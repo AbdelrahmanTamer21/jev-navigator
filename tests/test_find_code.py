@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
-import subprocess
 from collections.abc import Callable, Mapping
 from pathlib import Path
+
+from git_repos import commit_files
 
 from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code
 from jev_navigator.directives.places import (
@@ -368,14 +369,7 @@ def test_a_global_call_cap_on_the_judge_ends_a_search_as_budget(sample_index: Co
 
 
 def committed_index(root: Path, files: Mapping[str, str]) -> CodeIndex:
-    for name, text in files.items():
-        (root / name).write_text(text)
-    for command in (
-        ["init", "-q"],
-        ["add", "."],
-        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c"],
-    ):
-        subprocess.run(["git", *command], cwd=root, check=True)
+    commit_files(root, files)
     return CodeIndex(root, list(files))
 
 

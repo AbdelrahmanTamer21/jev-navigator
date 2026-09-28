@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from git_repos import commit_all
 
 from jev_navigator.index.code_index import CodeIndex, ScopeTooWideError
 from jev_navigator.index.spans import Span
@@ -341,12 +342,7 @@ def test_tracked_symbolic_links_stay_out_of_the_scope(tmp_path: Path) -> None:
     (tmp_path / "app/linked_dir").symlink_to("../skills/real", target_is_directory=True)
     (tmp_path / "app/linked_file.py").symlink_to("main.py")
     (tmp_path / "app/outside.py").symlink_to("/etc/hosts")
-    for command in (
-        ["init", "-q"],
-        ["add", "."],
-        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c"],
-    ):
-        subprocess.run(["git", *command], cwd=tmp_path, check=True)
+    commit_all(tmp_path)
 
     # Act
     working = CodeIndex.from_git(tmp_path, prefixes=("app/",))
@@ -362,12 +358,7 @@ def test_file_names_with_non_ascii_characters_enter_the_scope_as_they_are_on_dis
     # Arrange
     (tmp_path / "app").mkdir()
     (tmp_path / "app/größe.py").write_text("def groesse():\n    return 1\n")
-    for command in (
-        ["init", "-q"],
-        ["add", "."],
-        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c"],
-    ):
-        subprocess.run(["git", *command], cwd=tmp_path, check=True)
+    commit_all(tmp_path)
     (tmp_path / "app/größe.py").write_text("def groesse():\n    return 2\n")
 
     # Act

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
+
+from git_repos import commit_all
 
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.imports import imported_modules, imported_names
@@ -120,12 +121,7 @@ def test_an_index_at_an_old_commit_still_reads_the_tsconfig_outside_its_scope(tm
             "src/app/page.ts": 'import { shared } from "@/lib/utils";\n',
         },
     )
-    for command in (
-        ["init", "-q"],
-        ["add", "."],
-        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c"],
-    ):
-        subprocess.run(["git", *command], cwd=tmp_path, check=True)
+    commit_all(tmp_path)
 
     # Act
     index = CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("src/",))
