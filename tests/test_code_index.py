@@ -328,6 +328,106 @@ def test_references_in_lists_the_names_a_function_passes_on_without_calling(
     assert "scheduler" not in {ref.name for ref in references}
 
 
+USES_PY = """\
+from app.rules import ALLOWED, PATTERN, Store
+
+
+class Checker:
+    def check(self, store: Store, name) -> Store | None:
+        PATTERN.match(name)
+        if ALLOWED:
+            return store
+        assert name in ALLOWED
+        blocked = not ALLOWED
+        total = ALLOWED + 1
+        return self.store
+"""
+
+USES_TS = """\
+import { ALLOWED, PATTERN, Store } from "./rules";
+
+interface Store { save(): void }
+
+export function check(store: Store, names: Array<Store>): Store {
+  PATTERN.test(store.name);
+  if (ALLOWED) {}
+  const same = ALLOWED === names;
+  const blocked = !ALLOWED;
+  const total = ALLOWED + 1;
+  return ALLOWED ? store : store;
+}
+"""
+
+
+@pytest.fixture
+def uses_index(tmp_path: Path) -> CodeIndex:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/uses.py").write_text(USES_PY)
+    (tmp_path / "app/uses.ts").write_text(USES_TS)
+    return CodeIndex(tmp_path, ["app/uses.py", "app/uses.ts"])
+
+
+def test_a_name_used_as_a_receiver_a_type_or_in_a_condition_is_a_reference(uses_index: CodeIndex) -> None:
+    # Act
+    python = {
+        name: [(ref.line, ref.role) for ref in uses_index.find_references(name) if ref.file == "app/uses.py"]
+        for name in ("PATTERN", "ALLOWED", "Store")
+    }
+    script = {
+        name: [(ref.line, ref.role) for ref in uses_index.find_references(name) if ref.file == "app/uses.ts"]
+        for name in ("PATTERN", "ALLOWED", "Store")
+    }
+
+    # Assert
+    assert python == {
+        "PATTERN": [(6, "receiver")],
+        "ALLOWED": [(7, "condition"), (9, "condition"), (10, "condition")],
+        "Store": [(5, "type")],
+    }
+    assert script == {
+        "PATTERN": [(6, "receiver")],
+        "ALLOWED": [(7, "condition"), (8, "condition"), (9, "condition"), (11, "condition")],
+        "Store": [(5, "type")],
+    }
+
+
+def test_self_and_arithmetic_operands_are_not_references(uses_index: CodeIndex) -> None:
+    # Act
+    references = uses_index.find_references("self") + uses_index.find_references("ALLOWED")
+
+    # Assert
+    assert [ref for ref in references if ref.name == "self"] == []
+    assert 11 not in {ref.line for ref in references if ref.file == "app/uses.py"}
+    assert 10 not in {ref.line for ref in references if ref.file == "app/uses.ts"}
+
+
+def test_a_function_passes_on_the_names_on_its_first_line(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "transport.ts").write_text(
+        "export interface Answer { body: string }\n\n"
+        "export function send(url: string): Promise<Answer> {\n  return fetch(url);\n}\n"
+    )
+    index = CodeIndex(tmp_path, ["transport.ts"])
+
+    # Act
+    references = index.references_in(index.find_definition("send")[0])
+
+    # Assert
+    assert [(ref.name, ref.line, ref.role) for ref in references] == [("Answer", 3, "type")]
+
+
+def test_a_one_line_function_calls_what_its_first_line_calls(sample_index: CodeIndex) -> None:
+    # Arrange
+    parse_order = sample_index.find_definition("parseOrder")[0]
+
+    # Act
+    callees = sample_index.find_callees(parse_order)
+
+    # Assert
+    assert parse_order.start == parse_order.end
+    assert callees == ("parse",)
+
+
 def test_tracked_symbolic_links_stay_out_of_the_scope(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "skills/real").mkdir(parents=True)

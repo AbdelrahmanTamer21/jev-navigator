@@ -177,12 +177,20 @@ on its own scope, so searches sharing one judge never use up each other's budget
 `find_code(index, judge, target_description, start, *, budget=SearchBudget(), thresholds=None)` is
 the central search. Use it only when the target is described by meaning; anything code can decide
 (the callers of X) is an operation. For each opened place, one request asks "Does `slice.code`
-contain the code described in `target.description`?" and, per neighbour code lists (callers,
-callees, code that refers to it or that it passes on without a call, the other functions of its
-file, lines anywhere in scope (docs and config too) that mention its quoted keys or environment
-variables, co-changed files, and the lines before and after it), whether the target could be inside
-it. Each round opens the top `beam_width` places concurrently, with a visited set and a content
-cache. A low neighbour score only lowers that neighbour's priority; it is never treated as proof that
+contain the code described in `target.description`?" and, per neighbour code lists (callers, with
+callers in test files after the others; callees, the ones called from fewest places first; code that
+refers to it or that it passes on without a call, as an argument, collection entry, assignment,
+decorator, export, return, method receiver, type or condition; the other functions of its file, nearest
+first; lines anywhere in scope (docs and config too) that mention its environment variables or its
+quoted keys (six characters or more with a dot, underscore, colon, slash or dash, or CONSTANT_CASE), the
+rarest key first, skipping a key found on more than 30 lines; co-changed files; and the lines before and
+after it), whether the target could be inside it. Places that open the same lines of the same file are
+listed once, whatever move found them, and a place wholly inside the opened code is not listed;
+identical code in two files stays two places. A line outside any function opens its class or
+module-level declaration when that has at most 120 lines; in a longer one it opens the window around the
+line under the definition's name. Either way the moves can follow that name. Each round opens the top
+`beam_width` places concurrently, with a visited set and a
+content cache. A low neighbour score only lowers that neighbour's priority; it is never treated as proof that
 the code is not there. An `open_first` Choice picks the neighbour to open first, with the option "None
 of the entries is likely to contain it."; a confident pick moves its place ahead of every score only
 when that place's own `could_contain` answer is above the no bar, and the history's `used` says

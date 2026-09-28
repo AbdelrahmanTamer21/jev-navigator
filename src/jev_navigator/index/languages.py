@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 LANGUAGE_BY_SUFFIX = {
@@ -93,51 +94,109 @@ def function_name(first_line: str, line_before: str = "") -> str:
 _NOT_NAMES = frozenset({"if", "for", "while", "switch", "catch", "return", "function", "async"})
 
 
-_SCRIPT_REFERENCE_PARENTS = {
-    "argument": ("kind: arguments",),
-    "decorator": ("kind: decorator",),
-    "collection": ("kind: pair\nfield: value", "kind: array"),
-    "assignment": ("kind: variable_declarator\nfield: value", "kind: assignment_expression\nfield: right"),
-    "export": ("kind: export_specifier", "kind: export_statement"),
-    "return": ("kind: return_statement",),
+@dataclass(frozen=True)
+class ReferenceRole:
+    """An identifier of ``kind`` has the role ``name`` when a node listed in ``inside`` holds it and
+    no node listed in ``not_inside`` does, and its text does not match ``not_regex``. Each listed node
+    is an ast-grep relational rule about the direct parent, unless it sets its own ``stopBy``."""
+
+    name: str
+    inside: tuple[str, ...] = ()
+    kind: str = "identifier"
+    not_inside: tuple[str, ...] = ()
+    not_regex: str = ""
+
+
+_PYTHON_ROLES = (
+    ReferenceRole("argument", ("kind: argument_list", "kind: keyword_argument\nfield: value")),
+    ReferenceRole("decorator", ("kind: decorator",)),
+    ReferenceRole("collection", ("kind: pair\nfield: value", "kind: list", "kind: tuple", "kind: set")),
+    ReferenceRole("assignment", ("kind: assignment\nfield: right",)),
+    ReferenceRole("return", ("kind: return_statement",)),
+    ReferenceRole("receiver", ("kind: attribute\nfield: object",), not_regex="^(self|cls)$"),
+    ReferenceRole("type", ("kind: type\nstopBy: end",)),
+    ReferenceRole(
+        "condition",
+        (
+            "kind: comparison_operator",
+            "kind: boolean_operator",
+            "kind: not_operator",
+            "kind: assert_statement",
+            "field: condition\nany:\n  - kind: if_statement\n  - kind: elif_clause\n"
+            "  - kind: while_statement",
+        ),
+    ),
+)
+
+_COMPARISON_OR_LOGIC = r"^(===|!==|==|!=|<|>|<=|>=|&&|\|\||\?\?|instanceof|in)$"
+
+_SCRIPT_ROLES = (
+    ReferenceRole("argument", ("kind: arguments",)),
+    ReferenceRole("decorator", ("kind: decorator",)),
+    ReferenceRole("collection", ("kind: pair\nfield: value", "kind: array")),
+    ReferenceRole("collection", kind="shorthand_property_identifier"),
+    ReferenceRole(
+        "assignment", ("kind: variable_declarator\nfield: value", "kind: assignment_expression\nfield: right")
+    ),
+    ReferenceRole("export", ("kind: export_specifier", "kind: export_statement")),
+    ReferenceRole("return", ("kind: return_statement",)),
+    ReferenceRole("receiver", ("kind: member_expression\nfield: object",)),
+    ReferenceRole(
+        "condition",
+        (
+            f"kind: binary_expression\nhas:\n  field: operator\n  regex: {_COMPARISON_OR_LOGIC}",
+            "kind: unary_expression\nhas:\n  field: operator\n  regex: ^!$",
+            "kind: ternary_expression\nfield: condition",
+            "kind: parenthesized_expression\ninside:\n  stopBy: neighbor\n  field: condition\n  any:\n"
+            "    - kind: if_statement\n    - kind: while_statement\n    - kind: do_statement",
+        ),
+    ),
+)
+
+_TYPED_SCRIPT_ROLES = (
+    *_SCRIPT_ROLES,
+    ReferenceRole(
+        "type",
+        kind="type_identifier",
+        not_inside=(
+            "field: name\nany:\n  - kind: interface_declaration\n  - kind: type_alias_declaration\n"
+            "  - kind: class_declaration\n  - kind: abstract_class_declaration\n  - kind: type_parameter",
+        ),
+    ),
+)
+
+REFERENCE_ROLES = {
+    "python": _PYTHON_ROLES,
+    "typescript": _TYPED_SCRIPT_ROLES,
+    "tsx": _TYPED_SCRIPT_ROLES,
+    "javascript": _SCRIPT_ROLES,
 }
 
-REFERENCE_PARENTS = {
-    "python": {
-        "argument": ("kind: argument_list", "kind: keyword_argument\nfield: value"),
-        "decorator": ("kind: decorator",),
-        "collection": ("kind: pair\nfield: value", "kind: list", "kind: tuple", "kind: set"),
-        "assignment": ("kind: assignment\nfield: right",),
-        "return": ("kind: return_statement",),
-    },
-    "typescript": _SCRIPT_REFERENCE_PARENTS,
-    "tsx": _SCRIPT_REFERENCE_PARENTS,
-    "javascript": _SCRIPT_REFERENCE_PARENTS,
-}
 
-_SHORTHAND_PROPERTY = "shorthand_property_identifier"
+def reference_rules() -> str:
+    """ast-grep rules, one per language and role, matching every identifier that has that role. Calls
+    and imports have no role, so they never match."""
+    return "\n---\n".join(
+        _role_rule(language, role) for language, roles in REFERENCE_ROLES.items() for role in roles
+    )
 
 
-def reference_rules(name: str | None = None) -> str:
-    """ast-grep rules, one per language and role, matching an identifier (``name``, or any) whose
-    direct parent gives it that role. Calls and imports have no role, so they never match."""
-    documents = []
-    for language, roles in REFERENCE_PARENTS.items():
-        for role, parents in roles.items():
-            documents.append(_reference_rule(role, language, "identifier", name, parents))
-        if language != "python":
-            documents.append(_reference_rule("collection", language, _SHORTHAND_PROPERTY, name, ()))
-    return "\n---\n".join(documents)
-
-
-def _reference_rule(role: str, language: str, kind: str, name: str | None, parents: tuple[str, ...]) -> str:
-    lines = [f"id: {role}", f"language: {language}", "rule:", f"  kind: {kind}"]
-    if name is not None:
-        lines.append(f"  regex: ^{re.escape(name)}$")
-    if parents:
-        lines.append("  any:")
-        for parent in parents:
-            first, *rest = parent.split("\n")
-            lines += ["    - inside:", "        stopBy: neighbor", f"        {first}"]
-            lines += [f"        {extra}" for extra in rest]
+def _role_rule(language: str, role: ReferenceRole) -> str:
+    lines = [f"id: {role.name}", f"language: {language}", "rule:", f"  kind: {role.kind}"]
+    if role.inside:
+        lines += ["  any:", *_inside_entries(role.inside, "    ")]
+    exclusions = [f"      - regex: {role.not_regex}"] if role.not_regex else []
+    exclusions += _inside_entries(role.not_inside, "      ")
+    if exclusions:
+        lines += ["  not:", "    any:", *exclusions]
     return "\n".join(lines)
+
+
+def _inside_entries(parents: tuple[str, ...], indent: str) -> list[str]:
+    lines = []
+    for parent in parents:
+        lines.append(f"{indent}- inside:")
+        if not any(line.startswith("stopBy:") for line in parent.split("\n")):
+            lines.append(f"{indent}    stopBy: neighbor")
+        lines += [f"{indent}    {line}" for line in parent.split("\n")]
+    return lines

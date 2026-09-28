@@ -80,6 +80,7 @@ class CodeIndex:
             lambda: scan_structure(self._code_files, self.root, self._lines_of, self._unparsed)
         )
         self._calls = cache(lambda: scan_calls(self._code_files, self.root, self._unparsed))
+        self._call_counts = cache(lambda: Counter(call.name for call in self._calls()))
         self._reference_matches = cache(lambda: scan_references(self._code_files, self.root, self._unparsed))
         self._definitions = cache(self._definitions_by_name)
         self._callables = cache(self._callable_spans)
@@ -193,6 +194,10 @@ class CodeIndex:
             for (file, line), receiver in sorted(sites.items())
         )
 
+    def call_site_count(self, name: str) -> int:
+        """How many call sites in scope call ``name``; a name called from fewer places is more specific."""
+        return self._call_counts()[name]
+
     def find_callees(self, function: Span) -> tuple[str, ...]:
         """Names called inside ``function``; see ``callee_edges`` for their bindings."""
         return tuple(dict.fromkeys(edge.name for edge in self.callee_edges(function)))
@@ -201,7 +206,7 @@ class CodeIndex:
         self._require_in_scope(function.file)
         edges: dict[str, CallEdge] = {}
         for call in self._calls():
-            inside = call.file == function.file and function.start < call.line <= function.end
+            inside = call.file == function.file and function.start <= call.line <= function.end
             if inside and call.name not in edges:
                 binding = self.binding_of(call.file, call.line, call.name, call.receiver)
                 edges[call.name] = CallEdge(call.name, call.line, binding)
@@ -209,8 +214,9 @@ class CodeIndex:
 
     def find_references(self, name: str) -> tuple[Reference, ...]:
         """Uses of ``name`` that are not calls: arguments, collection entries, assignments,
-        decorators, exports and returns, each with its role, holder and binding. Code reached this
-        way (a callback, a registry entry) has no call edge to follow."""
+        decorators, exports, returns, method receivers, types and conditions, each with its role,
+        holder and binding. Code reached this way (a callback, a registry entry, a parameter typed
+        with a class) has no call edge to follow."""
         return self._references(match for match in self._reference_matches() if match.name == name)
 
     def references_in(self, function: Span) -> tuple[Reference, ...]:
@@ -219,7 +225,7 @@ class CodeIndex:
         inside = (
             match
             for match in self._reference_matches()
-            if match.file == function.file and function.start < match.line <= function.end
+            if match.file == function.file and function.start <= match.line <= function.end
         )
         return tuple(ref for ref in self._references(inside) if self.find_definition(ref.name))
 

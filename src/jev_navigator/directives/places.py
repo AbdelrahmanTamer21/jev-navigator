@@ -8,19 +8,24 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from ..index.code_index import CodeIndex
-from ..index.spans import CodeSlice, Span
+from ..index.spans import CodeSlice, Span, TextHit
 
 DEFAULT_NEIGHBOURS_PER_KIND = 8
+MAX_DEFINITION_LINES = 120
 REST_OF_FILE_LINES = 40
 CO_CHANGE_HEAD_LINES = 40
 _ENVIRONMENT_READ = re.compile(
     r"""(?:environ(?:\.get)?\(?\[?|getenv\(|process\.env\.)\s*["']?([A-Z][A-Z0-9_]{2,})"""
 )
-_QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{3,79})["'`]""")
+_QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{5,79})["'`]""")
+_KEY_SHAPE = re.compile(r"[._:/-]|^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
+MAX_KEY_HITS = 30
+_TEST_DIRECTORIES = frozenset({"test", "tests", "__tests__", "spec"})
+_TEST_FILE_NAME = re.compile(r"^test_|_test\.|\.test\.|\.spec\.|^conftest\.py$")
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,7 @@ class Place:
 
 
 def function_place(index: CodeIndex, span: Span, relation: str = "") -> Place:
+    """A function, class or declaration, opened whole."""
     first_line = index.read_slice(Span(span.file, span.start, span.start)).text.strip()
     note = f" ({relation})" if relation else ""
     signature = f"{span.file}:{span.start} `{first_line}`{note}"
@@ -40,12 +46,16 @@ def function_place(index: CodeIndex, span: Span, relation: str = "") -> Place:
     )
 
 
-def window_place(index: CodeIndex, file: str, line: int, relation: str, radius: int = 10) -> Place:
+def window_place(
+    index: CodeIndex, file: str, line: int, relation: str, radius: int = 10, name: str = ""
+) -> Place:
     """The lines around ``line``, the line that made this place a neighbour (a call, a reference, a
-    mentioned key); the signature quotes that line."""
+    mentioned key); the signature quotes that line. ``name`` names the class or declaration the
+    window lies in, so the moves can follow that name from the window."""
 
     def open_window() -> CodeSlice:
-        return index.read_window(file, line, radius, origin=relation)
+        window = index.read_window(file, line, radius).span
+        return index.read_slice(replace(window, name=name), origin=relation)
 
     span = open_window().span
     text_line = index.read_slice(Span(file, line, line)).text.strip()
@@ -65,10 +75,24 @@ def range_place(index: CodeIndex, file: str, start: int, end: int, relation: str
 
 
 def place_for_line(index: CodeIndex, file: str, line: int, relation: str) -> Place:
-    enclosing = index.enclosing_symbol(file, line)
-    if enclosing is not None:
-        return function_place(index, enclosing, relation)
-    return window_place(index, file, line, relation)
+    """The function holding ``line``. Outside every function, the class or module-level declaration
+    holding it, whole when it has at most ``MAX_DEFINITION_LINES`` lines and otherwise as the window
+    around the line under its name, so the moves can follow that name; outside every definition,
+    the window around the line."""
+    function = index.enclosing_symbol(file, line)
+    if function is not None:
+        return function_place(index, function, relation)
+    definition = _enclosing_definition(index, file, line)
+    if definition is None:
+        return window_place(index, file, line, relation)
+    if definition.size() <= MAX_DEFINITION_LINES:
+        return function_place(index, definition, relation)
+    return window_place(index, file, line, relation, name=definition.name)
+
+
+def _enclosing_definition(index: CodeIndex, file: str, line: int) -> Span | None:
+    definitions = (*index.symbols_in(file), *index.declarations_in(file))
+    return min((span for span in definitions if span.contains(line)), key=Span.size, default=None)
 
 
 Move = Callable[[CodeIndex, CodeSlice], list[Place]]
@@ -95,29 +119,43 @@ def neighbours_and_omissions(
     mention its quoted keys or environment variables, files usually committed with it, and the lines
     before and after it). A move is any function of the index and the opened code that returns
     places, so callers can drop moves or add their own. The places cut by the cap come back
-    separately, so a caller can report them as not inspected."""
+    separately, so a caller can report them as not inspected.
+
+    Places are one when they open the same lines of the same file, whatever their keys, and a place
+    wholly inside ``opened`` is left out. The first relation found is kept: calls and references come
+    before file position, so the strongest reason a place is a neighbour is the one shown. A move's
+    cap counts only places no earlier move kept."""
+    shown: set[str] = set()
     kept: list[Place] = []
-    omitted: list[Place] = []
+    beyond_cap: list[Place] = []
     for build in (MOVES if moves is None else moves).values():
-        places = [place for place in _unique(build(index, opened)) if place.key != opened.key]
-        kept += places[:per_kind]
-        omitted += places[per_kind:]
-    return _unique(kept), [place for place in _unique(omitted) if place.key not in {k.key for k in kept}]
+        new = _new_places(build(index, opened), opened.span, shown)
+        kept += new[:per_kind]
+        shown |= {place.open().span.key for place in new[:per_kind]}
+        beyond_cap += new[per_kind:]
+    return kept, _new_places(beyond_cap, opened.span, shown)
 
 
-def _unique(places: list[Place]) -> list[Place]:
-    """One place per key, keeping the first relation found: calls and references come before file
-    position, so the strongest reason a place is a neighbour is the one shown."""
-    first: dict[str, Place] = {}
+def _new_places(places: list[Place], opened: Span, shown: set[str]) -> list[Place]:
+    """One place per stretch of lines, leaving out stretches in ``shown`` and inside ``opened``."""
+    seen = set(shown)
+    new = []
     for place in places:
-        first.setdefault(place.key, place)
-    return list(first.values())
+        span = place.open().span
+        if span.key not in seen and not _within(span, opened):
+            seen.add(span.key)
+            new.append(place)
+    return new
+
+
+def _within(inner: Span, outer: Span) -> bool:
+    return inner.file == outer.file and outer.start <= inner.start and inner.end <= outer.end
 
 
 def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     if not _is_named(opened.span):
         return []
-    sites = index.find_callers(opened.span.name)
+    sites = sorted(index.find_callers(opened.span.name), key=lambda site: _is_test_file(site.file))
     return [
         place_for_line(index, site.file, site.line, _with_binding(f"calls {opened.span.name}", site.binding))
         for site in sites
@@ -125,10 +163,13 @@ def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
 
 
 def _callees(index: CodeIndex, opened: CodeSlice) -> list[Place]:
+    """What the opened code calls, the names called from fewest places first: a function called
+    only here says more about this code than a helper called everywhere."""
     if not _is_named(opened.span):
         return []
     places = []
-    for edge in index.callee_edges(opened.span):
+    edges = sorted(index.callee_edges(opened.span), key=lambda edge: index.call_site_count(edge.name))
+    for edge in edges:
         targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
         relation = _with_binding(f"called by {opened.span.name}", edge.binding)
         places += [function_place(index, span, relation) for span in targets]
@@ -167,31 +208,64 @@ def _with_binding(relation: str, binding) -> str:
     return f"{relation}, {binding.status}: {binding.reason}"
 
 
+def _is_test_file(path: str) -> bool:
+    directories, _, name = path.rpartition("/")
+    in_test_directory = not _TEST_DIRECTORIES.isdisjoint(directories.split("/"))
+    return in_test_directory or bool(_TEST_FILE_NAME.search(name))
+
+
 def _same_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
+    """The other functions of the file, nearest to the opened code first; a function nested in
+    another is part of that function."""
     relation = f"in the same file as {opened.span.name or opened.span.key}"
-    return [
-        function_place(index, span, relation)
-        for span in index.functions_in(opened.span.file)
-        if not _overlaps(span, opened.span)
-    ]
+    functions = index.functions_in(opened.span.file)
+    outermost = [span for span in functions if not any(_encloses(other, span) for other in functions)]
+    others = [span for span in outermost if not _overlaps(span, opened.span)]
+    nearest_first = sorted(others, key=lambda span: (_distance(span, opened.span), span.start))
+    return [function_place(index, span, relation) for span in nearest_first]
 
 
 def _overlaps(first: Span, second: Span) -> bool:
     return first.start <= second.end and second.start <= first.end
 
 
+def _encloses(outer: Span, inner: Span) -> bool:
+    same_lines = (outer.start, outer.end) == (inner.start, inner.end)
+    return not same_lines and outer.start <= inner.start and inner.end <= outer.end
+
+
+def _distance(span: Span, opened: Span) -> int:
+    return opened.start - span.end if span.end < opened.start else span.start - opened.end
+
+
 def _keys_mentioned(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    """Environment variables it reads and string keys it quotes, longest (most specific) first."""
-    found = _ENVIRONMENT_READ.findall(opened.text) + _QUOTED_KEY.findall(opened.text)
-    keys = sorted(dict.fromkeys(found), key=len, reverse=True)
-    places = []
-    for key in keys:
-        whole_key = re.compile(rf"(?<!\w){re.escape(key)}(?!\w)")
-        for hit in index.search_text(key):
-            outside = not opened.span.contains(hit.line) or hit.file != opened.span.file
-            if outside and whole_key.search(hit.text):
-                places.append(place_for_line(index, hit.file, hit.line, f"mentions `{key}`"))
-    return places
+    """Lines elsewhere that mention an environment variable it reads or a key it quotes, the rarest
+    key first. A quoted key has at least six characters and a key's shape: a dot, underscore, colon,
+    slash or dash, or CONSTANT_CASE. A key found on more than ``MAX_KEY_HITS`` lines is too common to
+    point anywhere and is skipped."""
+    hits_by_key = {key: _lines_mentioning(index, opened, key) for key in _keys_in(opened.text)}
+    usable = [(key, hits) for key, hits in hits_by_key.items() if 0 < len(hits) <= MAX_KEY_HITS]
+    rarest_first = sorted(usable, key=lambda item: len(item[1]))
+    return [
+        place_for_line(index, hit.file, hit.line, f"mentions `{key}`")
+        for key, hits in rarest_first
+        for hit in hits
+    ]
+
+
+def _keys_in(code: str) -> list[str]:
+    quoted = [key for key in _QUOTED_KEY.findall(code) if _KEY_SHAPE.search(key)]
+    return list(dict.fromkeys(_ENVIRONMENT_READ.findall(code) + quoted))
+
+
+def _lines_mentioning(index: CodeIndex, opened: CodeSlice, key: str) -> list[TextHit]:
+    whole_key = re.compile(rf"(?<!\w){re.escape(key)}(?!\w)")
+    return [
+        hit
+        for hit in index.search_text(key, MAX_KEY_HITS + 1)
+        if whole_key.search(hit.text)
+        and not (hit.file == opened.span.file and opened.span.contains(hit.line))
+    ]
 
 
 def _co_changed(index: CodeIndex, opened: CodeSlice) -> list[Place]:

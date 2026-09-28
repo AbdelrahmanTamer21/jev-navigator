@@ -110,7 +110,11 @@ file, quoted keys and environment variables, co-changed files, the lines before 
 read-only. Pass `moves=` to `find_code`, `find_code_async` or `context_for_comment` to use a subset,
 for example `{name: MOVES[name] for name in ("callers", "callees")}`, or add a function of your own.
 `FindResult.moves` and the final `stop` step of the history name the moves the search used, so every
-result says how it was found.
+result says how it was found. Your move's places go through the same filter as the built-in ones:
+places that open the same lines of the same file are kept once, the first move that listed them wins,
+a place wholly inside the opened code is dropped, and each move's cap counts only places no earlier
+move kept. Order the places a move returns by how likely they are to matter, because the cap keeps the
+first ones.
 
 ## Stopping on your own check
 
