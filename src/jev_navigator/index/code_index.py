@@ -206,7 +206,7 @@ class CodeIndex:
         self._require_in_scope(function.file)
         edges: dict[str, CallEdge] = {}
         for call in self._calls():
-            inside = call.file == function.file and function.start < call.line <= function.end
+            inside = call.file == function.file and function.start <= call.line <= function.end
             if inside and call.name not in edges:
                 binding = self.binding_of(call.file, call.line, call.name, call.receiver)
                 edges[call.name] = CallEdge(call.name, call.line, binding)
@@ -225,7 +225,7 @@ class CodeIndex:
         inside = (
             match
             for match in self._reference_matches()
-            if match.file == function.file and function.start < match.line <= function.end
+            if match.file == function.file and function.start <= match.line <= function.end
         )
         return tuple(ref for ref in self._references(inside) if self.find_definition(ref.name))
 

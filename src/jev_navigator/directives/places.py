@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from ..index.code_index import CodeIndex
-from ..index.spans import CodeSlice, Span
+from ..index.spans import CodeSlice, Span, TextHit
 
 DEFAULT_NEIGHBOURS_PER_KIND = 8
 MAX_DEFINITION_LINES = 120
@@ -21,7 +21,9 @@ CO_CHANGE_HEAD_LINES = 40
 _ENVIRONMENT_READ = re.compile(
     r"""(?:environ(?:\.get)?\(?\[?|getenv\(|process\.env\.)\s*["']?([A-Z][A-Z0-9_]{2,})"""
 )
-_QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{3,79})["'`]""")
+_QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{5,79})["'`]""")
+_KEY_SHAPE = re.compile(r"[._:/-]|^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
+MAX_KEY_HITS = 30
 _TEST_DIRECTORIES = frozenset({"test", "tests", "__tests__", "spec"})
 _TEST_FILE_NAME = re.compile(r"^test_|_test\.|\.test\.|\.spec\.|^conftest\.py$")
 
@@ -237,17 +239,33 @@ def _distance(span: Span, opened: Span) -> int:
 
 
 def _keys_mentioned(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    """Environment variables it reads and string keys it quotes, longest (most specific) first."""
-    found = _ENVIRONMENT_READ.findall(opened.text) + _QUOTED_KEY.findall(opened.text)
-    keys = sorted(dict.fromkeys(found), key=len, reverse=True)
-    places = []
-    for key in keys:
-        whole_key = re.compile(rf"(?<!\w){re.escape(key)}(?!\w)")
-        for hit in index.search_text(key):
-            outside = not opened.span.contains(hit.line) or hit.file != opened.span.file
-            if outside and whole_key.search(hit.text):
-                places.append(place_for_line(index, hit.file, hit.line, f"mentions `{key}`"))
-    return places
+    """Lines elsewhere that mention an environment variable it reads or a key it quotes, the rarest
+    key first. A quoted key has at least six characters and a key's shape: a dot, underscore, colon,
+    slash or dash, or CONSTANT_CASE. A key found on more than ``MAX_KEY_HITS`` lines is too common to
+    point anywhere and is skipped."""
+    hits_by_key = {key: _lines_mentioning(index, opened, key) for key in _keys_in(opened.text)}
+    usable = [(key, hits) for key, hits in hits_by_key.items() if 0 < len(hits) <= MAX_KEY_HITS]
+    rarest_first = sorted(usable, key=lambda item: len(item[1]))
+    return [
+        place_for_line(index, hit.file, hit.line, f"mentions `{key}`")
+        for key, hits in rarest_first
+        for hit in hits
+    ]
+
+
+def _keys_in(code: str) -> list[str]:
+    quoted = [key for key in _QUOTED_KEY.findall(code) if _KEY_SHAPE.search(key)]
+    return list(dict.fromkeys(_ENVIRONMENT_READ.findall(code) + quoted))
+
+
+def _lines_mentioning(index: CodeIndex, opened: CodeSlice, key: str) -> list[TextHit]:
+    whole_key = re.compile(rf"(?<!\w){re.escape(key)}(?!\w)")
+    return [
+        hit
+        for hit in index.search_text(key, MAX_KEY_HITS + 1)
+        if whole_key.search(hit.text)
+        and not (hit.file == opened.span.file and opened.span.contains(hit.line))
+    ]
 
 
 def _co_changed(index: CodeIndex, opened: CodeSlice) -> list[Place]:

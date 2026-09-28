@@ -10,6 +10,7 @@ from git_repos import commit_files
 
 from jev_navigator.directives.places import (
     MAX_DEFINITION_LINES,
+    MAX_KEY_HITS,
     MOVES,
     Move,
     Place,
@@ -157,9 +158,9 @@ def test_a_quoted_key_matches_whole_names_only(tmp_path: Path) -> None:
     index = committed_index(
         tmp_path,
         {
-            "orders.py": 'def place(order):\n    return order.get("invoice")\n',
-            "billing.py": "def send_invoice():\n    pass\n",
-            "config.yaml": "invoice: monthly\n",
+            "orders.py": 'def place(order):\n    return order.get("invoice_day")\n',
+            "billing.py": "def send_invoice_day_reminder():\n    pass\n",
+            "config.yaml": "invoice_day: 5\n",
         },
     )
 
@@ -167,8 +168,50 @@ def test_a_quoted_key_matches_whole_names_only(tmp_path: Path) -> None:
     offered = neighbour_signatures(index, "place")
 
     # Assert
-    mentions = {key.split(":")[0] for key, signature in offered.items() if "mentions `invoice`" in signature}
+    mentions = {
+        key.split(":")[0] for key, signature in offered.items() if "mentions `invoice_day`" in signature
+    }
     assert mentions == {"config.yaml"}
+
+
+def test_quoted_words_that_are_not_key_shaped_are_not_searched(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(
+        tmp_path,
+        {
+            "orders.py": 'def place(order):\n    return order.get("status"), open(order, "read")\n',
+            "config.yaml": "status: open\nmode: read\n",
+        },
+    )
+
+    # Act
+    offered = neighbour_signatures(index, "place")
+
+    # Assert
+    assert [signature for signature in offered.values() if "mentions" in signature] == []
+
+
+def test_rarer_keys_come_first_and_a_key_found_everywhere_is_skipped(tmp_path: Path) -> None:
+    # Arrange
+    everywhere = {f"notes/{number}.md": "see `app.common`\n" for number in range(MAX_KEY_HITS + 1)}
+    index = committed_index(
+        tmp_path,
+        {
+            **everywhere,
+            "orders.py": 'def place(order):\n    return order["app.common"], order["app.twice"], '
+            'order["app.once"]\n',
+            "a.yaml": "app.twice: 1\n",
+            "b.yaml": "app.twice: 2\n",
+            "c.yaml": "app.once: 3\n",
+        },
+    )
+
+    # Act
+    offered = neighbour_signatures(index, "place")
+
+    # Assert
+    mentioned = [signature.split("mentions ")[1] for signature in offered.values() if "mentions" in signature]
+    assert mentioned == ["`app.once`)", "`app.twice`)", "`app.twice`)"]
 
 
 def test_the_caller_chooses_which_moves_list_neighbours(tmp_path: Path) -> None:

@@ -401,6 +401,33 @@ def test_self_and_arithmetic_operands_are_not_references(uses_index: CodeIndex) 
     assert 10 not in {ref.line for ref in references if ref.file == "app/uses.ts"}
 
 
+def test_a_function_passes_on_the_names_on_its_first_line(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "transport.ts").write_text(
+        "export interface Answer { body: string }\n\n"
+        "export function send(url: string): Promise<Answer> {\n  return fetch(url);\n}\n"
+    )
+    index = CodeIndex(tmp_path, ["transport.ts"])
+
+    # Act
+    references = index.references_in(index.find_definition("send")[0])
+
+    # Assert
+    assert [(ref.name, ref.line, ref.role) for ref in references] == [("Answer", 3, "type")]
+
+
+def test_a_one_line_function_calls_what_its_first_line_calls(sample_index: CodeIndex) -> None:
+    # Arrange
+    parse_order = sample_index.find_definition("parseOrder")[0]
+
+    # Act
+    callees = sample_index.find_callees(parse_order)
+
+    # Assert
+    assert parse_order.start == parse_order.end
+    assert callees == ("parse",)
+
+
 def test_tracked_symbolic_links_stay_out_of_the_scope(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "skills/real").mkdir(parents=True)
