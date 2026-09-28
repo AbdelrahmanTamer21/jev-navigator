@@ -210,15 +210,15 @@ selects named sections and `history.state_for(names)` builds exactly that state.
 
 | Section | Holds |
 | --- | --- |
-| `history` (default for history checks) | `{"steps": [...]}`: every step in full, code, judgments and decisions |
-| `fetched` | every code body fetched, with its file, lines and commit, and nothing else |
+| `fetched` (default for history checks) | every code body fetched, with its file, lines and commit, and nothing else |
+| `history` | `{"steps": [...]}`: each step's operation, arguments and fetched code, without judgments or decisions |
 | `decisions` | every step without code: judgments with probabilities, candidates, choices, places set aside |
 | `previous_judgments` | the last answer of each history check, with its probability |
 | your own | declared with `History(sections={"subject": ..., "shown_code": ...})`, updated with `set_section` |
 
-`fetched` is the view without the search's own judgments, for a check that should not lean on them;
-which view works better is measured, not assumed, so the default stays the full `history`. An unknown
-name raises `UnknownSectionError`. Each section has its own `SectionLimit(max_entries, max_chars)`
+The default is `fetched`, so a history check never leans on the search's own verdicts; the
+`history` section carries no verdicts either. A check that is meant to read them selects `decisions`
+explicitly. An unknown name raises `UnknownSectionError`. Each section has its own `SectionLimit(max_entries, max_chars)`
 (newest entries kept, long text cut; defaults in `DEFAULT_LIMITS`), applied before the token budget.
 The budget is capped at Jev's 32k-token limit for state plus the longest question (64k per request
 overall; TypeSafe Models page, read 28.09.2026). When the selected sections still do not fit, the
@@ -228,9 +228,9 @@ Pass `recorder=` (for example a `JsonlJournal`) to record every appended step; t
 step without code bodies, only their sources and hashes.
 
 Whether the history holds what you need is your own concrete check, asked with
-`judge_history(judge, history, check, shared, sections=("history",), exhausted=False)`: yes is `found`,
+`judge_history(judge, history, check, shared, sections=("fetched",), exhausted=False)`: yes is `found`,
 no is `searched_not_found`, and unsure is `continue`, or `not_inspected` once your budget is exhausted,
-never "absent". Name a concrete property ("Does `history` contain code that compares the number of
+never "absent". Name a concrete property ("Does `fetched` contain code that compares the number of
 items with a limit?"), never "is it enough". `judge_sections(judge, history, {name: HistoryCheck(check,
 sections)})` asks several checks: those selecting the same sections share one request, different
 selections run in parallel. `find_code(..., stop_rule=StopRule(check, shared, sections=..., context=...))`
@@ -246,7 +246,7 @@ code, the `contains_target` probability and verdict, every neighbour offered wit
 probability, the `open_first` pick, and places set aside (`capped` or `depth`). A final `stop` step
 names the outcome, the not-inspected frontier with reasons, and the last stop check, so the history
 and the result agree. Without a stop rule nothing reads the history; with one, the stop check reads the
-sections it selects (by default all of it). `HistoryStep` is generic: append your own steps (an agent's tool call and result) the same way.
+sections it selects (by default only the fetched code). `HistoryStep` is generic: append your own steps (an agent's tool call and result) the same way.
 
 ## LlmStep: an LLM call you add yourself
 

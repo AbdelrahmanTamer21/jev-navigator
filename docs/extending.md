@@ -114,9 +114,11 @@ result says how it was found.
 
 ## Stopping on your own check
 
-`find_code(..., stop_rule=StopRule(check, sections=("fetched",)))` asks your check after every round.
-`sections` chooses what the check sees: the full `history` (the default), only the `fetched` code with
-its sources, only the `decisions`, or sections you add with `StopRule(context={"shown_code": ...})`.
+`find_code(..., stop_rule=StopRule(check))` asks your check after every round. `sections` chooses what
+the check sees: only the `fetched` code with its sources (the default), each step's operation,
+arguments and code (`history`), the search's own verdicts (`decisions`), or sections you add with
+`StopRule(context={"shown_code": ...})`. Only `decisions` carries verdicts, so a check reads them only
+when you select that section.
 Pick the smallest view the question needs; the fewer unrelated fields, the steadier the answer.
 
 ## Adding your own steps to a history

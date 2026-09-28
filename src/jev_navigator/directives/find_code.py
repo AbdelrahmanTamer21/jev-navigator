@@ -361,10 +361,11 @@ SUBJECT = "subject"
 @dataclass(frozen=True)
 class StopRule:
     """A caller-defined yes/no check over the history, asked after each round. It reads only the
-    ``sections`` it selects: by default ``history``, every step with its code and judgments; select
-    ``("fetched",)`` for the code and sources alone, without the search's own judgments. The history
-    declares ``subject`` (the target description) and any ``context`` sections the caller adds, such
-    as the code shown with a comment; ``shared`` is extra state outside the history."""
+    ``sections`` it selects: by default ``fetched``, the code opened so far with its sources and none
+    of the search's own verdicts; ``history`` adds each step's operation and arguments, and
+    ``decisions`` holds the verdicts for a check meant to read them. The history declares ``subject``
+    (the target description) and any ``context`` sections the caller adds, such as the code shown
+    with a comment; ``shared`` is extra state outside the history."""
 
     check: Check
     shared: Mapping = field(default_factory=dict)

@@ -29,9 +29,9 @@ NAMES_VALUE = Check(
 )
 HOLDS_LIMIT = Check(
     "holds_limit_check",
-    "Does `history` contain code that compares the number of items with a limit?",
-    Criterion("A fetched code body compares an item count with a limit."),
-    Criterion("No fetched code body makes that comparison."),
+    "Does `fetched` contain code that compares the number of items with a limit?",
+    Criterion("A code body in `fetched` compares an item count with a limit."),
+    Criterion("No code body in `fetched` makes that comparison."),
 )
 TARGET = "the check that limits how many items an order may have"
 SHARED = {"doc": {"sentence": "s"}}
@@ -142,8 +142,8 @@ def test_find_code_async_applies_the_stop_rule_through_the_async_history_check(
 ) -> None:
     # Arrange
     def answers(question_id: str, question: dict, state: dict) -> float:
-        if "history" in state:
-            bodies = [span["code"] for entry in state["history"]["steps"] for span in entry["fetched"]]
+        if "fetched" in state:
+            bodies = [span["code"] for span in state["fetched"]]
             return 0.9 if any("<= limit" in body for body in bodies) else 0.1
         return 0.3
 

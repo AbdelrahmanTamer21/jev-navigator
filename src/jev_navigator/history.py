@@ -4,12 +4,12 @@ Each step records the operation, its arguments, the code it fetched (with the so
 the judgments made with their raw probabilities, and the decision code took. Jev never sees the steps
 directly. A check selects named sections and ``History.state_for(names)`` builds exactly that state:
 
-- ``history`` (the default a history check reads): ``{"steps": [...]}``, every step in full, with its
-  code, judgments and decisions;
-- ``fetched``: every code body fetched, with its source, and nothing else: a view without the
-  search's own judgments, for a check that should not see them;
+- ``fetched`` (the default a history check reads): every code body fetched, with its source, and
+  nothing else, so a check never leans on the search's own verdicts;
+- ``history``: ``{"steps": [...]}``, each step's operation, arguments and fetched code, without
+  judgments or decisions;
 - ``decisions``: every step without code (judgments with probabilities, candidates, choices, places
-  set aside);
+  set aside), for a check that is meant to read the verdicts;
 - ``previous_judgments``: the last answer of each history check, with its probability;
 - any section the caller declares, for example ``subject`` or ``shown_code``.
 
@@ -25,7 +25,7 @@ The token budget is capped by Jev's context limit. The Models page of the TypeSa
 so select only the sections a check needs, and measure with ``ceiling_curve``.
 
 Whether the history is enough is a caller-defined yes/no question about a concrete property, for
-example "Does `history` contain code that compares the item count with a limit?", never "is it enough".
+example "Does `fetched` contain code that compares the item count with a limit?", never "is it enough".
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ FETCHED = "fetched"
 DECISIONS = "decisions"
 PREVIOUS_JUDGMENTS = "previous_judgments"
 BUILT_IN_SECTIONS = (HISTORY, FETCHED, DECISIONS, PREVIOUS_JUDGMENTS)
-DEFAULT_STOP_SECTIONS = (HISTORY,)
+DEFAULT_STOP_SECTIONS = (FETCHED,)
 _SECTIONS_WITH_CODE = frozenset({HISTORY, FETCHED})
 
 
@@ -99,6 +99,11 @@ class HistoryStep:
                 {**dict(span.source), "code_sha256": content_hash(span.code or "")} for span in self.fetched
             ],
         }
+
+    def history_json(self) -> dict:
+        """The step without its judgments or decision: what the ``history`` section shows."""
+        full = self.to_json()
+        return {"operation": full["operation"], "arguments": full["arguments"], "fetched": full["fetched"]}
 
     def decision_json(self) -> dict:
         """The step without its code: what the ``decisions`` section shows."""
@@ -219,7 +224,7 @@ class History:
 
     def _section(self, name: str, steps: list[HistoryStep]) -> object:
         if name == HISTORY:
-            return {"steps": [step.to_json() for step in steps]}
+            return {"steps": [step.history_json() for step in steps]}
         if name == FETCHED:
             return [
                 {**dict(span.source), "code": span.code if span.code is not None else EVICTED}
