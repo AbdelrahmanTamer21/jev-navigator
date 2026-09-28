@@ -64,6 +64,11 @@ commit's tsconfig files along, outside the scope. File lists come from git with 
 names with non-ASCII characters enter the scope as they are on disk, and lines split at newlines only,
 as the parser counts them.
 
+The index parses its scope once, lazily, with three ast-grep scans (symbols and declarations, call
+sites, references), then answers every lookup from those tables; each call site's binding is computed
+once. Scans run in batches of 100 files: a batch that times out is logged and listed in
+`index.unparsed_files`, and lookups treat those files as holding nothing instead of failing.
+
 Calls are found by name in the syntax tree, which is not a resolved binding. Every call carries a
 `Binding(status, reason, target)`: `resolved` when a definition in the same file or an import naming
 it proves the target, `candidate` when only the name matches (a method on an unknown receiver, or a
