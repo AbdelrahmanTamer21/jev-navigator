@@ -122,8 +122,10 @@ Every one of these has an async form (`check_each_async`, `pick_async`, `ask_all
 thread. Both paths share one core: masking, the secret scan, the hash, the store lookup, the call
 budget, the journal and the recording are the same steps, and only the send differs (a direct call,
 or an awaited one). Batches of `check_each_async` and the places of each `find_code_async` round are
-sent with `asyncio.gather`. A sync method given an async client raises `TypeError`. Offline tests use
-`testing.AsyncScriptedJevClient`.
+sent with `asyncio.gather` — except that the first batch of a `check_each_async` whose served model
+is still unknown and which has an answer store goes out alone. Its live answer pins the served model,
+so the remaining batches can replay from the store exactly as the sequential path does. A sync method given an async client
+raises `TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
 
 Budgets: `judge.calls` counts requests sent (store hits are free). `Judge(max_calls=N)` caps a judge
 together with every `judge.scope()` made from it, and a scope counts its own calls; `find_code` runs
@@ -147,8 +149,9 @@ on its own scope, so searches sharing one judge never use up each other's budget
 - **Answer store.** Every answer is stored with the served model and the thresholds in force. An
   item answer is reused only when the item, the shared state, the question with its wording hash and
   the served model all match; until the first live answer of a run the served model is unknown, and
-  unknown counts as a miss (or pass `served_model=`). `ReplayOnlyClient` replays from the store and
-  never calls Jev.
+  unknown counts as a miss (or pass `served_model=`); with a store, a first `check_each_async` then sends its
+  first batch alone, and the batches after that answer replay as usual. `ReplayOnlyClient` replays
+  from the store and never calls Jev.
 - **Journal, separate from the store.** Pass `journal=` (any object with `record_request(request) ->
   request_id`, `record_response(request_id, response)` and `record_failure(request_id, error,
   response)`). The judge records the masked request before dispatch and the raw response before
