@@ -11,7 +11,7 @@ import tempfile
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from functools import cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import tools
 from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts
@@ -26,6 +26,7 @@ from .languages import (
     reference_rules,
 )
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
+from .tsconfig import ScriptPaths, nearest_script_paths
 
 DEFAULT_MAX_FILES = 400
 DEFAULT_WINDOW_RADIUS = 10
@@ -73,6 +74,7 @@ class CodeIndex:
         self.symbols_in = cache(self._symbols_in)
         self.declarations_in = cache(self._declarations_in)
         self._lines_of = cache(self._read_lines)
+        self._script_paths_in = cache(self._read_script_paths)
 
     @classmethod
     def from_git(
@@ -86,10 +88,9 @@ class CodeIndex:
         """The tracked regular files under ``prefixes`` (every one when none are given). Symbolic links
         and submodules are left out: a link can point outside the scope, or at a directory."""
         root = Path(root)
-        listed = _regular_files(tools.git(["ls-files", "--stage", "--", *prefixes], root))
+        listed = _regular_files(tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root))
         commit = tools.git(["rev-parse", "HEAD"], root).strip()
-        status = tools.git(["status", "--porcelain", "--", *prefixes], root).splitlines()
-        changed = [line[3:].strip() for line in status if len(line) > 3]
+        changed = _changed_paths(tools.git(["status", "--porcelain", "-z", "--", *prefixes], root))
         return cls(
             root,
             listed,
@@ -110,16 +111,18 @@ class CodeIndex:
     ) -> CodeIndex:
         """The regular files under ``prefixes`` as they were at ``commit``, read from git objects into a
         private temporary directory; the checkout is never touched. History lookups still run in
-        ``repository``. Symbolic links and submodules are left out, as in ``from_git``."""
+        ``repository``. Symbolic links and submodules are left out, as in ``from_git``. The commit's
+        tsconfig files come along (outside the scope), so path aliases resolve."""
         repository = Path(repository)
         sha = tools.git(["rev-parse", "--verify", f"{commit}^{{commit}}"], repository).strip()
-        listed = _regular_files(tools.git(["ls-tree", "-r", sha, "--", *prefixes], repository))
+        listed = _regular_files(tools.git(["ls-tree", "-r", "-z", sha, "--", *prefixes], repository))
         if len(listed) > max_files:
             raise ScopeTooWideError(
                 f"{len(listed)} files is wider than the limit of {max_files}; narrow the scope"
             )
         snapshot = tempfile.TemporaryDirectory(prefix=f"jev-navigator-{sha[:8]}-")
-        tools.export_tree(repository, sha, prefixes, Path(snapshot.name))
+        exported = [*prefixes, *_script_configs(repository, sha)] if prefixes else []
+        tools.export_tree(repository, sha, exported, Path(snapshot.name))
         index = cls(snapshot.name, listed, max_files=max_files, commit=sha, git_root=repository)
         index._snapshot = snapshot
         return index
@@ -247,7 +250,7 @@ class CodeIndex:
         specifier = imported_names(source, file).get(name)
         if specifier is None:
             return ()
-        resolved = resolve_import(specifier, file, self._scope)
+        resolved = resolve_import(specifier, file, self._scope, self._script_paths(file))
         return (resolved,) if resolved else ()
 
     def read_slice(self, span: Span, origin: str = "") -> CodeSlice:
@@ -274,8 +277,10 @@ class CodeIndex:
 
     def imports(self, file: str) -> tuple[str, ...]:
         source = "\n".join(self._lines_of(file))
+        script_paths = self._script_paths(file)
         resolved = (
-            resolve_import(specifier, file, self._scope) for specifier in imported_modules(source, file)
+            resolve_import(specifier, file, self._scope, script_paths)
+            for specifier in imported_modules(source, file)
         )
         return tuple(dict.fromkeys(path for path in resolved if path))
 
@@ -354,13 +359,31 @@ class CodeIndex:
         method = tools.ast_grep_pattern(f"$RECEIVER.{name}($$$)", self._code_files, self.root)
         return plain + method
 
+    def _script_paths(self, file: str) -> ScriptPaths | None:
+        """The path aliases of the tsconfig.json nearest to a script file, read once per directory."""
+        return None if file.endswith(".py") else self._script_paths_in(str(PurePosixPath(file).parent))
+
+    def _read_script_paths(self, directory: str) -> ScriptPaths | None:
+        return nearest_script_paths(self.root, directory)
+
     def _read_lines(self, file: str) -> tuple[str, ...]:
         self._require_in_scope(file)
-        return tuple((self.root / file).read_text(errors="replace").splitlines())
+        return _split_lines((self.root / file).read_text(errors="replace"))
 
     def _require_in_scope(self, file: str) -> None:
         if file not in self._scope:
             raise ValueError(f"{file} is outside the index scope")
+
+
+def _script_configs(repository: Path, commit: str) -> list[str]:
+    listed = _regular_files(tools.git(["ls-tree", "-r", "-z", commit], repository))
+    return [
+        path
+        for path in listed
+        if PurePosixPath(path).name.startswith("tsconfig")
+        and path.endswith(".json")
+        and "node_modules/" not in path
+    ]
 
 
 def _rules_for(language: str, kinds: list[str]) -> str:
@@ -388,10 +411,33 @@ def _last_identifier(expression: str) -> str:
     return tail if tail.isidentifier() else ""
 
 
+def _split_lines(text: str) -> tuple[str, ...]:
+    """Lines split at newlines only, as the parser counts them; ``str.splitlines`` also splits at form
+    feeds and other separators, which would shift every line number after them."""
+    lines = text.replace("\r", "").split("\n")
+    return tuple(lines[:-1] if lines and lines[-1] == "" else lines)
+
+
+def _changed_paths(status: str) -> list[str]:
+    """Paths from ``git status --porcelain -z``; a rename or copy record is followed by its old path."""
+    records = status.split("\0")
+    changed = []
+    skip_next = False
+    for record in records:
+        if skip_next:
+            skip_next = False
+            continue
+        if len(record) > 3:
+            changed.append(record[3:])
+            skip_next = record[0] in "RC"
+    return changed
+
+
 def _regular_files(listing: str) -> list[str]:
-    """Paths from ``git ls-files --stage`` or ``git ls-tree -r`` output whose mode is a regular file."""
+    """Paths from ``git ls-files --stage -z`` or ``git ls-tree -r -z`` output whose mode is a regular
+    file. NUL separation keeps names with non-ASCII characters exactly as they are on disk."""
     files = []
-    for line in listing.splitlines():
+    for line in listing.split("\0"):
         details, _, path = line.partition("\t")
         if details.split(" ", 1)[0] in _REGULAR_FILE_MODES:
             files.append(path)

@@ -356,3 +356,38 @@ def test_tracked_symbolic_links_stay_out_of_the_scope(tmp_path: Path) -> None:
     assert working.files == historical.files == ("app/main.py",)
     assert [hit.file for hit in working.search_text("shared.key")] == ["app/main.py"]
     assert [hit.file for hit in historical.search_text("shared.key")] == ["app/main.py"]
+
+
+def test_file_names_with_non_ascii_characters_enter_the_scope_as_they_are_on_disk(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/größe.py").write_text("def groesse():\n    return 1\n")
+    for command in (
+        ["init", "-q"],
+        ["add", "."],
+        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c"],
+    ):
+        subprocess.run(["git", *command], cwd=tmp_path, check=True)
+    (tmp_path / "app/größe.py").write_text("def groesse():\n    return 2\n")
+
+    # Act
+    working = CodeIndex.from_git(tmp_path, prefixes=("app/",))
+    historical = CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("app/",))
+
+    # Assert
+    assert working.files == historical.files == ("app/größe.py",)
+    assert working.read_slice(working.find_definition("groesse")[0]).text.endswith("return 2")
+    assert working._changed == frozenset({"app/größe.py"})
+
+
+def test_line_numbers_follow_newlines_only_like_the_parser(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "app.py").write_text('BANNER = "a\fb"\r\n\r\ndef second():\n    return 2\n')
+    index = CodeIndex(tmp_path, ["app.py"])
+
+    # Act
+    second = index.find_definition("second")[0]
+
+    # Assert
+    assert (second.start, second.end) == (3, 4)
+    assert index.read_slice(second).text == "def second():\n    return 2"
