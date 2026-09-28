@@ -18,11 +18,14 @@ def cut_long_line(line: str, max_chars: int = MAX_LINE_CHARS) -> str:
 
 def shown_slice(
     code: CodeSlice, max_chars: int = MAX_SLICE_CHARS, max_line_chars: int = MAX_LINE_CHARS
-) -> CodeSlice:
+) -> CodeSlice | None:
     """The lines of ``code`` that fit ``max_chars``, each cut at ``max_line_chars``. After a cut the
-    span ends at the last shown line and a note names what was left out."""
+    span ends at the last shown line and a note names what was left out. Returns None when
+    not even the first line fits, so the caller retains the source as uninspected."""
     lines = [cut_long_line(line, max_line_chars) for line in code.text.split("\n")]
     kept = _lines_that_fit(lines, max_chars)
+    if not kept:
+        return None
     text = "\n".join(kept)
     if len(kept) < len(lines):
         text += f"\n[cut after {len(kept)} of {len(lines)} lines at {max_chars} characters]"
