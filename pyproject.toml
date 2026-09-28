@@ -3,7 +3,7 @@ name = "jev-navigator"
 version = "0.1.0"
 description = "Find code with small, typed Jev judgments: code offers the places, Jev judges each one"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 authors = [{ name = "André Machon" }]
 license = "MIT"
 dependencies = []
@@ -20,7 +20,7 @@ dev = ["pytest", "ruff"]
 
 [tool.ruff]
 line-length = 110
-target-version = "py313"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "N"]

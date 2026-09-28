@@ -19,7 +19,7 @@ layer you build on top; [docs/extending.md](docs/extending.md) shows how to comp
 uv add "jev-navigator[typesafe] @ git+https://github.com/ajbmachon/jev-navigator"
 ```
 
-Needs Python 3.13, and `ast-grep`, `rg` (ripgrep) and `git` on the PATH. The `typesafe` extra adds
+Needs Python 3.11 or newer, and `ast-grep`, `rg` (ripgrep) and `git` on the PATH. The `typesafe` extra adds
 the official SDK for live calls; set `TYPESAFE_API_KEY`. Everything else, including the tests, runs
 offline.
 
@@ -277,7 +277,9 @@ question-review tool, before any paid call, and pilot a small set of cases first
 ## Tests
 
 `uv run pytest --basetemp=<scratch dir>`. Tests run offline against small real git repositories and
-`ScriptedJevClient`.
+`ScriptedJevClient`. The TypeSafe adapter's test runs only with the extra installed:
+`uv run --extra typesafe pytest`. CI runs the suite on Python 3.11 and 3.13, each with and without
+the extra.
 
 ## License
 

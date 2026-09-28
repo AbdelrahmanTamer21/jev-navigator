@@ -371,6 +371,22 @@ def test_file_names_with_non_ascii_characters_enter_the_scope_as_they_are_on_dis
     assert working._changed == frozenset({"app/größe.py"})
 
 
+def test_an_index_at_a_commit_reads_a_file_whose_name_holds_a_newline(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/line\nbreak.py").write_text("def split_name():\n    return 1\n")
+    (tmp_path / "app/plain.py").write_text("def plain():\n    return 2\n")
+    commit_all(tmp_path)
+
+    # Act
+    historical = CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("app/",))
+
+    # Assert
+    assert historical.files == ("app/line\nbreak.py", "app/plain.py")
+    assert (historical.root / "app/line\nbreak.py").read_text().endswith("return 1\n")
+    assert (historical.root / "app/plain.py").read_text().endswith("return 2\n")
+
+
 def test_line_numbers_follow_newlines_only_like_the_parser(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "app.py").write_text('BANNER = "a\fb"\r\n\r\ndef second():\n    return 2\n')
