@@ -324,8 +324,8 @@ def test_each_search_step_records_judgments_candidates_and_why_the_next_place_wa
     assert first_open["judgments"]["contains_target"] == {"probability": 0.1, "verdict": "no"}
     offered = first_open["judgments"]["could_contain"]
     assert offered and {"place", "signature", "probability", "verdict"} <= set(offered[0])
-    assert first_open["decision"] == "searched"
-    assert second_choice["arguments"]["chosen"][0]["reason"] in {"open_first", "queue_score"}
+    assert first_open["decision"] == "start judged no"
+    assert second_choice["arguments"]["chosen"][0]["reason"] == "open_first"
     assert second_choice["arguments"]["chosen"][0]["place"] in {entry["place"] for entry in offered}
 
 

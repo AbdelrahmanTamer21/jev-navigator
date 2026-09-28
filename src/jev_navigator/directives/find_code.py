@@ -5,9 +5,11 @@ target, and, per neighbour code lists, could the target be inside that neighbour
 names the neighbour to open first. Jev sees only the target description, the opened code and the
 neighbour signatures; it never sees the search history, and code alone decides what happens next.
 
-Each round opens the top ``beam_width`` places of the queue at once. Neighbours merge into one
-best-first queue; a visited set removes overlapping paths, and an in-run cache skips code already
-judged. With ``beam_width=1`` this is a plain sequential best-first search.
+Each round opens ``beam_width`` places at once: start places first, then the neighbours Jev picked
+to open next, in the order it picked them, whatever its confidence, then the other neighbours by
+falling could-contain probability. A start place is judged but never ends the search as found, since
+the caller already had it. A visited set removes overlapping paths, and an in-run cache skips code
+already judged. With ``beam_width=1`` this is a plain sequential best-first search.
 """
 
 from __future__ import annotations
@@ -156,7 +158,8 @@ class Visit:
 class NotInspected:
     """A place the search did not open. ``reason`` is ``budget`` (still worth opening when the budget
     ran out), ``deprioritized`` (its signature scored low; that only lowered its priority, it was never
-    judged), ``capped`` (cut by the per-kind neighbour cap) or ``depth`` (beyond the depth limit)."""
+    judged), ``capped`` (cut by the per-kind neighbour cap) or ``depth`` (beyond the depth limit).
+    ``picked`` marks a place Jev picked to open next; a resumed search opens it before scored places."""
 
     place_key: str
     signature: str
@@ -165,6 +168,7 @@ class NotInspected:
     depth: int
     path: tuple[str, ...]
     place: Place = field(compare=False, repr=False)
+    picked: bool = False
 
 
 @dataclass(frozen=True)
@@ -173,8 +177,10 @@ class FindResult:
     with its probability) plus ``unsure``; and ``not_inspected``, the frontier a later call can resume
     from with ``resume=``. Neither ``searched`` nor the outcome ``nothing_left`` proves the code is
     absent: one "no" about one place can be wrong. When nothing is found, rank the opened places by
-    their probability; the best one is the likeliest place. ``unparsed_files`` lists scope files the
-    index could not parse; while it is not empty the outcome is never ``nothing_left``."""
+    their probability; the best one is the likeliest place. ``starts`` holds the start places with
+    their verdicts: a start is never a find, because the caller already had it. ``unparsed_files``
+    lists scope files the index could not parse; while it is not empty the outcome is never
+    ``nothing_left``."""
 
     outcome: Outcome
     found: tuple[Visit, ...]
@@ -189,15 +195,23 @@ class FindResult:
     stop_judgment: HistoryJudgment | None = None
     unparsed_files: frozenset[str] = frozenset()
     moves: tuple[str, ...] = ()
+    starts: tuple[Visit, ...] = ()
+
+
+_START, _PICK, _MOVE = 0, 1, 2
 
 
 @dataclass(order=True)
 class _Queued:
-    priority: float
+    """Starts come first, then picks in the order they were made, then moves by falling probability."""
+
+    tier: int
+    rank: float
     order: int
     place: Place = field(compare=False)
     depth: int = field(compare=False)
     path: tuple[str, ...] = field(compare=False)
+    probability: float = field(compare=False)
 
 
 @dataclass
@@ -216,20 +230,26 @@ class _Search:
     found: list[Visit] = field(default_factory=list)
     searched: list[Visit] = field(default_factory=list)
     unsure: list[Visit] = field(default_factory=list)
+    starts: list[Visit] = field(default_factory=list)
     set_aside: list[NotInspected] = field(default_factory=list)
     steps: int = 0
     cap_reached: bool = False
     counter: itertools.count = field(default_factory=itertools.count)
 
-    def push(self, place: Place, probability: float, depth: int, path: tuple[str, ...]) -> None:
+    def push(
+        self, place: Place, probability: float, depth: int, path: tuple[str, ...], tier: int = _MOVE
+    ) -> None:
         if place.key in self.visited:
             return
         if depth > self.budget.max_depth:
             self.set_aside.append(
-                NotInspected(place.key, place.signature, "depth", probability, depth, path, place)
+                NotInspected(
+                    place.key, place.signature, "depth", probability, depth, path, place, tier == _PICK
+                )
             )
             return
-        heapq.heappush(self.queue, _Queued(-probability, next(self.counter), place, depth, path))
+        rank = -probability if tier == _MOVE else 0.0
+        heapq.heappush(self.queue, _Queued(tier, rank, next(self.counter), place, depth, path, probability))
 
     def next_beam(self, calls_left: int) -> list[_Queued]:
         beam = []
@@ -241,7 +261,13 @@ class _Search:
         return beam
 
     def worth_opening(self) -> bool:
-        return any(-item.priority > self.thresholds.noul_no_at for item in self.queue)
+        return any(
+            self.still_worth_opening(item) for item in self.queue if item.place.key not in self.visited
+        )
+
+    def still_worth_opening(self, item: _Queued) -> bool:
+        """A waiting start or pick always is; a neighbour only when scored above the no bar."""
+        return item.tier != _MOVE or item.probability > self.thresholds.noul_no_at
 
 
 def find_code(
@@ -339,7 +365,7 @@ def _begin(
     if options.resume is not None:
         _restore(search, options.resume)
     for place in start:
-        search.push(place, 1.0, 0, (place.key,))
+        search.push(place, 1.0, 0, (place.key,), _START)
     return search, judge.scope()
 
 
@@ -408,10 +434,9 @@ def _restore(search: _Search, previous: FindResult) -> None:
     search.judged_code |= previous.judged_code
     search.searched += previous.searched
     search.unsure += previous.unsure
+    search.starts += previous.starts
     for entry in previous.not_inspected:
-        heapq.heappush(
-            search.queue, _Queued(-entry.priority, next(search.counter), entry.place, entry.depth, entry.path)
-        )
+        search.push(entry.place, entry.priority, entry.depth, entry.path, _PICK if entry.picked else _MOVE)
 
 
 def _stop_reason(search: _Search, judge: Judge, index: CodeIndex) -> Outcome | None:
@@ -537,7 +562,14 @@ def _set_aside_unasked(search: _Search, opening: _Opening) -> None:
     search.steps -= 1
     search.set_aside.append(
         NotInspected(
-            item.place.key, item.place.signature, "budget", -item.priority, item.depth, item.path, item.place
+            item.place.key,
+            item.place.signature,
+            "budget",
+            item.probability,
+            item.depth,
+            item.path,
+            item.place,
+            item.tier == _PICK,
         )
     )
 
@@ -548,25 +580,32 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
     visit = Visit(
         item.place.key, code, item.path, found_probability, search.thresholds.noul_verdict(found_probability)
     )
-    if visit.verdict == NoulVerdict.YES:
-        search.found.append(visit)
-    elif visit.verdict == NoulVerdict.UNSURE:
-        search.unsure.append(visit)
-    else:
-        search.searched.append(visit)
-    boosted = _boosted_slot(search, response)
+    _file_visit(search, visit, item.tier)
+    picked = _picked_slot(search, response)
     set_aside_before = len(search.set_aside)
     offered = []
     for slot, place in enumerate(candidates):
         probability = _could_contain(search, response, slot)
         verdict = search.thresholds.noul_verdict(probability)
-        priority = 1.0 + probability if slot == boosted else probability
-        search.push(place, priority, item.depth + 1, (*item.path, place.key))
+        path = (*item.path, place.key)
+        search.push(place, probability, item.depth + 1, path, _PICK if slot == picked else _MOVE)
         offered.append(
             {"place": place.key, "signature": place.signature, "probability": probability, "verdict": verdict}
         )
     not_opened = [*opening.capped, *search.set_aside[set_aside_before:]]
     search.history.append(_open_step(search, opening, visit, offered, response, not_opened))
+
+
+def _file_visit(search: _Search, visit: Visit, tier: int) -> None:
+    """A start keeps its verdict in ``starts``; only a place the search reached can be found."""
+    if tier == _START:
+        search.starts.append(visit)
+    elif visit.verdict == NoulVerdict.YES:
+        search.found.append(visit)
+    elif visit.verdict == NoulVerdict.UNSURE:
+        search.unsure.append(visit)
+    else:
+        search.searched.append(visit)
 
 
 _DECISIONS = {NoulVerdict.YES: "found", NoulVerdict.UNSURE: "unsure", NoulVerdict.NO: "searched"}
@@ -591,7 +630,7 @@ def _open_step(
         judgments["open_first"] = {
             "choice": _picked_place(answer.choice, opening.candidates),
             "confidence": answer.confidence,
-            "used": _boosted_slot(search, response) is not None,
+            "used": _picked_slot(search, response) is not None,
         }
     if not_opened:
         judgments["not_opened"] = [_frontier_entry(entry) for entry in not_opened]
@@ -600,7 +639,7 @@ def _open_step(
         {"place": visit.place_key, "depth": opening.item.depth, "path": list(visit.path)},
         (FetchedSpan(visit.code.source(), visit.code.text),),
         judgments,
-        _DECISIONS[visit.verdict],
+        f"start judged {visit.verdict}" if opening.item.tier == _START else _DECISIONS[visit.verdict],
     )
 
 
@@ -614,7 +653,7 @@ def _record_choice(search: _Search, beam: list[_Queued]) -> None:
     chosen = [
         {
             "place": item.place.key,
-            "priority": -item.priority,
+            "priority": item.probability,
             "depth": item.depth,
             "reason": _choice_reason(item),
         }
@@ -630,39 +669,26 @@ def _record_choice(search: _Search, beam: list[_Queued]) -> None:
 
 
 def _choice_reason(item: _Queued) -> str:
-    """``start`` for a caller's start place, ``open_first`` when Jev's confident pick raised it above
-    every score, else ``queue_score`` (its could_contain probability)."""
-    if item.depth == 0:
-        return "start"
-    return "open_first" if -item.priority > 1.0 else "queue_score"
+    """``start`` for a caller's start place, ``open_first`` for a place Jev picked to open next, else
+    ``queue_score`` (its could_contain probability)."""
+    return {_START: "start", _PICK: "open_first", _MOVE: "queue_score"}[item.tier]
 
 
 def _frontier_entry(entry: NotInspected) -> dict:
     return {"place": entry.place_key, "reason": entry.reason, "priority": entry.priority}
 
 
-def _boosted_slot(search: _Search, response) -> int | None:
-    """The candidate a confident pick moves ahead of every score, if its own could_contain answer is
-    above the no bar; a confident pick of a place scored "no" moves nothing."""
-    first = _confident_first(search, response)
-    if first is None:
+def _picked_slot(search: _Search, response) -> int | None:
+    """The candidate Jev picked to open next, whatever its confidence; ``none`` picks nothing."""
+    pick = search.questions.open_first
+    if pick is None or pick.question_id not in response.answers:
         return None
-    scored_no = search.thresholds.noul_verdict(_could_contain(search, response, first)) == NoulVerdict.NO
-    return None if scored_no else first
+    choice = response.choice(pick.question_id).choice
+    return None if choice == NO_CLEAR_FIRST else int(choice)
 
 
 def _could_contain(search: _Search, response, slot: int) -> float:
     return response.noul(f"{search.questions.could_contain.question_id}#{slot}").probability
-
-
-def _confident_first(search: _Search, response) -> int | None:
-    pick = search.questions.open_first
-    if pick is None or pick.question_id not in response.answers:
-        return None
-    answer = response.choice(pick.question_id)
-    if answer.choice == NO_CLEAR_FIRST or not search.thresholds.choice_is_confident(answer.confidence):
-        return None
-    return int(answer.choice)
 
 
 def _candidate_state(place: Place, preview_lines: int) -> dict:
@@ -679,10 +705,11 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
             item.place.key,
             item.place.signature,
             _reason(search, item),
-            -item.priority,
+            item.probability,
             item.depth,
             item.path,
             item.place,
+            item.tier == _PICK,
         )
         for item in sorted(left)
     ]
@@ -704,6 +731,7 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
         search.stop_judgment,
         unparsed,
         tuple(search.moves),
+        tuple(search.starts),
     )
 
 
@@ -723,4 +751,4 @@ def _stop_step(
 
 
 def _reason(search: _Search, item: _Queued) -> str:
-    return "budget" if -item.priority > search.thresholds.noul_no_at else "deprioritized"
+    return "budget" if search.still_worth_opening(item) else "deprioritized"

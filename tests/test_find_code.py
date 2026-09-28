@@ -11,6 +11,7 @@ from jev_navigator.directives.places import (
     MOVES,
     Place,
     function_place,
+    neighbours,
     place_for_line,
 )
 from jev_navigator.index.code_index import CodeIndex
@@ -70,16 +71,19 @@ def test_search_follows_likely_neighbours_until_the_target_is_found(sample_index
 
 def test_a_low_neighbour_score_keeps_the_neighbour_as_not_inspected(sample_index: CodeIndex) -> None:
     # Arrange
-    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1))
+    client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
+        choices={"open_first": {"none": 1.0}},
+    )
 
     # Act
     result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
 
     # Assert
     assert result.outcome == Outcome.NOTHING_LEFT
-    assert [visit.code.span.name for visit in result.searched] == ["place"]
+    assert [visit.code.span.name for visit in result.starts] == ["place"]
     assert result.not_inspected and {entry.reason for entry in result.not_inspected} == {"deprioritized"}
-    assert result.found == () and result.unsure == ()
+    assert result.found == () and result.unsure == () and result.searched == ()
 
 
 def test_search_reports_unsure_only_when_only_unsure_places_remain(sample_index: CodeIndex) -> None:
@@ -87,11 +91,18 @@ def test_search_reports_unsure_only_when_only_unsure_places_remain(sample_index:
     client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.5, could_contain=lambda signature: 0.1))
 
     # Act
-    result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
+    result = find_code(
+        sample_index,
+        Judge(client),
+        TARGET,
+        start_at_place(sample_index),
+        budget=SearchBudget(max_depth=1, beam_width=1),
+    )
 
     # Assert
     assert result.outcome == Outcome.UNSURE_ONLY
-    assert [visit.code.span.name for visit in result.unsure] == ["place"]
+    assert len(result.unsure) == 1
+    assert [visit.verdict for visit in result.starts] == ["unsure"]
 
 
 def test_search_stops_at_the_step_budget_and_lists_unopened_candidates(sample_index: CodeIndex) -> None:
@@ -136,7 +147,10 @@ def test_a_beam_opens_several_places_per_round_as_separate_requests(sample_index
 
 def test_the_same_place_reached_twice_is_opened_once(sample_index: CodeIndex) -> None:
     # Arrange
-    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1))
+    client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
+        choices={"open_first": {"none": 1.0}},
+    )
     place = sample_index.enclosing_symbol("app/orders.py", 6)
     starts = [function_place(sample_index, place), place_for_line(sample_index, "app/orders.py", 7, "start")]
 
@@ -149,7 +163,10 @@ def test_the_same_place_reached_twice_is_opened_once(sample_index: CodeIndex) ->
 
 def test_identical_code_under_two_places_is_judged_once(sample_index: CodeIndex) -> None:
     # Arrange
-    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1))
+    client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
+        choices={"open_first": {"none": 1.0}},
+    )
     same_code = CodeSlice(Span("app/orders.py", 5, 7, "place"), "def place(self, order): ...")
     starts = [
         Place("first", "function", "first", lambda: same_code),
@@ -248,7 +265,7 @@ def test_a_stopped_search_resumes_from_its_frontier(sample_index: CodeIndex) -> 
     assert first.outcome == Outcome.BUDGET
     assert resumed.outcome == Outcome.FOUND
     assert resumed.found[0].code.span.name == "check_limits"
-    assert [visit.code.span.name for visit in resumed.searched].count("place") == 1
+    assert [visit.code.span.name for visit in resumed.starts].count("place") == 1
 
 
 def test_capped_neighbours_are_reported_as_not_inspected(sample_index: CodeIndex) -> None:
@@ -415,14 +432,12 @@ def test_open_first_offers_a_real_none_option_whose_wording_is_part_of_the_quest
     assert tie_wording.question_id != OPEN_FIRST.question_id
 
 
-@pytest.mark.parametrize(("pick_score", "boosted"), [(0.15, False), (0.35, True)])
-def test_a_confident_pick_moves_ahead_only_when_its_own_score_is_above_the_no_bar(
-    sample_index: CodeIndex, pick_score: float, boosted: bool
-) -> None:
+@pytest.mark.parametrize("pick_score", [0.15, 0.35])
+def test_a_pick_is_used_whatever_its_own_score(sample_index: CodeIndex, pick_score: float) -> None:
     # Arrange
     client = ScriptedJevClient(
         nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: pick_score),
-        choices={"open_first": {"0": 1.0}},
+        choices={"open_first": {"0": 0.3}},
     )
 
     # Act
@@ -432,11 +447,149 @@ def test_a_confident_pick_moves_ahead_only_when_its_own_score_is_above_the_no_ba
 
     # Assert
     first_open = open_steps(result)[0]
-    assert first_open["judgments"]["open_first"]["used"] is boosted
+    assert first_open["judgments"]["open_first"]["used"] is True
     reasons = [
         chosen["reason"]
         for step in result.history.steps
         if step.operation == "choose_next"
         for chosen in step.arguments["chosen"]
     ]
-    assert ("open_first" in reasons) is boosted
+    assert "open_first" in reasons
+
+
+def slot_of(index: CodeIndex, start: Place, name: str) -> int:
+    candidates = [place for place in neighbours(index, start.open()) if place.open().text.strip()]
+    return next(slot for slot, place in enumerate(candidates) if name in place.signature)
+
+
+def opened_first_lines(client: ScriptedJevClient) -> list[str]:
+    return [state["slice"]["code"].split("\n")[0].strip() for state, _ in client.requests]
+
+
+def test_the_top_pick_opens_next_even_at_low_confidence_and_a_low_score(sample_index: CodeIndex) -> None:
+    # Arrange
+    start = start_at_place(sample_index)
+    cancel = slot_of(sample_index, start[0], "cancel")
+    client = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.05, could_contain=lambda signature: 0.1 if "cancel" in signature else 0.9
+        ),
+        choices={"open_first": {str(cancel): 0.3}},
+    )
+
+    # Act
+    find_code(sample_index, Judge(client), TARGET, start, budget=SearchBudget(max_steps=2, beam_width=1))
+
+    # Assert
+    assert opened_first_lines(client)[1] == "def cancel(order_id):"
+
+
+def test_starts_open_before_any_pick_and_picks_open_in_the_order_made(sample_index: CodeIndex) -> None:
+    # Arrange
+    starts = [
+        place_for_line(sample_index, "app/orders.py", 6, "start"),
+        place_for_line(sample_index, "app/validation.py", 11, "start"),
+    ]
+    first_pick = slot_of(sample_index, starts[0], "cancel")
+    client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
+        choices={"open_first": {str(first_pick): 0.3}},
+    )
+
+    # Act
+    result = find_code(
+        sample_index, Judge(client), TARGET, starts, budget=SearchBudget(max_steps=3, beam_width=1)
+    )
+
+    # Assert
+    opened = opened_first_lines(client)
+    assert opened[:3] == ["def place(self, order):", "def check_limits(order):", "def cancel(order_id):"]
+    reasons = [
+        chosen["reason"]
+        for step in result.history.steps
+        if step.operation == "choose_next"
+        for chosen in step.arguments["chosen"]
+    ]
+    assert reasons == ["start", "start", "open_first"]
+
+
+def test_a_none_pick_queues_nothing(sample_index: CodeIndex) -> None:
+    # Arrange
+    client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
+        choices={"open_first": {"none": 1.0}},
+    )
+
+    # Act
+    result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
+
+    # Assert
+    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.steps == 1
+
+
+def test_a_waiting_pick_keeps_the_search_going_when_no_move_scores_above_the_no_bar(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
+        choices={"open_first": {"0": 0.3}},
+    )
+
+    # Act
+    result = find_code(
+        sample_index,
+        Judge(client),
+        TARGET,
+        start_at_place(sample_index),
+        budget=SearchBudget(max_depth=1, beam_width=1),
+    )
+
+    # Assert
+    assert result.steps == 2
+    assert result.outcome == Outcome.NOTHING_LEFT
+
+
+def test_a_start_judged_to_hold_the_target_is_recorded_but_never_ends_the_search(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    client = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.95 if "def place(self, order)" in code else 0.05,
+            could_contain=lambda signature: 0.1,
+        ),
+        choices={"open_first": {"none": 1.0}},
+    )
+
+    # Act
+    result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
+
+    # Assert
+    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.found == ()
+    assert [(visit.code.span.name, visit.verdict) for visit in result.starts] == [("place", "yes")]
+
+
+def test_a_resumed_search_opens_its_waiting_pick_first(sample_index: CodeIndex) -> None:
+    # Arrange
+    start = start_at_place(sample_index)
+    cancel = slot_of(sample_index, start[0], "cancel")
+    client = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.05, could_contain=lambda signature: 0.1 if "cancel" in signature else 0.9
+        ),
+        choices={"open_first": {str(cancel): 0.3}},
+    )
+    judge = Judge(client)
+    first = find_code(sample_index, judge, TARGET, start, budget=SearchBudget(max_steps=1, beam_width=1))
+
+    # Act
+    find_code(sample_index, judge, TARGET, [], budget=SearchBudget(max_steps=1, beam_width=1), resume=first)
+
+    # Assert
+    assert [
+        entry.picked for entry in first.not_inspected if entry.signature.startswith("app/orders.py:10 ")
+    ] == [True]
+    assert opened_first_lines(client)[1] == "def cancel(order_id):"

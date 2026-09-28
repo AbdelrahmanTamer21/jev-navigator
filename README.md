@@ -188,23 +188,27 @@ after it), whether the target could be inside it. Places that open the same line
 listed once, whatever move found them, and a place wholly inside the opened code is not listed;
 identical code in two files stays two places. A line outside any function opens its class or
 module-level declaration when that has at most 120 lines; in a longer one it opens the window around the
-line under the definition's name. Either way the moves can follow that name. Each round opens the top
-`beam_width` places concurrently, with a visited set and a
-content cache. A low neighbour score only lowers that neighbour's priority; it is never treated as proof that
-the code is not there. An `open_first` Choice picks the neighbour to open first, with the option "None
-of the entries is likely to contain it."; a confident pick moves its place ahead of every score only
-when that place's own `could_contain` answer is above the no bar, and the history's `used` says
-whether it did. Each neighbour's signature names its file and lines: a function quotes its first
-line; a window around a call, reference or key outside any function gives its line range and quotes
-that line; a stretch chosen by position (the lines before or after, the start of a co-changed file)
-gives its range and quotes its first line of code. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
-`scope_incomplete`, and the result
-keeps three sets: `found`; `searched` and `unsure` (bodies actually judged); and `not_inspected`, each
-entry with its reason (`budget`, `deprioritized`, `capped` or `depth`). `searched` means "opened and
-judged at or below the no bar, probability kept", and `nothing_left` means "nothing left worth
-opening"; neither proves that the code does not exist, because one "no" about one place can be wrong.
-When nothing reaches the yes bar, rank the opened places by their `contains_target` probability: the
-best-scored place is the likeliest one. Pass the result back as
+line under the definition's name. Either way the moves can follow that name. Each round opens
+`beam_width` places concurrently: start places first, then the neighbours Jev picked to open next, in
+the order it picked them, then the other neighbours by falling `could_contain` probability, with a
+visited set and a content cache. An `open_first` Choice picks the neighbour to open next, with the
+option "None of the entries is likely to contain it."; every pick but "none" waits ahead of the scored
+neighbours, whatever its confidence and its own score, and the history's `used` says that it was queued.
+A low neighbour score only lowers that neighbour's priority; it is never treated as proof that the code
+is not there. The search ends as `nothing_left` when no start or pick waits and no neighbour scores
+above the no bar (0.20 by default). A start place is judged but never ends the search as found, because
+the caller already had it; `FindResult.starts` keeps each start with its verdict. Each neighbour's
+signature names its file and lines: a function quotes its first line; a window around a call, reference
+or key outside any function gives its line range and quotes that line; a stretch chosen by position (the
+lines before or after, the start of a co-changed file) gives its range and quotes its first line of
+code. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
+`scope_incomplete`, and the result keeps three sets: `found`; `searched` and `unsure` (bodies actually
+judged, start places apart in `starts`); and `not_inspected`, each entry with its reason (`budget`,
+`deprioritized`, `capped` or `depth`) and `picked` for a place Jev picked, which a resumed search opens
+first. `searched` means "opened and judged at or below the no bar, probability kept", and `nothing_left`
+means "nothing left worth opening"; neither proves that the code does not exist, because one "no" about
+one place can be wrong. When nothing reaches the yes bar, rank the opened places by their
+`contains_target` probability: the best-scored place is the likeliest one. Pass the result back as
 `resume=` to continue from that frontier with a fresh budget. Pass `commit=` to require that the index
 holds exactly that revision (use `CodeIndex.at_commit` for history); a mismatch raises
 `RevisionMismatchError`. Nothing escalates on its own. The default budget is 24 steps and 24 calls
@@ -261,7 +265,7 @@ replays a recorded search with a growing history and reports the probability at 
 
 `find_code` always records its own history in `FindResult.history`, with or without a stop rule; it
 costs no calls. A `choose_next` step lists the places opened next, each with its priority and reason
-(`start`, `open_first` when Jev's confident pick raised it, or `queue_score`). An `open` step holds the
+(`start`, `open_first` for a place Jev picked, or `queue_score`). An `open` step holds the
 code, the `contains_target` probability and verdict, every neighbour offered with its `could_contain`
 probability, the `open_first` pick, and places set aside (`capped` or `depth`). A final `stop` step
 names the outcome, the not-inspected frontier with reasons, and the last stop check, so the history
