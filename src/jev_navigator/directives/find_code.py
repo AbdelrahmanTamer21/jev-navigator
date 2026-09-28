@@ -107,6 +107,7 @@ class Outcome(StrEnum):
     STOP_RULE = "stop_rule"
     UNSURE_ONLY = "unsure_only"
     NOTHING_LEFT = "nothing_left"
+    SCOPE_INCOMPLETE = "scope_incomplete"
     BUDGET = "budget"
 
 
@@ -167,7 +168,9 @@ class NotInspected:
 @dataclass(frozen=True)
 class FindResult:
     """Three explicit sets: ``found``; ``searched`` (bodies judged and not the target) plus ``unsure``;
-    and ``not_inspected``, the frontier a later call can resume from with ``resume=``."""
+    and ``not_inspected``, the frontier a later call can resume from with ``resume=``.
+    ``unparsed_files`` lists scope files the index could not parse; while it is not empty the outcome
+    is never ``nothing_left``."""
 
     outcome: Outcome
     found: tuple[Visit, ...]
@@ -180,6 +183,7 @@ class FindResult:
     judged_code: frozenset[str] = frozenset()
     history: History | None = None
     stop_judgment: HistoryJudgment | None = None
+    unparsed_files: frozenset[str] = frozenset()
 
 
 @dataclass(order=True)
@@ -268,7 +272,7 @@ def find_code(
         stop_rule,
         moves,
     )
-    while (stop := _stop_reason(search, judge)) is None:
+    while (stop := _stop_reason(search, judge, index)) is None:
         opened = _open_round(index, search, judge)
         if not opened:
             continue
@@ -276,7 +280,7 @@ def find_code(
             responses = list(pool.map(lambda opening: _ask_within_cap(judge, search, opening), opened))
         _merge_round(search, opened, responses)
         _apply_stop_rule(judge, search)
-    return _result(search, stop, judge)
+    return _result(search, stop, judge, index)
 
 
 async def find_code_async(
@@ -308,7 +312,7 @@ async def find_code_async(
         stop_rule,
         moves,
     )
-    while (stop := _stop_reason(search, judge)) is None:
+    while (stop := _stop_reason(search, judge, index)) is None:
         opened = _open_round(index, search, judge)
         if not opened:
             continue
@@ -317,7 +321,7 @@ async def find_code_async(
         )
         _merge_round(search, opened, responses)
         await _apply_stop_rule_async(judge, search)
-    return _result(search, stop, judge)
+    return _result(search, stop, judge, index)
 
 
 def _begin(
@@ -422,7 +426,7 @@ def _restore(search: _Search, previous: FindResult) -> None:
         )
 
 
-def _stop_reason(search: _Search, judge: Judge) -> Outcome | None:
+def _stop_reason(search: _Search, judge: Judge, index: CodeIndex) -> Outcome | None:
     if search.found:
         return Outcome.FOUND
     if search.stop_judgment is not None and search.stop_judgment.outcome == HistoryOutcome.FOUND:
@@ -430,8 +434,16 @@ def _stop_reason(search: _Search, judge: Judge) -> Outcome | None:
     if search.cap_reached or search.steps >= search.budget.max_steps or _calls_left(search, judge) == 0:
         return Outcome.BUDGET
     if not search.worth_opening():
-        return Outcome.UNSURE_ONLY if search.unsure else Outcome.NOTHING_LEFT
+        return _nothing_worth_opening(search, index)
     return None
+
+
+def _nothing_worth_opening(search: _Search, index: CodeIndex) -> Outcome:
+    """``nothing_left`` only when every scope file was parsed; code in an unparsed file was never
+    offered, so the search cannot say it looked everywhere."""
+    if search.unsure:
+        return Outcome.UNSURE_ONLY
+    return Outcome.SCOPE_INCOMPLETE if index.unparsed_files else Outcome.NOTHING_LEFT
 
 
 def _calls_left(search: _Search, judge: Judge) -> int:
@@ -661,7 +673,7 @@ def _candidate_state(place: Place, preview_lines: int) -> dict:
     return {"signature": place.signature, "preview": preview}
 
 
-def _result(search: _Search, outcome: Outcome, judge: Judge) -> FindResult:
+def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -> FindResult:
     left = [item for item in search.queue if item.place.key not in search.visited]
     frontier = [
         NotInspected(
@@ -677,7 +689,8 @@ def _result(search: _Search, outcome: Outcome, judge: Judge) -> FindResult:
     ]
     frontier += [entry for entry in search.set_aside if entry.place_key not in search.visited]
     not_inspected = tuple({entry.place_key: entry for entry in frontier}.values())
-    search.history.append(_stop_step(search, outcome, not_inspected))
+    unparsed = index.unparsed_files
+    search.history.append(_stop_step(search, outcome, not_inspected, unparsed))
     return FindResult(
         outcome,
         tuple(search.found),
@@ -690,11 +703,16 @@ def _result(search: _Search, outcome: Outcome, judge: Judge) -> FindResult:
         frozenset(search.judged_code),
         search.history,
         search.stop_judgment,
+        unparsed,
     )
 
 
-def _stop_step(search: _Search, outcome: Outcome, not_inspected: tuple[NotInspected, ...]) -> HistoryStep:
+def _stop_step(
+    search: _Search, outcome: Outcome, not_inspected: tuple[NotInspected, ...], unparsed: frozenset[str]
+) -> HistoryStep:
     judgments: dict[str, object] = {"not_inspected": [_frontier_entry(entry) for entry in not_inspected]}
+    if unparsed:
+        judgments["unparsed_files"] = sorted(unparsed)
     if search.stop_judgment is not None:
         judgments["last_stop_check"] = {
             "probability": search.stop_judgment.probability,

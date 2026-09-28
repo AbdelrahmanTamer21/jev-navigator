@@ -1,30 +1,67 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
-from jev_navigator.directives.places import neighbours_and_omissions
+from jev_navigator.directives.find_code import Outcome, find_code
+from jev_navigator.directives.places import neighbours_and_omissions, place_for_line
 from jev_navigator.index import scope_scan, tools
+from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.judgments.judge import Judge
+from jev_navigator.testing import ScriptedJevClient
 
 
 @pytest.fixture
 def ast_grep_runs(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     runs: list[str] = []
-    original_rules, original_pattern = tools.ast_grep_rules, tools.ast_grep_pattern
+    original_rules = tools.ast_grep_rules
 
     def counted_rules(rules: str, files, cwd):
-        runs.append("rules")
+        runs.append(rules.split("\n", 1)[0])
         return original_rules(rules, files, cwd)
 
-    def counted_pattern(pattern: str, files, cwd):
-        runs.append("pattern")
-        return original_pattern(pattern, files, cwd)
-
     monkeypatch.setattr(tools, "ast_grep_rules", counted_rules)
-    monkeypatch.setattr(tools, "ast_grep_pattern", counted_pattern)
     return runs
+
+
+@pytest.fixture
+def validation_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_rules = tools.ast_grep_rules
+
+    def slow_on_validation(rules: str, files, cwd):
+        if "app/validation.py" in files:
+            raise subprocess.TimeoutExpired(["ast-grep"], tools.COMMAND_TIMEOUT_SECONDS)
+        return original_rules(rules, files, cwd)
+
+    monkeypatch.setattr(scope_scan, "BATCH_FILES", 1)
+    monkeypatch.setattr(tools, "ast_grep_rules", slow_on_validation)
+
+
+class CountingResolver:
+    """Answers nothing, so the index decides; counts how often the index asks."""
+
+    def __init__(self) -> None:
+        self.asked: list[tuple[str, int, str]] = []
+
+    def resolve_call(self, file: str, line: int, name: str, receiver: str | None) -> Binding | None:
+        self.asked.append((file, line, name))
+        return None
+
+
+def committed(root: Path, files: dict[str, str]) -> CodeIndex:
+    for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text)
+    for command in (
+        ["init", "-q"],
+        ["add", "."],
+        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c"],
+    ):
+        subprocess.run(["git", *command], cwd=root, check=True)
+    return CodeIndex.from_git(root)
 
 
 def test_the_scope_is_parsed_once_however_many_lookups_follow(sample_index: CodeIndex, ast_grep_runs) -> None:
@@ -45,36 +82,70 @@ def test_the_scope_is_parsed_once_however_many_lookups_follow(sample_index: Code
     assert len(ast_grep_runs) == 3
 
 
-def test_each_call_site_binding_is_computed_once(sample_index: CodeIndex) -> None:
+def test_each_call_site_is_bound_once_however_often_it_is_looked_up(sample_repo: Path) -> None:
     # Arrange
-    sites = sample_index.find_callers("check_limits")
+    resolver = CountingResolver()
+    index = CodeIndex.from_git(sample_repo, binding_resolver=resolver)
 
     # Act
-    again = sample_index.find_callers("check_limits")
+    first = index.find_callers("check_limits")
+    index.find_callers("check_limits")
+    index.callee_edges(index.find_definition("validate_order")[0])
 
     # Assert
-    assert [site.binding for site in again] == [site.binding for site in sites]
-    assert all(first.binding is second.binding for first, second in zip(sites, again, strict=True))
+    assert len(first) == 1
+    assert resolver.asked.count(("app/validation.py", 7, "check_limits")) == 1
+    assert len(resolver.asked) == len(set(resolver.asked))
 
 
-def test_a_batch_that_times_out_is_reported_and_the_rest_still_parse(
-    sample_index: CodeIndex, monkeypatch: pytest.MonkeyPatch
+def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_path: Path) -> None:
+    # Arrange
+    index = committed(
+        tmp_path,
+        {"app/orders.py": "def save(order):\n    return helpers.save(order), save(order)\n"},
+    )
+
+    # Act
+    site = index.find_callers("save")[0]
+
+    # Assert
+    assert site.binding.status == "resolved"
+
+
+def test_a_file_that_timed_out_makes_its_names_unknown_not_absent(
+    sample_index: CodeIndex, validation_times_out: None
+) -> None:
+    # Act
+    site = sample_index.find_callers("validate_order")[0]
+
+    # Assert
+    assert sample_index.unparsed_files == {"app/validation.py"}
+    assert sample_index.find_definition("check_limits") == ()
+    assert site.binding.status == "unknown"
+    assert "app/validation.py" in site.binding.reason
+
+
+def test_the_unparsed_list_is_complete_before_any_lookup(
+    sample_index: CodeIndex, validation_times_out: None
+) -> None:
+    # Act
+    unparsed = sample_index.unparsed_files
+
+    # Assert
+    assert unparsed == {"app/validation.py"}
+
+
+def test_a_search_over_a_scope_with_unparsed_files_never_reports_nothing_left(
+    sample_index: CodeIndex, validation_times_out: None
 ) -> None:
     # Arrange
-    original = tools.ast_grep_rules
-
-    def slow_on_orders(rules: str, files, cwd):
-        if "app/orders.py" in files:
-            raise subprocess.TimeoutExpired(["ast-grep"], tools.COMMAND_TIMEOUT_SECONDS)
-        return original(rules, files, cwd)
-
-    monkeypatch.setattr(scope_scan, "BATCH_FILES", 1)
-    monkeypatch.setattr(tools, "ast_grep_rules", slow_on_orders)
+    judge = Judge(ScriptedJevClient(nouls=lambda question_id, question, state: 0.05))
+    start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
 
     # Act
-    definitions = sample_index.find_definition("check_limits")
+    result = find_code(sample_index, judge, "the item limit check", start)
 
     # Assert
-    assert [span.name for span in definitions] == ["check_limits"]
-    assert sample_index.unparsed_files == {"app/orders.py"}
-    assert sample_index.symbols_in("app/orders.py") == ()
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
+    assert result.unparsed_files == {"app/validation.py"}
+    assert result.history.steps[-1].judgments["unparsed_files"] == ["app/validation.py"]

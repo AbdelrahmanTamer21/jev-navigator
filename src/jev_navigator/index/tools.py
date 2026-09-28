@@ -33,15 +33,6 @@ def run_command(arguments: Sequence[str], cwd: Path, *, no_match_exit: int | Non
     return completed.stdout
 
 
-def ast_grep_pattern(pattern: str, files: Sequence[str], cwd: Path) -> list[dict]:
-    if not files:
-        return []
-    output = run_command(
-        [AST_GREP, "run", "--pattern", pattern, "--json=compact", *files], cwd, no_match_exit=_NO_MATCHES_EXIT
-    )
-    return _json_list(output)
-
-
 def ast_grep_rules(rules_yaml: str, files: Sequence[str], cwd: Path) -> list[dict]:
     if not files:
         return []

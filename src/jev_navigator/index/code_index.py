@@ -146,7 +146,12 @@ class CodeIndex:
 
     @property
     def unparsed_files(self) -> frozenset[str]:
-        """Files a scan so far could not parse in time; lookups treat them as holding nothing."""
+        """Files a scan could not parse in time. Reading it runs any scan not yet run, so the list is
+        complete. Their definitions and calls are unknown, not absent: bindings that may depend on
+        them say ``unknown``, and a search over the scope never reports ``nothing_left``."""
+        self._structure()
+        self._calls()
+        self._reference_matches()
         return self._unparsed.files
 
     def enclosing_symbol(self, file: str, line: int) -> Span | None:
@@ -169,11 +174,13 @@ class CodeIndex:
         return self._definitions().get(name, ())
 
     def find_callers(self, name: str) -> tuple[CallSite, ...]:
-        """Calls to ``name`` found by name in the syntax tree, each with its binding status."""
+        """Calls to ``name`` found by name in the syntax tree, each with its binding status. When one
+        line holds both ``x.name(...)`` and ``name(...)``, the plain call stands for that line."""
         sites: dict[tuple[str, int], str | None] = {}
         for call in self._calls():
-            if call.name == name:
-                sites.setdefault((call.file, call.line), call.receiver)
+            key = (call.file, call.line)
+            if call.name == name and (key not in sites or call.receiver is None):
+                sites[key] = call.receiver
         return tuple(
             CallSite(
                 file, line, self.enclosing_symbol(file, line), self.binding_of(file, line, name, receiver)
@@ -241,6 +248,7 @@ class CodeIndex:
             definitions,
             tuple(span for span in definitions if span in self._top_level_in(file)),
             self._imported_from(file, name),
+            self.unparsed_files,
         )
         return binding_from_facts(facts)
 
@@ -367,10 +375,6 @@ def _script_configs(repository: Path, commit: str) -> list[str]:
         and path.endswith(".json")
         and "node_modules/" not in path
     ]
-
-
-def _line_of(match: dict) -> int:
-    return match["range"]["start"]["line"] + 1
 
 
 def _split_lines(text: str) -> tuple[str, ...]:
