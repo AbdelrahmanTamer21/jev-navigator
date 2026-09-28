@@ -13,7 +13,7 @@ from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch
 from .spans import Span
 from .tools import ast_grep_version
 
-FACT_RULE_VERSION = "combined-facts-v7-navigation-capabilities"
+FACT_RULE_VERSION = "combined-facts-v8-export-surface"
 
 
 class FactCache:
@@ -72,6 +72,7 @@ def _encode(facts: FileFacts) -> dict:
         "calls": [asdict(call) for call in facts.calls],
         "references": [asdict(reference) for reference in facts.references],
         "incomplete": facts.incomplete,
+        "export_names": list(facts.export_names),
     }
 
 
@@ -89,4 +90,5 @@ def _decode(file: str, raw: dict) -> FileFacts:
             for reference in raw["references"]
         ),
         bool(raw["incomplete"]),
+        tuple(raw.get("export_names", ())),
     )

@@ -6,7 +6,6 @@ from git_repos import commit_all, write_files
 
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.imports import (
-    directly_exported_names,
     imported_modules,
     imported_names,
     reexported_names,
@@ -75,19 +74,78 @@ import { ignored } from "./ignored";
     assert reexported_names("from .orders import create_order", "app/__init__.py") == ()
 
 
-def test_script_export_surface_excludes_private_and_default_declarations() -> None:
+def test_the_export_surface_is_the_ast_grep_statement_nodes(tmp_path: Path) -> None:
+    """The surface names real statements only: a private definition, a default export and a
+    template-literal body contribute nothing."""
     # Arrange
-    source = """\
-function privateRun() {}
-export function run() {}
-export const READY = true;
-const local = true;
-export { local as publicLocal };
-export default function defaultRun() {}
-"""
+    index = indexed(
+        tmp_path,
+        {
+            "src/service.ts": (
+                "function privateRun() {}\n"
+                "export function run() {}\n"
+                "export const READY = true;\n"
+                "const local = true;\n"
+                "export { local as publicLocal };\n"
+                "export default function defaultRun() {}\n"
+                'export * from "./one";\n'
+                "export { refund, createOrder as placeOrder } from './commands';\n"
+                "const tpl = `export function inTemplate() {}`;\n"
+            ),
+        },
+    )
 
-    # Act and assert
-    assert directly_exported_names(source, "src/service.ts") == frozenset({"run", "READY", "publicLocal"})
+    # Act
+    names = index._facts_in("src/service.ts").export_names
+
+    # Assert
+    assert names == ("READY", "placeOrder", "publicLocal", "refund", "run")
+
+
+def test_a_template_literal_body_is_not_part_of_the_export_surface(tmp_path: Path) -> None:
+    """The regression: a template literal whose text looks like export statements names nothing,
+    so the privately defined `run` behind the barrel stays a candidate."""
+    # Arrange
+    index = indexed(
+        tmp_path,
+        {
+            "src/services/one.ts": (
+                "const tpl = `export function run() {}`;\nfunction run() { return 1; }\n"
+            ),
+            "src/services/index.ts": 'export * from "./one";\n',
+            "src/page.ts": 'import { run } from "./services";\nrun();\n',
+        },
+    )
+
+    # Act
+    call = index.find_callers("run")[0]
+
+    # Assert
+    assert call.binding.status == "candidate"
+    assert call.binding.target is None
+
+
+def test_a_public_export_beside_a_template_literal_stays_proven(tmp_path: Path) -> None:
+    """The positive control: the real `export function` is still the surface, even when the same
+    file's template literal repeats its shape."""
+    # Arrange
+    index = indexed(
+        tmp_path,
+        {
+            "src/services/one.ts": (
+                "const tpl = `export function inner() {}`;\nexport function run() { return 1; }\n"
+            ),
+            "src/services/index.ts": 'export * from "./one";\n',
+            "src/page.ts": 'import { run } from "./services";\nrun();\n',
+        },
+    )
+
+    # Act
+    call = index.find_callers("run")[0]
+
+    # Assert
+    assert call.binding.status == "resolved"
+    assert call.binding.target == Span("src/services/one.ts", 2, 2, "run")
 
 
 def test_a_call_imported_through_a_barrel_has_a_proven_target(tmp_path: Path) -> None:

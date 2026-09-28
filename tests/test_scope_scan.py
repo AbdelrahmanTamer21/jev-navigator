@@ -342,6 +342,34 @@ def test_plain_javascript_is_unchanged_whether_or_not_flow_files_share_the_scope
     assert alone.unparsed_files == set()
 
 
+def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> None:
+    """Statement and specifier nodes carry the surface: default, wildcard, a multi-line list and a
+    template-literal body are each handled by the parser, not by source-text scanning."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/service.ts": (
+                "export function run() {}\n"
+                "export default function defaultRun() {}\n"
+                'export * from "./one";\n'
+                "export {\n"
+                "  refund,\n"
+                "  createOrder as placeOrder,\n"
+                "} from './commands';\n"
+                "const tpl = `export function inTemplate() {}`;\n"
+            ),
+        },
+    )
+
+    # Act
+    facts = index._facts_in("src/service.ts")
+
+    # Assert
+    assert facts.export_names == ("placeOrder", "refund", "run")
+    assert facts.incomplete is False
+
+
 def test_script_constructors_are_calls_with_their_existing_binding(tmp_path: Path) -> None:
     # Arrange
     index = committed(

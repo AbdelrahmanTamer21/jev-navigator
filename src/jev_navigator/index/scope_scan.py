@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import tools
+from .imports import _local
 from .languages import (
     CLASS_KINDS,
     DECLARATION_RULES,
@@ -22,6 +23,7 @@ from .languages import (
     FLOW_SGCONFIG,
     FUNCTION_KINDS,
     declared_name,
+    export_rules,
     function_name,
     grammar_of,
     language_for,
@@ -79,6 +81,7 @@ class FileFacts:
     calls: tuple[CallMatch, ...]
     references: tuple[ReferenceMatch, ...]
     incomplete: bool = False
+    export_names: tuple[str, ...] = ()
 
 
 def scan_facts(
@@ -88,7 +91,14 @@ def scan_facts(
     matches: list[dict] = []
     for config, group, languages in _scan_groups(files, lines_of):
         rules = "\n---\n".join(
-            (_structure_rules(languages), _call_rules(languages), reference_rules(languages))
+            part
+            for part in (
+                _structure_rules(languages),
+                _call_rules(languages),
+                reference_rules(languages),
+                export_rules(languages),
+            )
+            if part
         )
         if config is None:
             matches.extend(tools.ast_grep_rules(rules, group, root))
@@ -104,14 +114,16 @@ def scan_facts(
     references = _references_from_matches(
         match
         for match in matches
-        if match["ruleId"] not in {"function", "class", "declaration", _ERROR_RULE, "call"}
+        if match["ruleId"] not in {"function", "class", "declaration", _ERROR_RULE, "call", *_EXPORT_RULE_IDS}
     )
+    surface = _export_names_from_matches(match for match in matches if match["ruleId"] in _EXPORT_RULE_IDS)
     return {
         file: FileFacts(
             structure[file],
             tuple(call for call in calls if call.file == file),
             tuple(reference for reference in references if reference.file == file),
             file in unparsed.files,
+            surface.get(file, ()),
         )
         for file in files
     }
@@ -185,6 +197,35 @@ def last_identifier(expression: str) -> str:
 
 
 _ERROR_RULE = "parse_error"
+_EXPORT_STATEMENT_RULE = "export_surface"
+_EXPORT_SPECIFIER_RULE = "export_specifier"
+_EXPORT_RULE_IDS = (_EXPORT_STATEMENT_RULE, _EXPORT_SPECIFIER_RULE)
+
+
+def _export_names_from_matches(matches) -> dict[str, tuple[str, ...]]:
+    """The names each file's parser says it exports, from real statement and specifier nodes."""
+    names: dict[str, set[str]] = {}
+    for match in matches:
+        found = names.setdefault(match["file"], set())
+        if match["ruleId"] == _EXPORT_SPECIFIER_RULE:
+            found.add(_local(match["text"]))
+        elif name := _export_statement_name(match["text"]):
+            found.add(name)
+    return {file: tuple(sorted(found)) for file, found in names.items()}
+
+
+def _export_statement_name(text: str) -> str:
+    """The name an ``export`` statement declares. Default, wildcard, namespace and ``{ ... }``
+    list statements contribute nothing here (lists name themselves through specifier nodes);
+    declarations are named by the same helpers the spans use."""
+    statement = " ".join(text.split())
+    body = statement.removeprefix("export").lstrip()
+    if body.startswith(("default", "*", "as ", "{", "=")):
+        return ""
+    name = function_name(statement)
+    if name == "<anonymous>":
+        name = declared_name(statement)
+    return name if name.isidentifier() else ""
 
 
 def _structure_rules(languages: Sequence[str]) -> str:

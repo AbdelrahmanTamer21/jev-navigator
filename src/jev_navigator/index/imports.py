@@ -82,12 +82,6 @@ def _script_files(base: str) -> list[str]:
 _PYTHON_COMMENT = re.compile(r"#[^\n]*")
 _SCRIPT_DEFAULT_NAME = re.compile(r"^\s*([\w$]+)\s*(?:,|$)")
 _SCRIPT_BRACES = re.compile(r"\{([^}]*)\}")
-_SCRIPT_DIRECT_EXPORT = re.compile(
-    r"^[ \t]*export\s+(?!default\b)(?:declare\s+)?(?:async\s+)?"
-    r"(?:function|class|const|let|var|enum|interface|type)\s+([\w$]+)",
-    re.M,
-)
-_SCRIPT_EXPORT_LIST = re.compile(r"^[ \t]*export\s*\{([^}]*)\}(?!\s*from\b)", re.M)
 
 
 def imported_names(source: str, path: str) -> dict[str, str]:
@@ -136,21 +130,6 @@ def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | Non
         if names:
             exports.append((names, specifier))
     return tuple(exports)
-
-
-def directly_exported_names(source: str, path: str) -> frozenset[str]:
-    """Names this script module itself exports, excluding names available only inside the module."""
-    if path.endswith(".py"):
-        return frozenset()
-    code = _without_script_comments(source)
-    names = {match.group(1) for match in _SCRIPT_DIRECT_EXPORT.finditer(code)}
-    names.update(
-        _local(part)
-        for match in _SCRIPT_EXPORT_LIST.finditer(code)
-        for part in match.group(1).split(",")
-        if part.strip()
-    )
-    return frozenset(names)
 
 
 def _without_script_comments(source: str) -> str:

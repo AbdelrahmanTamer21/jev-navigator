@@ -253,6 +253,19 @@ REFERENCE_ROLES = {
 REFERENCE_ROLES[FLOW_LANGUAGE] = _TYPED_SCRIPT_ROLES
 
 
+def export_rules(languages: Iterable[str]) -> str:
+    """ast-grep rules for the script export surface: statement nodes, and the ``{ ... }`` clause
+    specifiers that carry aliased names. Python has no such kinds, so it contributes no rules."""
+    documents = []
+    for language in languages:
+        if language == "python":
+            continue
+        grammar = grammar_of(language)
+        documents.append(f"id: export_surface\nlanguage: {grammar}\nrule:\n  kind: export_statement")
+        documents.append(f"id: export_specifier\nlanguage: {grammar}\nrule:\n  kind: export_specifier")
+    return "\n---\n".join(documents)
+
+
 def reference_rules(languages: Iterable[str]) -> str:
     """ast-grep rules, one per listed language and role, matching every identifier that has that role.
     Calls and imports have no role, so they never match."""
