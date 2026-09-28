@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+import base64
+import json
+from collections.abc import Mapping
+from pathlib import Path
+
+import pytest
+
+from jev_navigator.judgments.journal import JournalRequest, JsonlJournal, RawResponse
+from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.questions import Check, Criterion
+from jev_navigator.judgments.thresholds import Thresholds
+from jev_navigator.testing import ScriptedJevClient
+
+STATE = {"slice": {"code": "def increment(x): return x + 1"}}
+QUESTIONS = {"adds_one": {"type": "noul", "instructions": "Does `slice.code` add one?"}}
+
+
+class RecordingJournal:
+    def __init__(self) -> None:
+        self.events: list[tuple] = []
+
+    def record_request(self, request: JournalRequest) -> str:
+        self.events.append(("request", request.request_sha256, dict(request.state)))
+        return f"attempt-{len(self.events)}"
+
+    def record_response(self, request_id: str, response: RawResponse) -> None:
+        self.events.append(("response", request_id, response))
+
+    def record_failure(self, request_id: str, error: str, response: RawResponse | None = None) -> None:
+        self.events.append(("failure", request_id, error, response))
+
+
+MALFORMED_BODY = b'{"model": "jev-1.13.0", "answers": {"adds_one": {"type": "noul"}}}'
+
+
+class MalformedClient(ScriptedJevClient):
+    def send(self, state: Mapping, questions: Mapping) -> RawResponse:
+        self.requests.append((state, questions))
+        return RawResponse(MALFORMED_BODY, 200, "application/json")
+
+
+def test_the_request_is_journaled_before_dispatch_and_the_raw_response_before_parsing() -> None:
+    # Arrange
+    journal = RecordingJournal()
+    judge = Judge(ScriptedJevClient(default_noul=0.9, model="jev-1.13.0"), journal=journal)
+
+    # Act
+    answer = judge.ask(STATE, QUESTIONS, thresholds=Thresholds())
+
+    # Assert
+    assert [event[0] for event in journal.events] == ["request", "response"]
+    assert journal.events[0][1] == answer.request_sha256
+    response = journal.events[1][2]
+    assert (response.status, response.content_type) == (200, "application/json")
+    decoded = response.json()
+    assert decoded["model"] == "jev-1.13.0" and decoded["answers"]["adds_one"]["noul"] == 0.9
+
+
+def test_a_malformed_response_is_journaled_raw_then_the_error_raises() -> None:
+    # Arrange
+    journal = RecordingJournal()
+    judge = Judge(MalformedClient(), journal=journal)
+
+    # Act and Assert
+    with pytest.raises(KeyError):
+        judge.ask(STATE, QUESTIONS, thresholds=Thresholds())
+    assert [event[0] for event in journal.events] == ["request", "response", "failure"]
+    assert journal.events[1][2].body == MALFORMED_BODY
+
+
+def test_a_transport_failure_is_journaled() -> None:
+    # Arrange
+    class DownClient(ScriptedJevClient):
+        def send(self, state: Mapping, questions: Mapping) -> RawResponse:
+            raise ConnectionError("provider down")
+
+    journal = RecordingJournal()
+
+    # Act and Assert
+    with pytest.raises(ConnectionError):
+        Judge(DownClient(), journal=journal).ask(STATE, QUESTIONS, thresholds=Thresholds())
+    assert journal.events[-1][:3] == ("failure", "attempt-1", "ConnectionError: provider down")
+
+
+def test_the_journal_sees_the_masked_request_and_the_request_hash_is_model_free(tmp_path: Path) -> None:
+    # Arrange
+    journal = RecordingJournal()
+    token = f"ghp_{'f6' * 18}"
+    state = {"slice": {"code": f'TOKEN = "{token}"'}}
+    first = Judge(ScriptedJevClient(model="model-a"), journal=journal).ask(
+        state, QUESTIONS, thresholds=Thresholds()
+    )
+    second = Judge(ScriptedJevClient(model="model-b")).ask(state, QUESTIONS, thresholds=Thresholds())
+
+    # Assert
+    assert token not in str(journal.events[0][2])
+    assert first.request_sha256 == second.request_sha256
+
+
+def test_jsonl_journal_appends_one_line_per_event(tmp_path: Path) -> None:
+    # Arrange
+    journal = JsonlJournal(tmp_path / "journal.jsonl")
+    judge = Judge(ScriptedJevClient(), journal=journal)
+    check = Check(
+        "adds_one", "Does `{item}.code` add one?", Criterion("It adds one."), Criterion("It does not.")
+    )
+
+    # Act
+    judge.check_each(check, [{"code": "x + 1"}], {})
+
+    # Assert
+    kinds = [
+        line.split('"kind": "')[1].split('"')[0]
+        for line in (tmp_path / "journal.jsonl").read_text().splitlines()
+    ]
+    assert kinds == ["request", "response"]
+
+
+def test_jsonl_journal_keeps_the_exact_response_bytes_status_and_content_type(tmp_path: Path) -> None:
+    # Arrange
+    body = b'{"answers": {"adds_one": {"type": "noul", "noul": 0.9}},  "model": "jev-1.13.0"}'
+
+    class WireClient(ScriptedJevClient):
+        def send(self, state: Mapping, questions: Mapping) -> RawResponse:
+            return RawResponse(body, 200, "application/json; charset=utf-8")
+
+    journal = JsonlJournal(tmp_path / "journal.jsonl")
+
+    # Act
+    Judge(WireClient(), journal=journal).ask(STATE, QUESTIONS, thresholds=Thresholds())
+
+    # Assert
+    lines = [json.loads(line) for line in (tmp_path / "journal.jsonl").read_text().splitlines()]
+    response = lines[1]
+    assert base64.b64decode(response["body_base64"]) == body
+    assert (response["status"], response["content_type"], response["exact"]) == (
+        200,
+        "application/json; charset=utf-8",
+        True,
+    )
+
+
+def test_a_client_that_only_parses_is_journaled_as_decoded_and_marked_inexact() -> None:
+    # Arrange
+    class ParseOnlyClient:
+        model = "jev-latest"
+
+        def ask(self, state: Mapping, questions: Mapping):
+            return ScriptedJevClient(default_noul=0.9).ask(state, questions)
+
+    journal = RecordingJournal()
+
+    # Act
+    Judge(ParseOnlyClient(), journal=journal).ask(STATE, QUESTIONS, thresholds=Thresholds())
+
+    # Assert
+    response = journal.events[1][2]
+    assert response.exact is False and response.status is None
+    assert response.json()["answers"]["adds_one"]["noul"] == 0.9
+
+
+def test_the_typesafe_adapter_journals_the_exact_bytes_it_received(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    httpx2 = pytest.importorskip("httpx2")
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key-for-a-mock-transport")
+    body = (
+        b'{"model": "jev-1.13.0", "usage": {"input_tokens": 12, "output_tokens": 1},'
+        b' "answers": {"adds_one": {"type": "noul", "noul": 0.9}}}'
+    )
+    mock = httpx2.MockTransport(
+        lambda request: httpx2.Response(200, content=body, headers={"content-type": "application/json"})
+    )
+    journal = JsonlJournal(tmp_path / "journal.jsonl")
+
+    # Act
+    answer = Judge(TypeSafeJevClient(transport=mock), journal=journal).ask(
+        STATE, QUESTIONS, thresholds=Thresholds()
+    )
+
+    # Assert
+    response = json.loads((tmp_path / "journal.jsonl").read_text().splitlines()[1])
+    assert base64.b64decode(response["body_base64"]) == body and response["exact"] is True
+    assert answer.noul("adds_one").probability == 0.9
+
+
+def test_jsonl_journal_keeps_no_request_text_unless_asked(tmp_path: Path) -> None:
+    # Arrange
+    default = JsonlJournal(tmp_path / "default.jsonl")
+    keeping = JsonlJournal(tmp_path / "keeping.jsonl", keep_request_text=True)
+
+    # Act
+    Judge(ScriptedJevClient(), journal=default).ask(STATE, QUESTIONS, thresholds=Thresholds())
+    Judge(ScriptedJevClient(), journal=keeping).ask(STATE, QUESTIONS, thresholds=Thresholds())
+
+    # Assert
+    request = json.loads((tmp_path / "default.jsonl").read_text().splitlines()[0])
+    assert "return x + 1" not in (tmp_path / "default.jsonl").read_text()
+    assert request["question_ids"] == ["adds_one"] and "state_sha256" in request
+    assert "return x + 1" in (tmp_path / "keeping.jsonl").read_text()

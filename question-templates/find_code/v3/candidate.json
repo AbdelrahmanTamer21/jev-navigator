@@ -1,0 +1,128 @@
+{
+  "case_id": "find_code:secret-refusal",
+  "group_id": "jev-navigator-find-code",
+  "intended_uses": {
+    "contains_target@80e0fd2a": "Yes (0.80 or more) ends the search and reports this code as found; unsure keeps it as an unsure place; no records it as searched without finding the target.",
+    "could_contain_target@1a6fddfe#0": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#1": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "could_contain_target@1a6fddfe#2": "The probability orders this neighbour in the best-first queue. A low value only lowers its priority; the neighbour is never discarded and stays in the result as not inspected.",
+    "open_first@ec99327f": "When confidence is 0.70 or more and the answer is not 'none', that neighbour is opened first."
+  },
+  "request": {
+    "model": "jev-latest",
+    "questions": {
+      "contains_target@80e0fd2a": {
+        "criteria": {
+          "false": {
+            "examples": [
+              "The slice calls `check_limits(order)` but the comparison is inside `check_limits`.",
+              "The slice formats an invoice."
+            ],
+            "not_for": "Code that merely has a similar name.",
+            "what": "`slice.code` only calls, mentions or sits near that code, or does something else entirely."
+          },
+          "true": {
+            "examples": [
+              "Description 'the check that limits items per order' and the slice holds `if len(order.items) > limit: raise`."
+            ],
+            "what": "A line or block in `slice.code` is itself the code the description names."
+          }
+        },
+        "instructions": "Does `slice.code` contain the code described in `target.description`?",
+        "type": "noul"
+      },
+      "could_contain_target@1a6fddfe#0": {
+        "criteria": {
+          "false": {
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ],
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description."
+          },
+          "true": {
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ],
+            "what": "The signature and preview suggest this function itself implements the description."
+          }
+        },
+        "instructions": "Does `candidates[0].preview`, under the signature `candidates[0].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "type": "noul"
+      },
+      "could_contain_target@1a6fddfe#1": {
+        "criteria": {
+          "false": {
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ],
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description."
+          },
+          "true": {
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ],
+            "what": "The signature and preview suggest this function itself implements the description."
+          }
+        },
+        "instructions": "Does `candidates[1].preview`, under the signature `candidates[1].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "type": "noul"
+      },
+      "could_contain_target@1a6fddfe#2": {
+        "criteria": {
+          "false": {
+            "examples": [
+              "A route handler that calls `place_order`, when the description is the item limit check.",
+              "A logging helper."
+            ],
+            "what": "The function is unrelated, or it only uses or wraps code that implements the description."
+          },
+          "true": {
+            "examples": [
+              "Description 'the check that limits items per order' and the candidate is `def check_limits(order):` reading a limit setting."
+            ],
+            "what": "The signature and preview suggest this function itself implements the description."
+          }
+        },
+        "instructions": "Does `candidates[2].preview`, under the signature `candidates[2].signature`, suggest that this function itself implements the code described in `target.description`?",
+        "type": "noul"
+      },
+      "open_first@ec99327f": {
+        "criteria": {
+          "0": "src/jev_navigator/judgments/store.py:1 `\"\"\"Every Jev answer is kept: by request hash for replay, and by item content for reuse on the next scan.` (start of a file committed with src/jev_navigator/judgments/judge.py 5 times)",
+          "1": "src/jev_navigator/directives/find_code.py:1 `\"\"\"find_code: open places best first until the code a description names is found, bounded by code.` (start of a file committed with src/jev_navigator/judgments/judge.py 4 times)",
+          "2": "src/jev_navigator/judgments/judge.py:91 `operation: str` (the lines after src/jev_navigator/judgments/judge.py:50-70)",
+          "none": "No entry is more likely than the others."
+        },
+        "instructions": "Which entry of `candidates` most likely contains the code described in `target.description`?",
+        "type": "choice"
+      }
+    },
+    "state": {
+      "candidates": [
+        {
+          "preview": "\"\"\"Every Jev answer is kept: by request hash for replay, and by item content for reuse on the next scan.\n\nA record holds hashes, question ids (each with its wording hash), raw answers, the served model, the\nthresholds in force, and the source (file, line range, commit) of every code item it judged, so the\nrequest can be rebuilt from the repository at that commit. It holds no request text unless\n``keep_requests`` is set, because a request carries client code; set it only for our own or\nopen-source code.\n\"\"\"",
+          "signature": "src/jev_navigator/judgments/store.py:1 `\"\"\"Every Jev answer is kept: by request hash for replay, and by item content for reuse on the next scan.` (start of a file committed with src/jev_navigator/judgments/judge.py 5 times)"
+        },
+        {
+          "preview": "\"\"\"find_code: open places best first until the code a description names is found, bounded by code.\n\nEach opened place gets one request with two kinds of yes/no question: does this code contain the\ntarget, and, per neighbour code lists, could the target be inside that neighbour. An optional pick\nnames the neighbour to open first. Jev sees only the target description, the opened code and the\nneighbour signatures; it never sees the search history, and code alone decides what happens next.\n\nEach round opens the top ``beam_width`` places of the queue at once. Neighbours merge into one",
+          "signature": "src/jev_navigator/directives/find_code.py:1 `\"\"\"find_code: open places best first until the code a description names is found, bounded by code.` (start of a file committed with src/jev_navigator/judgments/judge.py 4 times)"
+        },
+        {
+          "preview": "class AllAnswers:\n    \"\"\"Typed results by question name, each with its raw probabilities.\"\"\"\n\n    checks: Mapping[str, CheckResult]\n    picks: Mapping[str, PickResult]\n    scores: Mapping[str, ScoreResult]\n\n",
+          "signature": "src/jev_navigator/judgments/judge.py:91 `operation: str` (the lines after src/jev_navigator/judgments/judge.py:50-70)"
+        }
+      ],
+      "slice": {
+        "code": "\n\n@dataclass(frozen=True)\nclass PickResult:\n    \"\"\"The whole distribution is kept: ``probabilities`` per option and the API's ``confidence``.\n    ``confident`` applies the current threshold; callers may apply any rule of their own instead.\"\"\"\n\n    choice: str\n    confidence: float\n    probabilities: Mapping[str, float]\n    confident: bool\n\n\n@dataclass(frozen=True)\nclass ScoreResult:\n    score: float\n    probabilities: Mapping[str, float]\n    confidence: float\n\n\n@dataclass(frozen=True)",
+        "file": "src/jev_navigator/judgments/judge.py",
+        "lines": "50-70"
+      },
+      "target": {
+        "description": "the check that refuses to send a request that still contains a secret"
+      }
+    }
+  },
+  "revision_id": "v3"
+}

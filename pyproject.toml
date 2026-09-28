@@ -1,0 +1,29 @@
+[project]
+name = "jev-navigator"
+version = "0.1.0"
+description = "Find code with small, typed Jev judgments: code offers the places, Jev judges each one"
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [{ name = "André Machon" }]
+license = "MIT"
+dependencies = []
+
+[project.optional-dependencies]
+typesafe = ["typesafe-sdk"]
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "N"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

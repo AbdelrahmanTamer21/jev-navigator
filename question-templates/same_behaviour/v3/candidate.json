@@ -1,0 +1,100 @@
+{
+  "case_id": "same_behaviour:secrets-module",
+  "group_id": "jev-navigator-same_behaviour",
+  "intended_uses": {
+    "same_behaviour@a35e3a20#0": "Yes lists the candidate as duplicated behaviour; unsure is listed separately; no is dropped from the duplication candidates.",
+    "same_behaviour@a35e3a20#1": "Yes lists the candidate as duplicated behaviour; unsure is listed separately; no is dropped from the duplication candidates.",
+    "same_behaviour@a35e3a20#2": "Yes lists the candidate as duplicated behaviour; unsure is listed separately; no is dropped from the duplication candidates."
+  },
+  "request": {
+    "model": "jev-latest",
+    "questions": {
+      "same_behaviour@a35e3a20#0": {
+        "criteria": {
+          "false": {
+            "examples": [
+              "`parse_order` and `parse_refund` both call `json.loads` but build different records."
+            ],
+            "what": "They share names or helpers but do different work."
+          },
+          "true": {
+            "examples": [
+              "Two functions that each sum item prices and apply the same 10 percent discount above 100."
+            ],
+            "what": "Both compute the same result from the same kind of input, even if written differently."
+          }
+        },
+        "instructions": "Does `items[0].code` do the same thing as `subject.code`?",
+        "type": "noul"
+      },
+      "same_behaviour@a35e3a20#1": {
+        "criteria": {
+          "false": {
+            "examples": [
+              "`parse_order` and `parse_refund` both call `json.loads` but build different records."
+            ],
+            "what": "They share names or helpers but do different work."
+          },
+          "true": {
+            "examples": [
+              "Two functions that each sum item prices and apply the same 10 percent discount above 100."
+            ],
+            "what": "Both compute the same result from the same kind of input, even if written differently."
+          }
+        },
+        "instructions": "Does `items[1].code` do the same thing as `subject.code`?",
+        "type": "noul"
+      },
+      "same_behaviour@a35e3a20#2": {
+        "criteria": {
+          "false": {
+            "examples": [
+              "`parse_order` and `parse_refund` both call `json.loads` but build different records."
+            ],
+            "what": "They share names or helpers but do different work."
+          },
+          "true": {
+            "examples": [
+              "Two functions that each sum item prices and apply the same 10 percent discount above 100."
+            ],
+            "what": "Both compute the same result from the same kind of input, even if written differently."
+          }
+        },
+        "instructions": "Does `items[2].code` do the same thing as `subject.code`?",
+        "type": "noul"
+      }
+    },
+    "state": {
+      "items": [
+        {
+          "code": "    def mask(self, text: str) -> str: ...",
+          "file": "src/jev_navigator/judgments/secrets.py",
+          "lines": [
+            40,
+            40
+          ]
+        },
+        {
+          "code": "    def findings(self, text: str) -> list[str]: ...",
+          "file": "src/jev_navigator/judgments/secrets.py",
+          "lines": [
+            44,
+            44
+          ]
+        },
+        {
+          "code": "    def mask(self, text: str) -> str:\n        text = _PRIVATE_KEY_BLOCK.sub(MASK, text)\n        text = _KEY_MARKER_LINE.sub(MASK, text)\n        for shape in _TOKEN_SHAPES:\n            text = shape.sub(MASK, text)\n        text = _SECRET_ASSIGNMENT.sub(_mask_group, text)\n        return _QUOTED_ASSIGNMENT.sub(_mask_if_high_entropy, text)",
+          "file": "src/jev_navigator/judgments/secrets.py",
+          "lines": [
+            56,
+            62
+          ]
+        }
+      ],
+      "subject": {
+        "code": "def mask_value(value: object, masker: Masker) -> object:\n    \"\"\"Masks every string inside nested JSON-like data.\"\"\"\n    if isinstance(value, str):\n        return masker.mask(value)\n    if isinstance(value, Mapping):\n        return {key: mask_value(item, masker) for key, item in value.items()}\n    if isinstance(value, list | tuple):\n        return [mask_value(item, masker) for item in value]\n    return value"
+      }
+    }
+  },
+  "revision_id": "v3"
+}

@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+
+from jev_navigator.directives.find_code import Outcome, SearchBudget, StopRule, find_code, find_code_async
+from jev_navigator.directives.places import place_for_line
+from jev_navigator.history import History, judge_history_async
+from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.judgments.journal import JsonlJournal
+from jev_navigator.judgments.judge import CallCapReachedError, CallOffer, Judge
+from jev_navigator.judgments.questions import Check, Criterion, Pick, Rate
+from jev_navigator.judgments.store import JsonlAnswerStore
+from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
+
+DESCRIBES = Check(
+    name="describes",
+    instructions="Is `{item}.code` the implementation that `doc.sentence` describes?",
+    yes=Criterion("The code performs what the sentence says."),
+    no=Criterion("The code does something else, or only calls it."),
+)
+NAMES_VALUE = Check(
+    name="names_value",
+    instructions="Does `doc.sentence` name a value?",
+    yes=Criterion("The sentence names a value."),
+    no=Criterion("The sentence names no value."),
+)
+HOLDS_LIMIT = Check(
+    "holds_limit_check",
+    "Does `history` contain code that compares the number of items with a limit?",
+    Criterion("A fetched code body compares an item count with a limit."),
+    Criterion("No fetched code body makes that comparison."),
+)
+TARGET = "the check that limits how many items an order may have"
+SHARED = {"doc": {"sentence": "s"}}
+
+
+def run(coroutine):
+    return asyncio.run(coroutine)
+
+
+def limit_check_answers(question_id: str, question: dict, state: dict) -> float:
+    if "slice" in state and question_id.startswith("contains_target"):
+        return 0.95 if "len(order.items) <= limit" in state["slice"]["code"] else 0.05
+    return 0.9 if "check_limits" in str(state.get("candidates", "")) else 0.4
+
+
+def test_the_async_path_masks_stores_and_journals_exactly_like_the_sync_path(tmp_path: Path) -> None:
+    # Arrange
+    items = [{"code": f'TOKEN = "ghp_{"a1" * 18}"'}, {"code": "y = 2"}]
+    sync_client = ScriptedJevClient(nouls={"describes": 0.9})
+    async_client = AsyncScriptedJevClient(ScriptedJevClient(nouls={"describes": 0.9}))
+    sync_judge = Judge(sync_client, store=JsonlAnswerStore(tmp_path / "sync.jsonl"))
+    async_judge = Judge(
+        async_client,
+        store=JsonlAnswerStore(tmp_path / "async.jsonl"),
+        journal=JsonlJournal(tmp_path / "journal.jsonl"),
+    )
+
+    # Act
+    expected = sync_judge.check_each(DESCRIBES, items, SHARED)
+    results = run(async_judge.check_each_async(DESCRIBES, items, SHARED))
+    replayed = run(async_judge.check_each_async(DESCRIBES, items, SHARED))
+
+    # Assert
+    assert [(r.probability, r.verdict, r.request_sha256) for r in results] == [
+        (r.probability, r.verdict, r.request_sha256) for r in expected
+    ]
+    assert async_client.requests == sync_client.requests
+    assert "ghp_" not in str(async_client.requests)
+    assert all(result.from_store for result in replayed) and async_judge.calls == 1
+    journaled = (tmp_path / "journal.jsonl").read_text().splitlines()
+    assert ['"kind": "request"' in line for line in journaled] == [True, False]
+
+
+def test_ask_all_pick_and_choose_call_have_async_forms() -> None:
+    # Arrange
+    client = AsyncScriptedJevClient(
+        ScriptedJevClient(choices={"kind": {"why": 0.8, "what": 0.2}}, scores={"useful": [0.1, 0.9]})
+    )
+    judge = Judge(client)
+    kind = Pick("kind", "What kind of sentence is `doc.sentence`?")
+    usefulness = Rate("useful", "How much does `doc.sentence` add?", ("Nothing.", "Something."))
+    offers = [CallOffer("search_text", "lines with a key", Pick("key", "Which key?"), {"k": "1 hit"})]
+
+    # Act
+    everything = run(
+        judge.ask_all_async(
+            SHARED, checks=[NAMES_VALUE], picks=[(kind, {"why": "", "what": ""})], scores=[usefulness]
+        )
+    )
+    picked = run(judge.pick_async(kind, {"why": "", "what": ""}, SHARED))
+    decision = run(judge.choose_call_async(Pick("route", "Which lookup?"), offers, SHARED))
+
+    # Assert
+    assert everything.picks["kind"].choice == "why" and everything.scores["useful"].score == pytest.approx(
+        0.9
+    )
+    assert picked.choice == "why"
+    assert (decision.operation, decision.argument) == ("search_text", "k")
+    assert len(client.requests) == 3
+
+
+def test_a_sync_call_with_an_async_client_is_refused() -> None:
+    judge = Judge(AsyncScriptedJevClient())
+    with pytest.raises(TypeError, match="async"):
+        judge.check_each(DESCRIBES, [{"code": "x = 1"}], SHARED)
+
+
+def test_the_async_path_counts_calls_against_the_same_caps() -> None:
+    # Arrange
+    judge = Judge(AsyncScriptedJevClient(ScriptedJevClient(nouls={"describes": 0.9})), max_calls=1)
+    run(judge.check_each_async(DESCRIBES, [{"code": "x = 1"}], SHARED))
+
+    # Act and Assert
+    with pytest.raises(CallCapReachedError):
+        run(judge.check_each_async(DESCRIBES, [{"code": "y = 2"}], SHARED))
+
+
+def test_find_code_async_searches_like_find_code(sample_index: CodeIndex) -> None:
+    # Arrange
+    start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
+    budget = SearchBudget(beam_width=2)
+    sync_client = ScriptedJevClient(nouls=limit_check_answers)
+    async_client = AsyncScriptedJevClient(ScriptedJevClient(nouls=limit_check_answers))
+
+    # Act
+    expected = find_code(sample_index, Judge(sync_client), TARGET, start, budget=budget)
+    result = run(find_code_async(sample_index, Judge(async_client), TARGET, start, budget=budget))
+
+    # Assert
+    assert result.outcome == expected.outcome == Outcome.FOUND
+    assert result.found[0].code.span.name == "check_limits"
+    assert (result.steps, result.calls) == (expected.steps, expected.calls)
+    assert sorted(map(str, async_client.requests)) == sorted(map(str, sync_client.requests))
+
+
+def test_find_code_async_applies_the_stop_rule_through_the_async_history_check(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    def answers(question_id: str, question: dict, state: dict) -> float:
+        if "history" in state:
+            bodies = [span["code"] for entry in state["history"]["steps"] for span in entry["fetched"]]
+            return 0.9 if any("<= limit" in body for body in bodies) else 0.1
+        return 0.3
+
+    start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
+    judge = Judge(AsyncScriptedJevClient(ScriptedJevClient(nouls=answers)))
+
+    # Act
+    result = run(
+        find_code_async(
+            sample_index,
+            judge,
+            TARGET,
+            start,
+            budget=SearchBudget(beam_width=1),
+            stop_rule=StopRule(HOLDS_LIMIT),
+        )
+    )
+
+    # Assert
+    assert result.outcome == Outcome.STOP_RULE
+
+
+def test_the_async_history_check_matches_the_sync_one() -> None:
+    # Arrange
+    history = History()
+    judge = Judge(AsyncScriptedJevClient(ScriptedJevClient(default_noul=0.9)))
+
+    # Act
+    judged = run(judge_history_async(judge, history, HOLDS_LIMIT))
+
+    # Assert
+    assert judged.probability == 0.9
+    assert history.previous_judgments["holds_limit_check"] == judged

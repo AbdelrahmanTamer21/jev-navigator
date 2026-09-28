@@ -1,0 +1,147 @@
+{
+  "case_id": "find_code:secret-refusal",
+  "group_id": "jev-navigator-find-code",
+  "intended_uses": {
+    "contains_target@eb6c1aed": "Yes (0.80 or more) stops the search and reports this code as found; unsure keeps it as an unsure place for escalation; no moves on.",
+    "could_contain_target@5a0db71a#0": "The probability orders this neighbour in the best-first queue; no (0.20 or less) rules it out and it is never opened.",
+    "could_contain_target@5a0db71a#1": "The probability orders this neighbour in the best-first queue; no (0.20 or less) rules it out and it is never opened.",
+    "could_contain_target@5a0db71a#2": "The probability orders this neighbour in the best-first queue; no (0.20 or less) rules it out and it is never opened.",
+    "could_contain_target@5a0db71a#3": "The probability orders this neighbour in the best-first queue; no (0.20 or less) rules it out and it is never opened.",
+    "could_contain_target@5a0db71a#4": "The probability orders this neighbour in the best-first queue; no (0.20 or less) rules it out and it is never opened.",
+    "could_contain_target@5a0db71a#5": "The probability orders this neighbour in the best-first queue; no (0.20 or less) rules it out and it is never opened.",
+    "open_first@ec99327f": "When confidence is 0.70 or more, the picked neighbour is opened first; otherwise ignored."
+  },
+  "request": {
+    "model": "jev-latest",
+    "questions": {
+      "contains_target@eb6c1aed": {
+        "criteria": {
+          "false": {
+            "not_for": "Code that merely has a similar name.",
+            "what": "`slice.code` only calls, mentions or sits near that code."
+          },
+          "true": {
+            "what": "A line or block in `slice.code` is the code the description names."
+          }
+        },
+        "instructions": "Does `slice.code` contain the code described in `target.description`?",
+        "type": "noul"
+      },
+      "could_contain_target@5a0db71a#0": {
+        "criteria": {
+          "false": {
+            "what": "The signature names code with an unrelated purpose."
+          },
+          "true": {
+            "what": "The signature names code whose purpose fits the description."
+          }
+        },
+        "instructions": "Could the code described in `target.description` be inside `candidates[0].signature`?",
+        "type": "noul"
+      },
+      "could_contain_target@5a0db71a#1": {
+        "criteria": {
+          "false": {
+            "what": "The signature names code with an unrelated purpose."
+          },
+          "true": {
+            "what": "The signature names code whose purpose fits the description."
+          }
+        },
+        "instructions": "Could the code described in `target.description` be inside `candidates[1].signature`?",
+        "type": "noul"
+      },
+      "could_contain_target@5a0db71a#2": {
+        "criteria": {
+          "false": {
+            "what": "The signature names code with an unrelated purpose."
+          },
+          "true": {
+            "what": "The signature names code whose purpose fits the description."
+          }
+        },
+        "instructions": "Could the code described in `target.description` be inside `candidates[2].signature`?",
+        "type": "noul"
+      },
+      "could_contain_target@5a0db71a#3": {
+        "criteria": {
+          "false": {
+            "what": "The signature names code with an unrelated purpose."
+          },
+          "true": {
+            "what": "The signature names code whose purpose fits the description."
+          }
+        },
+        "instructions": "Could the code described in `target.description` be inside `candidates[3].signature`?",
+        "type": "noul"
+      },
+      "could_contain_target@5a0db71a#4": {
+        "criteria": {
+          "false": {
+            "what": "The signature names code with an unrelated purpose."
+          },
+          "true": {
+            "what": "The signature names code whose purpose fits the description."
+          }
+        },
+        "instructions": "Could the code described in `target.description` be inside `candidates[4].signature`?",
+        "type": "noul"
+      },
+      "could_contain_target@5a0db71a#5": {
+        "criteria": {
+          "false": {
+            "what": "The signature names code with an unrelated purpose."
+          },
+          "true": {
+            "what": "The signature names code whose purpose fits the description."
+          }
+        },
+        "instructions": "Could the code described in `target.description` be inside `candidates[5].signature`?",
+        "type": "noul"
+      },
+      "open_first@ec99327f": {
+        "criteria": {
+          "0": "",
+          "1": "",
+          "2": "",
+          "3": "",
+          "4": "",
+          "5": ""
+        },
+        "instructions": "Which entry of `candidates` most likely contains the code described in `target.description`?",
+        "type": "choice"
+      }
+    },
+    "state": {
+      "candidates": [
+        {
+          "signature": "src/jev_navigator/directives/find_code.py:151 `def find_code(` (calls _open)"
+        },
+        {
+          "signature": "src/jev_navigator/judgments/questions.py:86 `def content_hash(value: object) -> str:` (called by _open)"
+        },
+        {
+          "signature": "src/jev_navigator/directives/places.py:57 `def neighbours(index: CodeIndex, opened: CodeSlice) -> list[Place]:` (called by _open)"
+        },
+        {
+          "signature": "src/jev_navigator/judgments/judge.py:1 `\"\"\"Jev judgments as building blocks: yes/no checks over supplied items, picks over code-built` (start of a file committed with src/jev_navigator/directives/find_code.py 2 times)"
+        },
+        {
+          "signature": "src/jev_navigator/adapters/__init__.py:1 `` (start of a file committed with src/jev_navigator/directives/find_code.py 1 times)"
+        },
+        {
+          "signature": "src/jev_navigator/directives/find_code.py:230 `item, code, candidates = opening.item, opening.code, opening.candidates` (the lines after src/jev_navigator/directives/find_code.py:199-209)"
+        }
+      ],
+      "slice": {
+        "code": "def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:\n    \"\"\"Opens a place in code; the same code reached by another path is not judged twice.\"\"\"\n    code = item.place.open()\n    fingerprint = content_hash(code.text)\n    if fingerprint in search.judged_code:\n        return None\n    search.judged_code.add(fingerprint)\n    search.visited.add(code.key)\n    search.steps += 1\n    candidates = neighbours(index, code) if item.depth < search.budget.max_depth else []\n    return _Opening(item, code, [place for place in candidates if place.key not in search.visited])",
+        "file": "src/jev_navigator/directives/find_code.py",
+        "lines": "199-209"
+      },
+      "target": {
+        "description": "the check that refuses to send a request that still contains a secret"
+      }
+    }
+  },
+  "revision_id": "v1"
+}

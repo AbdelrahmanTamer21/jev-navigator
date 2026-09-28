@@ -1,0 +1,444 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from jev_navigator.judgments.answers import ChoiceAnswer
+from jev_navigator.judgments.client import MissingAnswerError, ReplayOnlyClient
+from jev_navigator.judgments.judge import CallCapReachedError, CallOffer, Judge
+from jev_navigator.judgments.questions import Check, Criterion, Pick
+from jev_navigator.judgments.secrets import SecretInRequestError, SecretMasker
+from jev_navigator.judgments.store import JsonlAnswerStore
+from jev_navigator.judgments.thresholds import NoulVerdict, Thresholds
+from jev_navigator.testing import ScriptedJevClient
+
+DESCRIBES = Check(
+    name="describes",
+    instructions="Is `{item}.code` the implementation that `doc.sentence` describes?",
+    yes=Criterion("The code performs what the sentence says."),
+    no=Criterion("The code does something else, or only calls it."),
+)
+
+WHOLE_STATE_CHECK = Check(
+    name="whole",
+    instructions="Does `doc.sentence` name a value?",
+    yes=Criterion("The sentence names a value."),
+    no=Criterion("The sentence names no value."),
+)
+
+
+@pytest.mark.parametrize(
+    ("probability", "verdict"),
+    [
+        (0.80, NoulVerdict.YES),
+        (0.7999, NoulVerdict.UNSURE),
+        (0.20, NoulVerdict.NO),
+        (0.2001, NoulVerdict.UNSURE),
+    ],
+)
+def test_noul_band_edges_are_inclusive_and_the_middle_stays_unsure(probability: float, verdict) -> None:
+    assert Thresholds().noul_verdict(probability) == verdict
+
+
+def test_choice_confidence_of_exactly_the_minimum_counts_as_confident() -> None:
+    # Arrange
+    thresholds = Thresholds()
+
+    # Act and Assert
+    assert thresholds.choice_min_confidence == 0.70
+    assert thresholds.choice_is_confident(0.70)
+    assert not thresholds.choice_is_confident(0.6999)
+
+
+def test_choice_confidence_comes_from_the_distribution_not_the_winner() -> None:
+    # Act
+    answer = ChoiceAnswer.from_probabilities({"a": 0.6, "b": 0.2, "c": 0.2})
+
+    # Assert
+    assert answer.choice == "a"
+    assert answer.confidence == pytest.approx(0.4)
+
+
+def test_thresholds_precedence_is_defaults_then_environment_then_directive_then_call() -> None:
+    # Arrange
+    environment = {"JEV_NAVIGATOR_CHOICE_MIN_CONFIDENCE": "0.5", "JEV_NAVIGATOR_NOUL_YES_AT": "0.9"}
+    judge = Judge(ScriptedJevClient(), thresholds=Thresholds.from_env(environment))
+
+    # Act
+    effective = judge.effective({"noul_yes_at": 0.85, "noul_no_at": 0.1}, {"noul_no_at": 0.05})
+
+    # Assert
+    assert effective == Thresholds(choice_min_confidence=0.5, noul_yes_at=0.85, noul_no_at=0.05)
+
+
+@pytest.mark.parametrize(
+    "overrides", [{"noul_no_at": 0.8}, {"noul_yes_at": 1.2}, {"choice_min_confidence": -0.1}]
+)
+def test_invalid_thresholds_are_rejected(overrides: dict) -> None:
+    with pytest.raises(ValueError):
+        Thresholds().updated(overrides)
+
+
+def test_check_each_batches_items_into_one_request_with_three_way_verdicts() -> None:
+    # Arrange
+    client = ScriptedJevClient(nouls={"describes#0": 0.95, "describes#1": 0.5, "describes#2": 0.05})
+    judge = Judge(client)
+    items = [{"code": "def a(): ..."}, {"code": "def b(): ..."}, {"code": "def c(): ..."}]
+
+    # Act
+    results = judge.check_each(DESCRIBES, items, {"doc": {"sentence": "a validates orders"}})
+
+    # Assert
+    assert [result.verdict for result in results] == [NoulVerdict.YES, NoulVerdict.UNSURE, NoulVerdict.NO]
+    assert len(client.requests) == 1
+    state, questions = client.requests[0]
+    assert state["doc"] == {"sentence": "a validates orders"}
+    assert list(questions.values())[1]["instructions"] == (
+        "Is `items[1].code` the implementation that `doc.sentence` describes?"
+    )
+
+
+def test_items_judged_before_are_answered_from_the_store(tmp_path: Path) -> None:
+    # Arrange
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+    first_client = ScriptedJevClient(nouls={"describes": 0.9})
+    Judge(first_client, store=store).check_each(DESCRIBES, [{"code": "x = 1"}], {"doc": {"sentence": "s"}})
+    second_client = ScriptedJevClient(nouls={"describes": 0.1})
+    second = Judge(
+        second_client, store=JsonlAnswerStore(tmp_path / "answers.jsonl"), served_model="jev-scripted"
+    )
+
+    # Act
+    results = second.check_each(DESCRIBES, [{"code": "x = 1"}, {"code": "y = 2"}], {"doc": {"sentence": "s"}})
+
+    # Assert
+    assert [(result.probability, result.from_store) for result in results] == [(0.9, True), (0.1, False)]
+    assert len(second_client.requests) == 1
+
+
+def test_the_same_item_against_different_shared_state_is_judged_again(tmp_path: Path) -> None:
+    # Arrange
+    path = tmp_path / "answers.jsonl"
+    Judge(ScriptedJevClient(nouls={"describes": 0.9}), store=JsonlAnswerStore(path)).check_each(
+        DESCRIBES, [{"code": "x = 1"}], {"doc": {"sentence": "x is set to one"}}
+    )
+    client = ScriptedJevClient(nouls={"describes": 0.1})
+
+    # Act
+    results = Judge(client, store=JsonlAnswerStore(path), served_model="jev-scripted").check_each(
+        DESCRIBES, [{"code": "x = 1"}], {"doc": {"sentence": "x is never set"}}
+    )
+
+    # Assert
+    assert (results[0].probability, results[0].from_store) == (0.1, False)
+    assert len(client.requests) == 1
+
+
+def test_answers_from_another_served_model_are_not_reused(tmp_path: Path) -> None:
+    # Arrange
+    path = tmp_path / "answers.jsonl"
+    shared = {"doc": {"sentence": "s"}}
+    Judge(
+        ScriptedJevClient(nouls={"describes": 0.9}, model="jev-1.12.0"), store=JsonlAnswerStore(path)
+    ).check_each(DESCRIBES, [{"code": "x = 1"}], shared)
+    upgraded = ScriptedJevClient(nouls={"describes": 0.1}, model="jev-1.13.0")
+
+    # Act
+    results = Judge(upgraded, store=JsonlAnswerStore(path), served_model="jev-1.13.0").check_each(
+        DESCRIBES, [{"code": "x = 1"}], shared
+    )
+
+    # Assert
+    assert results[0].from_store is False and len(upgraded.requests) == 1
+
+
+def test_an_unknown_served_model_is_a_miss_until_the_first_live_answer(tmp_path: Path) -> None:
+    # Arrange
+    path = tmp_path / "answers.jsonl"
+    shared = {"doc": {"sentence": "s"}}
+    Judge(ScriptedJevClient(nouls={"describes": 0.9}), store=JsonlAnswerStore(path)).check_each(
+        DESCRIBES, [{"code": "x = 1"}], shared
+    )
+    client = ScriptedJevClient(nouls={"describes": 0.1})
+    judge = Judge(client, store=JsonlAnswerStore(path))
+
+    # Act
+    first = judge.check_each(DESCRIBES, [{"code": "x = 1"}], shared)
+    second = judge.check_each(DESCRIBES, [{"code": "x = 1"}], shared)
+
+    # Assert
+    assert first[0].from_store is False
+    assert second[0].from_store is True
+
+
+def test_stored_answers_replay_without_calls_under_new_thresholds(tmp_path: Path) -> None:
+    # Arrange
+    path = tmp_path / "answers.jsonl"
+    Judge(ScriptedJevClient(nouls={"describes": 0.7}), store=JsonlAnswerStore(path)).check_each(
+        DESCRIBES, [{"code": "x = 1"}], {"doc": {"sentence": "s"}}
+    )
+    replay = Judge(ReplayOnlyClient(), store=JsonlAnswerStore(path), thresholds=Thresholds(noul_yes_at=0.65))
+
+    # Act
+    results = replay.check_each(DESCRIBES, [{"code": "x = 1"}], {"doc": {"sentence": "s"}})
+
+    # Assert
+    assert results[0].verdict == NoulVerdict.YES
+    assert replay.calls == 0
+
+
+def test_replay_without_a_stored_answer_fails_loudly(tmp_path: Path) -> None:
+    judge = Judge(ReplayOnlyClient(), store=JsonlAnswerStore(tmp_path / "answers.jsonl"))
+    with pytest.raises(MissingAnswerError):
+        judge.check_each(DESCRIBES, [{"code": "x = 1"}], {"doc": {"sentence": "s"}})
+
+
+def test_store_keeps_answers_and_thresholds_but_no_request_text_by_default(tmp_path: Path) -> None:
+    # Arrange
+    path = tmp_path / "answers.jsonl"
+
+    # Act
+    Judge(ScriptedJevClient(), store=JsonlAnswerStore(path)).check_each(
+        DESCRIBES, [{"code": "customer_code()"}], {"doc": {"sentence": "s"}}
+    )
+
+    # Assert
+    stored = path.read_text()
+    assert "customer_code" not in stored
+    assert '"noul_yes_at": 0.8' in stored
+
+
+def test_secrets_are_masked_before_any_request_leaves() -> None:
+    # Arrange
+    client = ScriptedJevClient()
+    key_block = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----"
+    items = [{"code": f'TOKEN = "ghp_{"a1" * 18}"\n{key_block}\npassword = "hunter2hunter2"'}]
+
+    # Act
+    Judge(client).check_each(DESCRIBES, items, {"doc": {"sentence": "s"}})
+
+    # Assert
+    sent = str(client.requests[0][0])
+    assert "ghp_" not in sent and "MIIEow" not in sent and "hunter2" not in sent
+    assert "PRIVATE KEY" not in sent
+
+
+def test_the_final_scan_refuses_when_a_host_turns_masking_off() -> None:
+    # Arrange
+    client = ScriptedJevClient()
+    judge = Judge(client, masker=None)
+
+    # Act and Assert
+    with pytest.raises(SecretInRequestError):
+        judge.check_each(DESCRIBES, [{"code": f'key = "ghp_{"b2" * 18}"'}], {})
+    assert client.requests == []
+
+
+def test_high_entropy_values_in_assignments_are_masked_and_ordinary_strings_are_not() -> None:
+    # Act
+    masked = SecretMasker().mask(
+        'seed = "Zq8vN3xL0pR7tY2wK5mB9cH4"\nlabel = "orders.max_items.default.value"'
+    )
+
+    # Assert
+    assert "Zq8vN3" not in masked
+    assert "orders.max_items.default.value" in masked
+
+
+def test_options_that_contain_a_secret_are_never_offered() -> None:
+    # Arrange
+    client = ScriptedJevClient()
+    pick = Pick(
+        "which_key", "Which of these string keys most likely names the setting `claim.text` mentions?"
+    )
+    options = {"orders.max_items": "3 hits", f"ghp_{'c3' * 18}": "1 hit"}
+
+    # Act
+    result = Judge(client).pick(pick, options, {"claim": {"text": "the limit is never read"}})
+
+    # Assert
+    assert result.choice == "orders.max_items"
+    assert list(client.requests[0][1].values())[0]["criteria"] == {"orders.max_items": "3 hits"}
+
+
+def test_choose_call_asks_every_argument_in_one_request_and_reports_low_confidence() -> None:
+    # Arrange
+    route = Pick("route", "Which lookup most likely reaches the check that `claim.text` says is missing?")
+    offers = [
+        CallOffer(
+            "find_callers",
+            "the functions that call a name",
+            Pick("caller_of", "Whose callers?"),
+            {"validate_order": "app/validation.py:4"},
+        ),
+        CallOffer(
+            "search_text",
+            "the lines containing a string key",
+            Pick("key", "Which key?"),
+            {"orders.max_items": "2 hits"},
+        ),
+    ]
+    client = ScriptedJevClient(choices={"route": {"find_callers": 0.55, "search_text": 0.45}})
+
+    # Act
+    decision = Judge(client).choose_call(route, offers, {"claim": {"text": "no limit check"}})
+
+    # Assert
+    assert (decision.operation, decision.argument) == ("find_callers", "validate_order")
+    assert not decision.confident
+    assert len(client.requests) == 1 and len(client.requests[0][1]) == 3
+
+
+def test_store_records_where_every_judged_item_came_from(tmp_path: Path) -> None:
+    # Arrange
+    path = tmp_path / "answers.jsonl"
+    items = [{"file": "app/orders.py", "lines": [5, 7], "commit": "abc123", "code": "def place(): ..."}]
+
+    # Act
+    Judge(ScriptedJevClient(), store=JsonlAnswerStore(path)).check_each(
+        DESCRIBES, items, {"doc": {"sentence": "s"}}
+    )
+
+    # Assert
+    record = json.loads(path.read_text())
+    assert list(record["sources"].values()) == [
+        {"file": "app/orders.py", "lines": [5, 7], "commit": "abc123"}
+    ]
+    assert "def place" not in path.read_text()
+
+
+def test_ask_all_sends_checks_picks_and_scores_over_one_state_in_one_request() -> None:
+    # Arrange
+    from jev_navigator.judgments.questions import Rate
+
+    accurate = Check(
+        "accurate",
+        "Does `comment.text` match what `slice.code` does?",
+        Criterion("The comment states what the code does."),
+        Criterion("The comment says otherwise."),
+    )
+    kind = Pick("kind", "What kind of comment is `comment.text`?")
+    usefulness = Rate(
+        "useful",
+        "How much does `comment.text` add beyond `slice.code`?",
+        ("Repeats the code.", "Adds a little context.", "Explains a reason the code cannot show."),
+    )
+    client = ScriptedJevClient(
+        nouls={"accurate": 0.3},
+        choices={"kind": {"why": 0.8, "what": 0.2}},
+        scores={"useful": [0.1, 0.2, 0.7]},
+    )
+    state = {"comment": {"text": "retry because the API drops the first call"}, "slice": {"code": "retry()"}}
+
+    # Act
+    answers = Judge(client).ask_all(
+        state, checks=[accurate], picks=[(kind, {"why": "", "what": ""})], scores=[usefulness]
+    )
+
+    # Assert
+    assert len(client.requests) == 1
+    assert answers.checks["accurate"].probability == 0.3
+    assert answers.checks["accurate"].verdict == NoulVerdict.UNSURE
+    assert answers.picks["kind"].probabilities == {"why": 0.8, "what": 0.2}
+    assert answers.scores["useful"].score == pytest.approx(1.6)
+    assert answers.scores["useful"].probabilities == {"0": 0.1, "1": 0.2, "2": 0.7}
+
+
+def test_score_answers_survive_the_store_round_trip(tmp_path: Path) -> None:
+    # Arrange
+    from jev_navigator.judgments.questions import Rate
+
+    rate = Rate("useful", "How useful is `x`?", ("not", "somewhat", "very"))
+    path = tmp_path / "answers.jsonl"
+    Judge(ScriptedJevClient(scores={"useful": [0.0, 0.5, 0.5]}), store=JsonlAnswerStore(path)).ask_all(
+        {"x": 1}, scores=[rate]
+    )
+
+    # Act
+    replayed = Judge(ReplayOnlyClient(), store=JsonlAnswerStore(path)).ask_all({"x": 1}, scores=[rate])
+
+    # Assert
+    assert replayed.scores["useful"].score == pytest.approx(1.5)
+
+
+def test_a_whole_request_answered_by_another_model_is_asked_again(tmp_path: Path) -> None:
+    # Arrange
+    path = tmp_path / "answers.jsonl"
+    state = {"items": [{"code": "def increment(x): return x + 1"}], "doc": {"sentence": "Add one."}}
+    questions = {"describes": DESCRIBES.to_question("items[0]")}
+    Judge(ScriptedJevClient(default_noul=0.95, model="model-a"), store=JsonlAnswerStore(path)).ask(
+        state, questions, thresholds=Thresholds()
+    )
+    second = ScriptedJevClient(default_noul=0.05, model="model-b")
+    judge = Judge(second, store=JsonlAnswerStore(path), served_model="model-b")
+
+    # Act
+    answer = judge.ask(state, questions, thresholds=Thresholds())
+
+    # Assert
+    assert answer.model == "model-b" and len(second.requests) == 1
+    assert answer.request_sha256 == JsonlAnswerStore(path).records()[0].request_sha256
+
+
+def test_a_judge_refuses_to_send_past_its_global_call_cap() -> None:
+    # Arrange
+    client = ScriptedJevClient(nouls={"describes": 0.9})
+    judge = Judge(client, max_calls=1)
+    judge.check_each(DESCRIBES, [{"code": "x = 1"}], {"doc": {"sentence": "s"}})
+
+    # Act / Assert
+    with pytest.raises(CallCapReachedError):
+        judge.check_each(DESCRIBES, [{"code": "y = 2"}], {"doc": {"sentence": "s"}})
+    assert len(client.requests) == 1
+
+
+def test_a_scoped_judge_counts_its_own_calls_and_adds_them_to_its_parent() -> None:
+    # Arrange
+    judge = Judge(ScriptedJevClient(nouls={"describes": 0.9}))
+    first, second = judge.scope(), judge.scope()
+
+    # Act
+    first.check_each(DESCRIBES, [{"code": "x = 1"}], {"doc": {"sentence": "s"}})
+    second.check_each(DESCRIBES, [{"code": "y = 2"}], {"doc": {"sentence": "s"}})
+    second.check_each(DESCRIBES, [{"code": "z = 3"}], {"doc": {"sentence": "s"}})
+
+    # Assert
+    assert (first.calls, second.calls, judge.calls) == (1, 2, 3)
+    assert judge.input_tokens == 300
+
+
+def test_every_result_carries_the_hash_of_the_masked_request_that_answered_it(tmp_path: Path) -> None:
+    # Arrange
+    from jev_navigator.judgments.questions import Rate, request_sha256
+
+    client = ScriptedJevClient(nouls={"describes": 0.9})
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+    judge = Judge(client, store=store)
+    secret_state = {"doc": {"sentence": f'TOKEN = "ghp_{"a1" * 18}"'}}
+    kind = Pick("kind", "What kind of comment is `doc.sentence`?")
+    offers = [CallOffer("search_text", "lines with a key", Pick("key", "Which key?"), {"k": "1 hit"})]
+    usefulness = Rate("useful", "How much does `doc.sentence` add?", ("Nothing.", "Something."))
+
+    # Act
+    checked = judge.check_each(DESCRIBES, [{"code": "x = 1"}], secret_state)
+    replayed = judge.check_each(DESCRIBES, [{"code": "x = 1"}], secret_state)
+    everything = judge.ask_all(
+        secret_state, checks=[WHOLE_STATE_CHECK], picks=[(kind, {"why": ""})], scores=[usefulness]
+    )
+    picked = judge.pick(kind, {"why": "", "what": ""}, secret_state)
+    decision = judge.choose_call(Pick("route", "Which lookup?"), offers, secret_state)
+
+    # Assert
+    sent_hashes = [request_sha256(state, questions) for state, questions in client.requests]
+    assert "ghp_" not in str(client.requests)
+    assert checked[0].request_sha256 == sent_hashes[0]
+    assert replayed[0].from_store and replayed[0].request_sha256 == sent_hashes[0]
+    assert everything.request_sha256 == sent_hashes[1]
+    assert everything.checks["whole"].request_sha256 == sent_hashes[1]
+    assert everything.picks["kind"].request_sha256 == sent_hashes[1]
+    assert everything.scores["useful"].request_sha256 == sent_hashes[1]
+    assert picked.request_sha256 == sent_hashes[2]
+    assert decision.request_sha256 == sent_hashes[3]
+    assert decision.route.request_sha256 == sent_hashes[3]

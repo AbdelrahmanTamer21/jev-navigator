@@ -1,0 +1,72 @@
+"""Rebuild a stored batched request from the repository at its commit, and prove it is the same one.
+
+The store never keeps client code. It keeps the question wording, the non-code fields of each item
+(file, lines, commit), and hashes of the code and of the shared state. ``rebuild_request`` re-reads
+each item's code from an index at that commit, adds the shared state the caller supplies, masks it
+as the judge did, and compares the request hash with the stored one; when they differ it says which
+part changed.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+from ..index.code_index import CodeIndex
+from ..index.spans import Span
+from .judge import CODE_FIELD
+from .questions import content_hash, request_sha256
+from .secrets import Masker, SecretMasker, mask_value
+from .store import AnswerRecord
+
+_DEFAULT_MASKER = SecretMasker()
+
+
+@dataclass(frozen=True)
+class RebuiltRequest:
+    state: Mapping
+    questions: Mapping
+    request_sha256: str
+    matches: bool
+    differences: tuple[str, ...]
+
+
+def rebuild_request(
+    record: AnswerRecord,
+    index_at_commit: CodeIndex,
+    shared: Mapping,
+    *,
+    masker: Masker | None = _DEFAULT_MASKER,
+) -> RebuiltRequest:
+    skeleton = record.skeleton
+    if not skeleton:
+        raise ValueError("this record has no skeleton; only batched checks can be rebuilt")
+    items = [_item(index_at_commit, fields) for fields in skeleton["items"]]
+    state = {**shared, skeleton["list_name"]: items}
+    state = mask_value(state, masker) if masker else state
+    questions = skeleton["questions"]
+    rebuilt_hash = request_sha256(state, questions)
+    matches = rebuilt_hash == record.request_sha256
+    differences = () if matches else _differences(skeleton, state, shared, masker)
+    return RebuiltRequest(state, questions, rebuilt_hash, matches, differences)
+
+
+def _item(index: CodeIndex, fields: Mapping) -> dict:
+    first, last = fields["lines"]
+    code = index.read_slice(Span(fields["file"], first, last)).text
+    return {**fields, CODE_FIELD: code}
+
+
+def _differences(
+    skeleton: Mapping, state: Mapping, shared: Mapping, masker: Masker | None
+) -> tuple[str, ...]:
+    found = []
+    masked_shared = mask_value(shared, masker) if masker else shared
+    if content_hash(masked_shared) != skeleton["shared_sha256"]:
+        found.append("shared state")
+    for slot, (item, stored_hash) in enumerate(
+        zip(state[skeleton["list_name"]], skeleton["item_code_sha256"], strict=True)
+    ):
+        if content_hash(item[CODE_FIELD]) != stored_hash:
+            found.append(f"code of item {slot} ({item['file']} lines {item['lines'][0]}-{item['lines'][1]})")
+    return tuple(found) or ("item fields or question wording",)

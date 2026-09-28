@@ -1,0 +1,100 @@
+{
+  "case_id": "find_code:secret-refusal",
+  "group_id": "jev-navigator-find-code",
+  "intended_uses": {
+    "contains_target@eb6c1aed": "Yes (0.80 or more) stops the search and reports this code as found; unsure keeps it as an unsure place for escalation; no moves on.",
+    "could_contain_target@bfca3586#0": "The probability orders this neighbour in the best-first queue; no (0.20 or less) rules it out and it is never opened.",
+    "could_contain_target@bfca3586#1": "The probability orders this neighbour in the best-first queue; no (0.20 or less) rules it out and it is never opened.",
+    "could_contain_target@bfca3586#2": "The probability orders this neighbour in the best-first queue; no (0.20 or less) rules it out and it is never opened.",
+    "open_first@ec99327f": "When confidence is 0.70 or more and the answer is not 'none', the picked neighbour is opened first; otherwise ignored."
+  },
+  "request": {
+    "model": "jev-latest",
+    "questions": {
+      "contains_target@eb6c1aed": {
+        "criteria": {
+          "false": {
+            "not_for": "Code that merely has a similar name.",
+            "what": "`slice.code` only calls, mentions or sits near that code."
+          },
+          "true": {
+            "what": "A line or block in `slice.code` is the code the description names."
+          }
+        },
+        "instructions": "Does `slice.code` contain the code described in `target.description`?",
+        "type": "noul"
+      },
+      "could_contain_target@bfca3586#0": {
+        "criteria": {
+          "false": {
+            "what": "The signature names code with an unrelated purpose."
+          },
+          "true": {
+            "what": "The signature names code whose purpose fits the description."
+          }
+        },
+        "instructions": "Could the code described in `target.description` be inside the code that `candidates[0].signature` names, judging from `candidates[0].preview`?",
+        "type": "noul"
+      },
+      "could_contain_target@bfca3586#1": {
+        "criteria": {
+          "false": {
+            "what": "The signature names code with an unrelated purpose."
+          },
+          "true": {
+            "what": "The signature names code whose purpose fits the description."
+          }
+        },
+        "instructions": "Could the code described in `target.description` be inside the code that `candidates[1].signature` names, judging from `candidates[1].preview`?",
+        "type": "noul"
+      },
+      "could_contain_target@bfca3586#2": {
+        "criteria": {
+          "false": {
+            "what": "The signature names code with an unrelated purpose."
+          },
+          "true": {
+            "what": "The signature names code whose purpose fits the description."
+          }
+        },
+        "instructions": "Could the code described in `target.description` be inside the code that `candidates[2].signature` names, judging from `candidates[2].preview`?",
+        "type": "noul"
+      },
+      "open_first@ec99327f": {
+        "criteria": {
+          "0": "src/jev_navigator/judgments/judge.py:1 `\"\"\"Jev judgments as building blocks: yes/no checks over supplied items, picks over code-built` (start of a file committed with src/jev_navigator/directives/find_code.py 2 times)",
+          "1": "src/jev_navigator/adapters/__init__.py:1 `` (start of a file committed with src/jev_navigator/directives/find_code.py 1 times)",
+          "2": "src/jev_navigator/directives/find_code.py:231 `options = {str(slot): place.signature for slot, place in enumerate(candidates)}` (the lines after src/jev_navigator/directives/find_code.py:190-210)",
+          "none": "No entry is more likely than the others."
+        },
+        "instructions": "Which entry of `candidates` most likely contains the code described in `target.description`?",
+        "type": "choice"
+      }
+    },
+    "state": {
+      "candidates": [
+        {
+          "preview": "\"\"\"Jev judgments as building blocks: yes/no checks over supplied items, picks over code-built\noptions, and one function-calling decision per step.\n\nEvery request is masked, scanned, hashed and looked up in the answer store before any call, and\nevery fresh answer is stored with the thresholds that were in force.\n\"\"\"\n\nfrom __future__ import annotations",
+          "signature": "src/jev_navigator/judgments/judge.py:1 `\"\"\"Jev judgments as building blocks: yes/no checks over supplied items, picks over code-built` (start of a file committed with src/jev_navigator/directives/find_code.py 2 times)"
+        },
+        {
+          "preview": "",
+          "signature": "src/jev_navigator/adapters/__init__.py:1 `` (start of a file committed with src/jev_navigator/directives/find_code.py 1 times)"
+        },
+        {
+          "preview": "    if fingerprint in search.judged_code:\n        return None\n    search.judged_code.add(fingerprint)\n    search.visited.add(code.key)\n    search.steps += 1\n    candidates = neighbours(index, code) if item.depth < search.budget.max_depth else []\n    return _Opening(item, code, [place for place in candidates if place.key not in search.visited])\n",
+          "signature": "src/jev_navigator/directives/find_code.py:231 `options = {str(slot): place.signature for slot, place in enumerate(candidates)}` (the lines after src/jev_navigator/directives/find_code.py:190-210)"
+        }
+      ],
+      "slice": {
+        "code": "def _stop_reason(search: _Search, judge: Judge) -> Outcome | None:\n    if search.found:\n        return Outcome.FOUND\n    if search.steps >= search.budget.max_steps or judge.calls >= search.budget.max_calls:\n        return Outcome.BUDGET\n    if not search.worth_opening():\n        return Outcome.ESCALATE if search.unsure else Outcome.NOTHING_LEFT\n    return None\n\n\n@dataclass(frozen=True)\nclass _Opening:\n    item: _Queued\n    code: CodeSlice\n    candidates: list[Place]\n\n\ndef _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:\n    \"\"\"Opens a place in code; the same code reached by another path is not judged twice.\"\"\"\n    code = item.place.open()\n    fingerprint = content_hash(code.text)",
+        "file": "src/jev_navigator/directives/find_code.py",
+        "lines": "190-210"
+      },
+      "target": {
+        "description": "the check that refuses to send a request that still contains a secret"
+      }
+    }
+  },
+  "revision_id": "v2"
+}

@@ -1,0 +1,258 @@
+# jev-navigator
+
+Find code with small, typed AI judgments. jev-navigator is a Python library for code navigation in
+three layers. The first works without any model: an index over a narrowed set of files (definitions,
+callers, callees, references, text, imports, git history). The second adds judgments from
+[Jev](https://docs.typesafe.ai), TypeSafe's System One model, as small building blocks: yes/no
+checks, picks from a list code built, and scores, each returned with its raw probabilities. The third
+composes both into searches such as "find the code this sentence describes". An optional piece,
+`LlmStep`, lets you add an LLM call to your own function.
+
+> **Jev gets concrete state and one closed judgment; code owns goals, loops and stopping.**
+
+The library finds code. Judging that code (is a comment accurate, does a rule hold everywhere) is a
+layer you build on top; [docs/extending.md](docs/extending.md) shows how to compose one.
+
+## Install
+
+```sh
+uv add "jev-navigator[typesafe] @ git+https://github.com/ajbmachon/jev-navigator"
+```
+
+Needs Python 3.13, and `ast-grep`, `rg` (ripgrep) and `git` on the PATH. The `typesafe` extra adds
+the official SDK for live calls; set `TYPESAFE_API_KEY`. Everything else, including the tests, runs
+offline.
+
+## Layer 1: index, operations and comments (no model)
+
+```python
+from jev_navigator.index.code_index import CodeIndex
+from jev_navigator import operations, comments
+
+index = CodeIndex.from_git(repo_root, prefixes=("app/", "web/"))  # refuses more than 400 files
+old = CodeIndex.at_commit(repo_root, "abc123", prefixes=("app/",))  # from git objects, checkout untouched
+index.find_definition("LIMITS_KEY")   # functions, classes, constants, assignments, types, enums
+index.find_callers("validate_order")  # CallSite(file, line, caller, binding), found by name
+index.callee_edges(span)               # CallEdge(name, line, binding); find_callees gives names only
+index.find_references("send_invoice")  # Reference(name, file, line, role, holder, binding): non-call uses
+index.references_in(span)              # names a function passes on without calling (callbacks, registries)
+index.enclosing_symbol(file, line); index.symbols_in(file)
+index.read_slice(span); index.read_window(file, line, radius=10)
+index.search_text("orders.max_items")  # ripgrep over the narrowed files only
+index.imports(file); index.dependents(file); index.co_changed_files(file)
+
+operations.slice_around(index, file, line)                # the enclosing function, or a window
+operations.code_described_by_comment(index, file, line)   # the whole next symbol or block
+operations.callers_of_file(index, path)
+operations.trace_callers(index, symbol, depth)            # and trace_callees; depth capped at 3
+operations.similar_functions(index, symbol)
+operations.code_named_in_doc(index, text)
+
+comments.find_comments(index, files)          # FoundComments(kept, dropped) of CommentBlock
+comments.comments_in_diff(index, base, head)  # changed comments, and comments above changed code
+comments.code_above_comment(index, file, line)  # CodeAbove(code or None, reason)
+```
+
+Calls are found by name in the syntax tree, which is not a resolved binding. Every call carries a
+`Binding(status, reason, target)`: `resolved` when a definition in the same file or an import naming
+it proves the target, `candidate` when only the name matches (a method on an unknown receiver, or a
+definition elsewhere with no import), and `unresolved` when nothing in scope defines it. A host with a
+real resolver (a code-intelligence service, a TypeScript alias resolver, an LSP) passes it as
+`binding_resolver=`; its answer wins. Trace steps and search neighbours carry the binding, so a
+candidate edge is never presented as a proven call.
+
+Every `CodeSlice` records its source: `slice.source()` gives the file, line range, commit (with
+`+worktree` when the file had uncommitted changes) and how it was reached.
+
+Comment kinds are `docstring`, `jsdoc`, `header`, `tool_directive`, `declaration`, `inline` and
+`block`. Adjacent line comments of the same syntax are merged; a JSDoc block and the `//` lines
+after it stay separate. Both finders return `FoundComments(kept, dropped)`. Filtering is yours: pass
+`drop=` any rule that returns a reason to set a block aside, or None to keep it
+(`comments.noise_reason` sets aside dividers, licence headers and bare tool directives). Every
+dropped block comes back in `dropped` with its reason, so the total count stays known. Facts come from
+pluggable rules (`jev_navigator.facts`): each `Fact` has a name, offsets, line and matched text. A rule
+is `FactRule(name, pattern, keep=None)`; the shipped `DEFAULT_COMMENT_RULES` (TODO without owner,
+commented-out code, date, ticket reference) are examples. `outside_names` is an optional filter that
+skips matches inside paths, file names or identifiers: `DATE.with_filter(outside_names)`.
+
+## Layer 2: judgments
+
+```python
+from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.questions import Check, Criterion, Pick, Rate
+from jev_navigator.judgments.store import JsonlAnswerStore
+from jev_navigator.judgments.thresholds import Thresholds
+from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+judge = Judge(TypeSafeJevClient(), store=JsonlAnswerStore(path), thresholds=Thresholds.from_env())
+judge.check_each(check, items, shared_state)  # one Noul per item, batched
+judge.pick(pick, options, state)              # one Choice over options code built
+judge.ask_all(state, checks=[...], picks=[(pick, options)], scores=[rate])  # one request
+judge.choose_call(route, offers, state)       # function calling: operation plus its input
+```
+
+Every one of these has an async form (`check_each_async`, `pick_async`, `ask_all_async`,
+`choose_call_async`, `ask_async`), and `find_code_async` is the async search. They take any
+`AsyncJevClient` (an object with `model` and `async ask(state, questions)`, optionally an async
+`send`), such as a host's own orchestrator; a sync client also works there and runs in a worker
+thread. Both paths share one core: masking, the secret scan, the hash, the store lookup, the call
+budget, the journal and the recording are the same steps, and only the send differs (a direct call,
+or an awaited one). Batches of `check_each_async` and the places of each `find_code_async` round are
+sent with `asyncio.gather`. A sync method given an async client raises `TypeError`. Offline tests use
+`testing.AsyncScriptedJevClient`.
+
+Budgets: `judge.calls` counts requests sent (store hits are free). `Judge(max_calls=N)` caps a judge
+together with every `judge.scope()` made from it, and a scope counts its own calls; `find_code` runs
+on its own scope, so searches sharing one judge never use up each other's budget.
+
+- **Raw values are always kept.** `CheckResult.probability` is Jev's P(yes). `PickResult` keeps
+  `probabilities` and `confidence`, and `ScoreResult` keeps `score`, `probabilities` and `confidence`.
+  Verdicts are a convenience; apply any band you like to the raw values.
+- **Thresholds.** A Noul is yes at 0.80 or above, no at 0.20 or below, and unsure in between; unsure
+  is a result, never rounded. A Choice counts as confident when its `confidence` (from the whole
+  distribution, not the winner's probability) is at least 0.70. Precedence: library defaults, then
+  `JEV_NAVIGATOR_CHOICE_MIN_CONFIDENCE`, `JEV_NAVIGATOR_NOUL_YES_AT` and `JEV_NAVIGATOR_NOUL_NO_AT` (via
+  `Thresholds.from_env()` at the edge), then a directive's defaults, then per-call overrides
+  (`judge.effective(directive, call)`).
+- **Secrets.** `SecretMasker` masks private keys, token shapes and high-entropy assignments in every
+  request, and `SecretScanner` refuses to send a request that still contains one. Both are on by
+  default; a host passes its own, or turns one off explicitly with `None`.
+- **Answer store.** Every answer is stored with the served model and the thresholds in force. An
+  item answer is reused only when the item, the shared state, the question with its wording hash and
+  the served model all match; until the first live answer of a run the served model is unknown, and
+  unknown counts as a miss (or pass `served_model=`). `ReplayOnlyClient` replays from the store and
+  never calls Jev.
+- **Journal, separate from the store.** Pass `journal=` (any object with `record_request(request) ->
+  request_id`, `record_response(request_id, response)` and `record_failure(request_id, error,
+  response)`). The judge records the masked request before dispatch and the raw response before
+  parsing, as a `RawResponse(body, status, content_type, decoded)`: the body bytes as received, the HTTP
+  status and the content type. Transport errors and responses that fail to parse are recorded as
+  failures. Clients that offer `send` and `parse` return that `RawResponse`; the TypeSafe adapter
+  captures the exact bytes from its HTTP transport. A client that only parses is journaled with its
+  decoded JSON and `exact=False`. `request_sha256` never includes the model; cache reuse checks the
+  served model separately. A request holds code, and the library cannot know whose code it is, so
+  `JsonlJournal` keeps only the request hash, the question ids and a state hash by default; pass
+  `keep_request_text=True` only for your own or open-source code.
+- **No client code in the store.** Request text is kept only with `keep_requests=True`, which is for
+  your own or open-source code (for example a frozen evaluation set). By default the store keeps
+  hashes, question wording, and each item's file, lines and commit, so
+  `rebuild_request(record, CodeIndex.at_commit(...), shared)` can rebuild the exact request and prove
+  it matches, or name the part that differs.
+
+## Layer 3: directives
+
+`find_code(index, judge, target_description, start, *, budget=SearchBudget(), thresholds=None)` is
+the central search. Use it only when the target is described by meaning; anything code can decide
+(the callers of X) is an operation. For each opened place, one request asks "Does `slice.code`
+contain the code described in `target.description`?" and, per neighbour code lists (callers,
+callees, code that refers to it or that it passes on without a call, the other functions of its
+file, lines anywhere in scope (docs and config too) that mention its quoted keys or environment
+variables, co-changed files, and the lines before and after it), whether the target could be inside
+it. Each round opens the top `beam_width` places concurrently, with a visited set and a content
+cache. A low neighbour score only lowers that neighbour's priority; it is never treated as proof that
+the code is not there. The outcome is `found`, `budget`, `nothing_left` or `unsure_only`, and the result
+keeps three sets: `found`; `searched` and `unsure` (bodies actually judged); and `not_inspected`, each
+entry with its reason (`budget`, `deprioritized`, `capped` or `depth`). Pass the result back as
+`resume=` to continue from that frontier with a fresh budget. Pass `commit=` to require that the index
+holds exactly that revision (use `CodeIndex.at_commit` for history); a mismatch raises
+`RevisionMismatchError`. Nothing escalates on its own. The default budget is 24 steps and 24 calls
+with a beam of 3 and depth 3. Everything is a parameter: `SearchBudget` also sets
+`neighbours_per_kind` and `preview_lines`, and `questions=SearchQuestions(found=..., could_contain=...,
+open_first=None)` replaces the wording. The directives take their check (`check=`) as a parameter too.
+
+Directives on top: `context_for_comment` and `find_similar_code`. The library finds code; answering
+questions about that code (is a comment accurate, does a claim hold) is a layer you build on top. A new
+use case is your own function of 30 to 60 lines that composes these pieces; see
+`directives/similar.py` and `docs/extending.md` for the pattern.
+
+## History: typed steps, read through named sections
+
+`jev_navigator.history.History` is an append-only list of `HistoryStep(operation, arguments, fetched,
+judgments, decision)`; each `FetchedSpan` keeps its source. Jev never gets the list itself: a check
+selects named sections and `history.state_for(names)` builds exactly that state.
+
+| Section | Holds |
+| --- | --- |
+| `history` (default for history checks) | `{"steps": [...]}`: every step in full, code, judgments and decisions |
+| `fetched` | every code body fetched, with its file, lines and commit, and nothing else |
+| `decisions` | every step without code: judgments with probabilities, candidates, choices, places set aside |
+| `previous_judgments` | the last answer of each history check, with its probability |
+| your own | declared with `History(sections={"subject": ..., "shown_code": ...})`, updated with `set_section` |
+
+`fetched` is the view without the search's own judgments, for a check that should not lean on them;
+which view works better is measured, not assumed, so the default stays the full `history`. An unknown
+name raises `UnknownSectionError`. Each section has its own `SectionLimit(max_entries, max_chars)`
+(newest entries kept, long text cut; defaults in `DEFAULT_LIMITS`), applied before the token budget.
+The budget is capped at Jev's 32k-token limit for state plus the longest question (64k per request
+overall; TypeSafe Models page, read 28.09.2026). When the selected sections still do not fit, the
+pluggable `evict` policy trims them; the default `drop_oldest_code` replaces the oldest code bodies with
+`[evicted]` and records each eviction in `history.evictions`. A check that reads no code never evicts.
+Pass `recorder=` (for example a `JsonlJournal`) to record every appended step; the recorder gets each
+step without code bodies, only their sources and hashes.
+
+Whether the history holds what you need is your own concrete check, asked with
+`judge_history(judge, history, check, shared, sections=("history",), exhausted=False)`: yes is `found`,
+no is `searched_not_found`, and unsure is `continue`, or `not_inspected` once your budget is exhausted,
+never "absent". Name a concrete property ("Does `history` contain code that compares the number of
+items with a limit?"), never "is it enough". `judge_sections(judge, history, {name: HistoryCheck(check,
+sections)})` asks several checks: those selecting the same sections share one request, different
+selections run in parallel. `find_code(..., stop_rule=StopRule(check, shared, sections=..., context=...))`
+applies such a check after each round (off by default); `context` adds your own sections, and the
+history always declares `subject` (the target description). The docs warn that accuracy falls as
+unrelated state grows, so measure first: `ceiling_curve(judge, recorded_steps, check, sections=...)`
+replays a recorded search with a growing history and reports the probability at each size.
+
+`find_code` always records its own history in `FindResult.history`, with or without a stop rule; it
+costs no calls. A `choose_next` step lists the places opened next, each with its priority and reason
+(`start`, `open_first` when Jev's confident pick raised it, or `queue_score`). An `open` step holds the
+code, the `contains_target` probability and verdict, every neighbour offered with its `could_contain`
+probability, the `open_first` pick, and places set aside (`capped` or `depth`). A final `stop` step
+names the outcome, the not-inspected frontier with reasons, and the last stop check, so the history
+and the result agree. Without a stop rule nothing reads the history; with one, the stop check reads the
+sections it selects (by default all of it). `HistoryStep` is generic: append your own steps (an agent's tool call and result) the same way.
+
+## LlmStep: an LLM call you add yourself
+
+Nothing in the library calls an LLM. `LlmStep` is a building block a user adds to their own
+directive, and the user defines all four parts:
+
+```python
+from jev_navigator.llm_step import LlmGuard, LlmStep, PickFromOptions
+from jev_navigator import connectors
+
+phrase_step = LlmStep(
+    name="phrase_fallback",
+    when=lambda result: result.confidence < 0.70,           # when: the phrase Choice was unsure
+    context=lambda result: {"comment": comment, "slice": code_state, "options": phrases},
+    answer=PickFromOptions("Which phrase names what the code does?", answer_field="phrase"),
+    connector=connectors.pi("your-model"),                  # any CLI or OpenAI-compatible endpoint
+    guard=LlmGuard(store_path=path, max_calls=5),
+)
+call = phrase_step.run(judge.pick(phrase_pick, phrases, state))  # None when `when` said no
+```
+
+`answer` can be `PickFromOptions`, `JsonContract(instructions, required={"accurate": bool})`, or any
+object with `render(context, parse_error)` and `parse(reply, context)`. A reply that does not parse
+is retried once with the error. Connectors: `hermes`, `pi`, `OpenAICompatibleConnector`,
+`CommandConnector`, and `claude`. The guard masks the context, refuses a prompt with a secret, keeps
+one JSON line per call (prompt hash, reply, parsed answer) and enforces an optional budget.
+
+> **Warning:** `connectors.claude()` runs Claude headless. Every run spends from your Claude plan or API
+> budget, and an automation can start many; enable it deliberately and set `LlmGuard(max_calls=...)`.
+
+## Before any live call: review the exact request
+
+Run your function once with `CapturingJevClient` (from `jev_navigator.judgments.review`); it never
+calls Jev and answers every question neutrally. Write the captured, already-masked request with
+`export_for_review(state, questions, intended_uses, path, case_id=..., group_id=...)`: one JSON file
+with the request and, per question, what code does with the answer. Read it, or pass it to a
+question-review tool, before any paid call, and pilot a small set of cases first.
+
+## Tests
+
+`uv run pytest --basetemp=<scratch dir>`. Tests run offline against small real git repositories and
+`ScriptedJevClient`.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
