@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import signal
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -704,6 +706,55 @@ def test_interrupt_while_filtering_a_candidate_resumes_and_processes_it(tmp_path
     ]
     assert resumed.outcome == Outcome.FOUND
     assert resumed.found[0].place_key == candidate.key
+
+
+def test_interrupt_while_popping_a_beam_restores_it_for_resume(
+    sample_index: CodeIndex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    from jev_navigator.directives import find_code as find_code_module
+
+    original = find_code_module._Search.next_beam
+    interrupted = False
+
+    def interrupt_after_pop(search, calls_left):
+        nonlocal interrupted
+        beam = original(search, calls_left)
+        if not interrupted:
+            interrupted = True
+            os.kill(os.getpid(), signal.SIGINT)
+        return beam
+
+    monkeypatch.setattr(find_code_module._Search, "next_beam", interrupt_after_pop)
+    target = function_place(sample_index, sample_index.find_definition("check_limits")[0])
+
+    # Act
+    cancelled = find_code(
+        sample_index,
+        Judge(ScriptedJevClient()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        initial_candidates=[(target, 1.0)],
+    )
+    resumed = find_code(
+        sample_index,
+        Judge(ScriptedJevClient(nouls={"contains_target": 0.95})),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        resume=cancelled,
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert [(entry.place_key, entry.reason) for entry in cancelled.not_inspected] == [
+        (target.key, "cancelled")
+    ]
+    assert resumed.outcome == Outcome.FOUND
+    assert resumed.found[0].place_key == target.key
 
 
 def test_interrupt_while_recording_a_round_choice_restores_the_popped_place(

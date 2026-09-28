@@ -422,10 +422,12 @@ def _begin(
 
 
 def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Opening]:
-    beam = search.next_beam(_calls_left(search, judge))
+    beam = []
     opened = []
     processed = 0
     try:
+        with _defer_keyboard_interrupts():
+            beam = search.next_beam(_calls_left(search, judge))
         _record_choice(search, beam)
         for item in beam:
             if opening := _open(index, search, item):
