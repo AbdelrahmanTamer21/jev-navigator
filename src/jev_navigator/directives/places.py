@@ -15,12 +15,15 @@ from ..index.code_index import CodeIndex
 from ..index.spans import CodeSlice, Span
 
 DEFAULT_NEIGHBOURS_PER_KIND = 8
+MAX_DEFINITION_LINES = 120
 REST_OF_FILE_LINES = 40
 CO_CHANGE_HEAD_LINES = 40
 _ENVIRONMENT_READ = re.compile(
     r"""(?:environ(?:\.get)?\(?\[?|getenv\(|process\.env\.)\s*["']?([A-Z][A-Z0-9_]{2,})"""
 )
 _QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{3,79})["'`]""")
+_TEST_DIRECTORIES = frozenset({"test", "tests", "__tests__", "spec"})
+_TEST_FILE_NAME = re.compile(r"^test_|_test\.|\.test\.|\.spec\.|^conftest\.py$")
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,7 @@ class Place:
 
 
 def function_place(index: CodeIndex, span: Span, relation: str = "") -> Place:
+    """A function, class or declaration, opened whole."""
     first_line = index.read_slice(Span(span.file, span.start, span.start)).text.strip()
     note = f" ({relation})" if relation else ""
     signature = f"{span.file}:{span.start} `{first_line}`{note}"
@@ -65,10 +69,19 @@ def range_place(index: CodeIndex, file: str, start: int, end: int, relation: str
 
 
 def place_for_line(index: CodeIndex, file: str, line: int, relation: str) -> Place:
-    enclosing = index.enclosing_symbol(file, line)
+    """The function holding ``line``. Outside every function, the class or module-level declaration
+    holding it, when that has at most ``MAX_DEFINITION_LINES`` lines, so the place has a name the
+    moves can follow; otherwise the window around the line."""
+    enclosing = index.enclosing_symbol(file, line) or _enclosing_definition(index, file, line)
     if enclosing is not None:
         return function_place(index, enclosing, relation)
     return window_place(index, file, line, relation)
+
+
+def _enclosing_definition(index: CodeIndex, file: str, line: int) -> Span | None:
+    definitions = (*index.symbols_in(file), *index.declarations_in(file))
+    fitting = [span for span in definitions if span.contains(line) and span.size() <= MAX_DEFINITION_LINES]
+    return min(fitting, key=Span.size, default=None)
 
 
 Move = Callable[[CodeIndex, CodeSlice], list[Place]]
@@ -95,29 +108,43 @@ def neighbours_and_omissions(
     mention its quoted keys or environment variables, files usually committed with it, and the lines
     before and after it). A move is any function of the index and the opened code that returns
     places, so callers can drop moves or add their own. The places cut by the cap come back
-    separately, so a caller can report them as not inspected."""
+    separately, so a caller can report them as not inspected.
+
+    Places are one when they open the same lines of the same file, whatever their keys, and a place
+    wholly inside ``opened`` is left out. The first relation found is kept: calls and references come
+    before file position, so the strongest reason a place is a neighbour is the one shown. A move's
+    cap counts only places no earlier move kept."""
+    shown: set[str] = set()
     kept: list[Place] = []
-    omitted: list[Place] = []
+    beyond_cap: list[Place] = []
     for build in (MOVES if moves is None else moves).values():
-        places = [place for place in _unique(build(index, opened)) if place.key != opened.key]
-        kept += places[:per_kind]
-        omitted += places[per_kind:]
-    return _unique(kept), [place for place in _unique(omitted) if place.key not in {k.key for k in kept}]
+        new = _new_places(build(index, opened), opened.span, shown)
+        kept += new[:per_kind]
+        shown |= {place.open().span.key for place in new[:per_kind]}
+        beyond_cap += new[per_kind:]
+    return kept, _new_places(beyond_cap, opened.span, shown)
 
 
-def _unique(places: list[Place]) -> list[Place]:
-    """One place per key, keeping the first relation found: calls and references come before file
-    position, so the strongest reason a place is a neighbour is the one shown."""
-    first: dict[str, Place] = {}
+def _new_places(places: list[Place], opened: Span, shown: set[str]) -> list[Place]:
+    """One place per stretch of lines, leaving out stretches in ``shown`` and inside ``opened``."""
+    seen = set(shown)
+    new = []
     for place in places:
-        first.setdefault(place.key, place)
-    return list(first.values())
+        span = place.open().span
+        if span.key not in seen and not _within(span, opened):
+            seen.add(span.key)
+            new.append(place)
+    return new
+
+
+def _within(inner: Span, outer: Span) -> bool:
+    return inner.file == outer.file and outer.start <= inner.start and inner.end <= outer.end
 
 
 def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     if not _is_named(opened.span):
         return []
-    sites = index.find_callers(opened.span.name)
+    sites = sorted(index.find_callers(opened.span.name), key=lambda site: _is_test_file(site.file))
     return [
         place_for_line(index, site.file, site.line, _with_binding(f"calls {opened.span.name}", site.binding))
         for site in sites
@@ -167,17 +194,34 @@ def _with_binding(relation: str, binding) -> str:
     return f"{relation}, {binding.status}: {binding.reason}"
 
 
+def _is_test_file(path: str) -> bool:
+    directories, _, name = path.rpartition("/")
+    in_test_directory = not _TEST_DIRECTORIES.isdisjoint(directories.split("/"))
+    return in_test_directory or bool(_TEST_FILE_NAME.search(name))
+
+
 def _same_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
+    """The other functions of the file, nearest to the opened code first; a function nested in
+    another is part of that function."""
     relation = f"in the same file as {opened.span.name or opened.span.key}"
-    return [
-        function_place(index, span, relation)
-        for span in index.functions_in(opened.span.file)
-        if not _overlaps(span, opened.span)
-    ]
+    functions = index.functions_in(opened.span.file)
+    outermost = [span for span in functions if not any(_encloses(other, span) for other in functions)]
+    others = [span for span in outermost if not _overlaps(span, opened.span)]
+    nearest_first = sorted(others, key=lambda span: (_distance(span, opened.span), span.start))
+    return [function_place(index, span, relation) for span in nearest_first]
 
 
 def _overlaps(first: Span, second: Span) -> bool:
     return first.start <= second.end and second.start <= first.end
+
+
+def _encloses(outer: Span, inner: Span) -> bool:
+    same_lines = (outer.start, outer.end) == (inner.start, inner.end)
+    return not same_lines and outer.start <= inner.start and inner.end <= outer.end
+
+
+def _distance(span: Span, opened: Span) -> int:
+    return opened.start - span.end if span.end < opened.start else span.start - opened.end
 
 
 def _keys_mentioned(index: CodeIndex, opened: CodeSlice) -> list[Place]:
