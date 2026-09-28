@@ -17,14 +17,9 @@ from . import tools
 from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts
 from .imports import imported_modules, imported_names, resolve_import
 from .languages import (
-    CLASS_KINDS,
-    DECLARATION_RULES,
-    FUNCTION_KINDS,
-    declared_name,
-    function_name,
     language_of,
-    reference_rules,
 )
+from .scope_scan import FileStructure, ReferenceMatch, Unparsed, scan_calls, scan_references, scan_structure
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
 
@@ -34,6 +29,9 @@ MAX_TEXT_HITS = 20
 CO_CHANGE_COMMITS = 200
 _COMMIT_MARK = "@@commit@@"
 _REGULAR_FILE_MODES = frozenset({"100644", "100755"})
+
+
+_NO_STRUCTURE = FileStructure((), (), ())
 
 
 class RevisionMismatchError(ValueError):
@@ -59,7 +57,6 @@ class CodeIndex:
         self.root = Path(root)
         self.git_root = Path(git_root) if git_root is not None else self.root
         self.binding_resolver = binding_resolver
-        self._callable_spans: frozenset[Span] | None = None
         self._snapshot: tempfile.TemporaryDirectory | None = None
         self.commit = commit
         self._changed = frozenset(changed_files)
@@ -70,11 +67,19 @@ class CodeIndex:
             )
         self._scope = frozenset(self.files)
         self._code_files = tuple(path for path in self.files if language_of(path))
-        self.functions_in = cache(self._functions_in)
-        self.symbols_in = cache(self._symbols_in)
-        self.declarations_in = cache(self._declarations_in)
         self._lines_of = cache(self._read_lines)
         self._script_paths_in = cache(self._read_script_paths)
+        self._unparsed = Unparsed()
+        self._structure = cache(
+            lambda: scan_structure(self._code_files, self.root, self._lines_of, self._unparsed)
+        )
+        self._calls = cache(lambda: scan_calls(self._code_files, self.root, self._unparsed))
+        self._reference_matches = cache(lambda: scan_references(self._code_files, self.root, self._unparsed))
+        self._definitions = cache(self._definitions_by_name)
+        self._callables = cache(self._callable_spans)
+        self._top_level_in = cache(self._top_level_spans)
+        self._names_imported = cache(self._read_imported_names)
+        self._binding = cache(self._compute_binding)
 
     @classmethod
     def from_git(
@@ -139,27 +144,43 @@ class CodeIndex:
                 f"the working tree has uncommitted changes in {sorted(self._changed)[:3]}"
             )
 
+    @property
+    def unparsed_files(self) -> frozenset[str]:
+        """Files a scan could not parse in time. Reading it runs any scan not yet run, so the list is
+        complete. Their definitions and calls are unknown, not absent: bindings that may depend on
+        them say ``unknown``, and a search over the scope never reports ``nothing_left``."""
+        self._structure()
+        self._calls()
+        self._reference_matches()
+        return self._unparsed.files
+
     def enclosing_symbol(self, file: str, line: int) -> Span | None:
         containing = [span for span in self.functions_in(file) if span.contains(line)]
         return min(containing, key=Span.size, default=None)
 
+    def functions_in(self, file: str) -> tuple[Span, ...]:
+        return self._file_structure(file).functions
+
+    def symbols_in(self, file: str) -> tuple[Span, ...]:
+        """Functions and classes."""
+        return self._file_structure(file).symbols
+
+    def declarations_in(self, file: str) -> tuple[Span, ...]:
+        """Module-level constants, assignments, types, interfaces and enums."""
+        return self._file_structure(file).declarations
+
     def find_definition(self, name: str) -> tuple[Span, ...]:
         """Functions, classes, and module-level constants, assignments, types, interfaces and enums."""
-        found = (
-            span
-            for file in self._code_files
-            for span in (*self.symbols_in(file), *self.declarations_in(file))
-            if span.name == name
-        )
-        return tuple(dict.fromkeys(found))
+        return self._definitions().get(name, ())
 
     def find_callers(self, name: str) -> tuple[CallSite, ...]:
-        """Calls to ``name`` found by name in the syntax tree, each with its binding status."""
-        sites = {}
-        for match in self._call_matches(name):
-            file, line = match["file"], _line_of(match)
-            receiver = match.get("metaVariables", {}).get("single", {}).get("RECEIVER", {}).get("text")
-            sites.setdefault((file, line), receiver)
+        """Calls to ``name`` found by name in the syntax tree, each with its binding status. When one
+        line holds both ``x.name(...)`` and ``name(...)``, the plain call stands for that line."""
+        sites: dict[tuple[str, int], str | None] = {}
+        for call in self._calls():
+            key = (call.file, call.line)
+            if call.name == name and (key not in sites or call.receiver is None):
+                sites[key] = call.receiver
         return tuple(
             CallSite(
                 file, line, self.enclosing_symbol(file, line), self.binding_of(file, line, name, receiver)
@@ -173,46 +194,48 @@ class CodeIndex:
 
     def callee_edges(self, function: Span) -> tuple[CallEdge, ...]:
         self._require_in_scope(function.file)
-        matches = tools.ast_grep_pattern("$CALLEE($$$)", [function.file], self.root)
-        edges = {}
-        for match in matches:
-            line = _line_of(match)
-            expression = match["metaVariables"]["single"]["CALLEE"]["text"]
-            name = _last_identifier(expression)
-            if function.start < line <= function.end and name and name not in edges:
-                receiver = _receiver(expression)
-                edges[name] = CallEdge(name, line, self.binding_of(function.file, line, name, receiver))
+        edges: dict[str, CallEdge] = {}
+        for call in self._calls():
+            inside = call.file == function.file and function.start < call.line <= function.end
+            if inside and call.name not in edges:
+                binding = self.binding_of(call.file, call.line, call.name, call.receiver)
+                edges[call.name] = CallEdge(call.name, call.line, binding)
         return tuple(edges.values())
 
     def find_references(self, name: str) -> tuple[Reference, ...]:
         """Uses of ``name`` that are not calls: arguments, collection entries, assignments,
         decorators, exports and returns, each with its role, holder and binding. Code reached this
         way (a callback, a registry entry) has no call edge to follow."""
-        matches = tools.ast_grep_rules(reference_rules(name), self._code_files, self.root)
-        return self._references(matches)
+        return self._references(match for match in self._reference_matches() if match.name == name)
 
     def references_in(self, function: Span) -> tuple[Reference, ...]:
         """Names ``function`` passes on without calling them, limited to names defined in scope."""
         self._require_in_scope(function.file)
-        matches = tools.ast_grep_rules(reference_rules(), [function.file], self.root)
-        inside = [match for match in matches if function.start < _line_of(match) <= function.end]
+        inside = (
+            match
+            for match in self._reference_matches()
+            if match.file == function.file and function.start < match.line <= function.end
+        )
         return tuple(ref for ref in self._references(inside) if self.find_definition(ref.name))
 
-    def _references(self, matches: list[dict]) -> tuple[Reference, ...]:
-        found = {(match["file"], _line_of(match), match["ruleId"], match["text"]) for match in matches}
+    def binding_of(self, file: str, line: int, name: str, receiver: str | None) -> Binding:
+        """Computed once per call site and cached for the life of the index."""
+        return self._binding(file, line, name, receiver)
+
+    def _references(self, matches: Iterable[ReferenceMatch]) -> tuple[Reference, ...]:
         return tuple(
             Reference(
-                name,
-                file,
-                line,
-                role,
-                self.enclosing_symbol(file, line),
-                self.binding_of(file, line, name, None),
+                match.name,
+                match.file,
+                match.line,
+                match.role,
+                self.enclosing_symbol(match.file, match.line),
+                self.binding_of(match.file, match.line, match.name, None),
             )
-            for file, line, role, name in sorted(found)
+            for match in sorted(set(matches))
         )
 
-    def binding_of(self, file: str, line: int, name: str, receiver: str | None) -> Binding:
+    def _compute_binding(self, file: str, line: int, name: str, receiver: str | None) -> Binding:
         if self.binding_resolver is not None:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
@@ -223,35 +246,44 @@ class CodeIndex:
             name,
             receiver,
             definitions,
-            self._top_level(file, definitions),
+            tuple(span for span in definitions if span in self._top_level_in(file)),
             self._imported_from(file, name),
+            self.unparsed_files,
         )
         return binding_from_facts(facts)
 
-    def _callables(self) -> frozenset[Span]:
-        if self._callable_spans is None:
-            self._callable_spans = frozenset(
-                span for path in self._code_files for span in self.symbols_in(path)
-            )
-        return self._callable_spans
+    def _file_structure(self, file: str) -> FileStructure:
+        self._require_in_scope(file)
+        return self._structure().get(file, _NO_STRUCTURE)
 
-    def _top_level(self, file: str, definitions: Sequence[Span]) -> tuple[Span, ...]:
-        classes = [span for span in self.symbols_in(file) if span not in self.functions_in(file)]
-        return tuple(
+    def _definitions_by_name(self) -> dict[str, tuple[Span, ...]]:
+        by_name: dict[str, dict[Span, None]] = {}
+        for file in self._code_files:
+            for span in (*self.symbols_in(file), *self.declarations_in(file)):
+                by_name.setdefault(span.name, {})[span] = None
+        return {name: tuple(spans) for name, spans in by_name.items()}
+
+    def _callable_spans(self) -> frozenset[Span]:
+        return frozenset(span for path in self._code_files for span in self.symbols_in(path))
+
+    def _top_level_spans(self, file: str) -> frozenset[Span]:
+        """Symbols of ``file`` that no class or other function contains."""
+        symbols = self.symbols_in(file)
+        return frozenset(
             span
-            for span in definitions
-            if span.file == file
-            and not any(owner.contains(span.start) and owner != span for owner in classes)
-            and not any(other != span and other.contains(span.start) for other in self.functions_in(file))
+            for span in symbols
+            if not any(other != span and other.contains(span.start) for other in symbols)
         )
 
     def _imported_from(self, file: str, name: str) -> tuple[str, ...]:
-        source = "\n".join(self._lines_of(file))
-        specifier = imported_names(source, file).get(name)
+        specifier = self._names_imported(file).get(name)
         if specifier is None:
             return ()
         resolved = resolve_import(specifier, file, self._scope, self._script_paths(file))
         return (resolved,) if resolved else ()
+
+    def _read_imported_names(self, file: str) -> dict[str, str]:
+        return imported_names("\n".join(self._lines_of(file)), file)
 
     def read_slice(self, span: Span, origin: str = "") -> CodeSlice:
         lines = self._lines_of(span.file)
@@ -318,47 +350,6 @@ class CodeIndex:
     def lines(self, file: str) -> tuple[str, ...]:
         return self._lines_of(file)
 
-    def _functions_in(self, file: str) -> tuple[Span, ...]:
-        return self._spans_of_kinds(file, FUNCTION_KINDS)
-
-    def _symbols_in(self, file: str) -> tuple[Span, ...]:
-        """Functions and classes."""
-        return self._spans_of_kinds(file, FUNCTION_KINDS, CLASS_KINDS)
-
-    def _declarations_in(self, file: str) -> tuple[Span, ...]:
-        self._require_in_scope(file)
-        language = language_of(file)
-        if language is None:
-            return ()
-        rule = f"id: declaration\nlanguage: {language}\nrule:\n{DECLARATION_RULES[language]}"
-        lines = self._lines_of(file)
-        spans = {
-            Span(
-                file,
-                _line_of(match),
-                match["range"]["end"]["line"] + 1,
-                declared_name(lines[_line_of(match) - 1]),
-            )
-            for match in tools.ast_grep_rules(rule, [file], self.root)
-        }
-        return tuple(sorted(spans))
-
-    def _spans_of_kinds(self, file: str, *kind_tables: dict) -> tuple[Span, ...]:
-        self._require_in_scope(file)
-        language = language_of(file)
-        if language is None:
-            return ()
-        kinds = [kind for table in kind_tables for kind in table[language]]
-        matches = tools.ast_grep_rules(_rules_for(language, kinds), [file], self.root)
-        lines = self._lines_of(file)
-        spans = {_function_span(file, match, lines) for match in matches}
-        return tuple(sorted(spans, key=lambda span: (span.start, -span.end)))
-
-    def _call_matches(self, name: str) -> list[dict]:
-        plain = tools.ast_grep_pattern(f"{name}($$$)", self._code_files, self.root)
-        method = tools.ast_grep_pattern(f"$RECEIVER.{name}($$$)", self._code_files, self.root)
-        return plain + method
-
     def _script_paths(self, file: str) -> ScriptPaths | None:
         """The path aliases of the tsconfig.json nearest to a script file, read once per directory."""
         return None if file.endswith(".py") else self._script_paths_in(str(PurePosixPath(file).parent))
@@ -384,31 +375,6 @@ def _script_configs(repository: Path, commit: str) -> list[str]:
         and path.endswith(".json")
         and "node_modules/" not in path
     ]
-
-
-def _rules_for(language: str, kinds: list[str]) -> str:
-    listed = "".join(f"\n    - kind: {kind}" for kind in kinds)
-    return f"id: symbol\nlanguage: {language}\nrule:\n  any:{listed}"
-
-
-def _function_span(file: str, match: dict, lines: Sequence[str]) -> Span:
-    start = _line_of(match)
-    end = match["range"]["end"]["line"] + 1
-    return Span(file, start, end, function_name(lines[start - 1]))
-
-
-def _line_of(match: dict) -> int:
-    return match["range"]["start"]["line"] + 1
-
-
-def _receiver(expression: str) -> str | None:
-    head, dot, _ = expression.replace("?.", ".").rpartition(".")
-    return head if dot else None
-
-
-def _last_identifier(expression: str) -> str:
-    tail = expression.replace("?.", ".").split(".")[-1]
-    return tail if tail.isidentifier() else ""
 
 
 def _split_lines(text: str) -> tuple[str, ...]:

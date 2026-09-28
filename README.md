@@ -64,10 +64,20 @@ commit's tsconfig files along, outside the scope. File lists come from git with 
 names with non-ASCII characters enter the scope as they are on disk, and lines split at newlines only,
 as the parser counts them.
 
+The index parses its scope once, lazily, with three ast-grep scans (symbols and declarations, call
+sites, references), then answers every lookup from those tables; each call site's binding is computed
+once. Scans run in batches of 100 files, so one slow batch cannot fail the index: a batch that times
+out is logged and listed in `index.unparsed_files` (reading it runs any scan not yet run, so the list
+is complete). Code in those files is unknown, not absent: a binding that may depend on them has status
+`unknown` with the files in its reason, and `find_code` reports `scope_incomplete` instead of
+`nothing_left`, with the files in `FindResult.unparsed_files` and in its stop step. Any other ast-grep
+failure (`ToolFailedError`) still fails the lookup that triggered the scan.
+
 Calls are found by name in the syntax tree, which is not a resolved binding. Every call carries a
 `Binding(status, reason, target)`: `resolved` when a definition in the same file or an import naming
 it proves the target, `candidate` when only the name matches (a method on an unknown receiver, or a
-definition elsewhere with no import), and `unresolved` when nothing in scope defines it. A host with a
+definition elsewhere with no import), `unresolved` when nothing in scope defines it, and `unknown` when
+the definition may sit in a file the index could not parse. A host with a
 real resolver (a code-intelligence service, a TypeScript alias resolver, an LSP) passes it as
 `binding_resolver=`; its answer wins. Trace steps and search neighbours carry the binding, so a
 candidate edge is never presented as a proven call.
@@ -161,7 +171,8 @@ file, lines anywhere in scope (docs and config too) that mention its quoted keys
 variables, co-changed files, and the lines before and after it), whether the target could be inside
 it. Each round opens the top `beam_width` places concurrently, with a visited set and a content
 cache. A low neighbour score only lowers that neighbour's priority; it is never treated as proof that
-the code is not there. The outcome is `found`, `budget`, `nothing_left` or `unsure_only`, and the result
+the code is not there. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
+`scope_incomplete`, and the result
 keeps three sets: `found`; `searched` and `unsure` (bodies actually judged); and `not_inspected`, each
 entry with its reason (`budget`, `deprioritized`, `capped` or `depth`). Pass the result back as
 `resume=` to continue from that frontier with a fresh budget. Pass `commit=` to require that the index
