@@ -63,7 +63,9 @@ points outside the index root, is not read: its aliases stay unknown and those b
 commit's tsconfig files along, outside the scope. File lists come from git with NUL separators, so
 names with non-ASCII characters enter the scope as they are on disk, and lines split at newlines only,
 as the parser counts them. A line that is not valid UTF-8 is read with its invalid bytes replaced, the
-same way by `search_text` and by every other lookup.
+same way by `search_text` and by every other lookup. A scope path that is a symbolic link, or that leads
+out of the root (through a linked directory or `..`), raises `UnsafePathError` when the index is built,
+before any tool reads it.
 
 The index parses its scope once, lazily, with three ast-grep scans (symbols and declarations, call
 sites, references), then answers every lookup from those tables; each call site's binding is computed
@@ -136,9 +138,12 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `JEV_NAVIGATOR_CHOICE_MIN_CONFIDENCE`, `JEV_NAVIGATOR_NOUL_YES_AT` and `JEV_NAVIGATOR_NOUL_NO_AT` (via
   `Thresholds.from_env()` at the edge), then a directive's defaults, then per-call overrides
   (`judge.effective(directive, call)`).
-- **Secrets.** `SecretMasker` masks private keys, token shapes and high-entropy assignments in every
-  request, and `SecretScanner` refuses to send a request that still contains one. Both are on by
-  default; a host passes its own, or turns one off explicitly with `None`.
+- **Secrets.** `SecretMasker` masks private keys, token shapes, secret-named assignments and
+  high-entropy assignments in every request, by content: a value hidden in one place is hidden
+  everywhere in the request, for example where a relation text or another item of the same batch
+  quotes it. `SecretScanner` refuses to send a request that still contains a secret, and a masked value
+  left in a key is refused too. Both are on by default; a host passes its own (a masker offers
+  `mask(text)` and `masked_values(text)`), or turns one off explicitly with `None`.
 - **Answer store.** Every answer is stored with the served model and the thresholds in force. An
   item answer is reused only when the item, the shared state, the question with its wording hash and
   the served model all match; until the first live answer of a run the served model is unknown, and
@@ -156,7 +161,13 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `JsonlJournal` keeps only the request hash, the question ids and a state hash by default; pass
   `keep_request_text=True` only for your own or open-source code.
 - **No client code in the store.** Request text is kept only with `keep_requests=True`, which is for
-  your own or open-source code (for example a frozen evaluation set). By default the store keeps
+  your own or open-source code (for example a frozen evaluation set). Such a record keeps the request
+  twice: `request`, written with sorted keys for reading, and the body as it was sent
+  (`sent_body_base64`, with `sent_exact` true when the TypeSafe adapter captured the wire bytes).
+  Jev can answer the two orders differently, so ask a stored request again only from
+  `record.sent_request()`, with a judge that has no store. `JsonlJournal(keep_request_text=True)`
+  likewise keeps the body as handed to the client (`body_base64`) and the wire bytes when captured
+  (`sent_body_base64`), and `export_for_review` keeps the order the request is sent in. By default the store keeps
   hashes, question wording, and each item's file, lines and commit, so
   `rebuild_request(record, CodeIndex.at_commit(...), shared)` can rebuild the exact request and prove
   it matches, or name the part that differs.
@@ -172,10 +183,20 @@ file, lines anywhere in scope (docs and config too) that mention its quoted keys
 variables, co-changed files, and the lines before and after it), whether the target could be inside
 it. Each round opens the top `beam_width` places concurrently, with a visited set and a content
 cache. A low neighbour score only lowers that neighbour's priority; it is never treated as proof that
-the code is not there. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
+the code is not there. An `open_first` Choice picks the neighbour to open first, with the option "None
+of the entries is likely to contain it."; a confident pick moves its place ahead of every score only
+when that place's own `could_contain` answer is above the no bar, and the history's `used` says
+whether it did. Each neighbour's signature names its file and lines: a function quotes its first
+line; a window around a call, reference or key outside any function gives its line range and quotes
+that line; a stretch chosen by position (the lines before or after, the start of a co-changed file)
+gives its range and quotes its first line of code. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
 `scope_incomplete`, and the result
 keeps three sets: `found`; `searched` and `unsure` (bodies actually judged); and `not_inspected`, each
-entry with its reason (`budget`, `deprioritized`, `capped` or `depth`). Pass the result back as
+entry with its reason (`budget`, `deprioritized`, `capped` or `depth`). `searched` means "opened and
+judged at or below the no bar, probability kept", and `nothing_left` means "nothing left worth
+opening"; neither proves that the code does not exist, because one "no" about one place can be wrong.
+When nothing reaches the yes bar, rank the opened places by their `contains_target` probability: the
+best-scored place is the likeliest one. Pass the result back as
 `resume=` to continue from that frontier with a fresh budget. Pass `commit=` to require that the index
 holds exactly that revision (use `CodeIndex.at_commit` for history); a mismatch raises
 `RevisionMismatchError`. Nothing escalates on its own. The default budget is 24 steps and 24 calls
@@ -184,8 +205,9 @@ with a beam of 3 and depth 3. Everything is a parameter: `SearchBudget` also set
 open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
 `places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `same_file`,
 `keys_mentioned`, `co_changed`, `lines_before`, `rest_of_file`) to a function of the index and the
-opened code that returns places. Pass a subset, or add a function of your own. The directives take
-their check (`check=`) as a parameter too.
+opened code that returns places. Pass a subset, or add a function of your own; `MOVES` itself is
+read-only. `FindResult.moves` and the final `stop` step name the moves a search used, and
+`context_for_comment` takes `moves=` too. The directives take their check (`check=`) as a parameter too.
 
 Directives on top: `context_for_comment` and `find_similar_code`. The library finds code; answering
 questions about that code (is a comment accurate, does a claim hold) is a layer you build on top. A new
@@ -200,15 +222,15 @@ selects named sections and `history.state_for(names)` builds exactly that state.
 
 | Section | Holds |
 | --- | --- |
-| `history` (default for history checks) | `{"steps": [...]}`: every step in full, code, judgments and decisions |
-| `fetched` | every code body fetched, with its file, lines and commit, and nothing else |
+| `fetched` (default for history checks) | every code body fetched, with its file, lines and commit, and nothing else |
+| `history` | `{"steps": [...]}`: each step's operation, arguments and fetched code, without judgments or decisions |
 | `decisions` | every step without code: judgments with probabilities, candidates, choices, places set aside |
 | `previous_judgments` | the last answer of each history check, with its probability |
 | your own | declared with `History(sections={"subject": ..., "shown_code": ...})`, updated with `set_section` |
 
-`fetched` is the view without the search's own judgments, for a check that should not lean on them;
-which view works better is measured, not assumed, so the default stays the full `history`. An unknown
-name raises `UnknownSectionError`. Each section has its own `SectionLimit(max_entries, max_chars)`
+The default is `fetched`, so a history check never leans on the search's own verdicts; the
+`history` section carries no verdicts either. A check that is meant to read them selects `decisions`
+explicitly. An unknown name raises `UnknownSectionError`. Each section has its own `SectionLimit(max_entries, max_chars)`
 (newest entries kept, long text cut; defaults in `DEFAULT_LIMITS`), applied before the token budget.
 The budget is capped at Jev's 32k-token limit for state plus the longest question (64k per request
 overall; TypeSafe Models page, read 28.09.2026). When the selected sections still do not fit, the
@@ -218,9 +240,9 @@ Pass `recorder=` (for example a `JsonlJournal`) to record every appended step; t
 step without code bodies, only their sources and hashes.
 
 Whether the history holds what you need is your own concrete check, asked with
-`judge_history(judge, history, check, shared, sections=("history",), exhausted=False)`: yes is `found`,
+`judge_history(judge, history, check, shared, sections=("fetched",), exhausted=False)`: yes is `found`,
 no is `searched_not_found`, and unsure is `continue`, or `not_inspected` once your budget is exhausted,
-never "absent". Name a concrete property ("Does `history` contain code that compares the number of
+never "absent". Name a concrete property ("Does `fetched` contain code that compares the number of
 items with a limit?"), never "is it enough". `judge_sections(judge, history, {name: HistoryCheck(check,
 sections)})` asks several checks: those selecting the same sections share one request, different
 selections run in parallel. `find_code(..., stop_rule=StopRule(check, shared, sections=..., context=...))`
@@ -236,7 +258,7 @@ code, the `contains_target` probability and verdict, every neighbour offered wit
 probability, the `open_first` pick, and places set aside (`capped` or `depth`). A final `stop` step
 names the outcome, the not-inspected frontier with reasons, and the last stop check, so the history
 and the result agree. Without a stop rule nothing reads the history; with one, the stop check reads the
-sections it selects (by default all of it). `HistoryStep` is generic: append your own steps (an agent's tool call and result) the same way.
+sections it selects (by default only the fetched code). `HistoryStep` is generic: append your own steps (an agent's tool call and result) the same way.
 
 ## LlmStep: an LLM call you add yourself
 

@@ -187,6 +187,23 @@ def test_comments_in_diff_includes_untouched_comments_above_changed_code(sample_
     assert [(block.span.file, block.span.start) for block in touched] == [("app/comments.py", 3)]
 
 
+def test_comments_in_diff_finds_changes_in_files_with_non_ascii_names(sample_repo: Path) -> None:
+    # Arrange
+    path = sample_repo / "app/größe.py"
+    path.write_text("# Returns the size.\ndef groesse():\n    return 1\n")
+    git(sample_repo, "add", ".")
+    git(sample_repo, "commit", "-qm", "size")
+    path.write_text("# Returns the size.\ndef groesse():\n    return 2\n")
+    git(sample_repo, "commit", "-qam", "change size")
+    index = CodeIndex.from_git(sample_repo)
+
+    # Act
+    touched = comments_in_diff(index, "HEAD~1", "HEAD").kept
+
+    # Assert
+    assert [(block.span.file, block.span.start) for block in touched] == [("app/größe.py", 1)]
+
+
 def test_blocks_of_different_syntax_are_never_merged(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "auth.ts").write_text(

@@ -5,10 +5,17 @@ thresholds in force, and the source (file, line range, commit) of every code ite
 request can be rebuilt from the repository at that commit. It holds no request text unless
 ``keep_requests`` is set, because a request carries code the library cannot know the owner of; set
 it only for your own or open-source code.
+
+With ``keep_requests`` a record keeps the request twice: ``request``, written with sorted keys for
+reading, and the body as it was sent (``sent_body_base64``; ``sent_exact`` when the client's transport
+captured the wire bytes, else the body as the library handed it over). Jev can answer the two orders
+differently, so ask again only from ``record.sent_request()``, with a judge that has no store (one
+with this store answers from it).
 """
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
@@ -32,10 +39,19 @@ class AnswerRecord:
     skeleton: Mapping = field(default_factory=dict)
     request: Mapping | None = None
     recorded_at: str = ""
+    sent_body_base64: str | None = None
+    sent_exact: bool = False
 
     def response(self) -> JevResponse:
         answers = {question_id: answer_from_json(raw) for question_id, raw in self.answers.items()}
         return JevResponse(answers, self.model, 0, self.request_sha256, from_store=True)
+
+    def sent_request(self) -> tuple[dict, dict]:
+        """The state and questions as they were sent, every key in its sent order."""
+        if self.sent_body_base64 is None:
+            raise ValueError("this record keeps no request; store answers with keep_requests=True")
+        body = json.loads(base64.b64decode(self.sent_body_base64))
+        return body["state"], body["questions"]
 
 
 @dataclass(frozen=True)
@@ -115,7 +131,15 @@ def _record_from_json(raw: dict) -> AnswerRecord:
 
 
 def _without_request(record: AnswerRecord) -> AnswerRecord:
-    return AnswerRecord(**{**asdict(record), "request": None, "question_ids": record.question_ids})
+    return AnswerRecord(
+        **{
+            **asdict(record),
+            "request": None,
+            "sent_body_base64": None,
+            "sent_exact": False,
+            "question_ids": record.question_ids,
+        }
+    )
 
 
 def _stamped(record: AnswerRecord) -> AnswerRecord:

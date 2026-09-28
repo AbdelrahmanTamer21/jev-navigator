@@ -22,7 +22,14 @@ from pathlib import Path
 from typing import Any, Generic, Protocol, TypeVar
 
 from .judgments.questions import content_hash
-from .judgments.secrets import Masker, Scanner, SecretMasker, SecretScanner, mask_value, refuse_if_secret
+from .judgments.secrets import (
+    Masker,
+    Scanner,
+    SecretMasker,
+    SecretScanner,
+    mask_by_content,
+    refuse_if_secret,
+)
 
 Parsed = TypeVar("Parsed")
 Results = TypeVar("Results")
@@ -71,7 +78,7 @@ class LlmGuard:
         return self.max_calls is None or self.calls < self.max_calls
 
     def safe_context(self, context: Mapping) -> Mapping:
-        return mask_value(context, self.masker) if self.masker else context
+        return mask_by_content(context, self.masker) if self.masker else context
 
     def check_prompt(self, prompt: str) -> None:
         refuse_if_secret({"prompt": prompt}, {}, self.scanner)

@@ -12,6 +12,7 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
 | `find_code` | a best-first search that opens places until the code a description names is found |
+| `places.MOVES` | the ways a search lists the neighbours of an opened place; pick a subset or add your own |
 | `StopRule`, `History` | your own stop check over a search's history, reading only the sections you select |
 | `LlmStep` | an opt-in LLM call for the cases where Jev's answer is not clear enough |
 
@@ -83,7 +84,9 @@ Why it is built this way:
   is in `{item}.called`; Jev is never asked to guess what an unseen call does. This holds for one level
   only: a write two calls down is not in the state, so read "no" as "no write within one call", or
   expand further in code. Each entry in `called` keeps its binding status, so a call the index could
-  not resolve stays visible instead of looking like a proven one.
+  not resolve stays visible instead of looking like a proven one. A yes can rest on the body of a
+  function the index could not prove (`candidate`, `unresolved` or `unknown`); when you need proof,
+  keep only the entries whose binding is `resolved`.
 - Each handler is its own question, so one handler cannot hide another.
 - Unsure stays unsure: it is reported, never counted as "does not write".
 
@@ -95,11 +98,27 @@ When code cannot list the candidates, search: `find_code(index, judge, descripti
 places best first and returns `found`, `searched`, `unsure` and `not_inspected` with reasons. Add a
 `StopRule` with your own concrete check when the target is spread over several places.
 
+Read `searched` and the outcome `nothing_left` as "opened and judged unlikely", never as "the code does
+not exist": one "no" about one place can be wrong. When nothing is found, rank the opened places by
+their probability and treat the best one as the likeliest place.
+
+## Choosing how the search moves
+
+A move is a plain function of the index and the opened code that returns places. `places.MOVES` maps
+each built-in move's name to its function (callers, callees, references, code passed on, the same
+file, quoted keys and environment variables, co-changed files, the lines before and after) and is
+read-only. Pass `moves=` to `find_code`, `find_code_async` or `context_for_comment` to use a subset,
+for example `{name: MOVES[name] for name in ("callers", "callees")}`, or add a function of your own.
+`FindResult.moves` and the final `stop` step of the history name the moves the search used, so every
+result says how it was found.
+
 ## Stopping on your own check
 
-`find_code(..., stop_rule=StopRule(check, sections=("fetched",)))` asks your check after every round.
-`sections` chooses what the check sees: the full `history` (the default), only the `fetched` code with
-its sources, only the `decisions`, or sections you add with `StopRule(context={"shown_code": ...})`.
+`find_code(..., stop_rule=StopRule(check))` asks your check after every round. `sections` chooses what
+the check sees: only the `fetched` code with its sources (the default), each step's operation,
+arguments and code (`history`), the search's own verdicts (`decisions`), or sections you add with
+`StopRule(context={"shown_code": ...})`. Only `decisions` carries verdicts, so a check reads them only
+when you select that section.
 Pick the smallest view the question needs; the fewer unrelated fields, the steadier the answer.
 
 ## Adding your own steps to a history

@@ -305,10 +305,15 @@ def _indent(text: str) -> int:
 
 
 def _changed_lines(index: CodeIndex, base: str, head: str) -> dict[str, set[int]]:
-    diff = tools.git(["diff", "-U0", base, head, "--", *index.files], index.git_root)
+    """Changed line numbers per file, read from hunk headers. Paths stay unquoted so names with
+    non-ASCII characters match the scope, and lines split at newlines only."""
+    diff = tools.git(
+        ["-c", "core.quotePath=false", "diff", "--no-color", "-U0", base, head, "--", *index.files],
+        index.git_root,
+    )
     changed: dict[str, set[int]] = {}
     current = None
-    for line in diff.splitlines():
+    for line in diff.split("\n"):
         if line.startswith("+++ "):
             current = line[6:] if line.startswith("+++ b/") else None
         elif line.startswith("@@") and current is not None:

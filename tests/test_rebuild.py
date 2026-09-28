@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from git_repos import git
+from git_repos import commit_files, git
 
 from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.rebuild import rebuild_request
@@ -63,3 +64,34 @@ def test_a_mismatch_names_the_part_that_changed(
     # Assert
     assert not rebuilt.matches
     assert rebuilt.differences == ("shared state", "code of item 0 (app/validation.py lines 10-12)")
+
+
+def test_a_batch_whose_items_share_a_masked_value_is_rebuilt_exactly(tmp_path: Path) -> None:
+    # Arrange
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    commit_files(
+        repo,
+        {
+            "settings.py": 'WEBHOOK_TOKEN = "order-hook-4f7a1c"\n',
+            "hooks.py": 'def send(order):\n    return post("order-hook-4f7a1c", order)\n',
+        },
+    )
+    index = CodeIndex.from_git(repo)
+    items = [
+        {"file": file, "lines": [first, last], "commit": index.commit, "code": index.read_slice(span).text}
+        for file, first, last, span in (
+            ("settings.py", 1, 1, Span("settings.py", 1, 1)),
+            ("hooks.py", 1, 2, Span("hooks.py", 1, 2)),
+        )
+    ]
+    store_path = tmp_path / "answers.jsonl"
+    client = ScriptedJevClient()
+    Judge(client, store=JsonlAnswerStore(store_path)).check_each(LIMITS, items, CLAIM)
+
+    # Act
+    rebuilt = rebuild_request(stored_record(store_path), index, CLAIM)
+
+    # Assert
+    assert "order-hook-4f7a1c" not in str(client.requests[0][0])
+    assert rebuilt.matches

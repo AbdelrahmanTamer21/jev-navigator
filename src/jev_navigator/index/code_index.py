@@ -42,6 +42,11 @@ class ScopeTooWideError(ValueError):
     """The index was asked to cover more files than its limit."""
 
 
+class UnsafePathError(ValueError):
+    """A scope path is a symbolic link or resolves outside the index root, so reading it could leave
+    the root."""
+
+
 class CodeIndex:
     def __init__(
         self,
@@ -65,6 +70,7 @@ class CodeIndex:
             raise ScopeTooWideError(
                 f"{len(self.files)} files is wider than the limit of {max_files}; narrow the scope"
             )
+        _require_inside(self.root, self.files)
         self._scope = frozenset(self.files)
         self._code_files = tuple(path for path in self.files if language_of(path))
         self._lines_of = cache(self._read_lines)
@@ -293,8 +299,7 @@ class CodeIndex:
     def read_window(
         self, file: str, line: int, radius: int = DEFAULT_WINDOW_RADIUS, origin: str = ""
     ) -> CodeSlice:
-        line_count = len(self._lines_of(file))
-        span = Span(file, max(1, line - radius), min(line_count, line + radius))
+        span = Span(file, max(1, line - radius), min(len(self._lines_of(file)), line + radius))
         return self.read_slice(span, origin)
 
     def search_text(self, text: str, max_hits: int = MAX_TEXT_HITS) -> tuple[TextHit, ...]:
@@ -320,6 +325,8 @@ class CodeIndex:
         self._require_in_scope(file)
         log = tools.git(
             [
+                "-c",
+                "core.quotePath=false",
                 "log",
                 *([self.commit] if self.commit else []),
                 f"-n{CO_CHANGE_COMMITS}",
@@ -388,6 +395,16 @@ def _script_configs(paths: Iterable[str]) -> list[str]:
     ]
 
 
+def _require_inside(root: Path, files: Iterable[str]) -> None:
+    """Every reader (the parser, ripgrep, plain reads) opens scope files by path, so a path that is a
+    link or leads out of the root is refused before any of them runs."""
+    resolved_root = root.resolve()
+    for file in files:
+        path = root / file
+        if path.is_symlink() or not path.resolve().is_relative_to(resolved_root):
+            raise UnsafePathError(f"{file} is a symbolic link or lies outside {root}")
+
+
 def _split_lines(text: str) -> tuple[str, ...]:
     """Lines split at newlines only, as the parser counts them; ``str.splitlines`` also splits at form
     feeds and other separators, which would shift every line number after them."""
@@ -423,6 +440,4 @@ def _regular_files(listing: str) -> list[str]:
 
 def _commits(log: str) -> list[set[str]]:
     blocks = log.split(_COMMIT_MARK)
-    return [
-        {line.strip() for line in block.splitlines() if line.strip()} for block in blocks if block.strip()
-    ]
+    return [{line.strip() for line in block.split("\n") if line.strip()} for block in blocks if block.strip()]

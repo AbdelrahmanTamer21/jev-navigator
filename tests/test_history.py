@@ -62,6 +62,26 @@ def test_fetched_holds_only_code_with_sources_and_decisions_hold_the_rest() -> N
     ]
 
 
+def test_the_history_section_holds_each_step_with_its_code_but_not_its_judgments() -> None:
+    # Arrange
+    history = History()
+    history.append(step(1, "def f(): pass"))
+
+    # Act
+    state = history.state_for(["history"])
+
+    # Assert
+    assert state["history"] == {
+        "steps": [
+            {
+                "operation": "open",
+                "arguments": {"n": 1},
+                "fetched": [{"file": "f1.py", "lines": [1, 1], "commit": "abc", "code": "def f(): pass"}],
+            }
+        ]
+    }
+
+
 def test_a_check_gets_exactly_the_sections_it_selects() -> None:
     # Arrange
     history = History(sections={"subject": {"description": "the limit check"}, "shown_code": ""})
@@ -236,8 +256,8 @@ def test_the_cache_key_covers_the_history_actually_sent(tmp_path: Path) -> None:
 def test_find_code_can_stop_on_the_callers_history_check(sample_index: CodeIndex) -> None:
     # Arrange
     def answer(question_id: str, question: dict, state: dict) -> float:
-        if "history" in state:
-            bodies = [span["code"] for entry in state["history"]["steps"] for span in entry["fetched"]]
+        if "fetched" in state:
+            bodies = [span["code"] for span in state["fetched"]]
             return 0.9 if any("<= limit" in body for body in bodies) else 0.1
         return 0.3
 
@@ -250,7 +270,7 @@ def test_find_code_can_stop_on_the_callers_history_check(sample_index: CodeIndex
         "the item limit check",
         start,
         budget=SearchBudget(beam_width=1),
-        stop_rule=StopRule(HOLDS_LIMIT),
+        stop_rule=StopRule(FETCHED_HOLDS_LIMIT),
     )
 
     # Assert
@@ -265,12 +285,12 @@ def test_find_code_can_stop_on_the_callers_history_check(sample_index: CodeIndex
 def test_the_ceiling_curve_reports_probability_against_history_size() -> None:
     # Arrange
     def grows_with_evidence(question_id: str, question: dict, state: dict) -> float:
-        return min(0.95, 0.2 * len(state["history"]["steps"]))
+        return min(0.95, 0.2 * len(state["fetched"]))
 
     steps = [step(number) for number in range(5)]
 
     # Act
-    points = ceiling_curve(Judge(ScriptedJevClient(nouls=grows_with_evidence)), steps, HOLDS_LIMIT)
+    points = ceiling_curve(Judge(ScriptedJevClient(nouls=grows_with_evidence)), steps, FETCHED_HOLDS_LIMIT)
 
     # Assert
     assert [point.steps for point in points] == [1, 2, 3, 4, 5]
@@ -312,7 +332,7 @@ def test_each_search_step_records_judgments_candidates_and_why_the_next_place_wa
 def test_a_budget_stop_ends_the_history_with_the_not_inspected_frontier(sample_index: CodeIndex) -> None:
     # Arrange
     def answer(question_id: str, question: dict, state: dict) -> float:
-        return 0.5 if "history" in state or question_id.startswith("could_contain") else 0.1
+        return 0.5 if "fetched" in state or question_id.startswith("could_contain") else 0.1
 
     start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
 
@@ -323,7 +343,7 @@ def test_a_budget_stop_ends_the_history_with_the_not_inspected_frontier(sample_i
         "the item limit check",
         start,
         budget=SearchBudget(max_steps=1, beam_width=1),
-        stop_rule=StopRule(HOLDS_LIMIT),
+        stop_rule=StopRule(FETCHED_HOLDS_LIMIT),
     )
 
     # Assert
@@ -353,7 +373,7 @@ def test_without_a_stop_rule_the_history_is_still_recorded_and_costs_no_calls(
     assert result.calls == len(client.requests) == 1
 
 
-def test_the_default_stop_view_is_the_full_history_and_a_caller_can_choose_code_only(
+def test_the_default_stop_view_is_the_fetched_code_and_verdicts_need_the_decisions_section(
     sample_index: CodeIndex,
 ) -> None:
     # Arrange
@@ -369,20 +389,19 @@ def test_the_default_stop_view_is_the_full_history_and_a_caller_can_choose_code_
     judge = Judge(ScriptedJevClient(nouls=answer))
 
     # Act
-    find_code(
-        sample_index, judge, "the item limit check", start, budget=budget, stop_rule=StopRule(HOLDS_LIMIT)
-    )
-    find_code(
-        sample_index,
-        judge,
-        "the item limit check",
-        start,
-        budget=budget,
-        stop_rule=StopRule(FETCHED_HOLDS_LIMIT, sections=("fetched",)),
-    )
+    for rule in (
+        StopRule(FETCHED_HOLDS_LIMIT),
+        StopRule(HOLDS_LIMIT, sections=("history",)),
+        StopRule(HOLDS_LIMIT, sections=("decisions",)),
+    ):
+        find_code(sample_index, judge, "the item limit check", start, budget=budget, stop_rule=rule)
 
     # Assert
-    full, code_only = seen_states
-    assert set(full) == {"history"} and full["history"]["steps"][-1]["judgments"]["contains_target"]
-    assert set(code_only) == {"fetched"}
-    assert code_only["fetched"][0]["code"] and "probability" not in str(code_only)
+    code_only, steps_with_code, verdicts = seen_states
+    assert set(code_only) == {"fetched"} and code_only["fetched"][0]["code"]
+    assert "probability" not in json.dumps(code_only) and "verdict" not in json.dumps(code_only)
+    assert {tuple(entry) for entry in steps_with_code["history"]["steps"]} == {
+        ("operation", "arguments", "fetched")
+    }
+    assert "probability" not in json.dumps(steps_with_code)
+    assert verdicts["decisions"][-1]["judgments"]["contains_target"]["verdict"] == "no"

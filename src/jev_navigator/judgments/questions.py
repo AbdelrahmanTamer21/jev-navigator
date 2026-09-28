@@ -58,19 +58,28 @@ class Check:
 
 @dataclass(frozen=True)
 class Pick:
-    """A Choice among options code supplies at call time."""
+    """A Choice among options code supplies at call time. ``extra_options`` are fixed options offered
+    after them every time, such as a no-match option; their wording is part of the question id."""
 
     name: str
     instructions: str
+    extra_options: tuple[tuple[str, str], ...] = ()
 
     @property
     def question_id(self) -> str:
-        return f"{self.name}@{wording_hash({'instructions': self.instructions})}"
+        wording: dict = {"instructions": self.instructions}
+        if self.extra_options:
+            wording["extra_options"] = dict(self.extra_options)
+        return f"{self.name}@{wording_hash(wording)}"
 
     def to_question(self, options: Mapping[str, str]) -> dict:
-        if len(options) > MAX_CHOICE_OPTIONS:
-            raise ValueError(f"{self.name} has {len(options)} options; the API accepts {MAX_CHOICE_OPTIONS}")
-        return {"type": "choice", "instructions": self.instructions, "criteria": dict(options)}
+        extra = dict(self.extra_options)
+        if set(options) & set(extra):
+            raise ValueError(f"{self.name}: {sorted(set(options) & set(extra))} are fixed option names")
+        criteria = {**options, **extra}
+        if len(criteria) > MAX_CHOICE_OPTIONS:
+            raise ValueError(f"{self.name} has {len(criteria)} options; the API accepts {MAX_CHOICE_OPTIONS}")
+        return {"type": "choice", "instructions": self.instructions, "criteria": criteria}
 
 
 @dataclass(frozen=True)
@@ -95,8 +104,14 @@ def wording_hash(question: Mapping) -> str:
 
 
 def request_sha256(state: Mapping, questions: Mapping) -> str:
+    """The request's identity: key order and formatting do not change it."""
     encoded = json.dumps({"state": state, "questions": questions}, sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def request_body(state: Mapping, questions: Mapping) -> bytes:
+    """The request as the library hands it to a client, with every key in the order it was built."""
+    return json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode()
 
 
 def content_hash(value: object) -> str:

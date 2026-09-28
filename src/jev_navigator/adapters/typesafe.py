@@ -19,7 +19,8 @@ from ..judgments.journal import RawResponse
 
 
 class CapturingTransport:
-    """Passes requests to ``inner`` and keeps each thread's last response as a ``RawResponse``."""
+    """Passes requests to ``inner`` and keeps each thread's last response, with the exact request
+    body that produced it, as a ``RawResponse``."""
 
     def __init__(self, inner) -> None:
         self._inner = inner
@@ -29,7 +30,9 @@ class CapturingTransport:
         response = self._inner.handle_request(request)
         response.read()
         content_type = response.headers.get("content-type", "")
-        self._last.response = RawResponse(response.content, response.status_code, content_type)
+        self._last.response = RawResponse(
+            response.content, response.status_code, content_type, sent_body=request.content
+        )
         return response
 
     def take(self) -> RawResponse | None:
@@ -64,7 +67,9 @@ class TypeSafeJevClient:
         captured = self._capture.take() if self._capture else None
         if captured is None:
             return RawResponse.from_decoded(decoded)
-        return RawResponse(captured.body, captured.status, captured.content_type, decoded)
+        return RawResponse(
+            captured.body, captured.status, captured.content_type, decoded, sent_body=captured.sent_body
+        )
 
     def parse(self, raw: RawResponse) -> JevResponse:
         return response_from_raw(raw.json())

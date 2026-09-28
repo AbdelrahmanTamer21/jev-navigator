@@ -38,7 +38,7 @@ from ..index.spans import CodeSlice
 from ..judgments.judge import CallCapReachedError, Judge
 from ..judgments.questions import Check, Criterion, Pick, content_hash
 from ..judgments.thresholds import NoulVerdict, Thresholds
-from .places import Move, Place, neighbours_and_omissions
+from .places import MOVES, Move, Place, neighbours_and_omissions
 
 FOUND = Check(
     name="contains_target",
@@ -80,17 +80,21 @@ COULD_CONTAIN = Check(
         ),
     ),
 )
+NO_CLEAR_FIRST = "none"
 OPEN_FIRST = Pick(
     name="open_first",
     instructions=(
         "Which entry of `candidates` most likely contains the code described in `target.description`?"
     ),
+    extra_options=((NO_CLEAR_FIRST, "None of the entries is likely to contain it."),),
 )
 
 
 @dataclass(frozen=True)
 class SearchQuestions:
-    """The wording find_code asks with. Replace any part; a new wording is a new question id."""
+    """The wording find_code asks with. Replace any part; a new wording is a new question id.
+    ``open_first`` gets the candidates as options named by their position; its own no-match option,
+    if any, must be named ``none``."""
 
     found: Check = FOUND
     could_contain: Check = COULD_CONTAIN
@@ -98,8 +102,6 @@ class SearchQuestions:
 
 
 DEFAULT_SEARCH_QUESTIONS = SearchQuestions()
-NO_CLEAR_FIRST = "none"
-NO_CLEAR_FIRST_TEXT = "No entry is more likely than the others."
 
 
 class Outcome(StrEnum):
@@ -167,10 +169,12 @@ class NotInspected:
 
 @dataclass(frozen=True)
 class FindResult:
-    """Three explicit sets: ``found``; ``searched`` (bodies judged and not the target) plus ``unsure``;
-    and ``not_inspected``, the frontier a later call can resume from with ``resume=``.
-    ``unparsed_files`` lists scope files the index could not parse; while it is not empty the outcome
-    is never ``nothing_left``."""
+    """Three explicit sets: ``found``; ``searched`` (opened and judged at or below the no bar, each
+    with its probability) plus ``unsure``; and ``not_inspected``, the frontier a later call can resume
+    from with ``resume=``. Neither ``searched`` nor the outcome ``nothing_left`` proves the code is
+    absent: one "no" about one place can be wrong. When nothing is found, rank the opened places by
+    their probability; the best one is the likeliest place. ``unparsed_files`` lists scope files the
+    index could not parse; while it is not empty the outcome is never ``nothing_left``."""
 
     outcome: Outcome
     found: tuple[Visit, ...]
@@ -184,6 +188,7 @@ class FindResult:
     history: History | None = None
     stop_judgment: HistoryJudgment | None = None
     unparsed_files: frozenset[str] = frozenset()
+    moves: tuple[str, ...] = ()
 
 
 @dataclass(order=True)
@@ -203,7 +208,7 @@ class _Search:
     questions: SearchQuestions = DEFAULT_SEARCH_QUESTIONS
     stop_rule: StopRule | None = None
     history: History = field(default_factory=History)
-    moves: Mapping[str, Move] | None = None
+    moves: Mapping[str, Move] = field(default_factory=lambda: MOVES)
     stop_judgment: HistoryJudgment | None = None
     queue: list[_Queued] = field(default_factory=list)
     visited: set[str] = field(default_factory=set)
@@ -259,19 +264,8 @@ def find_code(
     ``stop_rule``. ``moves`` chooses how neighbours are listed (default ``places.MOVES``); pass a
     subset, or add a move of your own. Each round's places are asked concurrently in threads;
     ``find_code_async`` is the same search for an async client."""
-    search, judge = _begin(
-        index,
-        judge,
-        target_description,
-        start,
-        budget,
-        thresholds,
-        questions,
-        resume,
-        commit,
-        stop_rule,
-        moves,
-    )
+    options = _SearchOptions(budget, thresholds, questions, resume, commit, stop_rule, moves)
+    search, judge = _begin(index, judge, target_description, start, options)
     while (stop := _stop_reason(search, judge, index)) is None:
         opened = _open_round(index, search, judge)
         if not opened:
@@ -299,19 +293,8 @@ async def find_code_async(
 ) -> FindResult:
     """``find_code`` with each round's places sent concurrently with ``asyncio.gather``; budgets,
     masking, the store, the journal and the history work exactly as in ``find_code``."""
-    search, judge = _begin(
-        index,
-        judge,
-        target_description,
-        start,
-        budget,
-        thresholds,
-        questions,
-        resume,
-        commit,
-        stop_rule,
-        moves,
-    )
+    options = _SearchOptions(budget, thresholds, questions, resume, commit, stop_rule, moves)
+    search, judge = _begin(index, judge, target_description, start, options)
     while (stop := _stop_reason(search, judge, index)) is None:
         opened = _open_round(index, search, judge)
         if not opened:
@@ -324,33 +307,37 @@ async def find_code_async(
     return _result(search, stop, judge, index)
 
 
+@dataclass(frozen=True)
+class _SearchOptions:
+    """The keyword arguments ``find_code`` and ``find_code_async`` share."""
+
+    budget: SearchBudget | None
+    thresholds: Mapping[str, float] | None
+    questions: SearchQuestions
+    resume: FindResult | None
+    commit: str | None
+    stop_rule: StopRule | None
+    moves: Mapping[str, Move] | None
+
+
 def _begin(
-    index: CodeIndex,
-    judge: Judge,
-    target_description: str,
-    start: Sequence[Place],
-    budget: SearchBudget | None,
-    thresholds: Mapping[str, float] | None,
-    questions: SearchQuestions,
-    resume: FindResult | None,
-    commit: str | None,
-    stop_rule: StopRule | None,
-    moves: Mapping[str, Move] | None,
+    index: CodeIndex, judge: Judge, target_description: str, start: Sequence[Place], options: _SearchOptions
 ) -> tuple[_Search, Judge]:
-    if commit is not None:
-        index.require_commit(commit)
+    if options.commit is not None:
+        index.require_commit(options.commit)
     target = {"description": target_description}
+    rule = options.stop_rule
     search = _Search(
         target,
-        judge.effective(thresholds),
-        budget or SearchBudget(),
-        questions,
-        stop_rule,
-        stop_rule.new_history(target) if stop_rule else History(sections={SUBJECT: target}),
-        moves,
+        judge.effective(options.thresholds),
+        options.budget or SearchBudget(),
+        options.questions,
+        rule,
+        rule.new_history(target) if rule else History(sections={SUBJECT: target}),
+        MOVES if options.moves is None else options.moves,
     )
-    if resume is not None:
-        _restore(search, resume)
+    if options.resume is not None:
+        _restore(search, options.resume)
     for place in start:
         search.push(place, 1.0, 0, (place.key,))
     return search, judge.scope()
@@ -376,10 +363,11 @@ SUBJECT = "subject"
 @dataclass(frozen=True)
 class StopRule:
     """A caller-defined yes/no check over the history, asked after each round. It reads only the
-    ``sections`` it selects: by default ``history``, every step with its code and judgments; select
-    ``("fetched",)`` for the code and sources alone, without the search's own judgments. The history
-    declares ``subject`` (the target description) and any ``context`` sections the caller adds, such
-    as the code shown with a comment; ``shared`` is extra state outside the history."""
+    ``sections`` it selects: by default ``fetched``, the code opened so far with its sources and none
+    of the search's own verdicts; ``history`` adds each step's operation and arguments, and
+    ``decisions`` holds the verdicts for a check meant to read them. The history declares ``subject``
+    (the target description) and any ``context`` sections the caller adds, such as the code shown
+    with a comment; ``shared`` is extra state outside the history."""
 
     check: Check
     shared: Mapping = field(default_factory=dict)
@@ -508,9 +496,7 @@ def _opening_request(search: _Search, opening: _Opening) -> _OpeningRequest:
         )
     if asked.open_first is not None and len(candidates) > 1:
         options = {str(slot): place.signature for slot, place in enumerate(candidates)}
-        questions[asked.open_first.question_id] = asked.open_first.to_question(
-            {**options, NO_CLEAR_FIRST: NO_CLEAR_FIRST_TEXT}
-        )
+        questions[asked.open_first.question_id] = asked.open_first.to_question(options)
     sources = {asked.found.question_id: code.source()}
     sources.update(
         {
@@ -568,14 +554,13 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
         search.unsure.append(visit)
     else:
         search.searched.append(visit)
-    first = _confident_first(search, response)
+    boosted = _boosted_slot(search, response)
     set_aside_before = len(search.set_aside)
     offered = []
     for slot, place in enumerate(candidates):
-        probability = response.noul(f"{search.questions.could_contain.question_id}#{slot}").probability
+        probability = _could_contain(search, response, slot)
         verdict = search.thresholds.noul_verdict(probability)
-        preferred = slot == first and verdict != NoulVerdict.NO
-        priority = 1.0 + probability if preferred else probability
+        priority = 1.0 + probability if slot == boosted else probability
         search.push(place, priority, item.depth + 1, (*item.path, place.key))
         offered.append(
             {"place": place.key, "signature": place.signature, "probability": probability, "verdict": verdict}
@@ -606,7 +591,7 @@ def _open_step(
         judgments["open_first"] = {
             "choice": _picked_place(answer.choice, opening.candidates),
             "confidence": answer.confidence,
-            "used": _confident_first(search, response) is not None,
+            "used": _boosted_slot(search, response) is not None,
         }
     if not_opened:
         judgments["not_opened"] = [_frontier_entry(entry) for entry in not_opened]
@@ -656,6 +641,20 @@ def _frontier_entry(entry: NotInspected) -> dict:
     return {"place": entry.place_key, "reason": entry.reason, "priority": entry.priority}
 
 
+def _boosted_slot(search: _Search, response) -> int | None:
+    """The candidate a confident pick moves ahead of every score, if its own could_contain answer is
+    above the no bar; a confident pick of a place scored "no" moves nothing."""
+    first = _confident_first(search, response)
+    if first is None:
+        return None
+    scored_no = search.thresholds.noul_verdict(_could_contain(search, response, first)) == NoulVerdict.NO
+    return None if scored_no else first
+
+
+def _could_contain(search: _Search, response, slot: int) -> float:
+    return response.noul(f"{search.questions.could_contain.question_id}#{slot}").probability
+
+
 def _confident_first(search: _Search, response) -> int | None:
     pick = search.questions.open_first
     if pick is None or pick.question_id not in response.answers:
@@ -669,7 +668,7 @@ def _confident_first(search: _Search, response) -> int | None:
 def _candidate_state(place: Place, preview_lines: int) -> dict:
     """The signature line plus the first lines of the candidate's code, so the judgment rests on
     more than a name."""
-    preview = "\n".join(place.open().text.splitlines()[:preview_lines])
+    preview = "\n".join(place.open().text.split("\n")[:preview_lines])
     return {"signature": place.signature, "preview": preview}
 
 
@@ -704,6 +703,7 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
         search.history,
         search.stop_judgment,
         unparsed,
+        tuple(search.moves),
     )
 
 
@@ -718,7 +718,8 @@ def _stop_step(
             "probability": search.stop_judgment.probability,
             "outcome": search.stop_judgment.outcome,
         }
-    return HistoryStep("stop", {"outcome": outcome}, (), judgments, f"stopped: {outcome}")
+    arguments = {"outcome": outcome, "moves": list(search.moves)}
+    return HistoryStep("stop", arguments, (), judgments, f"stopped: {outcome}")
 
 
 def _reason(search: _Search, item: _Queued) -> str:

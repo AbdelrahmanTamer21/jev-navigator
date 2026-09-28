@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from git_repos import commit_all, git
 
-from jev_navigator.index.code_index import CodeIndex, ScopeTooWideError
+from jev_navigator.index.code_index import CodeIndex, ScopeTooWideError, UnsafePathError
 from jev_navigator.index.spans import Span, TextHit
 
 
@@ -407,6 +407,21 @@ def test_search_text_reads_a_line_holding_a_unicode_line_separator(tmp_path: Pat
     assert [(hit.file, hit.line) for hit in hits] == [("messages.js", 1)]
 
 
+def test_co_changed_files_count_files_with_non_ascii_names(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/größe.py").write_text("SIZE = 1\n")
+    (tmp_path / "app/maß.py").write_text("MEASURE = 1\n")
+    commit_all(tmp_path)
+    index = CodeIndex.from_git(tmp_path, prefixes=("app/",))
+
+    # Act
+    co_changed = index.co_changed_files("app/größe.py")
+
+    # Assert
+    assert co_changed == (("app/maß.py", 1),)
+
+
 def test_line_numbers_follow_newlines_only_like_the_parser(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "app.py").write_text('BANNER = "a\fb"\r\n\r\ndef second():\n    return 2\n')
@@ -418,3 +433,20 @@ def test_line_numbers_follow_newlines_only_like_the_parser(tmp_path: Path) -> No
     # Assert
     assert (second.start, second.end) == (3, 4)
     assert index.read_slice(second).text == "def second():\n    return 2"
+
+
+@pytest.mark.parametrize("scope_path", ["link.py", "linked_dir/inside.py", "../outside.py"])
+def test_a_scope_path_that_leaves_the_root_is_refused(tmp_path: Path, scope_path: str) -> None:
+    # Arrange
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "inside.py").write_text("OUTSIDE = True\n")
+    root = tmp_path / "root"
+    root.mkdir()
+    (tmp_path / "outside.py").write_text("OUTSIDE = True\n")
+    (root / "link.py").symlink_to(elsewhere / "inside.py")
+    (root / "linked_dir").symlink_to(elsewhere, target_is_directory=True)
+
+    # Act and assert
+    with pytest.raises(UnsafePathError, match=scope_path.replace(".", r"\.")):
+        CodeIndex(root, [scope_path])

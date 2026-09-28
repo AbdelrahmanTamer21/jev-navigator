@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from ..index.code_index import CodeIndex
 from ..index.spans import CodeSlice, Span
@@ -40,13 +41,27 @@ def function_place(index: CodeIndex, span: Span, relation: str = "") -> Place:
 
 
 def window_place(index: CodeIndex, file: str, line: int, relation: str, radius: int = 10) -> Place:
+    """The lines around ``line``, the line that made this place a neighbour (a call, a reference, a
+    mentioned key); the signature quotes that line."""
+
     def open_window() -> CodeSlice:
         return index.read_window(file, line, radius, origin=relation)
 
+    span = open_window().span
     text_line = index.read_slice(Span(file, line, line)).text.strip()
-    return Place(
-        f"{file}:{line}~{radius}", "window", f"{file}:{line} `{text_line}` ({relation})", open_window
+    signature = f"{file}:{span.start}-{span.end} line {line} `{text_line}` ({relation})"
+    return Place(f"{file}:{line}~{radius}", "window", signature, open_window)
+
+
+def range_place(index: CodeIndex, file: str, start: int, end: int, relation: str) -> Place:
+    """Lines chosen by their position (before or after a place, the start of a file); no single line
+    made them a neighbour, so the signature quotes their first line of code."""
+    span = Span(file, start, end)
+    first_code_line = next(
+        (line.strip() for line in index.read_slice(span).text.split("\n") if line.strip()), ""
     )
+    signature = f"{span.key} `{first_code_line}` ({relation})"
+    return Place(span.key, "window", signature, lambda: index.read_slice(span, origin=relation))
 
 
 def place_for_line(index: CodeIndex, file: str, line: int, relation: str) -> Place:
@@ -183,27 +198,26 @@ def _co_changed(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     places = []
     for other, commits in index.co_changed_files(opened.span.file, limit=2):
         relation = f"start of a file committed with {opened.span.file} {commits} times"
-        places.append(window_place(index, other, 1, relation, radius=CO_CHANGE_HEAD_LINES))
+        end = min(len(index.lines(other)), CO_CHANGE_HEAD_LINES)
+        places.append(range_place(index, other, 1, end, relation))
     return places
 
 
 def _lines_before(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    if opened.span.start <= 1:
+    span = opened.span
+    if span.start <= 1:
         return []
-    radius = REST_OF_FILE_LINES // 2
-    middle = max(1, opened.span.start - 1 - radius)
-    relation = f"the lines before {opened.span.key}"
-    return [window_place(index, opened.span.file, middle, relation, radius=radius)]
+    start = max(1, span.start - REST_OF_FILE_LINES)
+    return [range_place(index, span.file, start, span.start - 1, f"the lines before {span.key}")]
 
 
 def _rest_of_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    line_count = len(index.read_window(opened.span.file, 1, radius=10**6).text.splitlines())
-    next_line = opened.span.end + 1
-    if next_line > line_count:
+    span = opened.span
+    line_count = len(index.lines(span.file))
+    if span.end >= line_count:
         return []
-    middle = min(line_count, next_line + REST_OF_FILE_LINES // 2)
-    relation = f"the lines after {opened.span.key}"
-    return [window_place(index, opened.span.file, middle, relation, radius=REST_OF_FILE_LINES // 2)]
+    end = min(line_count, span.end + REST_OF_FILE_LINES)
+    return [range_place(index, span.file, span.end + 1, end, f"the lines after {span.key}")]
 
 
 def _is_named(span: Span) -> bool:
@@ -214,14 +228,16 @@ def starting_places(index: CodeIndex, locations: Sequence[tuple[str, int]]) -> l
     return [place_for_line(index, file, line, "start") for file, line in locations]
 
 
-MOVES: Mapping[str, Move] = {
-    "callers": _callers,
-    "callees": _callees,
-    "referenced_by": _referenced_by,
-    "passed_on": _passed_on,
-    "same_file": _same_file,
-    "keys_mentioned": _keys_mentioned,
-    "co_changed": _co_changed,
-    "lines_before": _lines_before,
-    "rest_of_file": _rest_of_file,
-}
+MOVES: Mapping[str, Move] = MappingProxyType(
+    {
+        "callers": _callers,
+        "callees": _callees,
+        "referenced_by": _referenced_by,
+        "passed_on": _passed_on,
+        "same_file": _same_file,
+        "keys_mentioned": _keys_mentioned,
+        "co_changed": _co_changed,
+        "lines_before": _lines_before,
+        "rest_of_file": _rest_of_file,
+    }
+)

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from git_repos import commit_files
 
-from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code
+from jev_navigator.directives.find_code import OPEN_FIRST, Outcome, SearchBudget, find_code
 from jev_navigator.directives.places import (
     MOVES,
     Place,
@@ -430,6 +432,50 @@ def test_the_lines_before_an_opened_slice_are_offered(tmp_path: Path) -> None:
     assert len(before) == 1
 
 
+def test_windows_chosen_by_position_are_labelled_by_their_range_and_first_code_line(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    header = "import os\n\n\n" + "".join(f"SETTING_{number} = {number}\n" for number in range(30))
+    after = "\n\nLIMIT = 5\n" + "".join(f"OTHER_{number} = {number}\n" for number in range(50))
+    index = committed_index(tmp_path, {"orders.py": header + "def place(order):\n    return order\n" + after})
+    opened = index.find_definition("place")[0]
+
+    # Act
+    offered = neighbour_signatures(index, "place")
+
+    # Assert
+    before = next(signature for signature in offered.values() if "the lines before" in signature)
+    after_place = next(signature for signature in offered.values() if "the lines after" in signature)
+    assert before == f"orders.py:1-{opened.start - 1} `import os` (the lines before {opened.key})"
+    last = opened.end + 40
+    assert after_place == f"orders.py:{opened.end + 1}-{last} `LIMIT = 5` (the lines after {opened.key})"
+
+
+def test_the_lines_after_a_place_end_at_the_last_line_even_with_a_form_feed(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(tmp_path, {"orders.py": 'def place(order):\n    return "a\fb"\n\nLIMIT = 5\n'})
+
+    # Act
+    offered = neighbour_signatures(index, "place")
+
+    # Assert
+    after_place = next(signature for signature in offered.values() if "the lines after" in signature)
+    assert after_place.startswith("orders.py:3-4 `LIMIT = 5`")
+
+
+def test_a_window_around_a_line_outside_any_function_is_labelled_by_that_line(tmp_path: Path) -> None:
+    # Arrange
+    imports = "".join(f"import module_{number}\n" for number in range(14))
+    index = committed_index(tmp_path, {"routes.py": imports + 'HEADER = "x-order-limit"\n' + "\n" * 20})
+
+    # Act
+    place = place_for_line(index, "routes.py", 15, 'mentions "x-order-limit"')
+
+    # Assert
+    assert place.signature == 'routes.py:5-25 line 15 `HEADER = "x-order-limit"` (mentions "x-order-limit")'
+
+
 def test_quoted_keys_are_searched_across_the_scope_including_docs_and_config(tmp_path: Path) -> None:
     # Arrange
     index = committed_index(
@@ -506,3 +552,73 @@ def test_find_code_with_no_moves_opens_only_its_start(sample_index: CodeIndex) -
     # Assert
     assert result.outcome == Outcome.NOTHING_LEFT
     assert result.steps == 1 and len(client.requests) == 1
+
+
+def test_the_default_moves_cannot_be_changed_by_a_caller() -> None:
+    # Act and assert
+    with pytest.raises(TypeError):
+        MOVES["always_open_this"] = lambda index, opened: []  # type: ignore[index]
+
+
+def test_the_result_and_the_stop_step_name_the_moves_the_search_used(sample_index: CodeIndex) -> None:
+    # Arrange
+    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1))
+    chosen = {"callers": MOVES["callers"], "same_file": MOVES["same_file"]}
+
+    # Act
+    chosen_result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index), moves=chosen)
+    default_result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
+
+    # Assert
+    assert chosen_result.moves == ("callers", "same_file")
+    assert chosen_result.history.steps[-1].arguments["moves"] == ["callers", "same_file"]
+    assert default_result.moves == tuple(MOVES)
+
+
+def open_steps(result) -> list[dict]:
+    return [step.to_json() for step in result.history.steps if step.operation == "open"]
+
+
+def test_open_first_offers_a_real_none_option_whose_wording_is_part_of_the_question_id(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1))
+    tie_wording = replace(OPEN_FIRST, extra_options=(("none", "No entry is more likely than the others."),))
+
+    # Act
+    budget = SearchBudget(max_steps=1)
+    find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index), budget=budget)
+
+    # Assert
+    questions = client.requests[0][1]
+    pick = next(question for question_id, question in questions.items() if "open_first" in question_id)
+    assert pick["criteria"]["none"] == "None of the entries is likely to contain it."
+    assert tie_wording.question_id != OPEN_FIRST.question_id
+
+
+@pytest.mark.parametrize(("pick_score", "boosted"), [(0.15, False), (0.35, True)])
+def test_a_confident_pick_moves_ahead_only_when_its_own_score_is_above_the_no_bar(
+    sample_index: CodeIndex, pick_score: float, boosted: bool
+) -> None:
+    # Arrange
+    client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: pick_score),
+        choices={"open_first": {"0": 1.0}},
+    )
+
+    # Act
+    result = find_code(
+        sample_index, Judge(client), TARGET, start_at_place(sample_index), budget=SearchBudget(max_steps=2)
+    )
+
+    # Assert
+    first_open = open_steps(result)[0]
+    assert first_open["judgments"]["open_first"]["used"] is boosted
+    reasons = [
+        chosen["reason"]
+        for step in result.history.steps
+        if step.operation == "choose_next"
+        for chosen in step.arguments["chosen"]
+    ]
+    assert ("open_first" in reasons) is boosted

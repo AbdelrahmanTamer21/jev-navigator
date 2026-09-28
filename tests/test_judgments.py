@@ -206,8 +206,32 @@ def test_store_keeps_answers_and_thresholds_but_no_request_text_by_default(tmp_p
 
     # Assert
     stored = path.read_text()
+    record = json.loads(stored.splitlines()[0])
     assert "customer_code" not in stored
+    assert record["request"] is None and record["sent_body_base64"] is None
     assert '"noul_yes_at": 0.8' in stored
+
+
+def test_records_written_before_the_sent_body_was_kept_still_load(tmp_path: Path) -> None:
+    # Arrange
+    path = tmp_path / "answers.jsonl"
+    Judge(ScriptedJevClient(), store=JsonlAnswerStore(path)).check_each(
+        DESCRIBES, [{"code": "x = 1"}], {"doc": {"sentence": "s"}}
+    )
+    older = {
+        key: value
+        for key, value in json.loads(path.read_text()).items()
+        if key not in {"sent_body_base64", "sent_exact"}
+    }
+    path.write_text(json.dumps(older) + "\n")
+
+    # Act
+    record = JsonlAnswerStore(path).records()[0]
+
+    # Assert
+    assert record.sent_exact is False
+    with pytest.raises(ValueError, match="keep_requests"):
+        record.sent_request()
 
 
 def test_secrets_are_masked_before_any_request_leaves() -> None:
@@ -223,6 +247,53 @@ def test_secrets_are_masked_before_any_request_leaves() -> None:
     sent = str(client.requests[0][0])
     assert "ghp_" not in sent and "MIIEow" not in sent and "hunter2" not in sent
     assert "PRIVATE KEY" not in sent
+
+
+PLANTED_VALUE = "order-hook-4f7a1c"
+
+
+def test_a_value_masked_in_one_place_is_masked_everywhere_in_the_request() -> None:
+    # Arrange
+    client = ScriptedJevClient()
+    state = {
+        "slice": {"code": f'WEBHOOK_TOKEN = "{PLANTED_VALUE}"'},
+        "candidates": [{"signature": f'hooks.py:9 `send(order)` (mentions "{PLANTED_VALUE}")'}],
+    }
+    pick = Pick("open_first", "Which entry of `candidates` most likely sends the order?")
+
+    # Act
+    Judge(client).pick(pick, {"0": f'hooks.py:9 (mentions "{PLANTED_VALUE}")', "1": "other.py:3"}, state)
+
+    # Assert
+    sent_state, sent_questions = client.requests[0]
+    sent = json.dumps([sent_state, sent_questions])
+    assert PLANTED_VALUE not in sent
+    assert sent_state["slice"]["code"] == 'WEBHOOK_TOKEN = "[MASKED]"'
+    assert '(mentions "[MASKED]")' in sent_state["candidates"][0]["signature"]
+
+
+def test_a_value_masked_in_one_item_is_masked_in_the_other_items_of_its_batch() -> None:
+    # Arrange
+    client = ScriptedJevClient()
+    items = [{"code": f'WEBHOOK_TOKEN = "{PLANTED_VALUE}"'}, {"code": f'post("{PLANTED_VALUE}", order)'}]
+
+    # Act
+    Judge(client).check_each(DESCRIBES, items, {"doc": {"sentence": "s"}})
+
+    # Assert
+    sent_items = client.requests[0][0]["items"]
+    assert [item["code"] for item in sent_items] == ['WEBHOOK_TOKEN = "[MASKED]"', 'post("[MASKED]", order)']
+
+
+def test_the_final_scan_refuses_a_masked_value_that_is_also_a_state_key() -> None:
+    # Arrange
+    client = ScriptedJevClient()
+    state = {"slice": {"code": f'WEBHOOK_TOKEN = "{PLANTED_VALUE}"'}, PLANTED_VALUE: {"code": "x = 1"}}
+
+    # Act and assert
+    with pytest.raises(SecretInRequestError):
+        Judge(client).ask(state, {"q": DESCRIBES.to_question()}, thresholds=Thresholds())
+    assert client.requests == []
 
 
 def test_the_final_scan_refuses_when_a_host_turns_masking_off() -> None:
