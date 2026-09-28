@@ -5,7 +5,12 @@ from pathlib import Path
 from git_repos import commit_all, write_files
 
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.index.imports import imported_modules, imported_names, reexported_names
+from jev_navigator.index.imports import (
+    directly_exported_names,
+    imported_modules,
+    imported_names,
+    reexported_names,
+)
 from jev_navigator.index.spans import Span
 
 ROOT_TSCONFIG = """\
@@ -70,6 +75,21 @@ import { ignored } from "./ignored";
     assert reexported_names("from .orders import create_order", "app/__init__.py") == ()
 
 
+def test_script_export_surface_excludes_private_and_default_declarations() -> None:
+    # Arrange
+    source = """\
+function privateRun() {}
+export function run() {}
+export const READY = true;
+const local = true;
+export { local as publicLocal };
+export default function defaultRun() {}
+"""
+
+    # Act and assert
+    assert directly_exported_names(source, "src/service.ts") == frozenset({"run", "READY", "publicLocal"})
+
+
 def test_a_call_imported_through_a_barrel_has_a_proven_target(tmp_path: Path) -> None:
     # Arrange
     index = indexed(
@@ -100,6 +120,25 @@ def test_two_wildcard_reexports_with_the_same_name_stay_ambiguous(tmp_path: Path
             "src/services/one.ts": "export function run() { return 1; }\n",
             "src/services/two.ts": "export function run() { return 2; }\n",
             "src/services/index.ts": 'export * from "./one";\nexport * from "./two";\n',
+            "src/page.ts": 'import { run } from "./services";\nrun();\n',
+        },
+    )
+
+    # Act
+    call = index.find_callers("run")[0]
+
+    # Assert
+    assert call.binding.status == "candidate"
+    assert call.binding.target is None
+
+
+def test_a_private_name_behind_a_wildcard_barrel_is_not_a_proven_import(tmp_path: Path) -> None:
+    # Arrange
+    index = indexed(
+        tmp_path,
+        {
+            "src/services/one.ts": "function run() { return 1; }\n",
+            "src/services/index.ts": 'export * from "./one";\n',
             "src/page.ts": 'import { run } from "./services";\nrun();\n',
         },
     )

@@ -17,7 +17,13 @@ from pathlib import Path, PurePosixPath
 from . import tools
 from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts
 from .fact_cache import FactCache
-from .imports import imported_modules, imported_names, reexported_names, resolve_import
+from .imports import (
+    directly_exported_names,
+    imported_modules,
+    imported_names,
+    reexported_names,
+    resolve_import,
+)
 from .languages import (
     language_of,
 )
@@ -463,7 +469,9 @@ class CodeIndex:
                 )
                 if target is not None and target not in seen:
                     seen.add(target)
-                    found.append(target)
+                    target_source = "\n".join(self._lines_of(target))
+                    if name in directly_exported_names(target_source, target):
+                        found.append(target)
                     pending.append(target)
         return tuple(found)
 
