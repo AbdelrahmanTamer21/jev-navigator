@@ -498,10 +498,15 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
     fingerprint = content_hash(code.text)
     if fingerprint in search.judged_code:
         return None
+    shown = shown_slice(code, search.budget.max_slice_chars, search.budget.max_line_chars)
+    if shown is None:
+        search.visited.discard(item.place.key)
+        search.cap_reached = True
+        _set_aside_for_budget(search, item)
+        return None
     search.judged_code.add(fingerprint)
     search.visited.add(code.key)
     search.steps += 1
-    shown = shown_slice(code, search.budget.max_slice_chars, search.budget.max_line_chars)
     if item.depth >= search.budget.max_depth:
         return _Opening(item, shown, code.key, [])
     candidates, omitted = neighbours_and_omissions(
@@ -583,6 +588,10 @@ def _set_aside_unasked(search: _Search, opening: _Opening) -> None:
     search.visited -= {item.place.key, opening.opened_key}
     search.judged_code.discard(content_hash(item.place.open().text))
     search.steps -= 1
+    _set_aside_for_budget(search, item)
+
+
+def _set_aside_for_budget(search: _Search, item: _Queued) -> None:
     search.set_aside.append(
         NotInspected(
             item.place.key,
