@@ -182,7 +182,7 @@ callers in test files after the others; callees, the ones called from fewest pla
 refers to it or that it passes on without a call, as an argument, collection entry, assignment,
 decorator, export, return, method receiver, type or condition; the other functions of its file, nearest
 first; lines anywhere in scope (docs and config too) that mention its environment variables or its
-quoted keys (six characters or more with a dot, underscore, colon, slash or dash, or CONSTANT_CASE), the
+quoted keys (six characters or more with a dot, underscore, colon, slash or dash), the
 rarest key first, skipping a key found on more than 30 lines; co-changed files; and the lines before and
 after it), whether the target could be inside it. Places that open the same lines of the same file are
 listed once, whatever move found them, and a place wholly inside the opened code is not listed;

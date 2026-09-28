@@ -22,7 +22,7 @@ _ENVIRONMENT_READ = re.compile(
     r"""(?:environ(?:\.get)?\(?\[?|getenv\(|process\.env\.)\s*["']?([A-Z][A-Z0-9_]{2,})"""
 )
 _QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{5,79})["'`]""")
-_KEY_SHAPE = re.compile(r"[._:/-]|^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
+_KEY_SHAPE = re.compile(r"[._:/-]")
 MAX_KEY_HITS = 30
 _TEST_DIRECTORIES = frozenset({"test", "tests", "__tests__", "spec"})
 _TEST_FILE_NAME = re.compile(r"^test_|_test\.|\.test\.|\.spec\.|^conftest\.py$")
@@ -241,8 +241,8 @@ def _distance(span: Span, opened: Span) -> int:
 def _keys_mentioned(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     """Lines elsewhere that mention an environment variable it reads or a key it quotes, the rarest
     key first. A quoted key has at least six characters and a key's shape: a dot, underscore, colon,
-    slash or dash, or CONSTANT_CASE. A key found on more than ``MAX_KEY_HITS`` lines is too common to
-    point anywhere and is skipped."""
+    slash or dash. A key found on more than ``MAX_KEY_HITS`` lines is too common to point anywhere
+    and is skipped."""
     hits_by_key = {key: _lines_mentioning(index, opened, key) for key in _keys_in(opened.text)}
     usable = [(key, hits) for key, hits in hits_by_key.items() if 0 < len(hits) <= MAX_KEY_HITS]
     rarest_first = sorted(usable, key=lambda item: len(item[1]))
