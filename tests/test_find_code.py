@@ -507,6 +507,90 @@ def test_find_code_with_no_moves_opens_only_its_start(sample_index: CodeIndex) -
     assert result.steps == 1 and len(client.requests) == 1
 
 
+def test_default_search_limits_are_unbounded_and_a_finite_frontier_terminates(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    budget = SearchBudget(beam_width=1)
+    client = ScriptedJevClient(nouls=scripted(found=lambda _: 0.05, could_contain=lambda _: 0.9))
+
+    # Act
+    result = find_code(
+        sample_index,
+        Judge(client),
+        TARGET,
+        start_at_place(sample_index),
+        budget=budget,
+        moves={},
+    )
+
+    # Assert
+    assert (budget.max_depth, budget.max_steps, budget.max_calls, budget.neighbours_per_kind) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.not_inspected == ()
+
+
+def test_an_unbounded_search_can_reach_beyond_the_old_default_depth(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "chain.txt").write_text("start\none\ntwo\nthree\ntarget\n")
+    index = CodeIndex(tmp_path, ["chain.txt"])
+    chain = [range_place(index, "chain.txt", line, line, "chain") for line in range(1, 6)]
+    successor = {current.key: following for current, following in zip(chain[:-1], chain[1:], strict=True)}
+
+    def next_in_chain(index: CodeIndex, opened: CodeSlice) -> list[Place]:
+        del index
+        following = successor.get(opened.key)
+        return [following] if following is not None else []
+
+    client = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.95 if code == "target" else 0.05,
+            could_contain=lambda _: 0.95,
+        )
+    )
+
+    # Act
+    result = find_code(
+        index,
+        Judge(client),
+        "the target line",
+        [chain[0]],
+        budget=SearchBudget(beam_width=1),
+        moves={"chain": next_in_chain},
+    )
+
+    # Assert
+    assert result.outcome == Outcome.FOUND
+    assert result.found[0].code.span.start == 5
+    assert result.found[0].path == tuple(place.key for place in chain)
+
+
+def test_caller_interrupt_propagates_from_an_unbounded_search(sample_index: CodeIndex) -> None:
+    # Arrange
+    class InterruptingClient:
+        model = "interrupting"
+
+        def ask(self, state, questions):
+            del state, questions
+            raise KeyboardInterrupt
+
+    # Act and assert
+    with pytest.raises(KeyboardInterrupt):
+        find_code(
+            sample_index,
+            Judge(InterruptingClient()),
+            TARGET,
+            start_at_place(sample_index),
+            budget=SearchBudget(beam_width=1),
+            moves={},
+        )
+
+
 def test_the_result_and_the_stop_step_name_the_moves_the_search_used(sample_index: CodeIndex) -> None:
     # Arrange
     client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1))

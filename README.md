@@ -270,7 +270,10 @@ identical code in two files stays two places. A line outside any function opens 
 module-level declaration when that has at most 120 lines; in a longer one it opens the window around the
 line under the definition's name. Either way the moves can follow that name. Callees and passed-on
 definitions are also offered from anonymous functions and windows. For an anonymous nested function,
-same-file navigation first offers the nearest named containing symbol. Each round opens
+same-file navigation first offers the nearest named containing symbol. By default the finite,
+deduplicated frontier decides when the search is complete: depth, step, call and per-move neighbour
+limits are `None`. A caller can set any of those fields on `SearchBudget` when it has an explicit
+operational limit. Each round opens
 `beam_width` places concurrently: start places first, then the neighbours Jev picked to open next, in
 the order it picked them, then the other neighbours by falling `could_contain` probability, with a
 visited set and a content cache. An `open_first` Choice picks the neighbour to open next, with the

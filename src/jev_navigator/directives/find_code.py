@@ -1,4 +1,4 @@
-"""find_code: open places best first until the code a description names is found, bounded by code.
+"""find_code: open places best first until the code a description names is found.
 
 Each opened place gets one request with two kinds of yes/no question: does this code contain the
 target, and, per neighbour code lists, could the target be inside that neighbour. An optional pick
@@ -118,11 +118,14 @@ class Outcome(StrEnum):
 
 @dataclass(frozen=True)
 class SearchBudget:
-    max_depth: int = 3
-    max_steps: int = 24
-    max_calls: int = 24
+    """Optional caller-selected search limits. ``None`` means the finite frontier, rather than an
+    arbitrary library default, decides when the search is complete."""
+
+    max_depth: int | None = None
+    max_steps: int | None = None
+    max_calls: int | None = None
     beam_width: int = 3
-    neighbours_per_kind: int = 8
+    neighbours_per_kind: int | None = None
     preview_lines: int = 8
     max_slice_chars: int = MAX_SLICE_CHARS
     max_line_chars: int = MAX_LINE_CHARS
@@ -262,7 +265,7 @@ class _Search:
     ) -> None:
         if place.key in self.visited:
             return
-        if depth > self.budget.max_depth:
+        if self.budget.max_depth is not None and depth > self.budget.max_depth:
             self.set_aside.append(
                 NotInspected(place.key, place.signature, "depth", probability, depth, path, place, tier)
             )
@@ -270,9 +273,10 @@ class _Search:
         rank = -probability if tier in (QueueTier.DISCOVERED, QueueTier.MOVE) else 0.0
         heapq.heappush(self.queue, _Queued(tier, rank, next(self.counter), place, depth, path, probability))
 
-    def next_beam(self, calls_left: int) -> list[_Queued]:
+    def next_beam(self, calls_left: int | None) -> list[_Queued]:
         beam = []
-        while self.queue and len(beam) < min(self.budget.beam_width, calls_left):
+        width = self.budget.beam_width if calls_left is None else min(self.budget.beam_width, calls_left)
+        while self.queue and len(beam) < width:
             item = heapq.heappop(self.queue)
             if item.place.key not in self.visited:
                 self.visited.add(item.place.key)
@@ -476,7 +480,8 @@ def _stop_reason(search: _Search, judge: Judge, index: CodeIndex) -> Outcome | N
         return Outcome.FOUND
     if search.stop_judgment is not None and search.stop_judgment.outcome == HistoryOutcome.FOUND:
         return Outcome.STOP_RULE
-    if search.cap_reached or search.steps >= search.budget.max_steps or _calls_left(search, judge) == 0:
+    steps_used = search.budget.max_steps is not None and search.steps >= search.budget.max_steps
+    if search.cap_reached or steps_used or _calls_left(search, judge) == 0:
         return Outcome.BUDGET
     if not search.worth_opening():
         return _nothing_worth_opening(search, index)
@@ -493,10 +498,12 @@ def _nothing_worth_opening(search: _Search, index: CodeIndex) -> Outcome:
     )
 
 
-def _calls_left(search: _Search, judge: Judge) -> int:
-    own = search.budget.max_calls - judge.calls
+def _calls_left(search: _Search, judge: Judge) -> int | None:
+    own = None if search.budget.max_calls is None else max(0, search.budget.max_calls - judge.calls)
     shared = judge.calls_left()
-    return max(0, own if shared is None else min(own, shared))
+    if own is None:
+        return shared
+    return own if shared is None else min(own, shared)
 
 
 @dataclass(frozen=True)
@@ -526,7 +533,7 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
     search.judged_code.add(fingerprint)
     search.visited.add(code.key)
     search.steps += 1
-    if item.depth >= search.budget.max_depth:
+    if search.budget.max_depth is not None and item.depth >= search.budget.max_depth:
         return _Opening(item, shown, code.key, [])
     candidates, omitted = neighbours_and_omissions(
         index, code, search.budget.neighbours_per_kind, search.moves, shown.span

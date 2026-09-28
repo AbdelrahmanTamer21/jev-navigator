@@ -14,7 +14,6 @@ from types import MappingProxyType
 from ..index.code_index import CodeIndex
 from ..index.spans import CallEdge, CodeSlice, Span, TextHit
 
-DEFAULT_NEIGHBOURS_PER_KIND = 8
 MAX_DEFINITION_LINES = 120
 REST_OF_FILE_LINES = 40
 CO_CHANGE_HEAD_LINES = 40
@@ -104,7 +103,7 @@ Move = Callable[[CodeIndex, CodeSlice], list[Place]]
 def neighbours(
     index: CodeIndex,
     opened: CodeSlice,
-    per_kind: int = DEFAULT_NEIGHBOURS_PER_KIND,
+    per_kind: int | None = None,
     moves: Mapping[str, Move] | None = None,
 ) -> list[Place]:
     return neighbours_and_omissions(index, opened, per_kind, moves)[0]
@@ -113,7 +112,7 @@ def neighbours(
 def neighbours_and_omissions(
     index: CodeIndex,
     opened: CodeSlice,
-    per_kind: int = DEFAULT_NEIGHBOURS_PER_KIND,
+    per_kind: int | None = None,
     moves: Mapping[str, Move] | None = None,
     shown: Span | None = None,
 ) -> tuple[list[Place], list[Place]]:
@@ -136,9 +135,11 @@ def neighbours_and_omissions(
     beyond_cap: list[Place] = []
     for build in (MOVES if moves is None else moves).values():
         new = _new_places(build(index, opened), on_screen, kept_lines)
-        kept += new[:per_kind]
-        kept_lines |= {place.open().span.key for place in new[:per_kind]}
-        beyond_cap += new[per_kind:]
+        selected = new if per_kind is None else new[:per_kind]
+        kept += selected
+        kept_lines |= {place.open().span.key for place in selected}
+        if per_kind is not None:
+            beyond_cap += new[per_kind:]
     return kept, _new_places(beyond_cap, on_screen, kept_lines)
 
 

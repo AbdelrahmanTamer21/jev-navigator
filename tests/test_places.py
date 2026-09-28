@@ -349,7 +349,7 @@ def test_callees_called_from_few_places_come_first(tmp_path: Path) -> None:
     # Assert
     callees = [signature.split("`")[1] for signature in offered.values() if "called by handle" in signature]
     assert callees[0] == "def save_event(event):"
-    assert len(callees) == 8
+    assert len(callees) == 10
 
 
 def test_an_anonymous_handler_offers_proven_callees_before_test_only_candidates(
@@ -478,7 +478,7 @@ def test_the_other_functions_of_the_file_are_offered_nearest_first(tmp_path: Pat
 
     # Assert
     same_file = [signature.split("`")[1] for signature in offered if "in the same file" in signature]
-    assert same_file == [f"def step_{number}(value):" for number in (9, 11, 8, 12, 7, 6, 5, 4)]
+    assert same_file == [f"def step_{number}(value):" for number in (9, 11, 8, 12, 7, 6, 5, 4, 3, 2, 1)]
 
 
 def test_a_nested_function_is_offered_only_as_part_of_its_function(tmp_path: Path) -> None:

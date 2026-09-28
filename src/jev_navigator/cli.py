@@ -162,13 +162,13 @@ def create_evidence_pack(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="jvn",
-        description="Navigate code with bounded Jev judgments.",
+        description="Navigate code with reviewable Jev judgments.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
     find = commands.add_parser(
         "find",
         help="find semantically described code and write a versioned evidence pack",
-        description="Run one bounded live find_code search and write a versioned evidence pack.",
+        description="Run one live find_code search and write a versioned evidence pack.",
     )
     find.add_argument("target", help="Semantic description of the code to find")
     find.add_argument("--repo", default=".", help="Git repository to inspect (default: current directory)")
@@ -180,7 +180,7 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="PATH:LINE",
-        help="Known entry or caller line; repeatable. Defaults to the first line of each scoped code file.",
+        help="Known entry or caller line; repeatable. Without one, jvn chooses a narrow entry point.",
     )
     find.add_argument(
         "--out",
@@ -206,7 +206,7 @@ def _parser() -> argparse.ArgumentParser:
 def _validate_budget(budget: SearchBudget) -> None:
     non_negative = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
     positive = ("beam_width", "max_slice_chars", "max_line_chars")
-    invalid = [name for name in non_negative if getattr(budget, name) < 0]
+    invalid = [name for name in non_negative if (value := getattr(budget, name)) is not None and value < 0]
     invalid += [name for name in positive if getattr(budget, name) < 1]
     if invalid:
         raise ValueError(f"invalid search budget fields: {', '.join(invalid)}")
