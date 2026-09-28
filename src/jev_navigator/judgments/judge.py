@@ -193,15 +193,26 @@ class Judge:
         list_name: str = "items",
         thresholds: Thresholds | None = None,
     ) -> list[CheckResult]:
-        """``check_each`` with its batches sent concurrently."""
+        """``check_each`` with its batches sent concurrently; when the served model is still
+        unknown and an answer store is present, the first batch pins the model before the remaining
+        batches look in the store, exactly as the sequential path does."""
         plan = self._check_plan(check, items, shared, list_name, thresholds)
+        batches = plan.batches
+        if batches and self.store is not None and not self._knows_model():
+            # Without a served model the store cannot prove model-version identity, so every lookup
+            # misses; the first live response pins ``served_model`` and the rest may then replay.
+            first = await self.ask_async(
+                batches[0].state, batches[0].questions, thresholds=plan.thresholds, **batches[0].extras
+            )
+            plan.answer(batches[0], first)
+            batches = batches[1:]
         responses = await asyncio.gather(
             *(
                 self.ask_async(batch.state, batch.questions, thresholds=plan.thresholds, **batch.extras)
-                for batch in plan.batches
+                for batch in batches
             )
         )
-        for batch, response in zip(plan.batches, responses, strict=True):
+        for batch, response in zip(batches, responses, strict=True):
             plan.answer(batch, response)
         return plan.results()
 

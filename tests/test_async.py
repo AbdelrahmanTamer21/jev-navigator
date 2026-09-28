@@ -41,6 +41,34 @@ def run(coroutine):
     return asyncio.run(coroutine)
 
 
+BIG_ITEM = "1" * 30_000
+THREE_BATCH_ITEMS = [{"code": f"x{index} = {BIG_ITEM}"} for index in range(3)]
+
+
+class OverlappingAsyncClient:
+    """Wraps an ``AsyncScriptedJevClient`` and records how many sends were in flight at once."""
+
+    def __init__(self, script: ScriptedJevClient) -> None:
+        self.wrapped = AsyncScriptedJevClient(script)
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    @property
+    def model(self) -> str:
+        return self.wrapped.model
+
+    async def send(self, state: dict, questions: dict):
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            return await self.wrapped.send(state, questions)
+        finally:
+            self.in_flight -= 1
+
+    def parse(self, raw):
+        return self.wrapped.parse(raw)
+
+
 def limit_check_answers(question_id: str, question: dict, state: dict) -> float:
     if "slice" in state and question_id.startswith("contains_target"):
         return 0.95 if "len(order.items) <= limit" in state["slice"]["code"] else 0.05
@@ -164,6 +192,106 @@ def test_find_code_async_applies_the_stop_rule_through_the_async_history_check(
 
     # Assert
     assert result.outcome == Outcome.STOP_RULE
+
+
+def test_the_first_async_check_each_replays_the_remaining_batches_from_the_store(
+    tmp_path: Path,
+) -> None:
+    # Arrange: a prior run fills the store; the served model is unknown until a live answer arrives.
+    path = tmp_path / "answers.jsonl"
+    warm_client = ScriptedJevClient(nouls={"describes": 0.9})
+    Judge(warm_client, store=JsonlAnswerStore(path)).check_each(DESCRIBES, THREE_BATCH_ITEMS, SHARED)
+    assert len(JsonlAnswerStore(path).records()) == 3
+    client = OverlappingAsyncClient(ScriptedJevClient(nouls={"describes": 0.9}))
+    judge = Judge(client, store=JsonlAnswerStore(path))
+
+    # Act
+    results = run(judge.check_each_async(DESCRIBES, THREE_BATCH_ITEMS, SHARED))
+
+    # Assert: the first batch pins the served model, the other batches replay for free.
+    assert judge.calls == 1
+    assert [result.from_store for result in results] == [False, True, True]
+    assert all(result.probability == 0.9 for result in results)
+    # Replayed batches never send, so only the live first batch can be in flight.
+    assert client.max_in_flight == 1
+    # The one live request is byte-for-byte the request the sequential path sent for that batch.
+    assert client.wrapped.requests == warm_client.requests[:1]
+
+
+def test_the_first_async_check_each_stays_all_parallel_when_the_served_model_is_known(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    client = OverlappingAsyncClient(ScriptedJevClient(nouls={"describes": 0.9}))
+    judge = Judge(client, store=JsonlAnswerStore(tmp_path / "answers.jsonl"), served_model="jev-scripted")
+
+    # Act
+    run(judge.check_each_async(DESCRIBES, THREE_BATCH_ITEMS, SHARED))
+
+    # Assert
+    assert judge.calls == 3 and client.max_in_flight == 3
+
+
+def test_async_check_each_without_an_answer_store_keeps_all_batches_parallel() -> None:
+    client = OverlappingAsyncClient(ScriptedJevClient(nouls={"describes": 0.9}))
+    judge = Judge(client)
+
+    results = run(judge.check_each_async(DESCRIBES, THREE_BATCH_ITEMS, SHARED))
+
+    assert judge.calls == 3 and client.max_in_flight == 3
+    assert [result.probability for result in results] == [0.9, 0.9, 0.9]
+
+
+def test_the_first_async_check_each_rejects_store_answers_from_a_changed_served_model(
+    tmp_path: Path,
+) -> None:
+    # Arrange: the store holds answers from an older model version.
+    path = tmp_path / "answers.jsonl"
+    Judge(
+        ScriptedJevClient(nouls={"describes": 0.9}, model="jev-1.12.0"), store=JsonlAnswerStore(path)
+    ).check_each(DESCRIBES, THREE_BATCH_ITEMS, SHARED)
+    client = OverlappingAsyncClient(ScriptedJevClient(nouls={"describes": 0.1}, model="jev-1.13.0"))
+    judge = Judge(client, store=JsonlAnswerStore(path))
+
+    # Act
+    results = run(judge.check_each_async(DESCRIBES, THREE_BATCH_ITEMS, SHARED))
+
+    # Assert: once the first live answer pins the new served model, the older records are refused.
+    assert judge.calls == 3
+    assert [result.probability for result in results] == [0.1, 0.1, 0.1]
+    assert all(result.from_store is False for result in results)
+
+
+def test_concurrent_first_async_calls_do_not_trust_the_store_across_models(tmp_path: Path) -> None:
+    # Arrange: the store holds answers from an older model for two unrelated item lists; a new
+    # model serves two concurrent first calls over the same judge and store.
+    path = tmp_path / "answers.jsonl"
+    other_items = [{"code": "y = 2"}, {"code": "z = 3"}]
+    warm = Judge(
+        ScriptedJevClient(nouls={"describes": 0.9, "names_value": 0.9}, model="jev-1.12.0"),
+        store=JsonlAnswerStore(path),
+    )
+    warm.check_each(DESCRIBES, THREE_BATCH_ITEMS, SHARED)
+    warm.check_each(NAMES_VALUE, other_items, SHARED)
+    assert len(JsonlAnswerStore(path).records()) == 4
+    client = OverlappingAsyncClient(ScriptedJevClient(nouls={"describes": 0.1, "names_value": 0.2}))
+    judge = Judge(client, store=JsonlAnswerStore(path))
+
+    async def both():
+        return await asyncio.gather(
+            judge.check_each_async(DESCRIBES, THREE_BATCH_ITEMS, SHARED),
+            judge.check_each_async(NAMES_VALUE, other_items, SHARED),
+        )
+
+    # Act
+    first, second = run(both())
+
+    # Assert: every batch goes live under the new model, also on the call whose _prepare ran after
+    # the other call had already pinned the served model.
+    assert judge.calls == 4
+    assert all(result.from_store is False for result in [*first, *second])
+    assert [result.probability for result in first] == [0.1, 0.1, 0.1]
+    assert [result.probability for result in second] == [0.2, 0.2]
 
 
 def test_the_async_history_check_matches_the_sync_one() -> None:
