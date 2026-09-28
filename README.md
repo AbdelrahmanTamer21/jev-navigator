@@ -174,7 +174,10 @@ file, lines anywhere in scope (docs and config too) that mention its quoted keys
 variables, co-changed files, and the lines before and after it), whether the target could be inside
 it. Each round opens the top `beam_width` places concurrently, with a visited set and a content
 cache. A low neighbour score only lowers that neighbour's priority; it is never treated as proof that
-the code is not there. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
+the code is not there. Each neighbour's signature names its file and lines: a function quotes its first
+line; a window around a call, reference or key outside any function gives its line range and quotes
+that line; a stretch chosen by position (the lines before or after, the start of a co-changed file)
+gives its range and quotes its first line of code. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
 `scope_incomplete`, and the result
 keeps three sets: `found`; `searched` and `unsure` (bodies actually judged); and `not_inspected`, each
 entry with its reason (`budget`, `deprioritized`, `capped` or `depth`). `searched` means "opened and

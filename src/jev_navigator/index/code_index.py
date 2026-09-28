@@ -299,8 +299,7 @@ class CodeIndex:
     def read_window(
         self, file: str, line: int, radius: int = DEFAULT_WINDOW_RADIUS, origin: str = ""
     ) -> CodeSlice:
-        line_count = len(self._lines_of(file))
-        span = Span(file, max(1, line - radius), min(line_count, line + radius))
+        span = Span(file, max(1, line - radius), min(len(self._lines_of(file)), line + radius))
         return self.read_slice(span, origin)
 
     def search_text(self, text: str, max_hits: int = MAX_TEXT_HITS) -> tuple[TextHit, ...]:
@@ -326,6 +325,8 @@ class CodeIndex:
         self._require_in_scope(file)
         log = tools.git(
             [
+                "-c",
+                "core.quotePath=false",
                 "log",
                 *([self.commit] if self.commit else []),
                 f"-n{CO_CHANGE_COMMITS}",
@@ -439,6 +440,4 @@ def _regular_files(listing: str) -> list[str]:
 
 def _commits(log: str) -> list[set[str]]:
     blocks = log.split(_COMMIT_MARK)
-    return [
-        {line.strip() for line in block.splitlines() if line.strip()} for block in blocks if block.strip()
-    ]
+    return [{line.strip() for line in block.split("\n") if line.strip()} for block in blocks if block.strip()]

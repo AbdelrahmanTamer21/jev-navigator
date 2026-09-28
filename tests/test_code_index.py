@@ -407,6 +407,21 @@ def test_search_text_reads_a_line_holding_a_unicode_line_separator(tmp_path: Pat
     assert [(hit.file, hit.line) for hit in hits] == [("messages.js", 1)]
 
 
+def test_co_changed_files_count_files_with_non_ascii_names(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/größe.py").write_text("SIZE = 1\n")
+    (tmp_path / "app/maß.py").write_text("MEASURE = 1\n")
+    commit_all(tmp_path)
+    index = CodeIndex.from_git(tmp_path, prefixes=("app/",))
+
+    # Act
+    co_changed = index.co_changed_files("app/größe.py")
+
+    # Assert
+    assert co_changed == (("app/maß.py", 1),)
+
+
 def test_line_numbers_follow_newlines_only_like_the_parser(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "app.py").write_text('BANNER = "a\fb"\r\n\r\ndef second():\n    return 2\n')

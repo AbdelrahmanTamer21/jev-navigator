@@ -654,7 +654,7 @@ def _confident_first(search: _Search, response) -> int | None:
 def _candidate_state(place: Place, preview_lines: int) -> dict:
     """The signature line plus the first lines of the candidate's code, so the judgment rests on
     more than a name."""
-    preview = "\n".join(place.open().text.splitlines()[:preview_lines])
+    preview = "\n".join(place.open().text.split("\n")[:preview_lines])
     return {"signature": place.signature, "preview": preview}
 
 
