@@ -83,7 +83,6 @@ class CodeIndex:
         self._script_paths_in = cache(self._read_script_paths)
         self._unparsed = Unparsed()
         self._unavailable: dict[str, str] = {}
-        self._completed_scans: set[str] = set()
         self._facts: dict[str, FileFacts] = {}
         self._facts_lock = threading.RLock()
         self._fact_cache = FactCache(fact_cache_dir)

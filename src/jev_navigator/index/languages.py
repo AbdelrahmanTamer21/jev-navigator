@@ -1,8 +1,14 @@
-"""Which ast-grep language parses a file, which syntax nodes are functions, and how to read their names."""
+"""Which ast-grep language parses a file, which syntax nodes are functions, and how to read their names.
+
+A ``.js`` file whose leading comments carry the ``@flow`` pragma parses as ``flow``: flow uses
+ast-grep's available ``tsx`` grammar, selected
+per scan through a ``languageGlobs`` sgconfig. What that grammar cannot recover still surfaces as
+ERROR nodes, so incomplete coverage stays visible."""
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -57,6 +63,24 @@ DECLARATION_RULES = {
       - kind: export_statement""",
 }
 
+# The installed ast-grep supports tsx but not Flow. Route marked files through tsx;
+# unsupported Flow constructs remain visible through ERROR nodes.
+FLOW_LANGUAGE = "flow"
+FUNCTION_KINDS[FLOW_LANGUAGE] = FUNCTION_KINDS["tsx"]
+CLASS_KINDS[FLOW_LANGUAGE] = CLASS_KINDS["tsx"]
+DECLARATION_RULES[FLOW_LANGUAGE] = _SCRIPT_DECLARATIONS
+
+# ast-grep reads `languageGlobs` only from a config file: a scan of flow files passes this sgconfig,
+# which parses every JavaScript suffix with the tsx grammar. Plain-JS files are scanned in their own
+# invocation without it, so their grammar is unchanged.
+FLOW_SGCONFIG = 'languageGlobs:\n  tsx:\n    - "*.js"\n    - "*.jsx"\n    - "*.mjs"\n    - "*.cjs"\n'
+
+
+def grammar_of(language: str) -> str:
+    """The ast-grep language whose grammar parses ``language`` (flow rides on the tsx grammar)."""
+    return "tsx" if language == FLOW_LANGUAGE else language
+
+
 _DECLARED_NAME = re.compile(
     r"^\s*(?:export\s+)?(?:declare\s+)?(?:(?:type|interface|enum|const|let|var)\s+)?(\w+)"
 )
@@ -73,6 +97,55 @@ _NAME_PATTERNS = (
 
 def language_of(path: str) -> str | None:
     return LANGUAGE_BY_SUFFIX.get(PurePosixPath(path).suffix)
+
+
+def language_for(path: str, lines: Sequence[str] | None = None) -> str | None:
+    """The language ``path`` parses as: like ``language_of``, but a JavaScript file whose leading
+    comments carry the ``@flow`` pragma parses as ``flow`` (with the tsx grammar)."""
+    language = language_of(path)
+    if language == "javascript" and lines is not None and has_flow_pragma(lines):
+        return FLOW_LANGUAGE
+    return language
+
+
+_FLOW_PRAGMA = re.compile(r"@flow\b")
+
+
+def has_flow_pragma(lines: Sequence[str]) -> bool:
+    """True when a leading comment of the source carries the ``@flow`` pragma. Only comments before
+    the first line of code count — never ``@flow`` in a string or the body — and the scan stops at
+    that first code line, however far down it sits: leading comments may be arbitrarily long. A
+    byte-order mark or shebang may precede the comments."""
+    in_block = False
+    for index, line in enumerate(lines):
+        text = line[1:] if index == 0 and line.startswith("\ufeff") else line
+        position = 0
+        while True:
+            rest = text[position:]
+            stripped = rest.lstrip()
+            if not stripped:
+                break
+            position = len(text) - len(stripped)
+            if in_block:
+                end = stripped.find("*/")
+                if _FLOW_PRAGMA.search(stripped if end < 0 else stripped[:end]):
+                    return True
+                if end < 0:
+                    break
+                in_block = False
+                position += end + 2
+            elif stripped.startswith("//"):
+                if _FLOW_PRAGMA.search(stripped[2:]):
+                    return True
+                break
+            elif stripped.startswith("/*"):
+                in_block = True
+                position += 2
+            elif index == 0 and stripped.startswith("#!"):
+                break
+            else:
+                return False
+    return False
 
 
 def declared_name(first_line: str) -> str:
@@ -171,18 +244,19 @@ REFERENCE_ROLES = {
     "tsx": _TYPED_SCRIPT_ROLES,
     "javascript": _SCRIPT_ROLES,
 }
+REFERENCE_ROLES[FLOW_LANGUAGE] = _TYPED_SCRIPT_ROLES
 
 
-def reference_rules() -> str:
-    """ast-grep rules, one per language and role, matching every identifier that has that role. Calls
-    and imports have no role, so they never match."""
+def reference_rules(languages: Iterable[str]) -> str:
+    """ast-grep rules, one per listed language and role, matching every identifier that has that role.
+    Calls and imports have no role, so they never match."""
     return "\n---\n".join(
-        _role_rule(language, role) for language, roles in REFERENCE_ROLES.items() for role in roles
+        _role_rule(language, role) for language in languages for role in REFERENCE_ROLES[language]
     )
 
 
 def _role_rule(language: str, role: ReferenceRole) -> str:
-    lines = [f"id: {role.name}", f"language: {language}", "rule:", f"  kind: {role.kind}"]
+    lines = [f"id: {role.name}", f"language: {grammar_of(language)}", "rule:", f"  kind: {role.kind}"]
     if role.inside:
         lines += ["  any:", *_inside_entries(role.inside, "    ")]
     exclusions = [f"      - regex: {role.not_regex}"] if role.not_regex else []

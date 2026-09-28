@@ -60,8 +60,7 @@ class TerminalProgress:
         location = f" {file}:{lines}" if file else ""
         question_ids = ", ".join(request.questions)
         self._event(
-            f"request {number} started{location}; purpose {question_ids}; "
-            f"{self.elapsed():.1f}s elapsed"
+            f"request {number} started{location}; purpose {question_ids}; {self.elapsed():.1f}s elapsed"
         )
         if self.verbose:
             self._event(

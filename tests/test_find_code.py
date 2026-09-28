@@ -202,9 +202,8 @@ def test_budget_receipt_does_not_start_unused_scope_scans(
     # needed when this bounded search has no moves, and must remain explicitly pending.
     (tmp_path / "broken.js").write_text(
         "// @flow\n"
-        "export class Broken {\n"
-        "  find(query: Object): Promise<Array<Object>> { return query; }\n"
-        "}\n"
+        "export opaque type Query = Object;\n"
+        "export function find(query: Query): Query { return query; }\n"
     )
     (tmp_path / "unused.py").write_text("def unused():\n    return 1\n")
     index = CodeIndex(tmp_path, ["broken.js", "unused.py"], fact_cache_dir=tmp_path / "cache")
@@ -219,7 +218,7 @@ def test_budget_receipt_does_not_start_unused_scope_scans(
 
     monkeypatch.setattr(code_index, "scan_facts", observe_scan)
     index.functions_in("broken.js")
-    start = range_place(index, "broken.js", 1, 4, "test start")
+    start = range_place(index, "broken.js", 1, 3, "test start")
     client = ScriptedJevClient(nouls=scripted(found=lambda _: 0.05, could_contain=lambda _: 0.05))
 
     result = find_code(

@@ -81,24 +81,28 @@ from jev_navigator import operations, comments
 
 index = CodeIndex.from_git(repo_root, prefixes=("app/", "web/"))
 old = CodeIndex.at_commit(repo_root, "abc123", prefixes=("app/",))  # from git objects, checkout untouched
-index.find_definition("LIMITS_KEY")   # functions, classes, constants, assignments, types, enums
+index.find_definition("LIMITS_KEY")  # functions, classes, constants, assignments, types, enums
 index.find_callers("validate_order")  # CallSite(file, line, caller, binding), found by name
-index.callee_edges(span)               # CallEdge(name, line, binding); find_callees gives names only
+index.callee_edges(span)  # CallEdge(name, line, binding); find_callees gives names only
 index.find_references("send_invoice")  # Reference(name, file, line, role, holder, binding): non-call uses
-index.references_in(span)              # names a function passes on without calling (callbacks, registries)
-index.enclosing_symbol(file, line); index.symbols_in(file)
-index.read_slice(span); index.read_window(file, line, radius=10)
+index.references_in(span)  # names a function passes on without calling (callbacks, registries)
+index.enclosing_symbol(file, line)
+index.symbols_in(file)
+index.read_slice(span)
+index.read_window(file, line, radius=10)
 index.search_text("orders.max_items")  # ripgrep over the narrowed files only
-index.imports(file); index.dependents(file); index.co_changed_files(file)
+index.imports(file)
+index.dependents(file)
+index.co_changed_files(file)
 
-operations.slice_around(index, file, line)                # the enclosing function, or a window
-operations.code_described_by_comment(index, file, line)   # the whole next symbol or block
+operations.slice_around(index, file, line)  # the enclosing function, or a window
+operations.code_described_by_comment(index, file, line)  # the whole next symbol or block
 operations.callers_of_file(index, path)
-operations.trace_callers(index, symbol, depth)            # and trace_callees; depth capped at 3
+operations.trace_callers(index, symbol, depth)  # and trace_callees; depth capped at 3
 operations.similar_functions(index, symbol)
 operations.code_named_in_doc(index, text)
 
-comments.find_comments(index, files)          # FoundComments(kept, dropped) of CommentBlock
+comments.find_comments(index, files)  # FoundComments(kept, dropped) of CommentBlock
 comments.comments_in_diff(index, base, head)  # changed comments, and comments above changed code
 comments.code_above_comment(index, file, line)  # CodeAbove(code or None, reason)
 ```
@@ -125,8 +129,16 @@ without treating changed source or changed parser rules as current. Each call si
 computed once. There is no default file-count refusal or parser timeout, and no requested file is
 silently omitted.
 
+Before that pass, `.js` files whose leading comments (before any code, after an optional byte-order
+mark or shebang) carry the `@flow` pragma are separated from plain JavaScript. They ride on the tsx
+grammar — the closest available superset — through a `languageGlobs` sgconfig written outside the
+scanned repository. Plain JavaScript keeps the JavaScript grammar unchanged. The tsx grammar is not
+a Flow parser: unsupported constructs such as exact object types `{| |}`, `export opaque type`,
+variance annotations, `?T` in static property types and inexact objects `...` remain visible as
+ERROR nodes.
+
 The facts include grammar ERROR nodes. A language's parser may recover only part of such a file
-(Flow types in a JavaScript file, for example), so what it swallowed must not silently count as
+(a Flow-only construct, for example), so what it swallowed must not silently count as
 indexed; the symbols it did recover still count. Code in those files is unknown, not absent: a
 binding that may depend on them has status `unknown`, with the files in its reason. A completed
 search reports `scope_incomplete` instead of `nothing_left`; a budget-limited result reports which
@@ -168,9 +180,9 @@ from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
 judge = Judge(TypeSafeJevClient(), store=JsonlAnswerStore(path), thresholds=Thresholds.from_env())
 judge.check_each(check, items, shared_state)  # one Noul per item, batched
-judge.pick(pick, options, state)              # one Choice over options code built
+judge.pick(pick, options, state)  # one Choice over options code built
 judge.ask_all(state, checks=[...], picks=[(pick, options)], scores=[rate])  # one request
-judge.choose_call(route, offers, state)       # function calling: operation plus its input
+judge.choose_call(route, offers, state)  # function calling: operation plus its input
 ```
 
 Every one of these has an async form (`check_each_async`, `pick_async`, `ask_all_async`,
@@ -349,10 +361,10 @@ from jev_navigator import connectors
 
 phrase_step = LlmStep(
     name="phrase_fallback",
-    when=lambda result: result.confidence < 0.70,           # when: the phrase Choice was unsure
+    when=lambda result: result.confidence < 0.70,  # when: the phrase Choice was unsure
     context=lambda result: {"comment": comment, "slice": code_state, "options": phrases},
     answer=PickFromOptions("Which phrase names what the code does?", answer_field="phrase"),
-    connector=connectors.pi("your-model"),                  # any CLI or OpenAI-compatible endpoint
+    connector=connectors.pi("your-model"),  # any CLI or OpenAI-compatible endpoint
     guard=LlmGuard(store_path=path, max_calls=5),
 )
 call = phrase_step.run(judge.pick(phrase_pick, phrases, state))  # None when `when` said no
