@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from git_repos import git
+from git_repos import commit_files, git
 
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import Span
@@ -70,14 +70,13 @@ def test_a_batch_whose_items_share_a_masked_value_is_rebuilt_exactly(tmp_path: P
     # Arrange
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / "settings.py").write_text('WEBHOOK_TOKEN = "order-hook-4f7a1c"\n')
-    (repo / "hooks.py").write_text('def send(order):\n    return post("order-hook-4f7a1c", order)\n')
-    for command in (
-        ["init", "-q"],
-        ["add", "."],
-        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c"],
-    ):
-        subprocess.run(["git", *command], cwd=repo, check=True)
+    commit_files(
+        repo,
+        {
+            "settings.py": 'WEBHOOK_TOKEN = "order-hook-4f7a1c"\n',
+            "hooks.py": 'def send(order):\n    return post("order-hook-4f7a1c", order)\n',
+        },
+    )
     index = CodeIndex.from_git(repo)
     items = [
         {"file": file, "lines": [first, last], "commit": index.commit, "code": index.read_slice(span).text}

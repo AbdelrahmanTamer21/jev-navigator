@@ -208,7 +208,7 @@ class _Search:
     questions: SearchQuestions = DEFAULT_SEARCH_QUESTIONS
     stop_rule: StopRule | None = None
     history: History = field(default_factory=History)
-    moves: Mapping[str, Move] = MOVES
+    moves: Mapping[str, Move] = field(default_factory=lambda: MOVES)
     stop_judgment: HistoryJudgment | None = None
     queue: list[_Queued] = field(default_factory=list)
     visited: set[str] = field(default_factory=set)

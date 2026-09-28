@@ -191,10 +191,10 @@ def test_comments_in_diff_finds_changes_in_files_with_non_ascii_names(sample_rep
     # Arrange
     path = sample_repo / "app/größe.py"
     path.write_text("# Returns the size.\ndef groesse():\n    return 1\n")
-    subprocess.run(["git", "add", "."], cwd=sample_repo, check=True)
-    subprocess.run(["git", "commit", "-qm", "size"], cwd=sample_repo, check=True)
+    git(sample_repo, "add", ".")
+    git(sample_repo, "commit", "-qm", "size")
     path.write_text("# Returns the size.\ndef groesse():\n    return 2\n")
-    subprocess.run(["git", "commit", "-qam", "change size"], cwd=sample_repo, check=True)
+    git(sample_repo, "commit", "-qam", "change size")
     index = CodeIndex.from_git(sample_repo)
 
     # Act
