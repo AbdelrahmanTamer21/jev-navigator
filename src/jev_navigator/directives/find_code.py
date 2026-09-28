@@ -18,8 +18,11 @@ import asyncio
 import heapq
 import itertools
 import os
+import signal
+import threading
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import IntEnum, StrEnum
 
@@ -110,6 +113,7 @@ DEFAULT_SEARCH_QUESTIONS = SearchQuestions()
 class Outcome(StrEnum):
     FOUND = "found"
     STOP_RULE = "stop_rule"
+    CANCELLED = "cancelled"
     UNSURE_ONLY = "unsure_only"
     NOTHING_LEFT = "nothing_left"
     SCOPE_INCOMPLETE = "scope_incomplete"
@@ -176,8 +180,9 @@ class QueueTier(IntEnum):
 @dataclass(frozen=True)
 class NotInspected:
     """A place the search did not open. ``reason`` is ``budget`` (still worth opening when the budget
-    ran out), ``deprioritized`` (its signature scored low; that only lowered its priority, it was never
-    judged), ``capped`` (cut by the per-kind neighbour cap) or ``depth`` (beyond the depth limit).
+    ran out), ``cancelled`` (the caller interrupted before it was opened), ``deprioritized`` (its
+    signature scored low; that only lowered its priority, it was never judged), ``capped`` (cut by
+    an explicit per-kind neighbour cap) or ``depth`` (beyond an explicit depth limit).
     ``tier`` preserves starts, picked places and scored neighbours through Resume."""
 
     place_key: str
@@ -321,14 +326,22 @@ def find_code(
         budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
     )
     search, judge = _begin(index, judge, target_description, start, options)
-    while (stop := _stop_reason(search, judge, index)) is None:
-        opened = _open_round(index, search, judge)
-        if not opened:
-            continue
-        with ThreadPoolExecutor(max_workers=len(opened)) as pool:
-            responses = list(pool.map(lambda opening: _ask_within_cap(judge, search, opening), opened))
-        _merge_round(search, opened, responses)
-        _apply_stop_rule(judge, search)
+    stop = None
+    try:
+        while (stop := _stop_reason(search, judge, index)) is None:
+            opened = _open_round(index, search, judge)
+            if not opened:
+                continue
+            responses, cancelled = _ask_round(judge, search, opened)
+            with _defer_keyboard_interrupts():
+                _merge_round(search, opened, responses)
+            if cancelled:
+                stop = Outcome.CANCELLED
+                break
+            _apply_stop_rule(judge, search)
+    except KeyboardInterrupt:
+        stop = Outcome.CANCELLED
+    assert stop is not None
     return _result(search, stop, judge, index)
 
 
@@ -386,13 +399,16 @@ def _begin(
         index.require_commit(options.commit)
     target = {"description": target_description}
     rule = options.stop_rule
+    history = rule.new_history(target) if rule else History(sections={SUBJECT: target})
+    if judge.journal is not None and hasattr(judge.journal, "record_step"):
+        history.recorder = judge.journal
     search = _Search(
         target,
         judge.effective(options.thresholds),
         options.budget or SearchBudget(),
         options.questions,
         rule,
-        rule.new_history(target) if rule else History(sections={SUBJECT: target}),
+        history,
         MOVES if options.moves is None else options.moves,
     )
     if options.resume is not None:
@@ -407,16 +423,89 @@ def _begin(
 
 def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Opening]:
     beam = search.next_beam(_calls_left(search, judge))
-    _record_choice(search, beam)
-    return [opening for item in beam if (opening := _open(index, search, item)) is not None]
+    opened = []
+    processed = 0
+    try:
+        _record_choice(search, beam)
+        for item in beam:
+            if opening := _open(index, search, item):
+                opened.append(opening)
+            processed += 1
+        return opened
+    except BaseException:
+        for opening in opened:
+            _restore_opening(search, opening)
+            heapq.heappush(search.queue, opening.item)
+        for item in beam[processed:]:
+            search.visited.discard(item.place.key)
+            heapq.heappush(search.queue, item)
+        raise
+
+
+def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[list, bool]:
+    """Ask one beam concurrently. A caller interrupt stops future rounds after the already-sent
+    requests settle; successful responses still count and interrupted places return to the frontier."""
+    with ThreadPoolExecutor(max_workers=len(opened)) as pool:
+        futures = [pool.submit(_ask_within_cap, judge, search, opening) for opening in opened]
+        try:
+            return [future.result() for future in futures], False
+        except KeyboardInterrupt:
+            with _defer_keyboard_interrupts(re_raise=False):
+                judge.cancel()
+                for future in futures:
+                    future.cancel()
+                wait(futures)
+                responses = []
+                for future in futures:
+                    try:
+                        responses.append(future.result())
+                    except (CancelledError, KeyboardInterrupt):
+                        responses.append(_Unanswered.CANCELLED)
+                    except Exception:
+                        responses.append(_Unanswered.CANCELLED)
+            return responses, True
 
 
 def _merge_round(search: _Search, opened: list[_Opening], responses: list) -> None:
     for opening, response in zip(opened, responses, strict=True):
-        if response is None:
-            _set_aside_unasked(search, opening)
+        if response is _Unanswered.CANCELLED:
+            _set_aside_unasked(search, opening, "cancelled")
+        elif response is _Unanswered.BUDGET:
+            _set_aside_unasked(search, opening, "budget")
         else:
             _merge(search, opening, response)
+
+
+class _Unanswered(StrEnum):
+    BUDGET = "budget"
+    CANCELLED = "cancelled"
+
+
+@contextmanager
+def _defer_keyboard_interrupts(*, re_raise: bool = True):
+    """Keep the small receipt commit indivisible on the main thread.
+
+    A first interrupt is delivered after a normal merge has preserved its completed responses. Once
+    cancellation has begun, later interrupts are coalesced while the owned transport settles.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGINT)
+    interrupted = False
+
+    def defer(signum, frame) -> None:
+        del signum, frame
+        nonlocal interrupted
+        interrupted = True
+
+    signal.signal(signal.SIGINT, defer)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    if interrupted and re_raise:
+        raise KeyboardInterrupt
 
 
 SUBJECT = "subject"
@@ -513,6 +602,7 @@ class _Opening:
     item: _Queued
     code: CodeSlice
     opened_key: str
+    fingerprint: str
     candidates: list[Place]
     capped: tuple[NotInspected, ...] = ()
 
@@ -533,11 +623,17 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
     search.judged_code.add(fingerprint)
     search.visited.add(code.key)
     search.steps += 1
-    if search.budget.max_depth is not None and item.depth >= search.budget.max_depth:
-        return _Opening(item, shown, code.key, [])
-    candidates, omitted = neighbours_and_omissions(
-        index, code, search.budget.neighbours_per_kind, search.moves, shown.span
-    )
+    try:
+        if search.budget.max_depth is not None and item.depth >= search.budget.max_depth:
+            return _Opening(item, shown, code.key, fingerprint, [])
+        candidates, omitted = neighbours_and_omissions(
+            index, code, search.budget.neighbours_per_kind, search.moves, shown.span
+        )
+    except BaseException:
+        search.judged_code.discard(fingerprint)
+        search.visited -= {item.place.key, code.key}
+        search.steps -= 1
+        raise
     capped = tuple(
         NotInspected(
             place.key, place.signature, "capped", 0.5, item.depth + 1, (*item.path, place.key), place
@@ -547,7 +643,9 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
     )
     search.set_aside.extend(capped)
     unseen = [place for place in candidates if place.key not in search.visited]
-    return _Opening(item, shown, code.key, [place for place in unseen if place.open().text.strip()], capped)
+    return _Opening(
+        item, shown, code.key, fingerprint, [place for place in unseen if place.open().text.strip()], capped
+    )
 
 
 @dataclass(frozen=True)
@@ -595,7 +693,7 @@ def _ask_within_cap(judge: Judge, search: _Search, opening: _Opening):
         )
     except CallCapReachedError:
         search.cap_reached = True
-        return None
+        return _Unanswered.BUDGET
 
 
 async def _ask_within_cap_async(judge: Judge, search: _Search, opening: _Opening):
@@ -606,23 +704,31 @@ async def _ask_within_cap_async(judge: Judge, search: _Search, opening: _Opening
         )
     except CallCapReachedError:
         search.cap_reached = True
-        return None
+        return _Unanswered.BUDGET
 
 
-def _set_aside_unasked(search: _Search, opening: _Opening) -> None:
+def _set_aside_unasked(search: _Search, opening: _Opening, reason: str) -> None:
+    _restore_opening(search, opening)
+    _set_aside(search, opening.item, reason)
+
+
+def _restore_opening(search: _Search, opening: _Opening) -> None:
     item = opening.item
     search.visited -= {item.place.key, opening.opened_key}
-    search.judged_code.discard(content_hash(item.place.open().text))
+    search.judged_code.discard(opening.fingerprint)
     search.steps -= 1
-    _set_aside_for_budget(search, item)
 
 
 def _set_aside_for_budget(search: _Search, item: _Queued) -> None:
+    _set_aside(search, item, "budget")
+
+
+def _set_aside(search: _Search, item: _Queued, reason: str) -> None:
     search.set_aside.append(
         NotInspected(
             item.place.key,
             item.place.signature,
-            "budget",
+            reason,
             item.probability,
             item.depth,
             item.path,
@@ -779,7 +885,7 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
         NotInspected(
             item.place.key,
             item.place.signature,
-            _reason(search, item),
+            _reason(search, item, outcome),
             item.probability,
             item.depth,
             item.path,
@@ -845,5 +951,7 @@ def _stop_step(
     return HistoryStep("stop", arguments, (), judgments, f"stopped: {outcome}")
 
 
-def _reason(search: _Search, item: _Queued) -> str:
+def _reason(search: _Search, item: _Queued, outcome: Outcome) -> str:
+    if outcome == Outcome.CANCELLED:
+        return "cancelled"
     return "budget" if search.still_worth_opening(item) else "deprioritized"

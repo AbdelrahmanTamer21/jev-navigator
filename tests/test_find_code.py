@@ -570,7 +570,7 @@ def test_an_unbounded_search_can_reach_beyond_the_old_default_depth(tmp_path: Pa
     assert result.found[0].path == tuple(place.key for place in chain)
 
 
-def test_caller_interrupt_propagates_from_an_unbounded_search(sample_index: CodeIndex) -> None:
+def test_caller_interrupt_returns_a_resumable_frontier(sample_index: CodeIndex) -> None:
     # Arrange
     class InterruptingClient:
         model = "interrupting"
@@ -579,16 +579,136 @@ def test_caller_interrupt_propagates_from_an_unbounded_search(sample_index: Code
             del state, questions
             raise KeyboardInterrupt
 
-    # Act and assert
-    with pytest.raises(KeyboardInterrupt):
-        find_code(
-            sample_index,
-            Judge(InterruptingClient()),
-            TARGET,
-            start_at_place(sample_index),
-            budget=SearchBudget(beam_width=1),
-            moves={},
-        )
+    target = function_place(sample_index, sample_index.find_definition("check_limits")[0])
+
+    # Act
+    cancelled = find_code(
+        sample_index,
+        Judge(InterruptingClient()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        initial_candidates=[(target, 1.0)],
+    )
+    resumed = find_code(
+        sample_index,
+        Judge(ScriptedJevClient(nouls={"contains_target": 0.95})),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        resume=cancelled,
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert cancelled.steps == 0
+    assert [(entry.place_key, entry.reason) for entry in cancelled.not_inspected] == [
+        (target.key, "cancelled")
+    ]
+    assert resumed.outcome == Outcome.FOUND
+    assert resumed.found[0].code.span == target.open().span
+
+
+def test_interrupt_while_opening_a_beam_restores_every_popped_place(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "places.txt").write_text("first\nsecond\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
+    opened = 0
+
+    def interrupt_second_open(index: CodeIndex, code: CodeSlice) -> list[Place]:
+        del index, code
+        nonlocal opened
+        opened += 1
+        if opened == 2:
+            raise KeyboardInterrupt
+        return []
+
+    # Act
+    cancelled = find_code(
+        index,
+        Judge(ScriptedJevClient()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=2),
+        moves={"interrupt": interrupt_second_open},
+        initial_candidates=[(place, 1.0) for place in places],
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert cancelled.steps == 0
+    assert {entry.place_key for entry in cancelled.not_inspected} == {place.key for place in places}
+    assert {entry.reason for entry in cancelled.not_inspected} == {"cancelled"}
+
+
+def test_interrupt_while_recording_a_round_choice_restores_the_popped_place(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    class InterruptingRecorder:
+        def __init__(self) -> None:
+            self.interrupted = False
+
+        def record_step(self, step) -> None:
+            del step
+            if not self.interrupted:
+                self.interrupted = True
+                raise KeyboardInterrupt
+
+    target = function_place(sample_index, sample_index.find_definition("check_limits")[0])
+
+    # Act
+    cancelled = find_code(
+        sample_index,
+        Judge(ScriptedJevClient(), journal=InterruptingRecorder()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        initial_candidates=[(target, 1.0)],
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert [(entry.place_key, entry.reason) for entry in cancelled.not_inspected] == [
+        (target.key, "cancelled")
+    ]
+
+
+def test_cancellation_keeps_a_successful_response_from_the_same_beam(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "places.txt").write_text("first\nsecond\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
+
+    class PartlyInterruptingClient:
+        model = "partly-interrupting"
+
+        def ask(self, state, questions):
+            if state["slice"]["code"] == "second":
+                raise KeyboardInterrupt
+            return ScriptedJevClient(default_noul=0.05).ask(state, questions)
+
+    # Act
+    cancelled = find_code(
+        index,
+        Judge(PartlyInterruptingClient()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=2),
+        moves={},
+        initial_candidates=[(place, 1.0) for place in places],
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert [visit.place_key for visit in cancelled.searched] == [places[0].key]
+    assert [(entry.place_key, entry.reason) for entry in cancelled.not_inspected] == [
+        (places[1].key, "cancelled")
+    ]
 
 
 def test_the_result_and_the_stop_step_name_the_moves_the_search_used(sample_index: CodeIndex) -> None:

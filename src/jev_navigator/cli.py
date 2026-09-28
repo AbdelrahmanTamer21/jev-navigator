@@ -45,8 +45,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     repository = Path(args.repo).resolve()
     output = Path(args.out).expanduser() if args.out else _default_output(repository)
+    client: TypeSafeJevClient | None = None
     try:
         _load_typesafe_environment(os.environ)
+        client = TypeSafeJevClient()
         manifest = create_evidence_pack(
             repository,
             tuple(args.prefix),
@@ -54,16 +56,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             tuple(args.start),
             output,
             budget,
-            TypeSafeJevClient(),
+            client,
             thresholds=Thresholds.from_env(),
             verbose=args.verbose,
         )
     except Exception as error:
         print(f"jvn find: {error}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("jvn find: cancelled", file=sys.stderr)
+        return 130
+    finally:
+        if client is not None:
+            client.close()
     print(f"evidence pack: {output.resolve()}")
-    print(f"outcome: {manifest['search']['outcome']} ({manifest['search']['calls']} live calls)")
-    return 0
+    search_outcome = manifest["search"]["outcome"]
+    print(f"outcome: {search_outcome} ({manifest['search']['calls']} live calls)")
+    return 130 if search_outcome == "cancelled" else 0
 
 
 def create_evidence_pack(
@@ -87,6 +96,7 @@ def create_evidence_pack(
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
+    journal = ProgressJournal(journal_path, progress)
     progress.start()
     outcome = "failed"
     try:
@@ -104,7 +114,7 @@ def create_evidence_pack(
             client,
             thresholds=thresholds,
             max_calls=budget.max_calls,
-            journal=ProgressJournal(journal_path, progress),
+            journal=journal,
             store=JsonlAnswerStore(output / "answers.jsonl"),
         )
         selection: EntrySelection | None = None
@@ -155,7 +165,11 @@ def create_evidence_pack(
         (output / "report.md").write_text(_report(manifest))
         outcome = str(result.outcome)
         return manifest
+    except KeyboardInterrupt:
+        outcome = "cancelled"
+        raise
     finally:
+        journal.record_terminal(outcome)
         progress.close(outcome)
 
 

@@ -160,6 +160,12 @@ class Judge:
         caps = [judge.max_calls - judge.calls for judge in self._chain() if judge.max_calls is not None]
         return max(0, min(caps)) if caps else None
 
+    def cancel(self) -> None:
+        """Ask a client with an owned cancellation boundary to abort its active requests."""
+        cancel = getattr(self.client, "cancel", None)
+        if cancel is not None:
+            cancel()
+
     def effective(self, *overrides: Mapping[str, float] | None) -> Thresholds:
         thresholds = self.thresholds
         for layer in overrides:

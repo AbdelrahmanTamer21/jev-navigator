@@ -143,6 +143,9 @@ class ProgressJournal(JsonlJournal):
         super().record_failure(request_id, error, response)
         self.progress.failure(request_id, error)
 
+    def record_terminal(self, outcome: str) -> None:
+        self._append({"kind": "terminal", "outcome": outcome})
+
 
 def _usage(response: RawResponse) -> tuple[int, int]:
     try:

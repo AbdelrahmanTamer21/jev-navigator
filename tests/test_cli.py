@@ -14,6 +14,7 @@ from jev_navigator.cli import (
     _load_typesafe_environment,
     _scope_warning,
     create_evidence_pack,
+    main,
 )
 from jev_navigator.directives.find_code import SearchBudget
 from jev_navigator.testing import ScriptedJevClient
@@ -129,6 +130,63 @@ def test_zero_choice_probability_remains_zero_in_the_uninspected_frontier(tmp_pa
 
     target = next(item for item in manifest["search"]["not_inspected"] if "target" in item["signature"])
     assert target["priority"] == 0.0
+
+
+def test_cancelled_navigation_writes_a_resumable_evidence_pack(tmp_path: Path) -> None:
+    # Arrange
+    repository = tmp_path / "repository"
+    commit_files(repository, {"policy.py": "def policy(item):\n    return item\n"})
+
+    class InterruptingClient:
+        model = "interrupting"
+
+        def ask(self, state, questions):
+            del state, questions
+            raise KeyboardInterrupt
+
+    output = tmp_path / "cancelled-evidence"
+
+    # Act
+    manifest = create_evidence_pack(
+        repository,
+        (),
+        "the policy",
+        ("policy.py:1",),
+        output,
+        SearchBudget(beam_width=1),
+        InterruptingClient(),
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    # Assert
+    assert manifest["search"]["outcome"] == "cancelled"
+    assert manifest["search"]["steps"] == 0
+    assert manifest["search"]["not_inspected"][0]["reason"] == "cancelled"
+    assert "Outcome: **cancelled**" in (output / "report.md").read_text()
+    records = [json.loads(line) for line in (output / "journal.jsonl").read_text().splitlines()]
+    assert any(record["kind"] == "history_step" for record in records)
+    assert records[-1]["kind"] == "terminal"
+    assert records[-1]["outcome"] == "cancelled"
+
+
+def test_main_maps_a_cancelled_pack_to_the_shell_interrupt_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    from jev_navigator import cli
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
+    monkeypatch.setattr(
+        cli,
+        "create_evidence_pack",
+        lambda *args, **kwargs: {"search": {"outcome": "cancelled", "calls": 1}},
+    )
+
+    # Act
+    status = main(["find", "the policy", "--repo", str(tmp_path), "--out", str(tmp_path / "out")])
+
+    # Assert
+    assert status == 130
 
 
 def repository_commit(repository: Path) -> str:
