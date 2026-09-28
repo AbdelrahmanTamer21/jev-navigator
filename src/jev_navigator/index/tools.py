@@ -84,4 +84,11 @@ def export_tree(repository: Path, commit: str, prefixes: Sequence[str], destinat
     if archive.returncode != 0:
         raise ToolFailedError(f"git archive exited {archive.returncode}: {archive.stderr.decode()[:300]}")
     with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
-        tar.extractall(destination, filter="data")
+        tar.extractall(destination, filter=_regular_members)
+
+
+def _regular_members(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo | None:
+    """Links are skipped, so a link pointing outside the tree cannot fail or escape the export."""
+    if member.issym() or member.islnk():
+        return None
+    return tarfile.data_filter(member, destination)
