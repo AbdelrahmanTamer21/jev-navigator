@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 
 import pytest
 from git_repos import commit_files
 
 from jev_navigator.cli import (
     SCHEMA_VERSION,
-    _load_typesafe_api_key,
+    _load_typesafe_environment,
     _scope_warning,
     create_evidence_pack,
 )
@@ -136,26 +139,90 @@ def repository_commit(repository: Path) -> str:
     ).stdout.strip()
 
 
-def test_existing_environment_key_wins_over_the_user_dotenv_file(tmp_path: Path) -> None:
+def test_each_existing_typesafe_environment_value_wins_independently(tmp_path: Path) -> None:
+    pytest.importorskip("dotenv")
     path = tmp_path / "env"
-    path.write_text("TYPESAFE_API_KEY=file-value\n")
-    environment = {"TYPESAFE_API_KEY": "process-value"}
+    path.write_text("TYPESAFE_API_KEY=file-key\nTYPESAFE_BASE_URL=http://file.example/gateway\n")
+    environment = {"TYPESAFE_API_KEY": "process-key"}
 
-    _load_typesafe_api_key(environment, path)
+    _load_typesafe_environment(environment, path)
 
-    assert environment["TYPESAFE_API_KEY"] == "process-value"
+    assert environment == {
+        "TYPESAFE_API_KEY": "process-key",
+        "TYPESAFE_BASE_URL": "http://file.example/gateway",
+    }
 
 
 def test_user_dotenv_key_is_loaded_without_shell_evaluation(tmp_path: Path) -> None:
     pytest.importorskip("dotenv")
     path = tmp_path / "env"
-    path.write_text("TYPESAFE_API_KEY='file-value'\nUNRELATED=$(touch should-not-run)\n")
+    path.write_text(
+        "TYPESAFE_API_KEY='file-value'\n"
+        "TYPESAFE_BASE_URL='http://127.0.0.1:4777/jvn'\n"
+        "UNRELATED=$(touch should-not-run)\n"
+    )
     environment: dict[str, str] = {}
 
-    _load_typesafe_api_key(environment, path)
+    _load_typesafe_environment(environment, path)
 
-    assert environment == {"TYPESAFE_API_KEY": "file-value"}
+    assert environment == {
+        "TYPESAFE_API_KEY": "file-value",
+        "TYPESAFE_BASE_URL": "http://127.0.0.1:4777/jvn",
+    }
     assert not (tmp_path / "should-not-run").exists()
+
+
+def test_dotenv_base_url_reaches_the_real_sdk_system_one_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("typesafe_sdk")
+    pytest.importorskip("dotenv")
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    received: list[tuple[str, bytes]] = []
+    response = (
+        b'{"model":"jev-1.13.0","usage":{"input_tokens":1,"output_tokens":1},'
+        b'"answers":{"match":{"type":"noul","noul":0.9}}}'
+    )
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            body = self.rfile.read(int(self.headers["content-length"]))
+            received.append((self.path, body))
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+        monkeypatch.delenv("TYPESAFE_BASE_URL", raising=False)
+        path = tmp_path / "env"
+        path.write_text(
+            "TYPESAFE_API_KEY=local-viewer-key\n"
+            f"TYPESAFE_BASE_URL=http://127.0.0.1:{server.server_port}/jvn\n"
+        )
+        _load_typesafe_environment(os.environ, path)
+
+        answer = TypeSafeJevClient().ask(
+            {"code": "return wanted"},
+            {"match": {"type": "noul", "instructions": "Does code return wanted?"}},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert received and received[0][0] == "/jvn/v1/systemone"
+    assert b'"code":"return wanted"' in received[0][1]
+    assert answer.noul("match").probability == 0.9
 
 
 def test_large_scope_warning_starts_above_twenty_thousand_files() -> None:

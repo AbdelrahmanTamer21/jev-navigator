@@ -46,7 +46,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     repository = Path(args.repo).resolve()
     output = Path(args.out).expanduser() if args.out else _default_output(repository)
     try:
-        _load_typesafe_api_key(os.environ)
+        _load_typesafe_environment(os.environ)
         manifest = create_evidence_pack(
             repository,
             tuple(args.prefix),
@@ -229,20 +229,23 @@ def _scope_warning(file_count: int) -> str | None:
     return f"jvn: large scope contains {file_count:,} tracked files; indexing may take longer"
 
 
-def _load_typesafe_api_key(
+def _load_typesafe_environment(
     environment: MutableMapping[str, str],
     path: Path | None = None,
 ) -> None:
-    """Use the process key first, then the user's jvn dotenv file."""
-    if environment.get("TYPESAFE_API_KEY", "").strip():
-        return
+    """Load official TypeSafe SDK settings, with each process value taking precedence."""
     from dotenv import dotenv_values
 
     path = path or Path.home() / ".config/jvn/env"
-    key = dotenv_values(path).get("TYPESAFE_API_KEY") if path.is_file() else None
-    if not isinstance(key, str) or not key.strip():
+    configured = dotenv_values(path) if path.is_file() else {}
+    for name in ("TYPESAFE_API_KEY", "TYPESAFE_BASE_URL"):
+        if environment.get(name, "").strip():
+            continue
+        value = configured.get(name)
+        if isinstance(value, str) and value.strip():
+            environment[name] = value
+    if not environment.get("TYPESAFE_API_KEY", "").strip():
         raise RuntimeError("TYPESAFE_API_KEY is unset and ~/.config/jvn/env does not provide it")
-    environment["TYPESAFE_API_KEY"] = key
 
 
 def _parse_start(index: CodeIndex, value: str) -> Place:

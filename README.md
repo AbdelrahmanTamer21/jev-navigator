@@ -52,8 +52,10 @@ jvn find "the check that limits how many items an order may have" \
   --max-line-chars 240
 ```
 
-An explicit `TYPESAFE_API_KEY` environment variable wins. Otherwise `jvn` reads only
-`~/.config/jvn/env` with a dotenv parser; it does not execute that file or print the key.
+Explicit `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` process values win independently. Otherwise
+`jvn` reads those settings from `~/.config/jvn/env` with a dotenv parser; it does not execute that
+file or print the values. `TYPESAFE_BASE_URL` is the API root before `/v1/systemone`, such as
+`http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
 
 `--start PATH:LINE` is repeatable and optional. A useful start is an entry point or caller, rather
 than the target function itself. Without one, the first code span in every scoped file is queued as
