@@ -3,8 +3,10 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
+from git_repos import commit_files
 
 from jev_navigator.directives.find_code import OPEN_FIRST, Outcome, SearchBudget, find_code
 from jev_navigator.directives.places import (
@@ -593,3 +595,74 @@ def test_a_resumed_search_opens_its_waiting_pick_first(sample_index: CodeIndex) 
         entry.picked for entry in first.not_inspected if entry.signature.startswith("app/orders.py:10 ")
     ] == [True]
     assert opened_first_lines(client)[1] == "def cancel(order_id):"
+
+
+def long_function_index(root: Path) -> CodeIndex:
+    """``handle`` is about 16,000 characters: a call at its top, filler lines, then a nested helper."""
+    filler = "".join(
+        f"    step_{number} = 'a line of filler text that pads the function out to length'\n"
+        for number in range(200)
+    )
+    parameters = ", ".join(f"option_{number}=None" for number in range(30))
+    handle = (
+        f"def handle(event):\n    helper(event)\n{filler}"
+        "    def helper(event):\n        return event\n\n    return event\n"
+    )
+    commit_files(root, {"handler.py": handle + f"\n\ndef configure({parameters}):\n    return None\n"})
+    return CodeIndex(root, ["handler.py"])
+
+
+def test_a_slice_longer_than_the_limit_is_cut_on_a_line_boundary(tmp_path: Path) -> None:
+    # Arrange
+    index = long_function_index(tmp_path)
+    client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
+        choices={"open_first": {"none": 1.0}},
+    )
+
+    # Act
+    result = find_code(index, Judge(client), TARGET, [place_for_line(index, "handler.py", 2, "start")])
+
+    # Assert
+    shown = client.requests[0][0]["slice"]
+    last_line = int(shown["lines"].split("-")[1])
+    assert len(shown["code"]) <= 12_000 + 80
+    assert shown["code"].endswith("lines at 12000 characters]")
+    assert last_line < index.find_definition("handle")[0].end
+    assert result.starts[0].code.span.end == last_line
+
+
+def test_a_place_inside_the_cut_off_tail_is_still_offered(tmp_path: Path) -> None:
+    # Arrange
+    index = long_function_index(tmp_path)
+    client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
+        choices={"open_first": {"none": 1.0}},
+    )
+
+    # Act
+    find_code(index, Judge(client), TARGET, [place_for_line(index, "handler.py", 2, "start")])
+
+    # Assert
+    offered = [candidate["signature"] for candidate in client.requests[0][0]["candidates"]]
+    assert any("`def helper(event):`" in signature for signature in offered)
+
+
+def test_a_long_signature_is_cut_the_same_way_in_the_candidate_and_the_pick_options(tmp_path: Path) -> None:
+    # Arrange
+    index = long_function_index(tmp_path)
+    client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
+        choices={"open_first": {"none": 1.0}},
+    )
+
+    # Act
+    find_code(index, Judge(client), TARGET, [place_for_line(index, "handler.py", 2, "start")])
+
+    # Assert
+    state, questions = client.requests[0]
+    signatures = [candidate["signature"] for candidate in state["candidates"]]
+    pick = next(question for question_id, question in questions.items() if "open_first" in question_id)
+    configure = next(signature for signature in signatures if "def configure(" in signature)
+    assert len(configure) == 240 + len(" [line cut]") and configure.endswith(" [line cut]")
+    assert [pick["criteria"][str(slot)] for slot in range(len(signatures))] == signatures

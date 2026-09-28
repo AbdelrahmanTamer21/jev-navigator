@@ -213,8 +213,10 @@ one place can be wrong. When nothing reaches the yes bar, rank the opened places
 holds exactly that revision (use `CodeIndex.at_commit` for history); a mismatch raises
 `RevisionMismatchError`. Nothing escalates on its own. The default budget is 24 steps and 24 calls
 with a beam of 3 and depth 3. Everything is a parameter: `SearchBudget` also sets
-`neighbours_per_kind` and `preview_lines`, and `questions=SearchQuestions(found=..., could_contain=...,
-open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
+`neighbours_per_kind`, `preview_lines`, `max_line_chars` (240: longer lines and signatures are cut and
+marked "[line cut]") and `max_slice_chars` (12,000: an opened place is cut on a line boundary with a
+note, and `Visit.code` ends at the last shown line), and `questions=SearchQuestions(found=...,
+could_contain=..., open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
 `places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `same_file`,
 `keys_mentioned`, `co_changed`, `lines_before`, `rest_of_file`) to a function of the index and the
 opened code that returns places. Pass a subset, or add a function of your own; `MOVES` itself is

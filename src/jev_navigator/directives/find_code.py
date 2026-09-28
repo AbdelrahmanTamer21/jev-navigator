@@ -41,6 +41,7 @@ from ..judgments.judge import CallCapReachedError, Judge
 from ..judgments.questions import Check, Criterion, Pick, content_hash
 from ..judgments.thresholds import NoulVerdict, Thresholds
 from .places import MOVES, Move, Place, neighbours_and_omissions
+from .shown import MAX_LINE_CHARS, MAX_SLICE_CHARS, cut_long_line, shown_slice
 
 FOUND = Check(
     name="contains_target",
@@ -123,6 +124,8 @@ class SearchBudget:
     beam_width: int = 3
     neighbours_per_kind: int = 8
     preview_lines: int = 8
+    max_slice_chars: int = MAX_SLICE_CHARS
+    max_line_chars: int = MAX_LINE_CHARS
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> SearchBudget:
@@ -137,6 +140,8 @@ class SearchBudget:
                 "beam_width",
                 "neighbours_per_kind",
                 "preview_lines",
+                "max_slice_chars",
+                "max_line_chars",
             )
             if f"JEV_NAVIGATOR_{name.upper()}" in environment
         }
@@ -145,7 +150,9 @@ class SearchBudget:
 
 @dataclass(frozen=True)
 class Visit:
-    """An opened place: its code, the path from a start place, and the found verdict."""
+    """An opened place: the code the request showed of it (cut at ``SearchBudget.max_slice_chars``
+    on a line boundary, so ``code.span`` ends at the last shown line), the path from a start place,
+    and the found verdict."""
 
     place_key: str
     code: CodeSlice
@@ -467,14 +474,18 @@ def _calls_left(search: _Search, judge: Judge) -> int:
 
 @dataclass(frozen=True)
 class _Opening:
+    """``code`` is what the request shows of the place; ``opened_key`` names all of it."""
+
     item: _Queued
     code: CodeSlice
+    opened_key: str
     candidates: list[Place]
     capped: tuple[NotInspected, ...] = ()
 
 
 def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
-    """Opens a place in code; the same code reached by another path is not judged twice."""
+    """Opens a place in code; the same code reached by another path is not judged twice. Moves list
+    neighbours from all of the code, and only lines the request does not show can hold a new place."""
     code = item.place.open()
     fingerprint = content_hash(code.text)
     if fingerprint in search.judged_code:
@@ -482,10 +493,11 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
     search.judged_code.add(fingerprint)
     search.visited.add(code.key)
     search.steps += 1
+    shown = shown_slice(code, search.budget.max_slice_chars, search.budget.max_line_chars)
     if item.depth >= search.budget.max_depth:
-        return _Opening(item, code, [])
+        return _Opening(item, shown, code.key, [])
     candidates, omitted = neighbours_and_omissions(
-        index, code, search.budget.neighbours_per_kind, search.moves
+        index, code, search.budget.neighbours_per_kind, search.moves, shown.span
     )
     capped = tuple(
         NotInspected(
@@ -496,7 +508,7 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
     )
     search.set_aside.extend(capped)
     unseen = [place for place in candidates if place.key not in search.visited]
-    return _Opening(item, code, [place for place in unseen if place.open().text.strip()], capped)
+    return _Opening(item, shown, code.key, [place for place in unseen if place.open().text.strip()], capped)
 
 
 @dataclass(frozen=True)
@@ -511,7 +523,7 @@ def _opening_request(search: _Search, opening: _Opening) -> _OpeningRequest:
     state = {
         "target": search.target,
         "slice": {"file": code.span.file, "lines": f"{code.span.start}-{code.span.end}", "code": code.text},
-        "candidates": [_candidate_state(place, search.budget.preview_lines) for place in candidates],
+        "candidates": [_candidate_state(place, search.budget) for place in candidates],
     }
     asked = search.questions
     questions = {asked.found.question_id: asked.found.to_question()}
@@ -520,7 +532,10 @@ def _opening_request(search: _Search, opening: _Opening) -> _OpeningRequest:
             f"candidates[{slot}]"
         )
     if asked.open_first is not None and len(candidates) > 1:
-        options = {str(slot): place.signature for slot, place in enumerate(candidates)}
+        options = {
+            str(slot): cut_long_line(place.signature, search.budget.max_line_chars)
+            for slot, place in enumerate(candidates)
+        }
         questions[asked.open_first.question_id] = asked.open_first.to_question(options)
     sources = {asked.found.question_id: code.source()}
     sources.update(
@@ -557,8 +572,8 @@ async def _ask_within_cap_async(judge: Judge, search: _Search, opening: _Opening
 
 def _set_aside_unasked(search: _Search, opening: _Opening) -> None:
     item = opening.item
-    search.visited -= {item.place.key, opening.code.key}
-    search.judged_code.discard(content_hash(opening.code.text))
+    search.visited -= {item.place.key, opening.opened_key}
+    search.judged_code.discard(content_hash(item.place.open().text))
     search.steps -= 1
     search.set_aside.append(
         NotInspected(
@@ -590,7 +605,12 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
         path = (*item.path, place.key)
         search.push(place, probability, item.depth + 1, path, _PICK if slot == picked else _MOVE)
         offered.append(
-            {"place": place.key, "signature": place.signature, "probability": probability, "verdict": verdict}
+            {
+                "place": place.key,
+                "signature": cut_long_line(place.signature, search.budget.max_line_chars),
+                "probability": probability,
+                "verdict": verdict,
+            }
         )
     not_opened = [*opening.capped, *search.set_aside[set_aside_before:]]
     search.history.append(_open_step(search, opening, visit, offered, response, not_opened))
@@ -691,11 +711,14 @@ def _could_contain(search: _Search, response, slot: int) -> float:
     return response.noul(f"{search.questions.could_contain.question_id}#{slot}").probability
 
 
-def _candidate_state(place: Place, preview_lines: int) -> dict:
+def _candidate_state(place: Place, budget: SearchBudget) -> dict:
     """The signature line plus the first lines of the candidate's code, so the judgment rests on
-    more than a name."""
-    preview = "\n".join(place.open().text.split("\n")[:preview_lines])
-    return {"signature": place.signature, "preview": preview}
+    more than a name; every line is cut at the request's line limit."""
+    lines = place.open().text.split("\n")[: budget.preview_lines]
+    return {
+        "signature": cut_long_line(place.signature, budget.max_line_chars),
+        "preview": "\n".join(cut_long_line(line, budget.max_line_chars) for line in lines),
+    }
 
 
 def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -> FindResult:
