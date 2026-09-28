@@ -298,12 +298,8 @@ class CodeIndex:
         return self.read_slice(span, origin)
 
     def search_text(self, text: str, max_hits: int = MAX_TEXT_HITS) -> tuple[TextHit, ...]:
-        matches = tools.ripgrep_fixed(text, self.files, self.root, max_hits)
-        hits = sorted(
-            TextHit(match["path"]["text"], match["line_number"], match["lines"]["text"].rstrip("\n"))
-            for match in matches
-            if match["path"]["text"] in self._scope
-        )
+        found = tools.ripgrep_fixed(text, self.files, self.root, max_hits)
+        hits = sorted(hit for hit in found if hit.file in self._scope)
         return tuple(hits[:max_hits])
 
     def imports(self, file: str) -> tuple[str, ...]:

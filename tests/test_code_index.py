@@ -6,7 +6,7 @@ import pytest
 from git_repos import commit_all, git
 
 from jev_navigator.index.code_index import CodeIndex, ScopeTooWideError
-from jev_navigator.index.spans import Span
+from jev_navigator.index.spans import Span, TextHit
 
 
 def test_functions_in_lists_python_and_typescript_functions_with_names(sample_index: CodeIndex) -> None:
@@ -380,6 +380,31 @@ def test_an_index_at_a_commit_reads_a_file_whose_name_holds_a_newline(tmp_path: 
     assert historical.files == ("app/line\nbreak.py", "app/plain.py")
     assert (historical.root / "app/line\nbreak.py").read_text().endswith("return 1\n")
     assert (historical.root / "app/plain.py").read_text().endswith("return 2\n")
+
+
+def test_search_text_reads_a_line_that_is_not_utf8_as_the_index_does(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "labels.py").write_bytes(b'LABEL = "caf\xe9"\nLIMIT = 5\n')
+    index = CodeIndex(tmp_path, ["labels.py"])
+
+    # Act
+    hits = index.search_text("LABEL")
+
+    # Assert
+    assert hits == (TextHit("labels.py", 1, index.lines("labels.py")[0]),)
+    assert hits[0].text == 'LABEL = "caf\ufffd"'
+
+
+def test_search_text_reads_a_line_holding_a_unicode_line_separator(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "messages.js").write_text('const MESSAGE = "first\u2028second";\n')
+    index = CodeIndex(tmp_path, ["messages.js"])
+
+    # Act
+    hits = index.search_text("MESSAGE")
+
+    # Assert
+    assert [(hit.file, hit.line) for hit in hits] == [("messages.js", 1)]
 
 
 def test_line_numbers_follow_newlines_only_like_the_parser(tmp_path: Path) -> None:
