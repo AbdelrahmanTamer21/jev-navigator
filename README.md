@@ -158,7 +158,11 @@ holds exactly that revision (use `CodeIndex.at_commit` for history); a mismatch 
 `RevisionMismatchError`. Nothing escalates on its own. The default budget is 24 steps and 24 calls
 with a beam of 3 and depth 3. Everything is a parameter: `SearchBudget` also sets
 `neighbours_per_kind` and `preview_lines`, and `questions=SearchQuestions(found=..., could_contain=...,
-open_first=None)` replaces the wording. The directives take their check (`check=`) as a parameter too.
+open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
+`places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `same_file`,
+`keys_mentioned`, `co_changed`, `lines_before`, `rest_of_file`) to a function of the index and the
+opened code that returns places. Pass a subset, or add a function of your own. The directives take
+their check (`check=`) as a parameter too.
 
 Directives on top: `context_for_comment` and `find_similar_code`. The library finds code; answering
 questions about that code (is a comment accurate, does a claim hold) is a layer you build on top. A new

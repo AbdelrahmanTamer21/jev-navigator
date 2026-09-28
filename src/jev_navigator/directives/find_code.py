@@ -38,7 +38,7 @@ from ..index.spans import CodeSlice
 from ..judgments.judge import CallCapReachedError, Judge
 from ..judgments.questions import Check, Criterion, Pick, content_hash
 from ..judgments.thresholds import NoulVerdict, Thresholds
-from .places import Place, neighbours_and_omissions
+from .places import Move, Place, neighbours_and_omissions
 
 FOUND = Check(
     name="contains_target",
@@ -199,6 +199,7 @@ class _Search:
     questions: SearchQuestions = DEFAULT_SEARCH_QUESTIONS
     stop_rule: StopRule | None = None
     history: History = field(default_factory=History)
+    moves: Mapping[str, Move] | None = None
     stop_judgment: HistoryJudgment | None = None
     queue: list[_Queued] = field(default_factory=list)
     visited: set[str] = field(default_factory=set)
@@ -246,14 +247,26 @@ def find_code(
     resume: FindResult | None = None,
     commit: str | None = None,
     stop_rule: StopRule | None = None,
+    moves: Mapping[str, Move] | None = None,
 ) -> FindResult:
     """``commit``: the revision the caller means; the index must hold exactly it. ``resume``: continue
     a stopped search from its frontier with a fresh budget. ``stop_rule`` (off by default): after each
     round the caller's check is asked over the history; a yes ends the search with outcome
-    ``stop_rule``. Each round's places are asked concurrently in threads; ``find_code_async`` is the
-    same search for an async client."""
+    ``stop_rule``. ``moves`` chooses how neighbours are listed (default ``places.MOVES``); pass a
+    subset, or add a move of your own. Each round's places are asked concurrently in threads;
+    ``find_code_async`` is the same search for an async client."""
     search, judge = _begin(
-        index, judge, target_description, start, budget, thresholds, questions, resume, commit, stop_rule
+        index,
+        judge,
+        target_description,
+        start,
+        budget,
+        thresholds,
+        questions,
+        resume,
+        commit,
+        stop_rule,
+        moves,
     )
     while (stop := _stop_reason(search, judge)) is None:
         opened = _open_round(index, search, judge)
@@ -278,11 +291,22 @@ async def find_code_async(
     resume: FindResult | None = None,
     commit: str | None = None,
     stop_rule: StopRule | None = None,
+    moves: Mapping[str, Move] | None = None,
 ) -> FindResult:
     """``find_code`` with each round's places sent concurrently with ``asyncio.gather``; budgets,
     masking, the store, the journal and the history work exactly as in ``find_code``."""
     search, judge = _begin(
-        index, judge, target_description, start, budget, thresholds, questions, resume, commit, stop_rule
+        index,
+        judge,
+        target_description,
+        start,
+        budget,
+        thresholds,
+        questions,
+        resume,
+        commit,
+        stop_rule,
+        moves,
     )
     while (stop := _stop_reason(search, judge)) is None:
         opened = _open_round(index, search, judge)
@@ -307,6 +331,7 @@ def _begin(
     resume: FindResult | None,
     commit: str | None,
     stop_rule: StopRule | None,
+    moves: Mapping[str, Move] | None,
 ) -> tuple[_Search, Judge]:
     if commit is not None:
         index.require_commit(commit)
@@ -318,6 +343,7 @@ def _begin(
         questions,
         stop_rule,
         stop_rule.new_history(target) if stop_rule else History(sections={SUBJECT: target}),
+        moves,
     )
     if resume is not None:
         _restore(search, resume)
@@ -433,7 +459,9 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
     search.steps += 1
     if item.depth >= search.budget.max_depth:
         return _Opening(item, code, [])
-    candidates, omitted = neighbours_and_omissions(index, code, search.budget.neighbours_per_kind)
+    candidates, omitted = neighbours_and_omissions(
+        index, code, search.budget.neighbours_per_kind, search.moves
+    )
     capped = tuple(
         NotInspected(
             place.key, place.signature, "capped", 0.5, item.depth + 1, (*item.path, place.key), place

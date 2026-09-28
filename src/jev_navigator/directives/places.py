@@ -7,7 +7,7 @@ short text Jev reads when deciding whether the target could be inside it. Jev ne
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from ..index.code_index import CodeIndex
@@ -56,33 +56,34 @@ def place_for_line(index: CodeIndex, file: str, line: int, relation: str) -> Pla
     return window_place(index, file, line, relation)
 
 
+Move = Callable[[CodeIndex, CodeSlice], list[Place]]
+
+
 def neighbours(
-    index: CodeIndex, opened: CodeSlice, per_kind: int = DEFAULT_NEIGHBOURS_PER_KIND
+    index: CodeIndex,
+    opened: CodeSlice,
+    per_kind: int = DEFAULT_NEIGHBOURS_PER_KIND,
+    moves: Mapping[str, Move] | None = None,
 ) -> list[Place]:
-    return neighbours_and_omissions(index, opened, per_kind)[0]
+    return neighbours_and_omissions(index, opened, per_kind, moves)[0]
 
 
 def neighbours_and_omissions(
-    index: CodeIndex, opened: CodeSlice, per_kind: int = DEFAULT_NEIGHBOURS_PER_KIND
+    index: CodeIndex,
+    opened: CodeSlice,
+    per_kind: int = DEFAULT_NEIGHBOURS_PER_KIND,
+    moves: Mapping[str, Move] | None = None,
 ) -> tuple[list[Place], list[Place]]:
-    """Callers, callees defined in scope, code that refers to it without calling it, code it passes
-    on without calling, the other functions of its file, lines anywhere in scope (docs and config
-    included) that mention its quoted keys or environment variables, files usually committed with it,
-    and the lines before and after it, at most ``per_kind`` per kind. The
-    places cut by that cap come back separately, so a caller can report them as not inspected."""
+    """The places each move lists for ``opened``, at most ``per_kind`` per move, in the order of
+    ``moves`` (default ``MOVES``: callers, callees, code that refers to it without calling it, code
+    it passes on without calling, the other functions of its file, lines anywhere in scope that
+    mention its quoted keys or environment variables, files usually committed with it, and the lines
+    before and after it). A move is any function of the index and the opened code that returns
+    places, so callers can drop moves or add their own. The places cut by the cap come back
+    separately, so a caller can report them as not inspected."""
     kept: list[Place] = []
     omitted: list[Place] = []
-    for build in (
-        _callers,
-        _callees,
-        _referenced_by,
-        _passed_on,
-        _same_file,
-        _keys_mentioned,
-        _co_changed,
-        _lines_before,
-        _rest_of_file,
-    ):
+    for build in (MOVES if moves is None else moves).values():
         places = [place for place in _unique(build(index, opened)) if place.key != opened.key]
         kept += places[:per_kind]
         omitted += places[per_kind:]
@@ -211,3 +212,16 @@ def _is_named(span: Span) -> bool:
 
 def starting_places(index: CodeIndex, locations: Sequence[tuple[str, int]]) -> list[Place]:
     return [place_for_line(index, file, line, "start") for file, line in locations]
+
+
+MOVES: Mapping[str, Move] = {
+    "callers": _callers,
+    "callees": _callees,
+    "referenced_by": _referenced_by,
+    "passed_on": _passed_on,
+    "same_file": _same_file,
+    "keys_mentioned": _keys_mentioned,
+    "co_changed": _co_changed,
+    "lines_before": _lines_before,
+    "rest_of_file": _rest_of_file,
+}
