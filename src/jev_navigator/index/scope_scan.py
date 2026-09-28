@@ -158,11 +158,20 @@ def _references_from_matches(matches) -> tuple[ReferenceMatch, ...]:
     return tuple(
         sorted(
             {
-                ReferenceMatch(match["file"], _line_of(match), match["ruleId"], match["text"])
+                ReferenceMatch(
+                    match["file"],
+                    _line_of(match),
+                    match["ruleId"],
+                    _reference_name(match["ruleId"], match["text"]),
+                )
                 for match in matches
             }
         )
     )
+
+
+def _reference_name(role: str, text: str) -> str:
+    return last_identifier(text) if role == "argument" else text
 
 
 def receiver_of(expression: str) -> str | None:
@@ -191,10 +200,13 @@ def _structure_rules(languages: Sequence[str]) -> str:
 
 
 def _call_rules(languages: Sequence[str]) -> str:
-    return "\n---\n".join(
-        f"id: call\nlanguage: {grammar_of(language)}\nrule:\n  pattern: $CALLEE($$$)"
-        for language in languages
-    )
+    documents = []
+    for language in languages:
+        grammar = grammar_of(language)
+        documents.append(f"id: call\nlanguage: {grammar}\nrule:\n  pattern: $CALLEE($$$)")
+        if grammar != "python":
+            documents.append(f"id: call\nlanguage: {grammar}\nrule:\n  pattern: new $CALLEE($$$)")
+    return "\n---\n".join(documents)
 
 
 def _kind_rule(rule_id: str, language: str, kinds: Sequence[str]) -> str:

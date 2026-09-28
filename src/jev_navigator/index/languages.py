@@ -182,6 +182,11 @@ class ReferenceRole:
 
 _PYTHON_ROLES = (
     ReferenceRole("argument", ("kind: argument_list", "kind: keyword_argument\nfield: value")),
+    ReferenceRole(
+        "argument",
+        ("kind: argument_list", "kind: keyword_argument\nfield: value"),
+        kind="attribute",
+    ),
     ReferenceRole("decorator", ("kind: decorator",)),
     ReferenceRole("collection", ("kind: pair\nfield: value", "kind: list", "kind: tuple", "kind: set")),
     ReferenceRole("assignment", ("kind: assignment\nfield: right",)),
@@ -205,6 +210,7 @@ _COMPARISON_OR_LOGIC = r"^(===|!==|==|!=|<|>|<=|>=|&&|\|\||\?\?|instanceof|in)$"
 
 _SCRIPT_ROLES = (
     ReferenceRole("argument", ("kind: arguments",)),
+    ReferenceRole("argument", ("kind: arguments",), kind="member_expression"),
     ReferenceRole("decorator", ("kind: decorator",)),
     ReferenceRole("collection", ("kind: pair\nfield: value", "kind: array")),
     ReferenceRole("collection", kind="shorthand_property_identifier"),

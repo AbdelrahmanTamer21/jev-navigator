@@ -112,7 +112,9 @@ comments.code_above_comment(index, file, line)  # CodeAbove(code or None, reason
 Imports are read per statement, so an import spanning several lines counts like any other.
 TypeScript and JavaScript specifiers also resolve through the path aliases (`compilerOptions.paths` and
 `baseUrl`) of the nearest `tsconfig.json`, following relative `extends`; comments and trailing commas in
-the config are fine. Like TypeScript, an exact alias wins, otherwise the wildcard with the longest
+the config are fine. A named import follows transitive `export * from` barrel files inside the index;
+cycles terminate, and more than one matching definition remains a `candidate`. Like TypeScript, an
+exact alias wins, otherwise the wildcard with the longest
 prefix; only its targets are tried, then `baseUrl`. A config that is a symbolic link, or that extends or
 points outside the index root, is not read: its aliases stay unknown and those bindings stay
 `candidate`. `jsconfig.json` and tsconfig `references` are not read. `CodeIndex.at_commit` brings the
@@ -155,7 +157,9 @@ definition elsewhere with no import), `unresolved` when nothing in scope defines
 the definition may sit in a file the index could not parse. A host with a
 real resolver (a code-intelligence service, a TypeScript alias resolver, an LSP) passes it as
 `binding_resolver=`; its answer wins. Trace steps and search neighbours carry the binding, so a
-candidate edge is never presented as a proven call.
+candidate edge is never presented as a proven call. Script constructor expressions such as `new
+MemoryAdapter()` are calls too. A bound method passed as an argument is indexed under its member name,
+so navigation can offer the method definition while keeping its name-only binding honest.
 
 Every `CodeSlice` records its source: `slice.source()` gives the file, line range, commit (with
 `+worktree` when the file had uncommitted changes) and how it was reached.
@@ -253,9 +257,10 @@ on its own scope, so searches sharing one judge never use up each other's budget
 the central search. Use it only when the target is described by meaning; anything code can decide
 (the callers of X) is an operation. For each opened place, one request asks "Does `slice.code`
 contain the code described in `target.description`?" and, per neighbour code lists (callers, with
-callers in test files after the others; callees, the ones called from fewest places first; code that
+callers in test files after the others; callees, proven production targets first and then the ones
+called from fewest places; code that
 refers to it or that it passes on without a call, as an argument, collection entry, assignment,
-decorator, export, return, method receiver, type or condition; the other functions of its file, nearest
+decorator, export, return, method receiver or type; the other functions of its file, nearest
 first; lines anywhere in scope (docs and config too) that mention its environment variables or its
 quoted keys (six characters or more with a dot, underscore, colon, slash or dash), the
 rarest key first, skipping a key found on more than 30 lines; co-changed files; and the lines before and
@@ -263,7 +268,9 @@ after it), whether the target could be inside it. Places that open the same line
 listed once, whatever move found them, and a place wholly inside the opened code is not listed;
 identical code in two files stays two places. A line outside any function opens its class or
 module-level declaration when that has at most 120 lines; in a longer one it opens the window around the
-line under the definition's name. Either way the moves can follow that name. Each round opens
+line under the definition's name. Either way the moves can follow that name. Callees and passed-on
+definitions are also offered from anonymous functions and windows. For an anonymous nested function,
+same-file navigation first offers the nearest named containing symbol. Each round opens
 `beam_width` places concurrently: start places first, then the neighbours Jev picked to open next, in
 the order it picked them, then the other neighbours by falling `could_contain` probability, with a
 visited set and a content cache. An `open_first` Choice picks the neighbour to open next, with the

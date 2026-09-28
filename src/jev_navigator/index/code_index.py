@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 from . import tools
 from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts
 from .fact_cache import FactCache
-from .imports import imported_modules, imported_names, resolve_import
+from .imports import imported_modules, imported_names, reexported_names, resolve_import
 from .languages import (
     language_of,
 )
@@ -444,7 +444,28 @@ class CodeIndex:
         if specifier is None:
             return ()
         resolved = resolve_import(specifier, file, self._scope, self._script_paths(file))
-        return (resolved,) if resolved else ()
+        if resolved is None:
+            return ()
+        found = [resolved]
+        pending = [resolved]
+        seen = {resolved}
+        while pending:
+            exporter = pending.pop()
+            source = "\n".join(self._lines_of(exporter))
+            for names, target_specifier in reexported_names(source, exporter):
+                if names is not None and name not in names:
+                    continue
+                target = resolve_import(
+                    target_specifier,
+                    exporter,
+                    self._scope,
+                    self._script_paths(exporter),
+                )
+                if target is not None and target not in seen:
+                    seen.add(target)
+                    found.append(target)
+                    pending.append(target)
+        return tuple(found)
 
     def _read_imported_names(self, file: str) -> dict[str, str]:
         return imported_names("\n".join(self._lines_of(file)), file)

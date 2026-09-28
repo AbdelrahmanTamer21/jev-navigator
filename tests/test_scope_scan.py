@@ -11,6 +11,7 @@ from jev_navigator.index import tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.languages import has_flow_pragma
+from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
 
@@ -339,6 +340,69 @@ def test_plain_javascript_is_unchanged_whether_or_not_flow_files_share_the_scope
         assert mixed.find_callees(span) == alone.find_callees(span)
         assert mixed.find_references(name) == alone.find_references(name)
     assert alone.unparsed_files == set()
+
+
+def test_script_constructors_are_calls_with_their_existing_binding(tmp_path: Path) -> None:
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/memory.ts": "export class MemoryAdapter {}\n",
+            "src/build.ts": (
+                'import { MemoryAdapter } from "./memory";\n'
+                "export function build() { return new MemoryAdapter(); }\n"
+            ),
+        },
+    )
+    build = index.find_definition("build")[0]
+
+    # Act
+    edge = next(edge for edge in index.callee_edges(build) if edge.name == "MemoryAdapter")
+
+    # Assert
+    assert edge.binding.status == "resolved"
+    assert edge.binding.target == Span("src/memory.ts", 1, 1, "MemoryAdapter")
+
+
+@pytest.mark.parametrize(
+    ("files", "name", "file"),
+    [
+        (
+            {
+                "app/plugins.py": "def order_created(order):\n    return order\n",
+                "app/orders.py": (
+                    "def place_order(manager, order, call_event):\n"
+                    "    call_event(manager.order_created, order)\n"
+                ),
+            },
+            "order_created",
+            "app/orders.py",
+        ),
+        (
+            {
+                "src/plugins.ts": "export function orderCreated(order) { return order; }\n",
+                "src/orders.ts": (
+                    "export function placeOrder(manager, order, callEvent) {\n"
+                    "  callEvent(manager.orderCreated, order);\n"
+                    "}\n"
+                ),
+            },
+            "orderCreated",
+            "src/orders.ts",
+        ),
+    ],
+)
+def test_a_bound_member_passed_as_an_argument_uses_the_member_name(
+    tmp_path: Path, files: dict[str, str], name: str, file: str
+) -> None:
+    # Arrange
+    index = committed(tmp_path, files)
+
+    # Act
+    references = index.find_references(name)
+
+    # Assert
+    assert [(reference.file, reference.role) for reference in references] == [(file, "argument")]
 
 
 def test_an_unsupported_flow_construct_keeps_its_file_incomplete(tmp_path: Path) -> None:

@@ -108,6 +108,30 @@ def imported_names(source: str, path: str) -> dict[str, str]:
     return names
 
 
+def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
+    """Names re-exported from each script module; ``None`` means an ``export *`` wildcard."""
+    if path.endswith(".py"):
+        return ()
+    exports = []
+    for match in _SCRIPT_FROM.finditer(_without_script_comments(source)):
+        keyword, clause, specifier = match.groups()
+        if keyword != "export":
+            continue
+        stripped = clause.strip()
+        if stripped == "*":
+            exports.append((None, specifier))
+            continue
+        names = frozenset(
+            _local(part)
+            for braces in _SCRIPT_BRACES.findall(clause)
+            for part in braces.split(",")
+            if part.strip()
+        )
+        if names:
+            exports.append((names, specifier))
+    return tuple(exports)
+
+
 def _without_script_comments(source: str) -> str:
     """The source with ``//`` and ``/* */`` comments removed; string literals are kept whole, so a
     ``//`` inside a string is not taken for a comment."""
