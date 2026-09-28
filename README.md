@@ -53,6 +53,11 @@ comments.comments_in_diff(index, base, head)  # changed comments, and comments a
 comments.code_above_comment(index, file, line)  # CodeAbove(code or None, reason)
 ```
 
+Imports are read per statement, so an import spanning several lines counts like any other.
+TypeScript and JavaScript specifiers also resolve through the path aliases (`compilerOptions.paths` and
+`baseUrl`) of the nearest `tsconfig.json`, following relative `extends`; comments and trailing commas in
+the config are fine. `CodeIndex.at_commit` brings the commit's tsconfig files along, outside the scope.
+
 Calls are found by name in the syntax tree, which is not a resolved binding. Every call carries a
 `Binding(status, reason, target)`: `resolved` when a definition in the same file or an import naming
 it proves the target, `candidate` when only the name matches (a method on an unknown receiver, or a
