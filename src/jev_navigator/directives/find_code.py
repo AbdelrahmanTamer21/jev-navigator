@@ -80,17 +80,21 @@ COULD_CONTAIN = Check(
         ),
     ),
 )
+NO_CLEAR_FIRST = "none"
 OPEN_FIRST = Pick(
     name="open_first",
     instructions=(
         "Which entry of `candidates` most likely contains the code described in `target.description`?"
     ),
+    extra_options=((NO_CLEAR_FIRST, "None of the entries is likely to contain it."),),
 )
 
 
 @dataclass(frozen=True)
 class SearchQuestions:
-    """The wording find_code asks with. Replace any part; a new wording is a new question id."""
+    """The wording find_code asks with. Replace any part; a new wording is a new question id.
+    ``open_first`` gets the candidates as options named by their position; its own no-match option,
+    if any, must be named ``none``."""
 
     found: Check = FOUND
     could_contain: Check = COULD_CONTAIN
@@ -98,8 +102,6 @@ class SearchQuestions:
 
 
 DEFAULT_SEARCH_QUESTIONS = SearchQuestions()
-NO_CLEAR_FIRST = "none"
-NO_CLEAR_FIRST_TEXT = "No entry is more likely than the others."
 
 
 class Outcome(StrEnum):
@@ -494,9 +496,7 @@ def _opening_request(search: _Search, opening: _Opening) -> _OpeningRequest:
         )
     if asked.open_first is not None and len(candidates) > 1:
         options = {str(slot): place.signature for slot, place in enumerate(candidates)}
-        questions[asked.open_first.question_id] = asked.open_first.to_question(
-            {**options, NO_CLEAR_FIRST: NO_CLEAR_FIRST_TEXT}
-        )
+        questions[asked.open_first.question_id] = asked.open_first.to_question(options)
     sources = {asked.found.question_id: code.source()}
     sources.update(
         {
@@ -554,14 +554,13 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
         search.unsure.append(visit)
     else:
         search.searched.append(visit)
-    first = _confident_first(search, response)
+    boosted = _boosted_slot(search, response)
     set_aside_before = len(search.set_aside)
     offered = []
     for slot, place in enumerate(candidates):
-        probability = response.noul(f"{search.questions.could_contain.question_id}#{slot}").probability
+        probability = _could_contain(search, response, slot)
         verdict = search.thresholds.noul_verdict(probability)
-        preferred = slot == first and verdict != NoulVerdict.NO
-        priority = 1.0 + probability if preferred else probability
+        priority = 1.0 + probability if slot == boosted else probability
         search.push(place, priority, item.depth + 1, (*item.path, place.key))
         offered.append(
             {"place": place.key, "signature": place.signature, "probability": probability, "verdict": verdict}
@@ -592,7 +591,7 @@ def _open_step(
         judgments["open_first"] = {
             "choice": _picked_place(answer.choice, opening.candidates),
             "confidence": answer.confidence,
-            "used": _confident_first(search, response) is not None,
+            "used": _boosted_slot(search, response) is not None,
         }
     if not_opened:
         judgments["not_opened"] = [_frontier_entry(entry) for entry in not_opened]
@@ -640,6 +639,20 @@ def _choice_reason(item: _Queued) -> str:
 
 def _frontier_entry(entry: NotInspected) -> dict:
     return {"place": entry.place_key, "reason": entry.reason, "priority": entry.priority}
+
+
+def _boosted_slot(search: _Search, response) -> int | None:
+    """The candidate a confident pick moves ahead of every score, if its own could_contain answer is
+    above the no bar; a confident pick of a place scored "no" moves nothing."""
+    first = _confident_first(search, response)
+    if first is None:
+        return None
+    scored_no = search.thresholds.noul_verdict(_could_contain(search, response, first)) == NoulVerdict.NO
+    return None if scored_no else first
+
+
+def _could_contain(search: _Search, response, slot: int) -> float:
+    return response.noul(f"{search.questions.could_contain.question_id}#{slot}").probability
 
 
 def _confident_first(search: _Search, response) -> int | None:

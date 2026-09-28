@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from git_repos import commit_files
 
-from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code
+from jev_navigator.directives.find_code import OPEN_FIRST, Outcome, SearchBudget, find_code
 from jev_navigator.directives.places import (
     MOVES,
     Place,
@@ -572,3 +573,52 @@ def test_the_result_and_the_stop_step_name_the_moves_the_search_used(sample_inde
     assert chosen_result.moves == ("callers", "same_file")
     assert chosen_result.history.steps[-1].arguments["moves"] == ["callers", "same_file"]
     assert default_result.moves == tuple(MOVES)
+
+
+def open_steps(result) -> list[dict]:
+    return [step.to_json() for step in result.history.steps if step.operation == "open"]
+
+
+def test_open_first_offers_a_real_none_option_whose_wording_is_part_of_the_question_id(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1))
+    tie_wording = replace(OPEN_FIRST, extra_options=(("none", "No entry is more likely than the others."),))
+
+    # Act
+    budget = SearchBudget(max_steps=1)
+    find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index), budget=budget)
+
+    # Assert
+    questions = client.requests[0][1]
+    pick = next(question for question_id, question in questions.items() if "open_first" in question_id)
+    assert pick["criteria"]["none"] == "None of the entries is likely to contain it."
+    assert tie_wording.question_id != OPEN_FIRST.question_id
+
+
+@pytest.mark.parametrize(("pick_score", "boosted"), [(0.15, False), (0.35, True)])
+def test_a_confident_pick_moves_ahead_only_when_its_own_score_is_above_the_no_bar(
+    sample_index: CodeIndex, pick_score: float, boosted: bool
+) -> None:
+    # Arrange
+    client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: pick_score),
+        choices={"open_first": {"0": 1.0}},
+    )
+
+    # Act
+    result = find_code(
+        sample_index, Judge(client), TARGET, start_at_place(sample_index), budget=SearchBudget(max_steps=2)
+    )
+
+    # Assert
+    first_open = open_steps(result)[0]
+    assert first_open["judgments"]["open_first"]["used"] is boosted
+    reasons = [
+        chosen["reason"]
+        for step in result.history.steps
+        if step.operation == "choose_next"
+        for chosen in step.arguments["chosen"]
+    ]
+    assert ("open_first" in reasons) is boosted
