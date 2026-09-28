@@ -209,8 +209,9 @@ class CodeIndex:
 
     def find_references(self, name: str) -> tuple[Reference, ...]:
         """Uses of ``name`` that are not calls: arguments, collection entries, assignments,
-        decorators, exports and returns, each with its role, holder and binding. Code reached this
-        way (a callback, a registry entry) has no call edge to follow."""
+        decorators, exports, returns, method receivers, types and conditions, each with its role,
+        holder and binding. Code reached this way (a callback, a registry entry, a parameter typed
+        with a class) has no call edge to follow."""
         return self._references(match for match in self._reference_matches() if match.name == name)
 
     def references_in(self, function: Span) -> tuple[Reference, ...]:
