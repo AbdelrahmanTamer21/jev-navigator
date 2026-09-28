@@ -56,7 +56,13 @@ comments.code_above_comment(index, file, line)  # CodeAbove(code or None, reason
 Imports are read per statement, so an import spanning several lines counts like any other.
 TypeScript and JavaScript specifiers also resolve through the path aliases (`compilerOptions.paths` and
 `baseUrl`) of the nearest `tsconfig.json`, following relative `extends`; comments and trailing commas in
-the config are fine. `CodeIndex.at_commit` brings the commit's tsconfig files along, outside the scope.
+the config are fine. Like TypeScript, an exact alias wins, otherwise the wildcard with the longest
+prefix; only its targets are tried, then `baseUrl`. A config that is a symbolic link, or that extends or
+points outside the index root, is not read: its aliases stay unknown and those bindings stay
+`candidate`. `jsconfig.json` and tsconfig `references` are not read. `CodeIndex.at_commit` brings the
+commit's tsconfig files along, outside the scope. File lists come from git with NUL separators, so
+names with non-ASCII characters enter the scope as they are on disk, and lines split at newlines only,
+as the parser counts them.
 
 Calls are found by name in the syntax tree, which is not a resolved binding. Every call carries a
 `Binding(status, reason, target)`: `resolved` when a definition in the same file or an import naming

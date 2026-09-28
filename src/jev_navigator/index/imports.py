@@ -12,7 +12,12 @@ from .tsconfig import ScriptPaths, normalised
 _PYTHON_FROM = re.compile(r"^[ \t]*from\s+(\.*[\w.]*)\s+import\s+(\([^)]*\)|[^\n]*)", re.M)
 _PYTHON_IMPORT = re.compile(r"^[ \t]*import\s+([\w.]+)", re.M)
 _SCRIPT_FROM = re.compile(
-    r"""^[ \t]*(?:import|export)\s+(?:type\s+)?([\w$*\s{},]*?)\s*from\s*['"]([^'"]+)['"]""", re.M
+    r"""^[ \t]*(import|export)\s+(?:type\s+)?"""
+    r"""((?:(?!\n[ \t]*(?:import|export)\b)[\w$*\s{},])*?)\s*from\s*['"]([^'"]+)['"]""",
+    re.M,
+)
+_SCRIPT_COMMENT_OR_STRING = re.compile(
+    r""""(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`|//[^\n]*|/\*.*?\*/""", re.S
 )
 _SCRIPT_BARE = re.compile(r"""(?:\brequire\(\s*|\bimport\s*\(\s*|^[ \t]*import\s+)['"]([^'"]+)['"]""", re.M)
 _SCRIPT_SUFFIXES = (".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx")
@@ -25,8 +30,9 @@ def imported_modules(source: str, path: str) -> list[str]:
         found = [(match.start(), match.group(1)) for match in _PYTHON_FROM.finditer(source)]
         found += [(match.start(), match.group(1)) for match in _PYTHON_IMPORT.finditer(source)]
     else:
-        found = [(match.start(), match.group(2)) for match in _SCRIPT_FROM.finditer(source)]
-        found += [(match.start(), match.group(1)) for match in _SCRIPT_BARE.finditer(source)]
+        code = _without_script_comments(source)
+        found = [(match.start(), match.group(3)) for match in _SCRIPT_FROM.finditer(code)]
+        found += [(match.start(), match.group(1)) for match in _SCRIPT_BARE.finditer(code)]
     return list(dict.fromkeys(specifier for _, specifier in sorted(found)))
 
 
@@ -90,9 +96,9 @@ def imported_names(source: str, path: str) -> dict[str, str]:
             if part.strip() and part.strip() != "*"
         }
     names: dict[str, str] = {}
-    for match in _SCRIPT_FROM.finditer(source):
-        clause, specifier = match.group(1), match.group(2)
-        if not match.group(0).lstrip().startswith("import"):
+    for match in _SCRIPT_FROM.finditer(_without_script_comments(source)):
+        keyword, clause, specifier = match.groups()
+        if keyword != "import":
             continue
         default = _SCRIPT_DEFAULT_NAME.match(clause)
         if default:
@@ -100,6 +106,17 @@ def imported_names(source: str, path: str) -> dict[str, str]:
         for braces in _SCRIPT_BRACES.findall(clause):
             names.update({_local(part): specifier for part in braces.split(",") if part.strip()})
     return names
+
+
+def _without_script_comments(source: str) -> str:
+    """The source with ``//`` and ``/* */`` comments removed; string literals are kept whole, so a
+    ``//`` inside a string is not taken for a comment."""
+    return _SCRIPT_COMMENT_OR_STRING.sub(_keep_literal, source)
+
+
+def _keep_literal(match: re.Match) -> str:
+    text = match.group(0)
+    return "" if text.startswith("/") else text
 
 
 def _local(part: str) -> str:

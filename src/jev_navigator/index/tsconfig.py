@@ -28,23 +28,39 @@ class ScriptPaths:
     has_base_url: bool
 
     def candidates(self, specifier: str) -> list[str]:
-        """Root-relative paths the specifier may name, in the order TypeScript tries them."""
-        mapped = [
-            _join(self.base, target.replace("*", wildcard))
-            for pattern, targets in self.paths
-            if (wildcard := _match(pattern, specifier)) is not None
-            for target in targets
-        ]
+        """Root-relative paths the specifier may name, in the order TypeScript tries them: the
+        targets of the one pattern TypeScript picks (an exact match, else the wildcard with the
+        longest prefix before ``*``), then the specifier under ``baseUrl``."""
+        mapped = []
+        chosen = self._chosen_pattern(specifier)
+        if chosen is not None:
+            pattern, targets = chosen
+            wildcard = _match(pattern, specifier) or ""
+            mapped = [_join(self.base, target.replace("*", wildcard)) for target in targets]
         if self.has_base_url:
             mapped.append(_join(self.base, specifier))
         return mapped
 
+    def _chosen_pattern(self, specifier: str) -> tuple[str, tuple[str, ...]] | None:
+        exact = [entry for entry in self.paths if "*" not in entry[0] and entry[0] == specifier]
+        if exact:
+            return exact[0]
+        matching = [
+            entry for entry in self.paths if "*" in entry[0] and _match(entry[0], specifier) is not None
+        ]
+        return max(matching, key=lambda entry: len(entry[0].split("*", 1)[0]), default=None)
+
 
 def nearest_script_paths(root: Path, directory: str) -> ScriptPaths | None:
-    """The alias settings of the tsconfig.json nearest to ``directory`` (root-relative), or None."""
+    """The alias settings of the tsconfig.json nearest to ``directory`` (root-relative), or None.
+    None also when that config, a config it extends or its base directory is a symbolic link or lies
+    outside the root: the aliases then stay unknown and bindings through them stay unproven."""
+    root = root.resolve()
     current = PurePosixPath(directory)
     while True:
         config = root / current / CONFIG_NAME
+        if config.is_symlink():
+            return None
         if config.is_file():
             return _script_paths(root, config)
         if str(current) in ("", "."):
@@ -55,39 +71,52 @@ def nearest_script_paths(root: Path, directory: str) -> ScriptPaths | None:
 def _script_paths(root: Path, config: Path) -> ScriptPaths | None:
     """A child config overrides its parents. ``baseUrl`` is relative to the config that sets it;
     without one, ``paths`` targets are relative to the config that sets ``paths``."""
+    chain = _extends_chain(root, config)
+    if chain is None:
+        return None
     base_url_dir: Path | None = None
     paths_dir: Path | None = None
     paths: dict = {}
-    for path in reversed(_extends_chain(config)):
+    for path in reversed(chain):
         compiler = _read(path).get("compilerOptions", {})
-        if "baseUrl" in compiler:
+        if isinstance(compiler.get("baseUrl"), str):
             base_url_dir = path.parent / compiler["baseUrl"]
-        if "paths" in compiler:
+        if isinstance(compiler.get("paths"), dict):
             paths_dir, paths = path.parent, compiler["paths"]
     base_dir = base_url_dir or paths_dir
-    if base_dir is None:
+    if base_dir is None or not base_dir.resolve().is_relative_to(root):
         return None
-    base = normalised(base_dir.resolve().relative_to(root.resolve()).as_posix())
-    patterns = tuple((pattern, tuple(targets)) for pattern, targets in paths.items())
+    base = normalised(base_dir.resolve().relative_to(root).as_posix())
+    patterns = tuple(
+        (pattern, tuple(target for target in targets if isinstance(target, str)))
+        for pattern, targets in paths.items()
+        if isinstance(targets, list)
+    )
     return ScriptPaths(base, patterns, base_url_dir is not None)
 
 
-def _extends_chain(config: Path) -> list[Path]:
+def _extends_chain(root: Path, config: Path) -> list[Path] | None:
+    """The config and the relative configs it extends, or None when one of them is a symbolic link
+    or lies outside the root."""
     chain = [config]
     while len(chain) < _MAX_EXTENDS:
         parent = _read(chain[-1]).get("extends")
         if not isinstance(parent, str) or not parent.startswith("."):
             break
-        target = (chain[-1].parent / parent).resolve()
-        target = target if target.suffix == ".json" else target.with_name(target.name + ".json")
+        target = chain[-1].parent / (parent if parent.endswith(".json") else f"{parent}.json")
+        if target.is_symlink() or not target.resolve().is_relative_to(root):
+            return None
         if not target.is_file():
             break
-        chain.append(target)
+        chain.append(target.resolve())
     return chain
 
 
 def _read(config: Path) -> dict:
-    text = config.read_text(errors="replace")
+    try:
+        text = config.read_text(errors="replace")
+    except OSError:
+        return {}
     without_comments = _COMMENT_OR_STRING.sub(_keep_strings, text)
     try:
         loaded = json.loads(_TRAILING_COMMA.sub(r"\1", without_comments))

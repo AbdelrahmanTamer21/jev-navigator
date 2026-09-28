@@ -88,10 +88,9 @@ class CodeIndex:
         """The tracked regular files under ``prefixes`` (every one when none are given). Symbolic links
         and submodules are left out: a link can point outside the scope, or at a directory."""
         root = Path(root)
-        listed = _regular_files(tools.git(["ls-files", "--stage", "--", *prefixes], root))
+        listed = _regular_files(tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root))
         commit = tools.git(["rev-parse", "HEAD"], root).strip()
-        status = tools.git(["status", "--porcelain", "--", *prefixes], root).splitlines()
-        changed = [line[3:].strip() for line in status if len(line) > 3]
+        changed = _changed_paths(tools.git(["status", "--porcelain", "-z", "--", *prefixes], root))
         return cls(
             root,
             listed,
@@ -116,7 +115,7 @@ class CodeIndex:
         tsconfig files come along (outside the scope), so path aliases resolve."""
         repository = Path(repository)
         sha = tools.git(["rev-parse", "--verify", f"{commit}^{{commit}}"], repository).strip()
-        listed = _regular_files(tools.git(["ls-tree", "-r", sha, "--", *prefixes], repository))
+        listed = _regular_files(tools.git(["ls-tree", "-r", "-z", sha, "--", *prefixes], repository))
         if len(listed) > max_files:
             raise ScopeTooWideError(
                 f"{len(listed)} files is wider than the limit of {max_files}; narrow the scope"
@@ -369,7 +368,7 @@ class CodeIndex:
 
     def _read_lines(self, file: str) -> tuple[str, ...]:
         self._require_in_scope(file)
-        return tuple((self.root / file).read_text(errors="replace").splitlines())
+        return _split_lines((self.root / file).read_text(errors="replace"))
 
     def _require_in_scope(self, file: str) -> None:
         if file not in self._scope:
@@ -377,7 +376,7 @@ class CodeIndex:
 
 
 def _script_configs(repository: Path, commit: str) -> list[str]:
-    listed = _regular_files(tools.git(["ls-tree", "-r", commit], repository))
+    listed = _regular_files(tools.git(["ls-tree", "-r", "-z", commit], repository))
     return [
         path
         for path in listed
@@ -412,10 +411,33 @@ def _last_identifier(expression: str) -> str:
     return tail if tail.isidentifier() else ""
 
 
+def _split_lines(text: str) -> tuple[str, ...]:
+    """Lines split at newlines only, as the parser counts them; ``str.splitlines`` also splits at form
+    feeds and other separators, which would shift every line number after them."""
+    lines = text.replace("\r", "").split("\n")
+    return tuple(lines[:-1] if lines and lines[-1] == "" else lines)
+
+
+def _changed_paths(status: str) -> list[str]:
+    """Paths from ``git status --porcelain -z``; a rename or copy record is followed by its old path."""
+    records = status.split("\0")
+    changed = []
+    skip_next = False
+    for record in records:
+        if skip_next:
+            skip_next = False
+            continue
+        if len(record) > 3:
+            changed.append(record[3:])
+            skip_next = record[0] in "RC"
+    return changed
+
+
 def _regular_files(listing: str) -> list[str]:
-    """Paths from ``git ls-files --stage`` or ``git ls-tree -r`` output whose mode is a regular file."""
+    """Paths from ``git ls-files --stage -z`` or ``git ls-tree -r -z`` output whose mode is a regular
+    file. NUL separation keeps names with non-ASCII characters exactly as they are on disk."""
     files = []
-    for line in listing.splitlines():
+    for line in listing.split("\0"):
         details, _, path = line.partition("\t")
         if details.split(" ", 1)[0] in _REGULAR_FILE_MODES:
             files.append(path)
