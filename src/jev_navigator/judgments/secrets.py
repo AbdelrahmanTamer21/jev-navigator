@@ -1,6 +1,8 @@
 """Keep secrets out of every Jev request: mask what is found, then scan the final request and refuse on a hit.
 
-The built-in masker and scanner are lightweight and on by default. A host with a stronger scanner
+Masking works by content: every value the masker hides anywhere in a request is hidden everywhere
+in it, so a token found in an assignment is also hidden where a relation text or another item quotes
+it. The built-in masker and scanner are lightweight and on by default. A host with a stronger scanner
 passes its own objects; turning either off must be explicit (``masker=None`` or ``scanner=None``).
 """
 
@@ -9,7 +11,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -37,7 +39,12 @@ HIGH_ENTROPY_BITS_PER_CHAR = 4.0
 
 
 class Masker(Protocol):
+    """``mask`` hides secrets in one text; ``masked_values`` lists the values it hides there, so they
+    can be hidden everywhere else in the request too."""
+
     def mask(self, text: str) -> str: ...
+
+    def masked_values(self, text: str) -> list[str]: ...
 
 
 class Scanner(Protocol):
@@ -61,6 +68,16 @@ class SecretMasker:
         text = _SECRET_ASSIGNMENT.sub(_mask_group, text)
         return _QUOTED_ASSIGNMENT.sub(_mask_if_high_entropy, text)
 
+    def masked_values(self, text: str) -> list[str]:
+        found = [match.group(0) for match in _PRIVATE_KEY_BLOCK.finditer(text)]
+        found += [match.group(0) for match in _KEY_MARKER_LINE.finditer(text)]
+        found += [match.group(0) for shape in _TOKEN_SHAPES for match in shape.finditer(text)]
+        found += [match.group(1) for match in _SECRET_ASSIGNMENT.finditer(text)]
+        found += [
+            match.group(1) for match in _QUOTED_ASSIGNMENT.finditer(text) if _is_high_entropy(match.group(1))
+        ]
+        return [value for value in found if value != MASK]
+
 
 @dataclass(frozen=True)
 class SecretScanner:
@@ -78,15 +95,34 @@ class SecretScanner:
         return found
 
 
-def mask_value(value: object, masker: Masker) -> object:
-    """Masks every string inside nested JSON-like data."""
-    if isinstance(value, str):
-        return masker.mask(value)
-    if isinstance(value, Mapping):
-        return {key: mask_value(item, masker) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [mask_value(item, masker) for item in value]
-    return value
+def mask_request(state: Mapping, questions: Mapping, masker: Masker) -> tuple[Mapping, Mapping, frozenset]:
+    """The masked state and questions, and every value that was hidden in either."""
+    values = masked_values([state, questions], masker)
+    return mask_everywhere(state, masker, values), mask_everywhere(questions, masker, values), values
+
+
+def mask_by_content(value: object, masker: Masker) -> object:
+    """Masks nested JSON-like data so that a value hidden in one string is hidden in all of them."""
+    return mask_everywhere(value, masker, masked_values(value, masker))
+
+
+def masked_values(value: object, masker: Masker) -> frozenset[str]:
+    """Every value the masker hides anywhere inside nested JSON-like data, keys included."""
+    return frozenset(found for text in _strings(value) for found in masker.masked_values(text))
+
+
+def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> object:
+    """Masks every string by the masker's rules, then hides each of ``values`` wherever it still
+    appears. Keys are left as they are; ``refuse_if_secret`` refuses a request with one in a key."""
+    longest_first = sorted(values, key=len, reverse=True)
+
+    def hide(text: str) -> str:
+        text = masker.mask(text)
+        for secret in longest_first:
+            text = text.replace(secret, MASK)
+        return text
+
+    return _each_string(value, hide)
 
 
 def safe_options(options: Mapping[str, str], masker: Masker | None) -> dict[str, str]:
@@ -96,12 +132,29 @@ def safe_options(options: Mapping[str, str], masker: Masker | None) -> dict[str,
     return {key: masker.mask(text) for key, text in options.items() if masker.mask(key) == key}
 
 
-def refuse_if_secret(state: Mapping, questions: Mapping, scanner: Scanner | None) -> None:
+def refuse_if_secret(
+    state: Mapping, questions: Mapping, scanner: Scanner | None, masked: frozenset[str] = frozenset()
+) -> None:
+    """Refuses when a value masked elsewhere is still in the request (it can only sit in a key), or
+    when the scanner finds a secret."""
+    texts = _strings(state) + _strings(questions)
+    if any(value in text for text in texts for value in masked):
+        raise SecretInRequestError("a masked value is still in the request, in a key; nothing was sent")
     if scanner is None:
         return
-    for text in _strings(state) + _strings(questions):
+    for text in texts:
         if scanner.findings(text):
             raise SecretInRequestError("the final scan found a secret in the request; nothing was sent")
+
+
+def _each_string(value: object, change: Callable[[str], str]) -> object:
+    if isinstance(value, str):
+        return change(value)
+    if isinstance(value, Mapping):
+        return {key: _each_string(item, change) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_each_string(item, change) for item in value]
+    return value
 
 
 def _strings(value: object) -> list[str]:

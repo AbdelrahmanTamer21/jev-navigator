@@ -26,7 +26,9 @@ from .secrets import (
     Scanner,
     SecretMasker,
     SecretScanner,
-    mask_value,
+    mask_everywhere,
+    mask_request,
+    masked_values,
     refuse_if_secret,
     safe_options,
 )
@@ -314,9 +316,10 @@ class Judge:
         return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton)
 
     def _prepare(self, state: Mapping, questions: Mapping) -> _Prepared:
-        state = mask_value(state, self.masker) if self.masker else state
-        questions = mask_value(questions, self.masker) if self.masker else questions
-        refuse_if_secret(state, questions, self.scanner)
+        hidden: frozenset[str] = frozenset()
+        if self.masker:
+            state, questions, hidden = mask_request(state, questions, self.masker)
+        refuse_if_secret(state, questions, self.scanner, hidden)
         request_hash = request_sha256(state, questions)
         stored = self.store.by_request(request_hash) if self.store else None
         accepted = stored.response() if stored is not None and self._accepts(stored.model) else None
@@ -409,48 +412,53 @@ class Judge:
         list_name: str,
         thresholds: Thresholds | None,
     ) -> _CheckPlan:
-        masked_items = [mask_value(item, self.masker) if self.masker else item for item in items]
-        masked_shared = mask_value(shared or {}, self.masker) if self.masker else (shared or {})
+        """Each item is looked up masked together with the shared state alone; a batch masks its
+        items and the shared state together, as the request that carries them will be."""
+        shared = shared or {}
         plan = _CheckPlan(items, thresholds or self.thresholds)
-        for position, item in enumerate(masked_items):
-            stored = self._stored_item(check, item, masked_shared)
+        for position, item in enumerate(items):
+            stored = self._stored_item(check, *self._masked_together([item, shared]))
             if stored is not None:
                 plan.answered[position] = stored
         pending = [position for position in range(len(items)) if position not in plan.answered]
         plan.batches = [
-            self._batch(check, positions, masked_items, shared or {}, masked_shared, list_name)
-            for positions in _batches(pending, masked_items, shared or {})
+            self._batch(check, positions, items, shared, list_name)
+            for positions in _batches(pending, items, shared)
         ]
         return plan
 
+    def _masked_together(self, values: list[Mapping]) -> list[Mapping]:
+        """Masks the values as one request: a value hidden in one of them is hidden in all."""
+        if self.masker is None:
+            return values
+        hidden = masked_values(values, self.masker)
+        return [mask_everywhere(value, self.masker, hidden) for value in values]
+
     def _batch(
-        self,
-        check: Check,
-        positions: list[int],
-        items: list[Mapping],
-        shared: Mapping,
-        masked_shared: Mapping,
-        list_name: str,
+        self, check: Check, positions: list[int], items: Sequence[Mapping], shared: Mapping, list_name: str
     ) -> _Batch:
-        batch_items = [items[position] for position in positions]
+        *batch_items, batch_shared = self._masked_together(
+            [*(items[position] for position in positions), shared]
+        )
         question_ids = {position: f"{check.question_id}#{slot}" for slot, position in enumerate(positions)}
         questions = {
             question_ids[position]: check.to_question(item_path(list_name, slot))
             for slot, position in enumerate(positions)
         }
+        by_position = dict(zip(positions, batch_items, strict=True))
         extras = {
             "item_keys": {
-                self._item_key(check, items[position], masked_shared): question_ids[position]
-                for position in positions
+                self._item_key(check, item, batch_shared): question_ids[position]
+                for position, item in by_position.items()
             },
             "sources": {
-                question_ids[position]: _source_of(items[position])
-                for position in positions
-                if _source_of(items[position])
+                question_ids[position]: _source_of(item)
+                for position, item in by_position.items()
+                if _source_of(item)
             },
-            "skeleton": _skeleton(list_name, questions, batch_items, masked_shared),
+            "skeleton": _skeleton(list_name, questions, batch_items, batch_shared),
         }
-        return _Batch({**shared, list_name: batch_items}, questions, question_ids, extras)
+        return _Batch({**batch_shared, list_name: batch_items}, questions, question_ids, extras)
 
     def _all_request(
         self,

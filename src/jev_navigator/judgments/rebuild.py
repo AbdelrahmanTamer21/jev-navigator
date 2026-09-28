@@ -3,8 +3,8 @@
 The store never keeps client code. It keeps the question wording, the non-code fields of each item
 (file, lines, commit), and hashes of the code and of the shared state. ``rebuild_request`` re-reads
 each item's code from an index at that commit, adds the shared state the caller supplies, masks it
-as the judge did, and compares the request hash with the stored one; when they differ it says which
-part changed.
+as the judge did (a value hidden anywhere in the request is hidden everywhere), and compares the
+request hash with the stored one; when they differ it says which part changed.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from ..index.code_index import CodeIndex
 from ..index.spans import Span
 from .judge import CODE_FIELD
 from .questions import content_hash, request_sha256
-from .secrets import Masker, SecretMasker, mask_value
+from .secrets import Masker, SecretMasker, mask_request
 from .store import AnswerRecord
 
 _DEFAULT_MASKER = SecretMasker()
@@ -43,11 +43,12 @@ def rebuild_request(
         raise ValueError("this record has no skeleton; only batched checks can be rebuilt")
     items = [_item(index_at_commit, fields) for fields in skeleton["items"]]
     state = {**shared, skeleton["list_name"]: items}
-    state = mask_value(state, masker) if masker else state
     questions = skeleton["questions"]
+    if masker:
+        state, questions, _ = mask_request(state, questions, masker)
     rebuilt_hash = request_sha256(state, questions)
     matches = rebuilt_hash == record.request_sha256
-    differences = () if matches else _differences(skeleton, state, shared, masker)
+    differences = () if matches else _differences(skeleton, state)
     return RebuiltRequest(state, questions, rebuilt_hash, matches, differences)
 
 
@@ -57,11 +58,10 @@ def _item(index: CodeIndex, fields: Mapping) -> dict:
     return {**fields, CODE_FIELD: code}
 
 
-def _differences(
-    skeleton: Mapping, state: Mapping, shared: Mapping, masker: Masker | None
-) -> tuple[str, ...]:
+def _differences(skeleton: Mapping, state: Mapping) -> tuple[str, ...]:
+    """``state`` is the rebuilt, masked state; its shared part is everything but the item list."""
     found = []
-    masked_shared = mask_value(shared, masker) if masker else shared
+    masked_shared = {key: value for key, value in state.items() if key != skeleton["list_name"]}
     if content_hash(masked_shared) != skeleton["shared_sha256"]:
         found.append("shared state")
     for slot, (item, stored_hash) in enumerate(

@@ -138,9 +138,12 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `JEV_NAVIGATOR_CHOICE_MIN_CONFIDENCE`, `JEV_NAVIGATOR_NOUL_YES_AT` and `JEV_NAVIGATOR_NOUL_NO_AT` (via
   `Thresholds.from_env()` at the edge), then a directive's defaults, then per-call overrides
   (`judge.effective(directive, call)`).
-- **Secrets.** `SecretMasker` masks private keys, token shapes and high-entropy assignments in every
-  request, and `SecretScanner` refuses to send a request that still contains one. Both are on by
-  default; a host passes its own, or turns one off explicitly with `None`.
+- **Secrets.** `SecretMasker` masks private keys, token shapes, secret-named assignments and
+  high-entropy assignments in every request, by content: a value hidden in one place is hidden
+  everywhere in the request, for example where a relation text or another item of the same batch
+  quotes it. `SecretScanner` refuses to send a request that still contains a secret, and a masked value
+  left in a key is refused too. Both are on by default; a host passes its own (a masker offers
+  `mask(text)` and `masked_values(text)`), or turns one off explicitly with `None`.
 - **Answer store.** Every answer is stored with the served model and the thresholds in force. An
   item answer is reused only when the item, the shared state, the question with its wording hash and
   the served model all match; until the first live answer of a run the served model is unknown, and

@@ -225,6 +225,53 @@ def test_secrets_are_masked_before_any_request_leaves() -> None:
     assert "PRIVATE KEY" not in sent
 
 
+PLANTED_VALUE = "order-hook-4f7a1c"
+
+
+def test_a_value_masked_in_one_place_is_masked_everywhere_in_the_request() -> None:
+    # Arrange
+    client = ScriptedJevClient()
+    state = {
+        "slice": {"code": f'WEBHOOK_TOKEN = "{PLANTED_VALUE}"'},
+        "candidates": [{"signature": f'hooks.py:9 `send(order)` (mentions "{PLANTED_VALUE}")'}],
+    }
+    pick = Pick("open_first", "Which entry of `candidates` most likely sends the order?")
+
+    # Act
+    Judge(client).pick(pick, {"0": f'hooks.py:9 (mentions "{PLANTED_VALUE}")', "1": "other.py:3"}, state)
+
+    # Assert
+    sent_state, sent_questions = client.requests[0]
+    sent = json.dumps([sent_state, sent_questions])
+    assert PLANTED_VALUE not in sent
+    assert sent_state["slice"]["code"] == 'WEBHOOK_TOKEN = "[MASKED]"'
+    assert '(mentions "[MASKED]")' in sent_state["candidates"][0]["signature"]
+
+
+def test_a_value_masked_in_one_item_is_masked_in_the_other_items_of_its_batch() -> None:
+    # Arrange
+    client = ScriptedJevClient()
+    items = [{"code": f'WEBHOOK_TOKEN = "{PLANTED_VALUE}"'}, {"code": f'post("{PLANTED_VALUE}", order)'}]
+
+    # Act
+    Judge(client).check_each(DESCRIBES, items, {"doc": {"sentence": "s"}})
+
+    # Assert
+    sent_items = client.requests[0][0]["items"]
+    assert [item["code"] for item in sent_items] == ['WEBHOOK_TOKEN = "[MASKED]"', 'post("[MASKED]", order)']
+
+
+def test_the_final_scan_refuses_a_masked_value_that_is_also_a_state_key() -> None:
+    # Arrange
+    client = ScriptedJevClient()
+    state = {"slice": {"code": f'WEBHOOK_TOKEN = "{PLANTED_VALUE}"'}, PLANTED_VALUE: {"code": "x = 1"}}
+
+    # Act and assert
+    with pytest.raises(SecretInRequestError):
+        Judge(client).ask(state, {"q": DESCRIBES.to_question()}, thresholds=Thresholds())
+    assert client.requests == []
+
+
 def test_the_final_scan_refuses_when_a_host_turns_masking_off() -> None:
     # Arrange
     client = ScriptedJevClient()
