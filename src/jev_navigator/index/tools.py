@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import subprocess
-import tarfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -64,22 +62,48 @@ def _json_list(output: str) -> list[dict]:
     return json.loads(output) if output.strip() else []
 
 
-def export_tree(repository: Path, commit: str, prefixes: Sequence[str], destination: Path) -> None:
-    """Writes the files under ``prefixes`` at ``commit`` into ``destination`` via ``git archive``."""
-    archive = subprocess.run(
-        ["git", "archive", "--format=tar", commit, "--", *prefixes],
+def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) -> None:
+    """Writes each blob, keyed by its path, into ``destination``, all read with one
+    ``git cat-file --batch``. Blobs are asked for by object id, so any byte in a path is safe. A path
+    that would leave ``destination`` and an object git does not have both raise ``ToolFailedError``."""
+    if not blobs:
+        return
+    requests = "".join(f"{object_id}\n" for object_id in blobs.values()).encode()
+    completed = subprocess.run(
+        ["git", "cat-file", "--batch"],
         cwd=repository,
+        input=requests,
         capture_output=True,
         timeout=COMMAND_TIMEOUT_SECONDS,
     )
-    if archive.returncode != 0:
-        raise ToolFailedError(f"git archive exited {archive.returncode}: {archive.stderr.decode()[:300]}")
-    with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
-        tar.extractall(destination, filter=_regular_members)
+    if completed.returncode != 0:
+        raise ToolFailedError(
+            f"git cat-file exited {completed.returncode}: {completed.stderr.decode()[:300]}"
+        )
+    for path, content in zip(blobs, _batch_contents(completed.stdout), strict=True):
+        _write_inside(destination, path, content)
 
 
-def _regular_members(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo | None:
-    """Links are skipped, so a link pointing outside the tree cannot fail or escape the export."""
-    if member.issym() or member.islnk():
-        return None
-    return tarfile.data_filter(member, destination)
+def _batch_contents(output: bytes) -> list[bytes]:
+    """The object contents in ``git cat-file --batch`` output, in request order."""
+    contents = []
+    position = 0
+    while position < len(output):
+        header_end = output.index(b"\n", position)
+        object_id, _, details = output[position:header_end].partition(b" ")
+        if details == b"missing":
+            raise ToolFailedError(f"git has no object {object_id.decode()}")
+        start = header_end + 1
+        end = start + int(details.split()[1])
+        contents.append(output[start:end])
+        position = end + 1
+    return contents
+
+
+def _write_inside(destination: Path, path: str, content: bytes) -> None:
+    root = destination.resolve()
+    target = (root / path).resolve()
+    if not target.is_relative_to(root):
+        raise ToolFailedError(f"{path!r} would be written outside {root}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)

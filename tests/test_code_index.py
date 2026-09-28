@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
+from git_repos import commit_all, git
 
 from jev_navigator.index.code_index import CodeIndex, ScopeTooWideError
 from jev_navigator.index.spans import Span
@@ -129,9 +129,7 @@ def test_every_slice_records_its_source_file_lines_commit_and_how_it_was_reached
     # Arrange
     (sample_repo / "web/handlers.ts").write_text("// changed in the worktree\n")
     index = CodeIndex.from_git(sample_repo)
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=sample_repo, capture_output=True, text=True
-    ).stdout.strip()
+    head = git(sample_repo, "rev-parse", "HEAD").strip()
 
     # Act
     committed = index.read_slice(index.find_definition("check_limits")[0], origin="callee of validate_order")
@@ -156,9 +154,7 @@ def test_find_definition_covers_classes_constants_and_module_assignments(sample_
 
 def test_at_commit_reads_the_old_version_without_touching_the_checkout(sample_repo: Path) -> None:
     # Arrange
-    first_commit = subprocess.run(
-        ["git", "rev-list", "--max-parents=0", "HEAD"], cwd=sample_repo, capture_output=True, text=True
-    ).stdout.strip()
+    first_commit = git(sample_repo, "rev-list", "--max-parents=0", "HEAD").strip()
     checkout_before = (sample_repo / "app/validation.py").read_text()
 
     # Act
@@ -341,12 +337,7 @@ def test_tracked_symbolic_links_stay_out_of_the_scope(tmp_path: Path) -> None:
     (tmp_path / "app/linked_dir").symlink_to("../skills/real", target_is_directory=True)
     (tmp_path / "app/linked_file.py").symlink_to("main.py")
     (tmp_path / "app/outside.py").symlink_to("/etc/hosts")
-    for command in (
-        ["init", "-q"],
-        ["add", "."],
-        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c"],
-    ):
-        subprocess.run(["git", *command], cwd=tmp_path, check=True)
+    commit_all(tmp_path)
 
     # Act
     working = CodeIndex.from_git(tmp_path, prefixes=("app/",))
@@ -362,12 +353,7 @@ def test_file_names_with_non_ascii_characters_enter_the_scope_as_they_are_on_dis
     # Arrange
     (tmp_path / "app").mkdir()
     (tmp_path / "app/größe.py").write_text("def groesse():\n    return 1\n")
-    for command in (
-        ["init", "-q"],
-        ["add", "."],
-        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c"],
-    ):
-        subprocess.run(["git", *command], cwd=tmp_path, check=True)
+    commit_all(tmp_path)
     (tmp_path / "app/größe.py").write_text("def groesse():\n    return 2\n")
 
     # Act
@@ -378,6 +364,22 @@ def test_file_names_with_non_ascii_characters_enter_the_scope_as_they_are_on_dis
     assert working.files == historical.files == ("app/größe.py",)
     assert working.read_slice(working.find_definition("groesse")[0]).text.endswith("return 2")
     assert working._changed == frozenset({"app/größe.py"})
+
+
+def test_an_index_at_a_commit_reads_a_file_whose_name_holds_a_newline(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/line\nbreak.py").write_text("def split_name():\n    return 1\n")
+    (tmp_path / "app/plain.py").write_text("def plain():\n    return 2\n")
+    commit_all(tmp_path)
+
+    # Act
+    historical = CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("app/",))
+
+    # Assert
+    assert historical.files == ("app/line\nbreak.py", "app/plain.py")
+    assert (historical.root / "app/line\nbreak.py").read_text().endswith("return 1\n")
+    assert (historical.root / "app/plain.py").read_text().endswith("return 2\n")
 
 
 def test_line_numbers_follow_newlines_only_like_the_parser(tmp_path: Path) -> None:

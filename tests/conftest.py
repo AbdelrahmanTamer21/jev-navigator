@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
+from git_repos import git, write_files
 
 from jev_navigator.index.code_index import CodeIndex
 
@@ -91,38 +91,36 @@ API_TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 """
 
 
-def _write(root: Path, relative: str, text: str) -> None:
-    path = root / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
-
-
-def _git(root: Path, *arguments: str) -> None:
-    subprocess.run(["git", *arguments], cwd=root, check=True, capture_output=True)
-
-
 @pytest.fixture
 def sample_repo(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
-    _git(root, "init", "-q", "-b", "main")
-    _git(root, "config", "user.email", "test@example.com")
-    _git(root, "config", "user.name", "Test")
-    _write(root, "app/__init__.py", "")
-    _write(root, "app/orders.py", ORDER_SERVICE)
-    _write(root, "app/validation.py", VALIDATION)
-    _git(root, "add", ".")
-    _git(root, "commit", "-q", "-m", "orders and validation")
-    _write(root, "web/routes.ts", ROUTES)
-    _write(root, "web/handlers.ts", HANDLERS)
-    _write(root, "app/settings.py", SECRET_CONFIG)
-    _write(root, "app/comments.py", COMMENTS)
-    (root / "app/validation.py").write_text(VALIDATION + "\n\ndef noop():\n    return None\n")
-    _git(root, "add", ".")
-    _git(root, "commit", "-q", "-m", "routes, and a validation change")
-    (root / "app/orders.py").write_text(ORDER_SERVICE + "\n")
-    (root / "app/validation.py").write_text(VALIDATION + "\n\ndef noop():\n    return 1\n")
-    _git(root, "commit", "-qam", "orders and validation change together")
+    git(root, "init", "-q", "-b", "main")
+    write_files(
+        root, {"app/__init__.py": "", "app/orders.py": ORDER_SERVICE, "app/validation.py": VALIDATION}
+    )
+    git(root, "add", ".")
+    git(root, "commit", "-q", "-m", "orders and validation")
+    write_files(
+        root,
+        {
+            "web/routes.ts": ROUTES,
+            "web/handlers.ts": HANDLERS,
+            "app/settings.py": SECRET_CONFIG,
+            "app/comments.py": COMMENTS,
+            "app/validation.py": VALIDATION + "\n\ndef noop():\n    return None\n",
+        },
+    )
+    git(root, "add", ".")
+    git(root, "commit", "-q", "-m", "routes, and a validation change")
+    write_files(
+        root,
+        {
+            "app/orders.py": ORDER_SERVICE + "\n",
+            "app/validation.py": VALIDATION + "\n\ndef noop():\n    return 1\n",
+        },
+    )
+    git(root, "commit", "-qam", "orders and validation change together")
     return root
 
 

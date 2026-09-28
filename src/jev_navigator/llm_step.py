@@ -19,10 +19,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Generic, Protocol, TypeVar
 
 from .judgments.questions import content_hash
 from .judgments.secrets import Masker, Scanner, SecretMasker, SecretScanner, mask_value, refuse_if_secret
+
+Parsed = TypeVar("Parsed")
+Results = TypeVar("Results")
 
 
 class ReplyParseError(ValueError):
@@ -36,14 +39,14 @@ class Connector(Protocol):
     def complete(self, prompt: str) -> str: ...
 
 
-class AnswerContract[Parsed](Protocol):
+class AnswerContract(Protocol[Parsed]):
     def render(self, context: Mapping, parse_error: str = "") -> str: ...
 
     def parse(self, reply: str, context: Mapping) -> Parsed: ...
 
 
 @dataclass(frozen=True)
-class LlmCall[Parsed]:
+class LlmCall(Generic[Parsed]):
     """``answer`` is None when the reply never parsed; ``parse_error`` then says why."""
 
     answer: Parsed | None
@@ -93,7 +96,7 @@ class LlmGuard:
 
 
 @dataclass
-class LlmStep[Results, Parsed]:
+class LlmStep(Generic[Results, Parsed]):
     name: str
     when: Callable[[Results], bool]
     context: Callable[[Results], Mapping]

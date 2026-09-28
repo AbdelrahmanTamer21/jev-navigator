@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
+
+from git_repos import git
 
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.judge import Judge
@@ -54,7 +55,7 @@ def test_a_mismatch_names_the_part_that_changed(
     record = stored_record(tmp_path / "answers.jsonl")
     path = sample_repo / "app/validation.py"
     path.write_text(path.read_text().replace("<= limit", "< limit"))
-    subprocess.run(["git", "commit", "-qam", "tighten"], cwd=sample_repo, check=True)
+    git(sample_repo, "commit", "-qam", "tighten")
 
     # Act
     rebuilt = rebuild_request(record, CodeIndex.from_git(sample_repo), {"claim": {"subject": "a basket"}})

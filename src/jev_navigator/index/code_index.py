@@ -126,8 +126,7 @@ class CodeIndex:
                 f"{len(listed)} files is wider than the limit of {max_files}; narrow the scope"
             )
         snapshot = tempfile.TemporaryDirectory(prefix=f"jev-navigator-{sha[:8]}-")
-        exported = [*prefixes, *_script_configs(repository, sha)] if prefixes else []
-        tools.export_tree(repository, sha, exported, Path(snapshot.name))
+        tools.export_blobs(repository, _blobs_to_export(repository, sha, listed), Path(snapshot.name))
         index = cls(snapshot.name, listed, max_files=max_files, commit=sha, git_root=repository)
         index._snapshot = snapshot
         return index
@@ -366,11 +365,27 @@ class CodeIndex:
             raise ValueError(f"{file} is outside the index scope")
 
 
-def _script_configs(repository: Path, commit: str) -> list[str]:
-    listed = _regular_files(tools.git(["ls-tree", "-r", "-z", commit], repository))
+def _blobs_to_export(repository: Path, commit: str, listed: Sequence[str]) -> dict[str, str]:
+    """Object ids of the listed files and of every tsconfig file in ``commit``, keyed by path."""
+    tree = _tree_blobs(tools.git(["ls-tree", "-r", "-z", commit], repository))
+    return {path: tree[path] for path in [*listed, *_script_configs(tree)]}
+
+
+def _tree_blobs(listing: str) -> dict[str, str]:
+    """Object ids of the regular files in ``git ls-tree -r -z`` output, keyed by path."""
+    blobs = {}
+    for line in listing.split("\0"):
+        details, _, path = line.partition("\t")
+        mode, _, object_id = details.partition(" blob ")
+        if mode in _REGULAR_FILE_MODES:
+            blobs[path] = object_id
+    return blobs
+
+
+def _script_configs(paths: Iterable[str]) -> list[str]:
     return [
         path
-        for path in listed
+        for path in paths
         if PurePosixPath(path).name.startswith("tsconfig")
         and path.endswith(".json")
         and "node_modules/" not in path

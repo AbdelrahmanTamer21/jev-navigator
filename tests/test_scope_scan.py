@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from git_repos import commit_files
 
 from jev_navigator.directives.find_code import Outcome, find_code
 from jev_navigator.directives.places import neighbours_and_omissions, place_for_line
@@ -52,15 +53,7 @@ class CountingResolver:
 
 
 def committed(root: Path, files: dict[str, str]) -> CodeIndex:
-    for name, text in files.items():
-        (root / name).parent.mkdir(parents=True, exist_ok=True)
-        (root / name).write_text(text)
-    for command in (
-        ["init", "-q"],
-        ["add", "."],
-        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c"],
-    ):
-        subprocess.run(["git", *command], cwd=root, check=True)
+    commit_files(root, files)
     return CodeIndex.from_git(root)
 
 
