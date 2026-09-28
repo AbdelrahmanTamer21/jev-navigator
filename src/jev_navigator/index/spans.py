@@ -37,12 +37,14 @@ class CodeSlice:
     text: str
     origin: str = ""
     commit: str = ""
+    file_sha256: str = ""
 
     def source(self) -> dict:
         return {
             "file": self.span.file,
             "lines": [self.span.start, self.span.end],
             "commit": self.commit,
+            "file_sha256": self.file_sha256,
             "reached_by": self.origin,
         }
 

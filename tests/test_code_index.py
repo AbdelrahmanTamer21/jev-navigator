@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -113,6 +114,12 @@ def test_scope_wider_than_the_limit_is_refused(sample_repo: Path) -> None:
         CodeIndex.from_git(sample_repo, max_files=2)
 
 
+def test_explicit_unbounded_scope_keeps_every_tracked_file(sample_repo: Path) -> None:
+    index = CodeIndex.from_git(sample_repo, max_files=None)
+
+    assert len(index.files) > 2
+
+
 def test_paths_outside_the_scope_are_refused(sample_repo: Path) -> None:
     # Arrange
     index = CodeIndex.from_git(sample_repo, prefixes=("web/",))
@@ -140,6 +147,7 @@ def test_every_slice_records_its_source_file_lines_commit_and_how_it_was_reached
         "file": "app/validation.py",
         "lines": [10, 12],
         "commit": head,
+        "file_sha256": hashlib.sha256((sample_repo / "app/validation.py").read_bytes()).hexdigest(),
         "reached_by": "callee of validate_order",
     }
     assert edited.commit == f"{head}+worktree"

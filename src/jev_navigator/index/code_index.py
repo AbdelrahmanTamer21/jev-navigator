@@ -2,14 +2,16 @@
 
 Every lookup stays inside the scope the index was built with. A scope wider than ``max_files`` is
 refused, because whole-repository searches are slow and send far more code onward than any
-decision needs; the caller narrows first (a directory, a changed-file list, a module).
+decision needs; the caller narrows first (a directory, a changed-file list, a module). A caller
+that deliberately owns whole-repository navigation passes ``max_files=None``; no file is dropped.
 """
 
 from __future__ import annotations
 
+import hashlib
 import tempfile
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from functools import cache
 from pathlib import Path, PurePosixPath
 
@@ -23,12 +25,14 @@ from .scope_scan import FileStructure, ReferenceMatch, Unparsed, scan_calls, sca
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
 
-DEFAULT_MAX_FILES = 400
 DEFAULT_WINDOW_RADIUS = 10
 MAX_TEXT_HITS = 20
 CO_CHANGE_COMMITS = 200
 _COMMIT_MARK = "@@commit@@"
 _REGULAR_FILE_MODES = frozenset({"100644", "100755"})
+_PARSER_SCANS = ("structure", "calls", "references")
+
+ScanObserver = Callable[[str, str, int], None]
 
 
 _NO_STRUCTURE = FileStructure((), (), ())
@@ -53,20 +57,22 @@ class CodeIndex:
         root: Path,
         files: Iterable[str],
         *,
-        max_files: int = DEFAULT_MAX_FILES,
+        max_files: int | None = None,
         commit: str = "",
         changed_files: Iterable[str] = (),
         git_root: Path | None = None,
         binding_resolver: BindingResolver | None = None,
+        scan_observer: ScanObserver | None = None,
     ) -> None:
         self.root = Path(root)
         self.git_root = Path(git_root) if git_root is not None else self.root
         self.binding_resolver = binding_resolver
+        self.scan_observer = scan_observer
         self._snapshot: tempfile.TemporaryDirectory | None = None
         self.commit = commit
         self._changed = frozenset(changed_files)
         self.files = tuple(sorted(set(files)))
-        if len(self.files) > max_files:
+        if max_files is not None and len(self.files) > max_files:
             raise ScopeTooWideError(
                 f"{len(self.files)} files is wider than the limit of {max_files}; narrow the scope"
             )
@@ -74,14 +80,28 @@ class CodeIndex:
         self._scope = frozenset(self.files)
         self._code_files = tuple(path for path in self.files if language_of(path))
         self._lines_of = cache(self._read_lines)
+        self._file_sha256 = cache(self._read_file_sha256)
         self._script_paths_in = cache(self._read_script_paths)
         self._unparsed = Unparsed()
+        self._completed_scans: set[str] = set()
         self._structure = cache(
-            lambda: scan_structure(self._code_files, self.root, self._lines_of, self._unparsed)
+            lambda: self._run_scan(
+                "structure",
+                lambda: scan_structure(self._code_files, self.root, self._lines_of, self._unparsed),
+            )
         )
-        self._calls = cache(lambda: scan_calls(self._code_files, self.root, self._unparsed))
+        self._calls = cache(
+            lambda: self._run_scan(
+                "calls", lambda: scan_calls(self._code_files, self.root, self._unparsed)
+            )
+        )
         self._call_counts = cache(lambda: Counter(call.name for call in self._calls()))
-        self._reference_matches = cache(lambda: scan_references(self._code_files, self.root, self._unparsed))
+        self._reference_matches = cache(
+            lambda: self._run_scan(
+                "references",
+                lambda: scan_references(self._code_files, self.root, self._unparsed),
+            )
+        )
         self._definitions = cache(self._definitions_by_name)
         self._callables = cache(self._callable_spans)
         self._top_level_in = cache(self._top_level_spans)
@@ -94,8 +114,9 @@ class CodeIndex:
         root: Path,
         prefixes: Sequence[str] = (),
         *,
-        max_files: int = DEFAULT_MAX_FILES,
+        max_files: int | None = None,
         binding_resolver: BindingResolver | None = None,
+        scan_observer: ScanObserver | None = None,
     ) -> CodeIndex:
         """The tracked regular files under ``prefixes`` (every one when none are given). Symbolic links
         and submodules are left out: a link can point outside the scope, or at a directory."""
@@ -110,6 +131,36 @@ class CodeIndex:
             commit=commit,
             changed_files=changed,
             binding_resolver=binding_resolver,
+            scan_observer=scan_observer,
+        )
+
+    @classmethod
+    def from_directory(
+        cls,
+        root: Path,
+        prefixes: Sequence[str] = (),
+        *,
+        max_files: int | None = None,
+        binding_resolver: BindingResolver | None = None,
+        scan_observer: ScanObserver | None = None,
+    ) -> CodeIndex:
+        """Index current files using ripgrep's ignore policy, with Git metadata when available.
+
+        Modified and untracked files are included. In a Git worktree, slices carry the current HEAD
+        plus ``+worktree`` when their file differs; outside Git they carry no commit. Every slice
+        also carries its current file SHA-256, so either case identifies the inspected bytes.
+        """
+        root = Path(root)
+        files = tools.listed_files(root, prefixes)
+        commit, changed = _working_git_metadata(root, prefixes)
+        return cls(
+            root,
+            files,
+            max_files=max_files,
+            commit=commit,
+            changed_files=changed,
+            binding_resolver=binding_resolver,
+            scan_observer=scan_observer,
         )
 
     @classmethod
@@ -119,7 +170,7 @@ class CodeIndex:
         commit: str,
         prefixes: Sequence[str] = (),
         *,
-        max_files: int = DEFAULT_MAX_FILES,
+        max_files: int | None = None,
     ) -> CodeIndex:
         """The regular files under ``prefixes`` as they were at ``commit``, read from git objects into a
         private temporary directory; the checkout is never touched. History lookups still run in
@@ -128,7 +179,7 @@ class CodeIndex:
         repository = Path(repository)
         sha = tools.git(["rev-parse", "--verify", f"{commit}^{{commit}}"], repository).strip()
         listed = _regular_files(tools.git(["ls-tree", "-r", "-z", sha, "--", *prefixes], repository))
-        if len(listed) > max_files:
+        if max_files is not None and len(listed) > max_files:
             raise ScopeTooWideError(
                 f"{len(listed)} files is wider than the limit of {max_files}; narrow the scope"
             )
@@ -160,6 +211,37 @@ class CodeIndex:
         self._calls()
         self._reference_matches()
         return self._unparsed.files
+
+    @property
+    def observed_unparsed_files(self) -> frozenset[str]:
+        """Files found unparsed by scans that navigation actually needed.
+
+        Unlike ``unparsed_files``, this receipt never starts another repository-wide scan. Pair it
+        with ``parser_scans_pending`` before making any claim about the whole scope.
+        """
+        return self._unparsed.files
+
+    @property
+    def parser_scans_completed(self) -> tuple[str, ...]:
+        return tuple(scan for scan in _PARSER_SCANS if scan in self._completed_scans)
+
+    @property
+    def parser_scans_pending(self) -> tuple[str, ...]:
+        return tuple(scan for scan in _PARSER_SCANS if scan not in self._completed_scans)
+
+    def _run_scan(self, name: str, scan: Callable[[], object]):
+        if self.scan_observer is not None:
+            self.scan_observer(name, "started", len(self._code_files))
+        try:
+            result = scan()
+        except BaseException:
+            if self.scan_observer is not None:
+                self.scan_observer(name, "failed", len(self._code_files))
+            raise
+        self._completed_scans.add(name)
+        if self.scan_observer is not None:
+            self.scan_observer(name, "completed", len(self._code_files))
+        return result
 
     def enclosing_symbol(self, file: str, line: int) -> Span | None:
         containing = [span for span in self.functions_in(file) if span.contains(line)]
@@ -300,7 +382,11 @@ class CodeIndex:
     def read_slice(self, span: Span, origin: str = "") -> CodeSlice:
         lines = self._lines_of(span.file)
         return CodeSlice(
-            span, "\n".join(lines[span.start - 1 : span.end]), origin, self._revision_of(span.file)
+            span,
+            "\n".join(lines[span.start - 1 : span.end]),
+            origin,
+            self._revision_of(span.file),
+            self._file_sha256(span.file),
         )
 
     def read_window(
@@ -330,6 +416,8 @@ class CodeIndex:
     def co_changed_files(self, file: str, limit: int = 5) -> tuple[tuple[str, int], ...]:
         """Scope files most often committed together with ``file``, with their shared-commit counts."""
         self._require_in_scope(file)
+        if not self.commit:
+            return ()
         log = tools.git(
             [
                 "-c",
@@ -369,6 +457,10 @@ class CodeIndex:
     def _read_lines(self, file: str) -> tuple[str, ...]:
         self._require_in_scope(file)
         return _split_lines((self.root / file).read_text(errors="replace"))
+
+    def _read_file_sha256(self, file: str) -> str:
+        self._require_in_scope(file)
+        return hashlib.sha256((self.root / file).read_bytes()).hexdigest()
 
     def _require_in_scope(self, file: str) -> None:
         if file not in self._scope:
@@ -432,6 +524,17 @@ def _changed_paths(status: str) -> list[str]:
             changed.append(record[3:])
             skip_next = record[0] in "RC"
     return changed
+
+
+def _working_git_metadata(root: Path, prefixes: Sequence[str]) -> tuple[str, list[str]]:
+    try:
+        commit = tools.git(["rev-parse", "HEAD"], root).strip()
+        status = tools.git(
+            ["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root
+        )
+    except tools.ToolFailedError:
+        return "", []
+    return commit, _changed_paths(status)
 
 
 def _regular_files(listing: str) -> list[str]:

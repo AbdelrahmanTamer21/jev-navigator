@@ -59,6 +59,36 @@ def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> 
     return [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
 
 
+def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
+    """Regular, non-symlink files visible to ripgrep's ignore policy, including hidden paths.
+
+    This is the working-directory inventory for Git and non-Git trees. ``--hidden`` includes owned
+    paths such as ``.github``; explicit globs keep Git's internal database out. Ripgrep continues to
+    honor ``.gitignore``, ``.ignore``, and global ignore files.
+    """
+    output = run_command(
+        [
+            RIPGREP,
+            "--files",
+            "--hidden",
+            "--null",
+            "--glob",
+            "!.git",
+            "--glob",
+            "!.git/**",
+            *prefixes,
+        ],
+        cwd,
+    )
+    files = []
+    for raw in output.split("\0"):
+        path = raw.removeprefix("./")
+        candidate = cwd / path
+        if path and candidate.is_file() and not candidate.is_symlink():
+            files.append(path)
+    return tuple(sorted(dict.fromkeys(files)))
+
+
 def _text_hit(match: dict) -> TextHit:
     return TextHit(_decoded(match["path"]), match["line_number"], _decoded(match["lines"]).rstrip("\r\n"))
 

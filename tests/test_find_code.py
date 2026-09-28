@@ -15,6 +15,7 @@ from jev_navigator.directives.places import (
     function_place,
     neighbours,
     place_for_line,
+    range_place,
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
@@ -88,6 +89,73 @@ def test_a_low_neighbour_score_keeps_the_neighbour_as_not_inspected(sample_index
     assert result.found == () and result.unsure == () and result.searched == ()
 
 
+def test_a_system_discovered_initial_candidate_can_be_found(sample_index: CodeIndex) -> None:
+    target = sample_index.find_definition("check_limits")[0]
+    candidate = function_place(sample_index, target, "automatic entry selection")
+    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.95, could_contain=lambda _: 0.1))
+
+    result = find_code(
+        sample_index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        initial_candidates=[(candidate, 0.9)],
+    )
+
+    assert result.outcome == Outcome.FOUND
+    assert result.found[0].code.span.name == "check_limits"
+
+
+def test_a_low_choice_probability_does_not_discard_an_unjudged_entry_alternative(
+    sample_index: CodeIndex,
+) -> None:
+    wrong = function_place(sample_index, sample_index.find_definition("place")[0])
+    target = function_place(sample_index, sample_index.find_definition("check_limits")[0])
+    client = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.95 if "len(order.items) <= limit" in code else 0.05,
+            could_contain=lambda _: 0.05,
+        )
+    )
+
+    result = find_code(
+        sample_index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(max_steps=2, beam_width=1),
+        initial_candidates=[(wrong, 0.99), (target, 0.01)],
+        moves={},
+    )
+
+    assert result.outcome == Outcome.FOUND
+    assert result.found[0].code.span.name == "check_limits"
+
+
+def test_an_unopened_entry_alternative_remains_visible_at_the_step_budget(
+    sample_index: CodeIndex,
+) -> None:
+    wrong = function_place(sample_index, sample_index.find_definition("place")[0])
+    target = function_place(sample_index, sample_index.find_definition("check_limits")[0])
+    client = ScriptedJevClient(nouls=scripted(found=lambda _: 0.05, could_contain=lambda _: 0.05))
+
+    result = find_code(
+        sample_index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(max_steps=1, beam_width=1),
+        initial_candidates=[(wrong, 0.99), (target, 0.01)],
+        moves={},
+    )
+
+    assert result.outcome == Outcome.BUDGET
+    remaining = next(item for item in result.not_inspected if item.place_key == target.key)
+    assert remaining.reason == "budget"
+    assert remaining.tier.name == "DISCOVERED"
+
+
 def test_search_reports_unsure_only_when_only_unsure_places_remain(sample_index: CodeIndex) -> None:
     # Arrange
     client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.5, could_contain=lambda signature: 0.1))
@@ -125,6 +193,43 @@ def test_search_stops_at_the_step_budget_and_lists_unopened_candidates(sample_in
     assert result.steps == 2
     assert result.not_inspected
     assert "budget" in {entry.reason for entry in result.not_inspected}
+
+
+def test_budget_receipt_does_not_start_unused_scope_scans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The structure scan is needed to expose real parser recovery. Calls and references are not
+    # needed when this bounded search has no moves, and must remain explicitly pending.
+    (tmp_path / "broken.js").write_text(
+        "// @flow\n"
+        "export class Broken {\n"
+        "  find(query: Object): Promise<Array<Object>> { return query; }\n"
+        "}\n"
+    )
+    index = CodeIndex(tmp_path, ["broken.js"])
+    index.functions_in("broken.js")
+
+    def unexpected_scan(*args, **kwargs):
+        raise AssertionError("an unused parser scan ran after the search budget was exhausted")
+
+    monkeypatch.setattr("jev_navigator.index.code_index.scan_calls", unexpected_scan)
+    monkeypatch.setattr("jev_navigator.index.code_index.scan_references", unexpected_scan)
+    start = range_place(index, "broken.js", 1, 4, "test start")
+    client = ScriptedJevClient(nouls=scripted(found=lambda _: 0.05, could_contain=lambda _: 0.05))
+
+    result = find_code(
+        index,
+        Judge(client),
+        TARGET,
+        [start],
+        budget=SearchBudget(max_steps=1, beam_width=1),
+        moves={},
+    )
+
+    assert result.outcome == Outcome.BUDGET
+    assert result.unparsed_files == {"broken.js"}
+    assert result.parser_scans_completed == ("structure",)
+    assert result.parser_scans_pending == ("calls", "references")
 
 
 def test_a_beam_opens_several_places_per_round_as_separate_requests(sample_index: CodeIndex) -> None:

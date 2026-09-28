@@ -19,9 +19,59 @@ layer you build on top; [docs/extending.md](docs/extending.md) shows how to comp
 uv add "jev-navigator[typesafe] @ git+https://github.com/ajbmachon/jev-navigator"
 ```
 
+Install the command globally with uv:
+
+```sh
+uv tool install "jev-navigator[typesafe] @ git+https://github.com/ajbmachon/jev-navigator"
+jvn --help
+```
+
 Needs Python 3.11 or newer, and `ast-grep`, `rg` (ripgrep) and `git` on the PATH. The `typesafe` extra adds
 the official SDK for live calls; set `TYPESAFE_API_KEY`. Everything else, including the tests, runs
 offline.
+
+## Live evidence-pack command
+
+`jvn find` runs the existing `CodeIndex`, `Judge`, and `find_code` owners and writes
+one reviewable directory. Load the TypeSafe key into the environment without putting its value on
+the command line, choose a narrow tracked scope, and state the complete search budget:
+
+```sh
+jvn find "the check that limits how many items an order may have" \
+  --repo /path/to/repository \
+  --prefix app/ \
+  --start app/orders.py:42 \
+  --out ~/.local/share/jev-navigator/evidence-packs/order-limit-01 \
+  --max-depth 3 \
+  --max-steps 8 \
+  --max-calls 8 \
+  --beam-width 1 \
+  --neighbours-per-kind 8 \
+  --preview-lines 8 \
+  --max-slice-chars 12000 \
+  --max-line-chars 240
+```
+
+An explicit `TYPESAFE_API_KEY` environment variable wins. Otherwise `jvn` reads only
+`~/.config/jvn/env` with a dotenv parser; it does not execute that file or print the key.
+
+`--start PATH:LINE` is repeatable and optional. A useful start is an entry point or caller, rather
+than the target function itself. Without one, the first code span in every scoped file is queued as
+a start; the budget and `not_inspected` output keep the unfinished scope visible.
+
+The output directory must be new or empty. It contains:
+
+- `manifest.json`: schema version, navigator build fingerprint and source revision, inspected
+  repository revision, explicit budget and thresholds, requested and served model, elapsed time,
+  versioned code spans, raw probabilities, full search history, uninspected frontier, and unparsed
+  files.
+- `report.md`: a readable outcome, source table, found code, and coverage caveat.
+- `journal.jsonl`: request hashes and exact provider responses as the run progresses.
+- `answers.jsonl`: reusable typed answers keyed by source and request hashes.
+
+The manifest and report contain inspected source code. Keep packs for private repositories in a
+private artifact store; the repository includes only a small public-format sample under
+[`examples/evidence-pack`](examples/evidence-pack).
 
 ## Layer 1: index, operations and comments (no model)
 

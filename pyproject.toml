@@ -8,8 +8,11 @@ authors = [{ name = "André Machon" }]
 license = "MIT"
 dependencies = []
 
+[project.scripts]
+jvn = "jev_navigator.cli:main"
+
 [project.optional-dependencies]
-typesafe = ["typesafe-sdk"]
+typesafe = ["python-dotenv", "typesafe-sdk"]
 
 [build-system]
 requires = ["uv_build"]

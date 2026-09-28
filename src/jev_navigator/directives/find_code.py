@@ -166,7 +166,8 @@ class QueueTier(IntEnum):
 
     START = 0
     PICK = 1
-    MOVE = 2
+    DISCOVERED = 2
+    MOVE = 3
 
 
 @dataclass(frozen=True)
@@ -211,6 +212,8 @@ class FindResult:
     unparsed_files: frozenset[str] = frozenset()
     moves: tuple[str, ...] = ()
     starts: tuple[Visit, ...] = ()
+    parser_scans_completed: tuple[str, ...] = ()
+    parser_scans_pending: tuple[str, ...] = ()
 
 
 @dataclass(order=True)
@@ -263,7 +266,7 @@ class _Search:
                 NotInspected(place.key, place.signature, "depth", probability, depth, path, place, tier)
             )
             return
-        rank = -probability if tier == QueueTier.MOVE else 0.0
+        rank = -probability if tier in (QueueTier.DISCOVERED, QueueTier.MOVE) else 0.0
         heapq.heappush(self.queue, _Queued(tier, rank, next(self.counter), place, depth, path, probability))
 
     def next_beam(self, calls_left: int) -> list[_Queued]:
@@ -298,14 +301,20 @@ def find_code(
     commit: str | None = None,
     stop_rule: StopRule | None = None,
     moves: Mapping[str, Move] | None = None,
+    initial_candidates: Sequence[tuple[Place, float]] = (),
 ) -> FindResult:
     """``commit``: the revision the caller means; the index must hold exactly it. ``resume``: continue
     a stopped search from its frontier with a fresh budget. ``stop_rule`` (off by default): after each
     round the caller's check is asked over the history; a yes ends the search with outcome
-    ``stop_rule``. ``moves`` chooses how neighbours are listed (default ``places.MOVES``); pass a
+    ``stop_rule``. ``initial_candidates`` are system-discovered places: the first is opened as a
+    picked place and may be found, while the rest keep their supplied probabilities in the ordinary
+    move frontier. Explicit ``start`` places retain their caller-known semantics and never count as
+    finds. ``moves`` chooses how neighbours are listed (default ``places.MOVES``); pass a
     subset, or add a move of your own. Each round's places are asked concurrently in threads;
     ``find_code_async`` is the same search for an async client."""
-    options = _SearchOptions(budget, thresholds, questions, resume, commit, stop_rule, moves)
+    options = _SearchOptions(
+        budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
+    )
     search, judge = _begin(index, judge, target_description, start, options)
     while (stop := _stop_reason(search, judge, index)) is None:
         opened = _open_round(index, search, judge)
@@ -331,10 +340,13 @@ async def find_code_async(
     commit: str | None = None,
     stop_rule: StopRule | None = None,
     moves: Mapping[str, Move] | None = None,
+    initial_candidates: Sequence[tuple[Place, float]] = (),
 ) -> FindResult:
     """``find_code`` with each round's places sent concurrently with ``asyncio.gather``; budgets,
     masking, the store, the journal and the history work exactly as in ``find_code``."""
-    options = _SearchOptions(budget, thresholds, questions, resume, commit, stop_rule, moves)
+    options = _SearchOptions(
+        budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
+    )
     search, judge = _begin(index, judge, target_description, start, options)
     while (stop := _stop_reason(search, judge, index)) is None:
         opened = _open_round(index, search, judge)
@@ -359,6 +371,7 @@ class _SearchOptions:
     commit: str | None
     stop_rule: StopRule | None
     moves: Mapping[str, Move] | None
+    initial_candidates: Sequence[tuple[Place, float]]
 
 
 def _begin(
@@ -381,6 +394,9 @@ def _begin(
         _restore(search, options.resume)
     for place in start:
         search.push(place, 1.0, 0, (place.key,), QueueTier.START)
+    for position, (place, probability) in enumerate(options.initial_candidates):
+        tier = QueueTier.PICK if position == 0 else QueueTier.DISCOVERED
+        search.push(place, probability, 0, (place.key,), tier)
     return search, judge.scope()
 
 
@@ -712,7 +728,12 @@ def _record_choice(search: _Search, beam: list[_Queued]) -> None:
 def _choice_reason(item: _Queued) -> str:
     """``start`` for a caller's start place, ``open_first`` for a place Jev picked to open next, else
     ``queue_score`` (its could_contain probability)."""
-    return {QueueTier.START: "start", QueueTier.PICK: "open_first", QueueTier.MOVE: "queue_score"}[item.tier]
+    return {
+        QueueTier.START: "start",
+        QueueTier.PICK: "open_first",
+        QueueTier.DISCOVERED: "automatic_entry_alternative",
+        QueueTier.MOVE: "queue_score",
+    }[item.tier]
 
 
 def _frontier_entry(entry: NotInspected) -> dict:
@@ -759,8 +780,12 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
     ]
     frontier += [entry for entry in search.set_aside if entry.place_key not in search.visited]
     not_inspected = tuple({entry.place_key: entry for entry in frontier}.values())
-    unparsed = index.unparsed_files
-    search.history.append(_stop_step(search, outcome, not_inspected, unparsed))
+    unparsed = index.observed_unparsed_files
+    completed_scans = index.parser_scans_completed
+    pending_scans = index.parser_scans_pending
+    search.history.append(
+        _stop_step(search, outcome, not_inspected, unparsed, completed_scans, pending_scans)
+    )
     return FindResult(
         outcome,
         tuple(search.found),
@@ -776,15 +801,26 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
         unparsed,
         tuple(search.moves),
         tuple(search.starts),
+        completed_scans,
+        pending_scans,
     )
 
 
 def _stop_step(
-    search: _Search, outcome: Outcome, not_inspected: tuple[NotInspected, ...], unparsed: frozenset[str]
+    search: _Search,
+    outcome: Outcome,
+    not_inspected: tuple[NotInspected, ...],
+    unparsed: frozenset[str],
+    completed_scans: tuple[str, ...],
+    pending_scans: tuple[str, ...],
 ) -> HistoryStep:
     judgments: dict[str, object] = {"not_inspected": [_frontier_entry(entry) for entry in not_inspected]}
     if unparsed:
         judgments["unparsed_files"] = sorted(unparsed)
+    judgments["parser_scans"] = {
+        "completed": list(completed_scans),
+        "pending": list(pending_scans),
+    }
     if search.stop_judgment is not None:
         judgments["last_stop_check"] = {
             "probability": search.stop_judgment.probability,
