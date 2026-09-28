@@ -1,0 +1,74 @@
+{
+  "schema_version": "jev-navigator.evidence-pack/v1",
+  "generated_at": "2026-09-28T18:00:00+00:00",
+  "navigator": {
+    "package_version": "0.1.0",
+    "source_revision": "0000000000000000000000000000000000000000",
+    "source_dirty": false,
+    "source_tree_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "source": {
+    "repository": "https://github.com/example/orders",
+    "revision": "1111111111111111111111111111111111111111",
+    "prefixes": ["app/"],
+    "tracked_files": 2
+  },
+  "target": "the check that limits how many items an order may have",
+  "requested_starts": ["app/orders.py:4"],
+  "budget": {
+    "max_depth": 2,
+    "max_steps": 3,
+    "max_calls": 3,
+    "beam_width": 1,
+    "neighbours_per_kind": 8,
+    "preview_lines": 8,
+    "max_slice_chars": 12000,
+    "max_line_chars": 240
+  },
+  "thresholds": {
+    "choice_min_confidence": 0.7,
+    "noul_yes_at": 0.8,
+    "noul_no_at": 0.2
+  },
+  "provider": {
+    "requested_model": "jev-latest",
+    "served_model": "jev-example-version",
+    "input_tokens": 120
+  },
+  "search": {
+    "outcome": "found",
+    "steps": 2,
+    "calls": 2,
+    "duration_seconds": 1.25,
+    "moves": ["callees"],
+    "found": [
+      {
+        "place": "app/policy.py:1-2",
+        "source": {
+          "file": "app/policy.py",
+          "lines": [1, 2],
+          "commit": "1111111111111111111111111111111111111111",
+          "reached_by": "called by handle"
+        },
+        "code": "def admit(items):\n    return len(items) <= 3",
+        "probability": 0.96,
+        "verdict": "yes",
+        "path": ["app/orders.py:3-4", "app/policy.py:1-2"]
+      }
+    ],
+    "starts": [],
+    "searched": [],
+    "unsure": [],
+    "not_inspected": [],
+    "unparsed_files": [],
+    "history": [
+      {
+        "operation": "stop",
+        "arguments": {"outcome": "found", "moves": ["callees"]},
+        "fetched": [],
+        "judgments": {"not_inspected": []},
+        "decision": "stopped: found"
+      }
+    ]
+  }
+}

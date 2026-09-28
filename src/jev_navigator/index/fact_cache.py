@@ -1,0 +1,94 @@
+"""Persistent syntax facts keyed only by source bytes and parser/rule identity."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import tempfile
+from dataclasses import asdict
+from pathlib import Path
+
+from .languages import language_of
+from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch
+from .spans import Span
+from .tools import ast_grep_version
+
+FACT_RULE_VERSION = "combined-facts-v8-export-surface"
+
+
+class FactCache:
+    def __init__(self, root: Path | None = None) -> None:
+        self.root = root or Path.home() / ".cache/jev-navigator/facts"
+        self.parser = ast_grep_version()
+
+    def load(self, file: str, content: bytes) -> FileFacts | None:
+        path = self._path(file, content)
+        try:
+            raw = json.loads(path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
+            return None
+        try:
+            return _decode(file, raw)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def save(self, file: str, content: bytes, facts: FileFacts) -> None:
+        path = self._path(file, content)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as temporary:
+            temporary.write(json.dumps(_encode(facts), sort_keys=True, separators=(",", ":")))
+            temporary_path = Path(temporary.name)
+        try:
+            temporary_path.replace(path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    def _path(self, file: str, content: bytes) -> Path:
+        language = language_of(file) or "text"
+        identity = hashlib.sha256()
+        identity.update(content)
+        identity.update(b"\0")
+        identity.update(language.encode())
+        identity.update(b"\0")
+        identity.update(self.parser.encode())
+        identity.update(b"\0")
+        identity.update(FACT_RULE_VERSION.encode())
+        return self.root / language / f"{identity.hexdigest()}.json"
+
+
+def _span(file: str, raw: dict) -> Span:
+    return Span(file, raw["start"], raw["end"], raw.get("name", ""))
+
+
+def _encode(facts: FileFacts) -> dict:
+    return {
+        "structure": {
+            "functions": [asdict(span) for span in facts.structure.functions],
+            "symbols": [asdict(span) for span in facts.structure.symbols],
+            "declarations": [asdict(span) for span in facts.structure.declarations],
+        },
+        "calls": [asdict(call) for call in facts.calls],
+        "references": [asdict(reference) for reference in facts.references],
+        "incomplete": facts.incomplete,
+        "export_names": list(facts.export_names),
+    }
+
+
+def _decode(file: str, raw: dict) -> FileFacts:
+    structure = raw["structure"]
+    return FileFacts(
+        FileStructure(
+            tuple(_span(file, span) for span in structure["functions"]),
+            tuple(_span(file, span) for span in structure["symbols"]),
+            tuple(_span(file, span) for span in structure["declarations"]),
+        ),
+        tuple(CallMatch(file, call["line"], call["name"], call.get("receiver")) for call in raw["calls"]),
+        tuple(
+            ReferenceMatch(file, reference["line"], reference["role"], reference["name"])
+            for reference in raw["references"]
+        ),
+        bool(raw["incomplete"]),
+        tuple(raw.get("export_names", ())),
+    )

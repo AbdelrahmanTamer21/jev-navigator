@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -8,10 +7,11 @@ from git_repos import commit_files
 
 from jev_navigator.directives.find_code import Outcome, find_code
 from jev_navigator.directives.places import neighbours_and_omissions, place_for_line
-from jev_navigator.index import scope_scan, tools
+from jev_navigator.index import tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.languages import has_flow_pragma
+from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
 
@@ -31,19 +31,6 @@ def ast_grep_runs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str | None
     return runs
 
 
-@pytest.fixture
-def validation_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    original_rules = tools.ast_grep_rules
-
-    def slow_on_validation(rules: str, files, cwd, config=None):
-        if "app/validation.py" in files:
-            raise subprocess.TimeoutExpired(["ast-grep"], tools.COMMAND_TIMEOUT_SECONDS)
-        return original_rules(rules, files, cwd)
-
-    monkeypatch.setattr(scope_scan, "BATCH_FILES", 1)
-    monkeypatch.setattr(tools, "ast_grep_rules", slow_on_validation)
-
-
 class CountingResolver:
     """Answers nothing, so the index decides; counts how often the index asks."""
 
@@ -57,7 +44,7 @@ class CountingResolver:
 
 def committed(root: Path, files: dict[str, str]) -> CodeIndex:
     commit_files(root, files)
-    return CodeIndex.from_git(root)
+    return CodeIndex.from_git(root, fact_cache_dir=root.parent / f"{root.name}-fact-cache")
 
 
 # The evidence bundle's flow_adapter.js: a real Flow-typed storage adapter (the eval fixture).
@@ -183,7 +170,9 @@ def a_root_tag_scope(tmp_path: Path) -> CodeIndex:
     )
 
 
-def test_the_scope_is_parsed_once_however_many_lookups_follow(sample_index: CodeIndex, ast_grep_runs) -> None:
+def test_each_file_is_parsed_once_and_a_new_index_reuses_its_facts(
+    sample_index: CodeIndex, ast_grep_runs
+) -> None:
     # Arrange
     opened = [
         sample_index.read_slice(span) for file in sample_index.files for span in sample_index.symbols_in(file)
@@ -196,9 +185,15 @@ def test_the_scope_is_parsed_once_however_many_lookups_follow(sample_index: Code
         sample_index.find_callers(name)
         sample_index.find_references(name)
 
+    cold_runs = len(ast_grep_runs)
+    warm = CodeIndex.from_git(sample_index.root, fact_cache_dir=sample_index.root.parent / "fact-cache")
+    for file in warm.files:
+        warm.symbols_in(file)
+
     # Assert
     assert len(opened) >= 6
-    assert len(ast_grep_runs) == 3
+    assert cold_runs == len(sample_index._code_files)
+    assert len(ast_grep_runs) == cold_runs
 
 
 def test_each_call_site_is_bound_once_however_often_it_is_looked_up(sample_repo: Path) -> None:
@@ -217,6 +212,22 @@ def test_each_call_site_is_bound_once_however_often_it_is_looked_up(sample_repo:
     assert len(resolver.asked) == len(set(resolver.asked))
 
 
+def test_an_external_parser_failure_is_not_relabelled_as_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "module.py").write_text("def run():\n    return 1\n")
+
+    def fail_parser(rules, files, cwd, config=None):
+        del rules, files, cwd, config
+        raise tools.ToolFailedError("ast-grep failed for a real tool reason")
+
+    monkeypatch.setattr(tools, "ast_grep_rules", fail_parser)
+    index = CodeIndex(tmp_path, ["module.py"], fact_cache_dir=tmp_path / "cache")
+
+    with pytest.raises(tools.ToolFailedError, match="real tool reason"):
+        index.functions_in("module.py")
+
+
 def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_path: Path) -> None:
     # Arrange
     index = committed(
@@ -229,45 +240,6 @@ def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_p
 
     # Assert
     assert site.binding.status == "resolved"
-
-
-def test_a_file_that_timed_out_makes_its_names_unknown_not_absent(
-    sample_index: CodeIndex, validation_times_out: None
-) -> None:
-    # Act
-    site = sample_index.find_callers("validate_order")[0]
-
-    # Assert
-    assert sample_index.unparsed_files == {"app/validation.py"}
-    assert sample_index.find_definition("check_limits") == ()
-    assert site.binding.status == "unknown"
-    assert "app/validation.py" in site.binding.reason
-
-
-def test_the_unparsed_list_is_complete_before_any_lookup(
-    sample_index: CodeIndex, validation_times_out: None
-) -> None:
-    # Act
-    unparsed = sample_index.unparsed_files
-
-    # Assert
-    assert unparsed == {"app/validation.py"}
-
-
-def test_a_search_over_a_scope_with_unparsed_files_never_reports_nothing_left(
-    sample_index: CodeIndex, validation_times_out: None
-) -> None:
-    # Arrange
-    judge = Judge(ScriptedJevClient(nouls=lambda question_id, question, state: 0.05))
-    start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
-
-    # Act
-    result = find_code(sample_index, judge, "the item limit check", start)
-
-    # Assert
-    assert result.outcome == Outcome.SCOPE_INCOMPLETE
-    assert result.unparsed_files == {"app/validation.py"}
-    assert result.history.steps[-1].judgments["unparsed_files"] == ["app/validation.py"]
 
 
 def test_the_flow_pragma_is_taken_from_leading_comments_not_from_strings_or_the_body() -> None:
@@ -368,6 +340,97 @@ def test_plain_javascript_is_unchanged_whether_or_not_flow_files_share_the_scope
         assert mixed.find_callees(span) == alone.find_callees(span)
         assert mixed.find_references(name) == alone.find_references(name)
     assert alone.unparsed_files == set()
+
+
+def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> None:
+    """Statement and specifier nodes carry the surface: default, wildcard, a multi-line list and a
+    template-literal body are each handled by the parser, not by source-text scanning."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/service.ts": (
+                "export function run() {}\n"
+                "export default function defaultRun() {}\n"
+                'export * from "./one";\n'
+                "export {\n"
+                "  refund,\n"
+                "  createOrder as placeOrder,\n"
+                "} from './commands';\n"
+                "const tpl = `export function inTemplate() {}`;\n"
+            ),
+        },
+    )
+
+    # Act
+    facts = index._facts_in("src/service.ts")
+
+    # Assert
+    assert facts.export_names == ("placeOrder", "refund", "run")
+    assert facts.incomplete is False
+
+
+def test_script_constructors_are_calls_with_their_existing_binding(tmp_path: Path) -> None:
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/memory.ts": "export class MemoryAdapter {}\n",
+            "src/build.ts": (
+                'import { MemoryAdapter } from "./memory";\n'
+                "export function build() { return new MemoryAdapter(); }\n"
+            ),
+        },
+    )
+    build = index.find_definition("build")[0]
+
+    # Act
+    edge = next(edge for edge in index.callee_edges(build) if edge.name == "MemoryAdapter")
+
+    # Assert
+    assert edge.binding.status == "resolved"
+    assert edge.binding.target == Span("src/memory.ts", 1, 1, "MemoryAdapter")
+
+
+@pytest.mark.parametrize(
+    ("files", "name", "file"),
+    [
+        (
+            {
+                "app/plugins.py": "def order_created(order):\n    return order\n",
+                "app/orders.py": (
+                    "def place_order(manager, order, call_event):\n"
+                    "    call_event(manager.order_created, order)\n"
+                ),
+            },
+            "order_created",
+            "app/orders.py",
+        ),
+        (
+            {
+                "src/plugins.ts": "export function orderCreated(order) { return order; }\n",
+                "src/orders.ts": (
+                    "export function placeOrder(manager, order, callEvent) {\n"
+                    "  callEvent(manager.orderCreated, order);\n"
+                    "}\n"
+                ),
+            },
+            "orderCreated",
+            "src/orders.ts",
+        ),
+    ],
+)
+def test_a_bound_member_passed_as_an_argument_uses_the_member_name(
+    tmp_path: Path, files: dict[str, str], name: str, file: str
+) -> None:
+    # Arrange
+    index = committed(tmp_path, files)
+
+    # Act
+    references = index.find_references(name)
+
+    # Assert
+    assert [(reference.file, reference.role) for reference in references] == [(file, "argument")]
 
 
 def test_an_unsupported_flow_construct_keeps_its_file_incomplete(tmp_path: Path) -> None:

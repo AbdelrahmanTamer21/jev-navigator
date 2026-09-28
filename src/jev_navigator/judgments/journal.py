@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
@@ -72,6 +73,7 @@ class JsonlJournal:
     def __init__(self, path: Path, *, keep_request_text: bool = False) -> None:
         self.path = Path(path)
         self.keep_request_text = keep_request_text
+        self._write_lock = threading.Lock()
 
     def record_request(self, request: JournalRequest) -> str:
         request_id = uuid.uuid4().hex
@@ -99,9 +101,10 @@ class JsonlJournal:
 
     def _append(self, line: dict) -> None:
         line["recorded_at"] = datetime.now(UTC).isoformat(timespec="seconds")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a") as lines:
-            lines.write(json.dumps(line, sort_keys=True, default=str) + "\n")
+        with self._write_lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a") as lines:
+                lines.write(json.dumps(line, sort_keys=True, default=str) + "\n")
 
 
 def _response_fields(response: RawResponse) -> dict:

@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
+from functools import cache
 from pathlib import Path
 
 from .spans import TextHit
@@ -17,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 AST_GREP = "ast-grep"
 RIPGREP = "rg"
-COMMAND_TIMEOUT_SECONDS = 30
 _NO_MATCHES_EXIT = 1
 
 
@@ -27,13 +27,16 @@ class ToolFailedError(RuntimeError):
 
 def run_command(arguments: Sequence[str], cwd: Path, *, no_match_exit: int | None = None) -> str:
     """The command's output; ``no_match_exit`` is the exit code a search tool uses for "nothing found"."""
-    completed = subprocess.run(
-        list(arguments), cwd=cwd, capture_output=True, text=True, timeout=COMMAND_TIMEOUT_SECONDS
-    )
+    completed = subprocess.run(list(arguments), cwd=cwd, capture_output=True, text=True)
     if completed.returncode not in (0, no_match_exit):
         detail = completed.stderr.strip()[:300]
         raise ToolFailedError(f"{arguments[0]} exited {completed.returncode}: {detail}")
     return completed.stdout
+
+
+@cache
+def ast_grep_version() -> str:
+    return run_command([AST_GREP, "--version"], Path.cwd()).strip()
 
 
 def ast_grep_rules(rules_yaml: str, files: Sequence[str], cwd: Path, config: str | None = None) -> list[dict]:
@@ -71,6 +74,54 @@ def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> 
     return [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
 
 
+def ripgrep_files(text: str, files: Sequence[str], cwd: Path) -> tuple[str, ...]:
+    """Every supplied file containing the exact text, without a result-count cutoff."""
+    if not files:
+        return ()
+    output = run_command(
+        [RIPGREP, "--files-with-matches", "--null", "--fixed-strings", "--", text, *files],
+        cwd,
+        no_match_exit=_NO_MATCHES_EXIT,
+    )
+    return tuple(path.removeprefix("./") for path in output.split("\0") if path)
+
+
+def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
+    """Regular, non-symlink files owned by this working directory, including hidden paths.
+
+    A Git worktree uses its tracked and untracked, non-ignored inventory, which naturally excludes
+    nested repositories and managed worktrees. A non-Git directory uses ripgrep's ignore policy.
+    """
+    try:
+        inside_git = git(["rev-parse", "--is-inside-work-tree"], cwd).strip() == "true"
+    except ToolFailedError:
+        inside_git = False
+    if inside_git:
+        output = git(["ls-files", "-z", "-c", "-o", "--exclude-standard", "--", *prefixes], cwd)
+    else:
+        output = run_command(
+            [
+                RIPGREP,
+                "--files",
+                "--hidden",
+                "--null",
+                "--glob",
+                "!.git",
+                "--glob",
+                "!.git/**",
+                *prefixes,
+            ],
+            cwd,
+        )
+    files = []
+    for raw in output.split("\0"):
+        path = raw.removeprefix("./")
+        candidate = cwd / path
+        if path and candidate.is_file() and not candidate.is_symlink():
+            files.append(path)
+    return tuple(sorted(dict.fromkeys(files)))
+
+
 def _text_hit(match: dict) -> TextHit:
     return TextHit(_decoded(match["path"]), match["line_number"], _decoded(match["lines"]).rstrip("\r\n"))
 
@@ -103,7 +154,6 @@ def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) 
         cwd=repository,
         input=requests,
         capture_output=True,
-        timeout=COMMAND_TIMEOUT_SECONDS,
     )
     if completed.returncode != 0:
         raise ToolFailedError(

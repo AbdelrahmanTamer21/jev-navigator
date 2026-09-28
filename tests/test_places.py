@@ -349,7 +349,99 @@ def test_callees_called_from_few_places_come_first(tmp_path: Path) -> None:
     # Assert
     callees = [signature.split("`")[1] for signature in offered.values() if "called by handle" in signature]
     assert callees[0] == "def save_event(event):"
-    assert len(callees) == 8
+    assert len(callees) == 10
+
+
+def test_an_anonymous_handler_offers_proven_callees_before_test_only_candidates(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    index = committed_index(
+        tmp_path,
+        {
+            "src/orders.ts": "export function createOrder() { return 1; }\n",
+            "src/routes.ts": (
+                'import { createOrder } from "./orders";\n'
+                "router.post('/orders', (request) => {\n"
+                "  error(request);\n"
+                "  return createOrder();\n"
+                "});\n"
+            ),
+            "tests/cache.test.ts": "export function error(value) { return value; }\n",
+        },
+    )
+    handler = next(span for span in index.functions_in("src/routes.ts") if span.name == "<anonymous>")
+    opened = index.read_slice(handler)
+
+    # Act
+    offered = neighbours(index, opened, per_kind=1, moves={"callees": MOVES["callees"]})
+
+    # Assert
+    assert [place.key for place in offered] == ["src/orders.ts:1-1"]
+    assert "called by src/routes.ts:" in offered[0].signature
+
+
+def test_a_module_registration_window_offers_the_registered_function(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(
+        tmp_path,
+        {
+            "src/auth.ts": "export function authenticate(request) { return request; }\n",
+            "src/app.ts": ('import { authenticate } from "./auth";\napp.use(authenticate);\n'),
+        },
+    )
+
+    # Act
+    offered = offered_from(index, "src/app.ts", 2)
+
+    # Assert
+    authentication = next(place for place in offered if place.key == "src/auth.ts:1-1")
+    assert "passed on by src/app.ts:1-2 as argument" in authentication.signature
+    assert "candidate" not in authentication.signature
+
+
+def test_a_condition_is_not_described_as_passing_a_name_on(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(
+        tmp_path,
+        {
+            "cache.py": "CACHE_READY = True\n\n\ndef read():\n    if CACHE_READY:\n        return 1\n",
+        },
+    )
+
+    # Act
+    offered = neighbour_signatures(index, "read")
+
+    # Assert
+    assert not any("passed on by read as condition" in signature for signature in offered.values())
+
+
+def test_an_anonymous_callback_offers_its_named_containing_function(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(
+        tmp_path,
+        {
+            "orders.ts": (
+                "export function createOrder(database) {\n"
+                "  return database.transaction(async (transaction) => {\n"
+                "    return transaction.save();\n"
+                "  });\n"
+                "}\n"
+            )
+        },
+    )
+    callback = next(span for span in index.functions_in("orders.ts") if span.name == "<anonymous>")
+
+    # Act
+    offered = neighbours(
+        index,
+        index.read_slice(callback),
+        moves={"same_file": MOVES["same_file"]},
+    )
+
+    # Assert
+    assert [place.key for place in offered] == ["orders.ts:1-5"]
+    assert "in the same file as orders.ts:" in offered[0].signature
 
 
 def test_a_constant_used_as_a_method_receiver_is_passed_on(tmp_path: Path) -> None:
@@ -386,7 +478,7 @@ def test_the_other_functions_of_the_file_are_offered_nearest_first(tmp_path: Pat
 
     # Assert
     same_file = [signature.split("`")[1] for signature in offered if "in the same file" in signature]
-    assert same_file == [f"def step_{number}(value):" for number in (9, 11, 8, 12, 7, 6, 5, 4)]
+    assert same_file == [f"def step_{number}(value):" for number in (9, 11, 8, 12, 7, 6, 5, 4, 3, 2, 1)]
 
 
 def test_a_nested_function_is_offered_only_as_part_of_its_function(tmp_path: Path) -> None:

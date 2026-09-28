@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -113,6 +114,12 @@ def test_scope_wider_than_the_limit_is_refused(sample_repo: Path) -> None:
         CodeIndex.from_git(sample_repo, max_files=2)
 
 
+def test_explicit_unbounded_scope_keeps_every_tracked_file(sample_repo: Path) -> None:
+    index = CodeIndex.from_git(sample_repo, max_files=None)
+
+    assert len(index.files) > 2
+
+
 def test_paths_outside_the_scope_are_refused(sample_repo: Path) -> None:
     # Arrange
     index = CodeIndex.from_git(sample_repo, prefixes=("web/",))
@@ -140,6 +147,7 @@ def test_every_slice_records_its_source_file_lines_commit_and_how_it_was_reached
         "file": "app/validation.py",
         "lines": [10, 12],
         "commit": head,
+        "file_sha256": hashlib.sha256((sample_repo / "app/validation.py").read_bytes()).hexdigest(),
         "reached_by": "callee of validate_order",
     }
     assert edited.commit == f"{head}+worktree"
@@ -493,6 +501,33 @@ def test_search_text_reads_a_line_that_is_not_utf8_as_the_index_does(tmp_path: P
     # Assert
     assert hits == (TextHit("labels.py", 1, index.lines("labels.py")[0]),)
     assert hits[0].text == 'LABEL = "caf\ufffd"'
+
+
+def test_working_directory_inventory_includes_outer_changes_and_excludes_nested_repositories(
+    tmp_path: Path,
+) -> None:
+    git(tmp_path, "init", "-q", "-b", "main")
+    (tmp_path / "tracked.py").write_text("VALUE = 1\n")
+    git(tmp_path, "add", "tracked.py")
+    git(tmp_path, "commit", "-q", "-m", "tracked")
+    (tmp_path / "tracked.py").write_text("VALUE = 2\n")
+    (tmp_path / "untracked.py").write_text("UNTRACKED = True\n")
+    (tmp_path / ".gitignore").write_text("ignored.py\n")
+    (tmp_path / "ignored.py").write_text("IGNORED = True\n")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    git(nested, "init", "-q", "-b", "main")
+    (nested / "duplicate.py").write_text("DUPLICATE = True\n")
+
+    index = CodeIndex.from_directory(tmp_path)
+
+    assert index.files == (".gitignore", "tracked.py", "untracked.py")
+
+
+def test_non_git_directory_inventory_includes_untracked_files(tmp_path: Path) -> None:
+    (tmp_path / "module.py").write_text("VALUE = 1\n")
+
+    assert CodeIndex.from_directory(tmp_path).files == ("module.py",)
 
 
 def test_search_text_reads_a_line_holding_a_unicode_line_separator(tmp_path: Path) -> None:

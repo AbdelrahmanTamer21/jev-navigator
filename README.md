@@ -19,9 +19,61 @@ layer you build on top; [docs/extending.md](docs/extending.md) shows how to comp
 uv add "jev-navigator[typesafe] @ git+https://github.com/ajbmachon/jev-navigator"
 ```
 
+Install the command globally with uv:
+
+```sh
+uv tool install "jev-navigator[typesafe] @ git+https://github.com/ajbmachon/jev-navigator"
+jvn --help
+```
+
 Needs Python 3.11 or newer, and `ast-grep`, `rg` (ripgrep) and `git` on the PATH. The `typesafe` extra adds
 the official SDK for live calls; set `TYPESAFE_API_KEY`. Everything else, including the tests, runs
 offline.
+
+## Live evidence-pack command
+
+`jvn find` runs the existing `CodeIndex`, `Judge`, and `find_code` owners and writes
+one reviewable directory. Load the TypeSafe key into the environment without putting its value on
+the command line, choose a narrow tracked scope, and state the complete search budget:
+
+```sh
+jvn find "the check that limits how many items an order may have" \
+  --repo /path/to/repository \
+  --prefix app/ \
+  --start app/orders.py:42 \
+  --out ~/.local/share/jev-navigator/evidence-packs/order-limit-01 \
+  --max-depth 3 \
+  --max-steps 8 \
+  --max-calls 8 \
+  --beam-width 1 \
+  --neighbours-per-kind 8 \
+  --preview-lines 8 \
+  --max-slice-chars 12000 \
+  --max-line-chars 240
+```
+
+Explicit `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` process values win independently. Otherwise
+`jvn` reads those settings from `~/.config/jvn/env` with a dotenv parser; it does not execute that
+file or print the values. `TYPESAFE_BASE_URL` is the API root before `/v1/systemone`, such as
+`http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
+
+`--start PATH:LINE` is repeatable and optional. A useful start is an entry point or caller, rather
+than the target function itself. Without one, the first code span in every scoped file is queued as
+a start; the budget and `not_inspected` output keep the unfinished scope visible.
+
+The output directory must be new or empty. It contains:
+
+- `manifest.json`: schema version, navigator build fingerprint and source revision, inspected
+  repository revision, explicit budget and thresholds, requested and served model, elapsed time,
+  versioned code spans, raw probabilities, full search history, uninspected frontier, and unparsed
+  files.
+- `report.md`: a readable outcome, source table, found code, and coverage caveat.
+- `journal.jsonl`: request hashes and exact provider responses as the run progresses.
+- `answers.jsonl`: reusable typed answers keyed by source and request hashes.
+
+The manifest and report contain inspected source code. Keep packs for private repositories in a
+private artifact store; the repository includes only a small public-format sample under
+[`examples/evidence-pack`](examples/evidence-pack).
 
 ## Layer 1: index, operations and comments (no model)
 
@@ -29,26 +81,30 @@ offline.
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator import operations, comments
 
-index = CodeIndex.from_git(repo_root, prefixes=("app/", "web/"))  # refuses more than 400 files
+index = CodeIndex.from_git(repo_root, prefixes=("app/", "web/"))
 old = CodeIndex.at_commit(repo_root, "abc123", prefixes=("app/",))  # from git objects, checkout untouched
-index.find_definition("LIMITS_KEY")   # functions, classes, constants, assignments, types, enums
+index.find_definition("LIMITS_KEY")  # functions, classes, constants, assignments, types, enums
 index.find_callers("validate_order")  # CallSite(file, line, caller, binding), found by name
-index.callee_edges(span)               # CallEdge(name, line, binding); find_callees gives names only
+index.callee_edges(span)  # CallEdge(name, line, binding); find_callees gives names only
 index.find_references("send_invoice")  # Reference(name, file, line, role, holder, binding): non-call uses
-index.references_in(span)              # names a function passes on without calling (callbacks, registries)
-index.enclosing_symbol(file, line); index.symbols_in(file)
-index.read_slice(span); index.read_window(file, line, radius=10)
+index.references_in(span)  # names a function passes on without calling (callbacks, registries)
+index.enclosing_symbol(file, line)
+index.symbols_in(file)
+index.read_slice(span)
+index.read_window(file, line, radius=10)
 index.search_text("orders.max_items")  # ripgrep over the narrowed files only
-index.imports(file); index.dependents(file); index.co_changed_files(file)
+index.imports(file)
+index.dependents(file)
+index.co_changed_files(file)
 
-operations.slice_around(index, file, line)                # the enclosing function, or a window
-operations.code_described_by_comment(index, file, line)   # the whole next symbol or block
+operations.slice_around(index, file, line)  # the enclosing function, or a window
+operations.code_described_by_comment(index, file, line)  # the whole next symbol or block
 operations.callers_of_file(index, path)
-operations.trace_callers(index, symbol, depth)            # and trace_callees; depth capped at 3
+operations.trace_callers(index, symbol, depth)  # and trace_callees; depth capped at 3
 operations.similar_functions(index, symbol)
 operations.code_named_in_doc(index, text)
 
-comments.find_comments(index, files)          # FoundComments(kept, dropped) of CommentBlock
+comments.find_comments(index, files)  # FoundComments(kept, dropped) of CommentBlock
 comments.comments_in_diff(index, base, head)  # changed comments, and comments above changed code
 comments.code_above_comment(index, file, line)  # CodeAbove(code or None, reason)
 ```
@@ -56,7 +112,9 @@ comments.code_above_comment(index, file, line)  # CodeAbove(code or None, reason
 Imports are read per statement, so an import spanning several lines counts like any other.
 TypeScript and JavaScript specifiers also resolve through the path aliases (`compilerOptions.paths` and
 `baseUrl`) of the nearest `tsconfig.json`, following relative `extends`; comments and trailing commas in
-the config are fine. Like TypeScript, an exact alias wins, otherwise the wildcard with the longest
+the config are fine. A named import follows transitive `export * from` barrel files inside the index;
+cycles terminate, and more than one matching definition remains a `candidate`. Like TypeScript, an
+exact alias wins, otherwise the wildcard with the longest
 prefix; only its targets are tried, then `baseUrl`. A config that is a symbolic link, or that extends or
 points outside the index root, is not read: its aliases stay unknown and those bindings stay
 `candidate`. `jsconfig.json` and tsconfig `references` are not read. `CodeIndex.at_commit` brings the
@@ -67,24 +125,30 @@ same way by `search_text` and by every other lookup. A scope path that is a symb
 out of the root (through a linked directory or `..`), raises `UnsafePathError` when the index is built,
 before any tool reads it.
 
-The index parses its scope once, lazily, with three ast-grep scans (symbols and declarations, call
-sites, references), then answers every lookup from those tables; each call site's binding is computed
-once. A `.js` file whose leading comments (before any code, after an optional byte-order mark or
-shebang) carry the `@flow` pragma is parsed as `flow`: no Flow grammar is maintained, so these files
-ride on the tsx grammar — the closest superset — scanned in their own invocation through a
-`languageGlobs` sgconfig written outside the scanned repository. Plain JavaScript keeps the
-JavaScript grammar unchanged. The tsx grammar is an incidental superset, not a Flow parser: Flow-only
-constructs it cannot recover (exact object types `{| |}`, `export opaque type`, variance annotations,
-`?T` in static property types, inexact objects `...`) still surface as ERROR nodes below. Scans run in
-batches of 100 files, so one slow batch cannot fail the index: a batch that times
-out is logged and listed in `index.unparsed_files` (reading it runs any scan not yet run, so the list
-is complete). The structure scan also lists files the grammar reports ERROR nodes on — a language's
-parser may recover only part of such a file, so what
-it swallowed must not silently count as indexed; the symbols it did recover still count. Code in
-those files is unknown, not absent: a binding that may depend on them has status
-`unknown` with the files in its reason, and `find_code` reports `scope_incomplete` instead of
-`nothing_left`, with the files in `FindResult.unparsed_files` and in its stop step. Any other ast-grep
-failure (`ToolFailedError`) still fails the lookup that triggered the scan.
+The index extracts symbols, declarations, calls and non-call references together in one ast-grep
+pass over the files a lookup actually needs. Exact-name lookups first use ripgrep to narrow the
+candidate files; opening a known span parses its file directly. The resulting per-file facts are
+cached by source bytes, language, ast-grep version and rule version, so a new index can reuse facts
+without treating changed source or changed parser rules as current. Each call site's binding is
+computed once. There is no default file-count refusal or parser timeout, and no requested file is
+silently omitted.
+
+Before that pass, `.js` files whose leading comments (before any code, after an optional byte-order
+mark or shebang) carry the `@flow` pragma are separated from plain JavaScript. They ride on the tsx
+grammar — the closest available superset — through a `languageGlobs` sgconfig written outside the
+scanned repository. Plain JavaScript keeps the JavaScript grammar unchanged. The tsx grammar is not
+a Flow parser: unsupported constructs such as exact object types `{| |}`, `export opaque type`,
+variance annotations, `?T` in static property types and inexact objects `...` remain visible as
+ERROR nodes.
+
+The facts include grammar ERROR nodes. A language's parser may recover only part of such a file
+(a Flow-only construct, for example), so what it swallowed must not silently count as
+indexed; the symbols it did recover still count. Code in those files is unknown, not absent: a
+binding that may depend on them has status `unknown`, with the files in its reason. A completed
+search reports `scope_incomplete` instead of `nothing_left`; a budget-limited result reports which
+fact scans completed and which remain pending. A file that disappears after the working-directory
+inventory was built is reported separately as unavailable. Any ast-grep or ripgrep failure other
+than that verified disappearance still fails the lookup that triggered it.
 
 Calls are found by name in the syntax tree, which is not a resolved binding. Every call carries a
 `Binding(status, reason, target)`: `resolved` when a definition in the same file or an import naming
@@ -93,7 +157,9 @@ definition elsewhere with no import), `unresolved` when nothing in scope defines
 the definition may sit in a file the index could not parse. A host with a
 real resolver (a code-intelligence service, a TypeScript alias resolver, an LSP) passes it as
 `binding_resolver=`; its answer wins. Trace steps and search neighbours carry the binding, so a
-candidate edge is never presented as a proven call.
+candidate edge is never presented as a proven call. Script constructor expressions such as `new
+MemoryAdapter()` are calls too. A bound method passed as an argument is indexed under its member name,
+so navigation can offer the method definition while keeping its name-only binding honest.
 
 Every `CodeSlice` records its source: `slice.source()` gives the file, line range, commit (with
 `+worktree` when the file had uncommitted changes) and how it was reached.
@@ -120,9 +186,9 @@ from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
 judge = Judge(TypeSafeJevClient(), store=JsonlAnswerStore(path), thresholds=Thresholds.from_env())
 judge.check_each(check, items, shared_state)  # one Noul per item, batched
-judge.pick(pick, options, state)              # one Choice over options code built
+judge.pick(pick, options, state)  # one Choice over options code built
 judge.ask_all(state, checks=[...], picks=[(pick, options)], scores=[rate])  # one request
-judge.choose_call(route, offers, state)       # function calling: operation plus its input
+judge.choose_call(route, offers, state)  # function calling: operation plus its input
 ```
 
 Every one of these has an async form (`check_each_async`, `pick_async`, `ask_all_async`,
@@ -191,9 +257,10 @@ on its own scope, so searches sharing one judge never use up each other's budget
 the central search. Use it only when the target is described by meaning; anything code can decide
 (the callers of X) is an operation. For each opened place, one request asks "Does `slice.code`
 contain the code described in `target.description`?" and, per neighbour code lists (callers, with
-callers in test files after the others; callees, the ones called from fewest places first; code that
+callers in test files after the others; callees, proven production targets first and then the ones
+called from fewest places; code that
 refers to it or that it passes on without a call, as an argument, collection entry, assignment,
-decorator, export, return, method receiver, type or condition; the other functions of its file, nearest
+decorator, export, return, method receiver or type; the other functions of its file, nearest
 first; lines anywhere in scope (docs and config too) that mention its environment variables or its
 quoted keys (six characters or more with a dot, underscore, colon, slash or dash), the
 rarest key first, skipping a key found on more than 30 lines; co-changed files; and the lines before and
@@ -201,7 +268,12 @@ after it), whether the target could be inside it. Places that open the same line
 listed once, whatever move found them, and a place wholly inside the opened code is not listed;
 identical code in two files stays two places. A line outside any function opens its class or
 module-level declaration when that has at most 120 lines; in a longer one it opens the window around the
-line under the definition's name. Either way the moves can follow that name. Each round opens
+line under the definition's name. Either way the moves can follow that name. Callees and passed-on
+definitions are also offered from anonymous functions and windows. For an anonymous nested function,
+same-file navigation first offers the nearest named containing symbol. By default the finite,
+deduplicated frontier decides when the search is complete: depth, step, call and per-move neighbour
+limits are `None`. A caller can set any of those fields on `SearchBudget` when it has an explicit
+operational limit. Each round opens
 `beam_width` places concurrently: start places first, then the neighbours Jev picked to open next, in
 the order it picked them, then the other neighbours by falling `could_contain` probability, with a
 visited set and a content cache. An `open_first` Choice picks the neighbour to open next, with the
@@ -301,10 +373,10 @@ from jev_navigator import connectors
 
 phrase_step = LlmStep(
     name="phrase_fallback",
-    when=lambda result: result.confidence < 0.70,           # when: the phrase Choice was unsure
+    when=lambda result: result.confidence < 0.70,  # when: the phrase Choice was unsure
     context=lambda result: {"comment": comment, "slice": code_state, "options": phrases},
     answer=PickFromOptions("Which phrase names what the code does?", answer_field="phrase"),
-    connector=connectors.pi("your-model"),                  # any CLI or OpenAI-compatible endpoint
+    connector=connectors.pi("your-model"),  # any CLI or OpenAI-compatible endpoint
     guard=LlmGuard(store_path=path, max_calls=5),
 )
 call = phrase_step.run(judge.pick(phrase_pick, phrases, state))  # None when `when` said no

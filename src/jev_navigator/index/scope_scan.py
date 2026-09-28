@@ -1,23 +1,21 @@
-"""Scope-wide tables built with one ast-grep scan each: symbols and declarations per file, every call
-site, and every non-call reference. Lookups then filter a table instead of running ast-grep again.
+"""Syntax facts extracted together in one ast-grep pass over each requested file set.
 
-Each scan runs in batches of ``BATCH_FILES`` files, so one slow batch cannot fail the index: a batch
-that times out is logged and its files are reported as unparsed, and every other file still counts.
-The structure scan also matches the grammar's ERROR nodes: a file the parser could only recover
+Each requested file set is handed to one ast-grep scan, which schedules parsing across its own worker
+pool without reparsing arbitrary fixed-size batches. The structure rules also match the grammar's
+ERROR nodes: a file the parser could only recover
 partially (Flow types in a JavaScript file, say) is reported as unparsed too. Its matched symbols and
 calls still count — recovery keeps what it could — but whatever the ERROR nodes swallowed is unknown,
-not absent, exactly as for a timed-out batch.
+not absent.
 """
 
 from __future__ import annotations
 
-import logging
-import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import tools
+from .imports import _local
 from .languages import (
     CLASS_KINDS,
     DECLARATION_RULES,
@@ -25,6 +23,7 @@ from .languages import (
     FLOW_SGCONFIG,
     FUNCTION_KINDS,
     declared_name,
+    export_rules,
     function_name,
     grammar_of,
     language_for,
@@ -34,15 +33,14 @@ from .languages import (
 from .spans import Span
 
 LinesOf = Callable[[str], Sequence[str]]
-BATCH_FILES = 100
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
 class Unparsed:
-    """Files a scan could not parse — a timed-out batch, or grammar ERROR nodes the parser only
-    recovered partially; lookups treat them as holding nothing they have not matched."""
+    """Files with grammar ERROR nodes the parser only recovered partially.
+
+    Lookups keep recovered matches while treating anything the parser omitted as unknown.
+    """
 
     files_by_scan: dict[str, set[str]] = field(default_factory=dict)
 
@@ -77,10 +75,61 @@ class ReferenceMatch:
     name: str
 
 
-def scan_structure(
+@dataclass(frozen=True)
+class FileFacts:
+    structure: FileStructure
+    calls: tuple[CallMatch, ...]
+    references: tuple[ReferenceMatch, ...]
+    incomplete: bool = False
+    export_names: tuple[str, ...] = ()
+
+
+def scan_facts(
     files: Sequence[str], root: Path, lines_of: LinesOf, unparsed: Unparsed
-) -> dict[str, FileStructure]:
-    matches = _batched("structure", files, lines_of, _structure_rules, root, unparsed)
+) -> dict[str, FileFacts]:
+    """Extract structure, calls, and references in one parser pass over each supplied file."""
+    matches: list[dict] = []
+    for config, group, languages in _scan_groups(files, lines_of):
+        rules = "\n---\n".join(
+            part
+            for part in (
+                _structure_rules(languages),
+                _call_rules(languages),
+                reference_rules(languages),
+                export_rules(languages),
+            )
+            if part
+        )
+        if config is None:
+            matches.extend(tools.ast_grep_rules(rules, group, root))
+        else:
+            matches.extend(tools.ast_grep_rules(rules, group, root, config=config))
+    structure = _structure_from_matches(
+        files,
+        lines_of,
+        unparsed,
+        (match for match in matches if match["ruleId"] in {"function", "class", "declaration", _ERROR_RULE}),
+    )
+    calls = _calls_from_matches(match for match in matches if match["ruleId"] == "call")
+    references = _references_from_matches(
+        match
+        for match in matches
+        if match["ruleId"] not in {"function", "class", "declaration", _ERROR_RULE, "call", *_EXPORT_RULE_IDS}
+    )
+    surface = _export_names_from_matches(match for match in matches if match["ruleId"] in _EXPORT_RULE_IDS)
+    return {
+        file: FileFacts(
+            structure[file],
+            tuple(call for call in calls if call.file == file),
+            tuple(reference for reference in references if reference.file == file),
+            file in unparsed.files,
+            surface.get(file, ()),
+        )
+        for file in files
+    }
+
+
+def _structure_from_matches(files, lines_of, unparsed, matches):
     functions: dict[str, set[Span]] = {file: set() for file in files}
     classes: dict[str, set[Span]] = {file: set() for file in files}
     declarations: dict[str, set[Span]] = {file: set() for file in files}
@@ -89,7 +138,7 @@ def scan_structure(
         if match["ruleId"] == _ERROR_RULE:
             # The grammar reports ERROR nodes here: whatever recovery swallowed is unknown, while the
             # symbols it did keep are still matched below.
-            unparsed.add("structure", [file])
+            unparsed.add("facts", [file])
             continue
         first_line = lines_of(file)[start - 1]
         if match["ruleId"] == "declaration":
@@ -107,12 +156,9 @@ def scan_structure(
     }
 
 
-def scan_calls(
-    files: Sequence[str], root: Path, unparsed: Unparsed, lines_of: LinesOf
-) -> tuple[CallMatch, ...]:
-    """Every call whose callee ends in a plain name, with the receiver before the last dot."""
+def _calls_from_matches(matches) -> tuple[CallMatch, ...]:
     found = []
-    for match in _batched("calls", files, lines_of, _call_rules, root, unparsed):
+    for match in matches:
         expression = match["metaVariables"]["single"]["CALLEE"]["text"]
         name = last_identifier(expression)
         if name:
@@ -120,43 +166,24 @@ def scan_calls(
     return tuple(sorted(found, key=lambda call: (call.file, call.line)))
 
 
-def scan_references(
-    files: Sequence[str], root: Path, unparsed: Unparsed, lines_of: LinesOf
-) -> tuple[ReferenceMatch, ...]:
-    matches = _batched("references", files, lines_of, reference_rules, root, unparsed)
+def _references_from_matches(matches) -> tuple[ReferenceMatch, ...]:
     return tuple(
         sorted(
             {
-                ReferenceMatch(match["file"], _line_of(match), match["ruleId"], match["text"])
+                ReferenceMatch(
+                    match["file"],
+                    _line_of(match),
+                    match["ruleId"],
+                    _reference_name(match["ruleId"], match["text"]),
+                )
                 for match in matches
             }
         )
     )
 
 
-def _batched(
-    scan: str,
-    files: Sequence[str],
-    lines_of: LinesOf,
-    rules_of: Callable[[Sequence[str]], str],
-    root: Path,
-    unparsed: Unparsed,
-) -> list[dict]:
-    matches: list[dict] = []
-    for config, group, languages in _scan_groups(files, lines_of):
-        rules = rules_of(languages)
-        for start in range(0, len(group), BATCH_FILES):
-            batch = group[start : start + BATCH_FILES]
-            try:
-                matches += tools.ast_grep_rules(rules, batch, root, config=config)
-            except subprocess.TimeoutExpired:
-                logger.warning(
-                    "ast-grep timed out on %d files in the %s scan; they count as unparsed",
-                    len(batch),
-                    scan,
-                )
-                unparsed.add(scan, batch)
-    return matches
+def _reference_name(role: str, text: str) -> str:
+    return last_identifier(text) if role == "argument" else text
 
 
 def receiver_of(expression: str) -> str | None:
@@ -170,6 +197,35 @@ def last_identifier(expression: str) -> str:
 
 
 _ERROR_RULE = "parse_error"
+_EXPORT_STATEMENT_RULE = "export_surface"
+_EXPORT_SPECIFIER_RULE = "export_specifier"
+_EXPORT_RULE_IDS = (_EXPORT_STATEMENT_RULE, _EXPORT_SPECIFIER_RULE)
+
+
+def _export_names_from_matches(matches) -> dict[str, tuple[str, ...]]:
+    """The names each file's parser says it exports, from real statement and specifier nodes."""
+    names: dict[str, set[str]] = {}
+    for match in matches:
+        found = names.setdefault(match["file"], set())
+        if match["ruleId"] == _EXPORT_SPECIFIER_RULE:
+            found.add(_local(match["text"]))
+        elif name := _export_statement_name(match["text"]):
+            found.add(name)
+    return {file: tuple(sorted(found)) for file, found in names.items()}
+
+
+def _export_statement_name(text: str) -> str:
+    """The name an ``export`` statement declares. Default, wildcard, namespace and ``{ ... }``
+    list statements contribute nothing here (lists name themselves through specifier nodes);
+    declarations are named by the same helpers the spans use."""
+    statement = " ".join(text.split())
+    body = statement.removeprefix("export").lstrip()
+    if body.startswith(("default", "*", "as ", "{", "=")):
+        return ""
+    name = function_name(statement)
+    if name == "<anonymous>":
+        name = declared_name(statement)
+    return name if name.isidentifier() else ""
 
 
 def _structure_rules(languages: Sequence[str]) -> str:
@@ -185,10 +241,13 @@ def _structure_rules(languages: Sequence[str]) -> str:
 
 
 def _call_rules(languages: Sequence[str]) -> str:
-    return "\n---\n".join(
-        f"id: call\nlanguage: {grammar_of(language)}\nrule:\n  pattern: $CALLEE($$$)"
-        for language in languages
-    )
+    documents = []
+    for language in languages:
+        grammar = grammar_of(language)
+        documents.append(f"id: call\nlanguage: {grammar}\nrule:\n  pattern: $CALLEE($$$)")
+        if grammar != "python":
+            documents.append(f"id: call\nlanguage: {grammar}\nrule:\n  pattern: new $CALLEE($$$)")
+    return "\n---\n".join(documents)
 
 
 def _kind_rule(rule_id: str, language: str, kinds: Sequence[str]) -> str:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import signal
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -15,6 +17,7 @@ from jev_navigator.directives.places import (
     function_place,
     neighbours,
     place_for_line,
+    range_place,
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
@@ -88,6 +91,73 @@ def test_a_low_neighbour_score_keeps_the_neighbour_as_not_inspected(sample_index
     assert result.found == () and result.unsure == () and result.searched == ()
 
 
+def test_a_system_discovered_initial_candidate_can_be_found(sample_index: CodeIndex) -> None:
+    target = sample_index.find_definition("check_limits")[0]
+    candidate = function_place(sample_index, target, "automatic entry selection")
+    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.95, could_contain=lambda _: 0.1))
+
+    result = find_code(
+        sample_index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        initial_candidates=[(candidate, 0.9)],
+    )
+
+    assert result.outcome == Outcome.FOUND
+    assert result.found[0].code.span.name == "check_limits"
+
+
+def test_a_low_choice_probability_does_not_discard_an_unjudged_entry_alternative(
+    sample_index: CodeIndex,
+) -> None:
+    wrong = function_place(sample_index, sample_index.find_definition("place")[0])
+    target = function_place(sample_index, sample_index.find_definition("check_limits")[0])
+    client = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.95 if "len(order.items) <= limit" in code else 0.05,
+            could_contain=lambda _: 0.05,
+        )
+    )
+
+    result = find_code(
+        sample_index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(max_steps=2, beam_width=1),
+        initial_candidates=[(wrong, 0.99), (target, 0.01)],
+        moves={},
+    )
+
+    assert result.outcome == Outcome.FOUND
+    assert result.found[0].code.span.name == "check_limits"
+
+
+def test_an_unopened_entry_alternative_remains_visible_at_the_step_budget(
+    sample_index: CodeIndex,
+) -> None:
+    wrong = function_place(sample_index, sample_index.find_definition("place")[0])
+    target = function_place(sample_index, sample_index.find_definition("check_limits")[0])
+    client = ScriptedJevClient(nouls=scripted(found=lambda _: 0.05, could_contain=lambda _: 0.05))
+
+    result = find_code(
+        sample_index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(max_steps=1, beam_width=1),
+        initial_candidates=[(wrong, 0.99), (target, 0.01)],
+        moves={},
+    )
+
+    assert result.outcome == Outcome.BUDGET
+    remaining = next(item for item in result.not_inspected if item.place_key == target.key)
+    assert remaining.reason == "budget"
+    assert remaining.tier.name == "DISCOVERED"
+
+
 def test_search_reports_unsure_only_when_only_unsure_places_remain(sample_index: CodeIndex) -> None:
     # Arrange
     client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.5, could_contain=lambda signature: 0.1))
@@ -125,6 +195,48 @@ def test_search_stops_at_the_step_budget_and_lists_unopened_candidates(sample_in
     assert result.steps == 2
     assert result.not_inspected
     assert "budget" in {entry.reason for entry in result.not_inspected}
+
+
+def test_budget_receipt_does_not_start_unused_scope_scans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The structure scan is needed to expose real parser recovery. Calls and references are not
+    # needed when this bounded search has no moves, and must remain explicitly pending.
+    (tmp_path / "broken.js").write_text(
+        "// @flow\n"
+        "export opaque type Query = Object;\n"
+        "export function find(query: Query): Query { return query; }\n"
+    )
+    (tmp_path / "unused.py").write_text("def unused():\n    return 1\n")
+    index = CodeIndex(tmp_path, ["broken.js", "unused.py"], fact_cache_dir=tmp_path / "cache")
+    from jev_navigator.index import code_index
+
+    actual_scan = code_index.scan_facts
+    scanned: list[tuple[str, ...]] = []
+
+    def observe_scan(files, root, lines_of, unparsed):
+        scanned.append(tuple(files))
+        return actual_scan(files, root, lines_of, unparsed)
+
+    monkeypatch.setattr(code_index, "scan_facts", observe_scan)
+    index.functions_in("broken.js")
+    start = range_place(index, "broken.js", 1, 3, "test start")
+    client = ScriptedJevClient(nouls=scripted(found=lambda _: 0.05, could_contain=lambda _: 0.05))
+
+    result = find_code(
+        index,
+        Judge(client),
+        TARGET,
+        [start],
+        budget=SearchBudget(max_steps=1, beam_width=1),
+        moves={},
+    )
+
+    assert result.outcome == Outcome.BUDGET
+    assert result.unparsed_files == {"broken.js"}
+    assert result.parser_scans_completed == ()
+    assert result.parser_scans_pending == ("facts",)
+    assert scanned == [("broken.js",)]
 
 
 def test_a_beam_opens_several_places_per_round_as_separate_requests(sample_index: CodeIndex) -> None:
@@ -395,6 +507,321 @@ def test_find_code_with_no_moves_opens_only_its_start(sample_index: CodeIndex) -
     # Assert
     assert result.outcome == Outcome.NOTHING_LEFT
     assert result.steps == 1 and len(client.requests) == 1
+
+
+def test_default_search_limits_are_unbounded_and_a_finite_frontier_terminates(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    budget = SearchBudget(beam_width=1)
+    client = ScriptedJevClient(nouls=scripted(found=lambda _: 0.05, could_contain=lambda _: 0.9))
+
+    # Act
+    result = find_code(
+        sample_index,
+        Judge(client),
+        TARGET,
+        start_at_place(sample_index),
+        budget=budget,
+        moves={},
+    )
+
+    # Assert
+    assert (budget.max_depth, budget.max_steps, budget.max_calls, budget.neighbours_per_kind) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.not_inspected == ()
+
+
+def test_an_unbounded_search_can_reach_beyond_the_old_default_depth(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "chain.txt").write_text("start\none\ntwo\nthree\ntarget\n")
+    index = CodeIndex(tmp_path, ["chain.txt"])
+    chain = [range_place(index, "chain.txt", line, line, "chain") for line in range(1, 6)]
+    successor = {current.key: following for current, following in zip(chain[:-1], chain[1:], strict=True)}
+
+    def next_in_chain(index: CodeIndex, opened: CodeSlice) -> list[Place]:
+        del index
+        following = successor.get(opened.key)
+        return [following] if following is not None else []
+
+    client = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.95 if code == "target" else 0.05,
+            could_contain=lambda _: 0.95,
+        )
+    )
+
+    # Act
+    result = find_code(
+        index,
+        Judge(client),
+        "the target line",
+        [chain[0]],
+        budget=SearchBudget(beam_width=1),
+        moves={"chain": next_in_chain},
+    )
+
+    # Assert
+    assert result.outcome == Outcome.FOUND
+    assert result.found[0].code.span.start == 5
+    assert result.found[0].path == tuple(place.key for place in chain)
+
+
+def test_caller_interrupt_returns_a_resumable_frontier(sample_index: CodeIndex) -> None:
+    # Arrange
+    class InterruptingClient:
+        model = "interrupting"
+
+        def ask(self, state, questions):
+            del state, questions
+            raise KeyboardInterrupt
+
+    target = function_place(sample_index, sample_index.find_definition("check_limits")[0])
+
+    # Act
+    cancelled = find_code(
+        sample_index,
+        Judge(InterruptingClient()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        initial_candidates=[(target, 1.0)],
+    )
+    resumed = find_code(
+        sample_index,
+        Judge(ScriptedJevClient(nouls={"contains_target": 0.95})),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        resume=cancelled,
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert cancelled.steps == 0
+    assert [(entry.place_key, entry.reason) for entry in cancelled.not_inspected] == [
+        (target.key, "cancelled")
+    ]
+    assert resumed.outcome == Outcome.FOUND
+    assert resumed.found[0].code.span == target.open().span
+
+
+def test_interrupt_while_opening_a_beam_restores_every_popped_place(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "places.txt").write_text("first\nsecond\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
+    opened = 0
+
+    def interrupt_second_open(index: CodeIndex, code: CodeSlice) -> list[Place]:
+        del index, code
+        nonlocal opened
+        opened += 1
+        if opened == 2:
+            raise KeyboardInterrupt
+        return []
+
+    # Act
+    cancelled = find_code(
+        index,
+        Judge(ScriptedJevClient()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=2),
+        moves={"interrupt": interrupt_second_open},
+        initial_candidates=[(place, 1.0) for place in places],
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert cancelled.steps == 0
+    assert {entry.place_key for entry in cancelled.not_inspected} == {place.key for place in places}
+    assert {entry.reason for entry in cancelled.not_inspected} == {"cancelled"}
+
+
+def test_interrupt_while_filtering_a_candidate_resumes_and_processes_it(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "places.txt").write_text("start\ntarget\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    start = range_place(index, "places.txt", 1, 1, "candidate")
+    real_candidate = range_place(index, "places.txt", 2, 2, "move")
+    candidate_opens = 0
+
+    def open_candidate() -> CodeSlice:
+        nonlocal candidate_opens
+        candidate_opens += 1
+        if candidate_opens == 3:
+            raise KeyboardInterrupt
+        return real_candidate.open()
+
+    candidate = Place(
+        real_candidate.key,
+        real_candidate.kind,
+        real_candidate.signature,
+        open_candidate,
+    )
+
+    def offer_candidate(index: CodeIndex, code: CodeSlice) -> list[Place]:
+        del index, code
+        return [candidate]
+
+    client = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.95 if code == "target" else 0.05,
+            could_contain=lambda signature: 0.95,
+        )
+    )
+
+    # Act
+    cancelled = find_code(
+        index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={"candidate": offer_candidate},
+        initial_candidates=[(start, 1.0)],
+    )
+    resumed = find_code(
+        index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={"candidate": offer_candidate},
+        resume=cancelled,
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert [(entry.place_key, entry.reason) for entry in cancelled.not_inspected] == [
+        (start.key, "cancelled")
+    ]
+    assert resumed.outcome == Outcome.FOUND
+    assert resumed.found[0].place_key == candidate.key
+
+
+def test_interrupt_while_popping_a_beam_restores_it_for_resume(
+    sample_index: CodeIndex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    from jev_navigator.directives import find_code as find_code_module
+
+    original = find_code_module._Search.next_beam
+    interrupted = False
+
+    def interrupt_after_pop(search, calls_left):
+        nonlocal interrupted
+        beam = original(search, calls_left)
+        if not interrupted:
+            interrupted = True
+            os.kill(os.getpid(), signal.SIGINT)
+        return beam
+
+    monkeypatch.setattr(find_code_module._Search, "next_beam", interrupt_after_pop)
+    target = function_place(sample_index, sample_index.find_definition("check_limits")[0])
+
+    # Act
+    cancelled = find_code(
+        sample_index,
+        Judge(ScriptedJevClient()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        initial_candidates=[(target, 1.0)],
+    )
+    resumed = find_code(
+        sample_index,
+        Judge(ScriptedJevClient(nouls={"contains_target": 0.95})),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        resume=cancelled,
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert [(entry.place_key, entry.reason) for entry in cancelled.not_inspected] == [
+        (target.key, "cancelled")
+    ]
+    assert resumed.outcome == Outcome.FOUND
+    assert resumed.found[0].place_key == target.key
+
+
+def test_interrupt_while_recording_a_round_choice_restores_the_popped_place(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    class InterruptingRecorder:
+        def __init__(self) -> None:
+            self.interrupted = False
+
+        def record_step(self, step) -> None:
+            del step
+            if not self.interrupted:
+                self.interrupted = True
+                raise KeyboardInterrupt
+
+    target = function_place(sample_index, sample_index.find_definition("check_limits")[0])
+
+    # Act
+    cancelled = find_code(
+        sample_index,
+        Judge(ScriptedJevClient(), journal=InterruptingRecorder()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        initial_candidates=[(target, 1.0)],
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert [(entry.place_key, entry.reason) for entry in cancelled.not_inspected] == [
+        (target.key, "cancelled")
+    ]
+
+
+def test_cancellation_keeps_a_successful_response_from_the_same_beam(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "places.txt").write_text("first\nsecond\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
+
+    class PartlyInterruptingClient:
+        model = "partly-interrupting"
+
+        def ask(self, state, questions):
+            if state["slice"]["code"] == "second":
+                raise KeyboardInterrupt
+            return ScriptedJevClient(default_noul=0.05).ask(state, questions)
+
+    # Act
+    cancelled = find_code(
+        index,
+        Judge(PartlyInterruptingClient()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=2),
+        moves={},
+        initial_candidates=[(place, 1.0) for place in places],
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert [visit.place_key for visit in cancelled.searched] == [places[0].key]
+    assert [(entry.place_key, entry.reason) for entry in cancelled.not_inspected] == [
+        (places[1].key, "cancelled")
+    ]
 
 
 def test_the_result_and_the_stop_step_name_the_moves_the_search_used(sample_index: CodeIndex) -> None:

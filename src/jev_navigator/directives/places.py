@@ -12,9 +12,8 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from ..index.code_index import CodeIndex
-from ..index.spans import CodeSlice, Span, TextHit
+from ..index.spans import CallEdge, CodeSlice, Span, TextHit
 
-DEFAULT_NEIGHBOURS_PER_KIND = 8
 MAX_DEFINITION_LINES = 120
 REST_OF_FILE_LINES = 40
 CO_CHANGE_HEAD_LINES = 40
@@ -24,6 +23,9 @@ _ENVIRONMENT_READ = re.compile(
 _QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{5,79})["'`]""")
 _KEY_SHAPE = re.compile(r"[._:/-]")
 MAX_KEY_HITS = 30
+_PASSED_ON_ROLES = frozenset(
+    {"argument", "decorator", "collection", "assignment", "export", "return", "receiver", "type"}
+)
 _TEST_DIRECTORIES = frozenset({"test", "tests", "__tests__", "spec"})
 _TEST_FILE_NAME = re.compile(r"^test_|_test\.|\.test\.|\.spec\.|^conftest\.py$")
 
@@ -101,7 +103,7 @@ Move = Callable[[CodeIndex, CodeSlice], list[Place]]
 def neighbours(
     index: CodeIndex,
     opened: CodeSlice,
-    per_kind: int = DEFAULT_NEIGHBOURS_PER_KIND,
+    per_kind: int | None = None,
     moves: Mapping[str, Move] | None = None,
 ) -> list[Place]:
     return neighbours_and_omissions(index, opened, per_kind, moves)[0]
@@ -110,7 +112,7 @@ def neighbours(
 def neighbours_and_omissions(
     index: CodeIndex,
     opened: CodeSlice,
-    per_kind: int = DEFAULT_NEIGHBOURS_PER_KIND,
+    per_kind: int | None = None,
     moves: Mapping[str, Move] | None = None,
     shown: Span | None = None,
 ) -> tuple[list[Place], list[Place]]:
@@ -133,9 +135,11 @@ def neighbours_and_omissions(
     beyond_cap: list[Place] = []
     for build in (MOVES if moves is None else moves).values():
         new = _new_places(build(index, opened), on_screen, kept_lines)
-        kept += new[:per_kind]
-        kept_lines |= {place.open().span.key for place in new[:per_kind]}
-        beyond_cap += new[per_kind:]
+        selected = new if per_kind is None else new[:per_kind]
+        kept += selected
+        kept_lines |= {place.open().span.key for place in selected}
+        if per_kind is not None:
+            beyond_cap += new[per_kind:]
     return kept, _new_places(beyond_cap, on_screen, kept_lines)
 
 
@@ -166,17 +170,21 @@ def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
 
 
 def _callees(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    """What the opened code calls, the names called from fewest places first: a function called
-    only here says more about this code than a helper called everywhere."""
-    if not _is_named(opened.span):
-        return []
+    """What the opened code calls, with proven production targets before name-only candidates."""
     places = []
-    edges = sorted(index.callee_edges(opened.span), key=lambda edge: index.call_site_count(edge.name))
+    edges = sorted(index.callee_edges(opened.span), key=lambda edge: _callee_rank(index, edge))
+    source = _span_label(opened.span)
     for edge in edges:
         targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
-        relation = _with_binding(f"called by {opened.span.name}", edge.binding)
+        relation = _with_binding(f"called by {source}", edge.binding)
         places += [function_place(index, span, relation) for span in targets]
     return places
+
+
+def _callee_rank(index: CodeIndex, edge: CallEdge) -> tuple[bool, bool, int]:
+    targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
+    only_tests = bool(targets) and all(_is_test_file(target.file) for target in targets)
+    return not edge.binding.proven, only_tests, index.call_site_count(edge.name)
 
 
 def _referenced_by(index: CodeIndex, opened: CodeSlice) -> list[Place]:
@@ -192,14 +200,13 @@ def _referenced_by(index: CodeIndex, opened: CodeSlice) -> list[Place]:
 
 
 def _passed_on(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    if not _is_named(opened.span):
-        return []
     places = []
-    for ref in index.references_in(opened.span):
+    source = _span_label(opened.span)
+    for ref in (ref for ref in index.references_in(opened.span) if ref.role in _PASSED_ON_ROLES):
         targets = (
             [ref.binding.target] if ref.binding and ref.binding.target else index.find_definition(ref.name)
         )
-        relation = _with_binding(f"passed on by {opened.span.name} as {ref.role}", ref.binding)
+        relation = _with_binding(f"passed on by {source} as {ref.role}", ref.binding)
         places += [function_place(index, span, relation) for span in targets]
     return places
 
@@ -220,12 +227,24 @@ def _is_test_file(path: str) -> bool:
 def _same_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     """The other functions of the file, nearest to the opened code first; a function nested in
     another is part of that function."""
-    relation = f"in the same file as {opened.span.name or opened.span.key}"
+    relation = f"in the same file as {_span_label(opened.span)}"
     functions = index.functions_in(opened.span.file)
+    container = None
+    if not _is_named(opened.span):
+        container = min(
+            (
+                span
+                for span in index.symbols_in(opened.span.file)
+                if span != opened.span and _is_named(span) and span.contains(opened.span.start)
+            ),
+            key=Span.size,
+            default=None,
+        )
     outermost = [span for span in functions if not any(_encloses(other, span) for other in functions)]
     others = [span for span in outermost if not _overlaps(span, opened.span)]
     nearest_first = sorted(others, key=lambda span: (_distance(span, opened.span), span.start))
-    return [function_place(index, span, relation) for span in nearest_first]
+    ordered = ([container] if container is not None else []) + nearest_first
+    return [function_place(index, span, relation) for span in ordered]
 
 
 def _overlaps(first: Span, second: Span) -> bool:
@@ -299,6 +318,10 @@ def _rest_of_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
 
 def _is_named(span: Span) -> bool:
     return bool(span.name) and not span.name.startswith("<")
+
+
+def _span_label(span: Span) -> str:
+    return span.name if _is_named(span) else span.key
 
 
 def starting_places(index: CodeIndex, locations: Sequence[tuple[str, int]]) -> list[Place]:
