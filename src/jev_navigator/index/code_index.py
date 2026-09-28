@@ -152,7 +152,8 @@ class CodeIndex:
 
     @property
     def unparsed_files(self) -> frozenset[str]:
-        """Files a scan could not parse in time. Reading it runs any scan not yet run, so the list is
+        """Files a scan could not parse in time, or that the grammar reports ERROR nodes on, so what
+        the parser recovered from them is partial. Reading it runs any scan not yet run, so the list is
         complete. Their definitions and calls are unknown, not absent: bindings that may depend on
         them say ``unknown``, and a search over the scope never reports ``nothing_left``."""
         self._structure()

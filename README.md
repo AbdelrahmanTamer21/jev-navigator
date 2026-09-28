@@ -71,7 +71,10 @@ The index parses its scope once, lazily, with three ast-grep scans (symbols and 
 sites, references), then answers every lookup from those tables; each call site's binding is computed
 once. Scans run in batches of 100 files, so one slow batch cannot fail the index: a batch that times
 out is logged and listed in `index.unparsed_files` (reading it runs any scan not yet run, so the list
-is complete). Code in those files is unknown, not absent: a binding that may depend on them has status
+is complete). The structure scan also lists files the grammar reports ERROR nodes on — a language's
+parser may recover only part of such a file (Flow types in a JavaScript file, for example), so what
+it swallowed must not silently count as indexed; the symbols it did recover still count. Code in
+those files is unknown, not absent: a binding that may depend on them has status
 `unknown` with the files in its reason, and `find_code` reports `scope_incomplete` instead of
 `nothing_left`, with the files in `FindResult.unparsed_files` and in its stop step. Any other ast-grep
 failure (`ToolFailedError`) still fails the lookup that triggered the scan.

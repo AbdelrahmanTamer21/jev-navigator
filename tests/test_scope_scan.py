@@ -57,6 +57,63 @@ def committed(root: Path, files: dict[str, str]) -> CodeIndex:
     return CodeIndex.from_git(root)
 
 
+FLOW_ADAPTER = """\
+// @flow
+const toPostgresValue = (value: any, options: ?QueryOptions): any => value;
+
+export class PostgresAdapter {
+  constructor({ uri }: { uri: string }) {
+    this._client = connect(uri);
+  }
+
+  async createObject(className: string, object: Object, options: ?QueryOptions): Promise<void> {
+    await this._client.none('INSERT INTO $1:name', [className, toPostgresValue(object, options)]);
+  }
+
+  find(className: string, query: Object): Promise<Array<Object>> {
+    return this._client.any('SELECT * FROM $1:name', [className, query]);
+  }
+}
+
+function connect(uri: string): any {
+  return { uri };
+}
+"""
+
+MEMORY_ADAPTER = """\
+export class MemoryAdapter {
+  constructor() {
+    this.rows = [];
+  }
+
+  createObject(className, object) {
+    this.rows.push({ className, object });
+  }
+}
+"""
+
+ADAPTER_CALLER = """\
+import { PostgresAdapter } from './postgres';
+
+export function store(uri) {
+  const adapter = new PostgresAdapter({ uri });
+  return adapter.find('users', {});
+}
+"""
+
+
+def an_adapter_scope(tmp_path: Path) -> CodeIndex:
+    """A Flow-typed file the JavaScript grammar only partly recovers, a valid sibling, and a caller."""
+    return committed(
+        tmp_path,
+        {
+            "src/adapters/postgres.js": FLOW_ADAPTER,
+            "src/adapters/memory.js": MEMORY_ADAPTER,
+            "src/adapters/index.js": ADAPTER_CALLER,
+        },
+    )
+
+
 def test_the_scope_is_parsed_once_however_many_lookups_follow(sample_index: CodeIndex, ast_grep_runs) -> None:
     # Arrange
     opened = [
@@ -142,3 +199,49 @@ def test_a_search_over_a_scope_with_unparsed_files_never_reports_nothing_left(
     assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert result.unparsed_files == {"app/validation.py"}
     assert result.history.steps[-1].judgments["unparsed_files"] == ["app/validation.py"]
+
+
+def test_a_file_the_grammar_only_partly_recovers_counts_as_unparsed(tmp_path: Path) -> None:
+    """parse-server P1: `options: ?QueryOptions` on a method of an exported class makes the JavaScript
+    grammar report an ERROR in the class. The file must not count as completely indexed, while
+    valid module functions and the valid sibling stay usable. Recovery inside the malformed class
+    may vary across parser versions."""
+    # Arrange
+    index = an_adapter_scope(tmp_path)
+
+    # Act
+    methods = {span.name for span in index.functions_in("src/adapters/postgres.js")}
+
+    # Assert
+    assert index.unparsed_files == {"src/adapters/postgres.js"}
+    assert {"toPostgresValue", "connect"} <= methods
+    assert {"constructor", "createObject"} <= {
+        span.name for span in index.functions_in("src/adapters/memory.js")
+    }
+
+
+def test_a_name_defined_only_where_the_grammar_errored_is_unknown_not_unresolved(tmp_path: Path) -> None:
+    # Arrange
+    index = an_adapter_scope(tmp_path)
+
+    # Act
+    site = index.find_callers("find")[0]
+
+    # Assert
+    assert site.binding.status == "unknown"
+    assert "src/adapters/postgres.js" in site.binding.reason
+
+
+def test_a_search_over_a_scope_with_grammar_errors_never_reports_nothing_left(tmp_path: Path) -> None:
+    # Arrange
+    index = an_adapter_scope(tmp_path)
+    judge = Judge(ScriptedJevClient(nouls=lambda question_id, question, state: 0.05))
+    start = [place_for_line(index, "src/adapters/index.js", 4, "start")]
+
+    # Act
+    result = find_code(index, judge, "where users are found", start)
+
+    # Assert
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
+    assert result.unparsed_files == {"src/adapters/postgres.js"}
+    assert result.history.steps[-1].judgments["unparsed_files"] == ["src/adapters/postgres.js"]

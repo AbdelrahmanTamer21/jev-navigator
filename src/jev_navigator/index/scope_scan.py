@@ -3,6 +3,10 @@ site, and every non-call reference. Lookups then filter a table instead of runni
 
 Each scan runs in batches of ``BATCH_FILES`` files, so one slow batch cannot fail the index: a batch
 that times out is logged and its files are reported as unparsed, and every other file still counts.
+The structure scan also matches the grammar's ERROR nodes: a file the parser could only recover
+partially (Flow types in a JavaScript file, say) is reported as unparsed too. Its matched symbols and
+calls still count — recovery keeps what it could — but whatever the ERROR nodes swallowed is unknown,
+not absent, exactly as for a timed-out batch.
 """
 
 from __future__ import annotations
@@ -33,7 +37,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Unparsed:
-    """Files a scan could not parse, by scan name; lookups treat them as holding nothing."""
+    """Files a scan could not parse — a timed-out batch, or grammar ERROR nodes the parser only
+    recovered partially; lookups treat them as holding nothing they have not matched."""
 
     files_by_scan: dict[str, set[str]] = field(default_factory=dict)
 
@@ -77,6 +82,11 @@ def scan_structure(
     declarations: dict[str, set[Span]] = {file: set() for file in files}
     for match in matches:
         file, start, end = match["file"], _line_of(match), match["range"]["end"]["line"] + 1
+        if match["ruleId"] == _ERROR_RULE:
+            # The grammar reports ERROR nodes here: whatever recovery swallowed is unknown, while the
+            # symbols it did keep are still matched below.
+            unparsed.add("structure", [file])
+            continue
         first_line = lines_of(file)[start - 1]
         if match["ruleId"] == "declaration":
             declarations[file].add(Span(file, start, end, declared_name(first_line)))
@@ -143,12 +153,16 @@ def last_identifier(expression: str) -> str:
     return tail if tail.isidentifier() else ""
 
 
+_ERROR_RULE = "parse_error"
+
+
 def _structure_rules(files: Sequence[str]) -> str:
     documents = []
     for language in _languages(files):
         documents.append(_kind_rule("function", language, FUNCTION_KINDS[language]))
         documents.append(_kind_rule("class", language, CLASS_KINDS[language]))
         documents.append(f"id: declaration\nlanguage: {language}\nrule:\n{DECLARATION_RULES[language]}")
+        documents.append(f"id: {_ERROR_RULE}\nlanguage: {language}\nrule:\n  kind: ERROR")
     return "\n---\n".join(documents)
 
 
