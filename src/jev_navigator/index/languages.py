@@ -122,7 +122,8 @@ _PYTHON_ROLES = (
             "kind: boolean_operator",
             "kind: not_operator",
             "kind: assert_statement",
-            "field: condition\nany:\n  - kind: if_statement\n  - kind: elif_clause\n  - kind: while_statement",
+            "field: condition\nany:\n  - kind: if_statement\n  - kind: elif_clause\n"
+            "  - kind: while_statement",
         ),
     ),
 )

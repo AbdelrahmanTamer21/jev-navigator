@@ -80,6 +80,7 @@ class CodeIndex:
             lambda: scan_structure(self._code_files, self.root, self._lines_of, self._unparsed)
         )
         self._calls = cache(lambda: scan_calls(self._code_files, self.root, self._unparsed))
+        self._call_counts = cache(lambda: Counter(call.name for call in self._calls()))
         self._reference_matches = cache(lambda: scan_references(self._code_files, self.root, self._unparsed))
         self._definitions = cache(self._definitions_by_name)
         self._callables = cache(self._callable_spans)
@@ -192,6 +193,10 @@ class CodeIndex:
             )
             for (file, line), receiver in sorted(sites.items())
         )
+
+    def call_site_count(self, name: str) -> int:
+        """How many call sites in scope call ``name``; a name called from fewer places is more specific."""
+        return self._call_counts()[name]
 
     def find_callees(self, function: Span) -> tuple[str, ...]:
         """Names called inside ``function``; see ``callee_edges`` for their bindings."""

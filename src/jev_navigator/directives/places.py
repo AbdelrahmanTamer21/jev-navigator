@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from ..index.code_index import CodeIndex
@@ -44,12 +44,16 @@ def function_place(index: CodeIndex, span: Span, relation: str = "") -> Place:
     )
 
 
-def window_place(index: CodeIndex, file: str, line: int, relation: str, radius: int = 10) -> Place:
+def window_place(
+    index: CodeIndex, file: str, line: int, relation: str, radius: int = 10, name: str = ""
+) -> Place:
     """The lines around ``line``, the line that made this place a neighbour (a call, a reference, a
-    mentioned key); the signature quotes that line."""
+    mentioned key); the signature quotes that line. ``name`` names the class or declaration the
+    window lies in, so the moves can follow that name from the window."""
 
     def open_window() -> CodeSlice:
-        return index.read_window(file, line, radius, origin=relation)
+        window = index.read_window(file, line, radius).span
+        return index.read_slice(replace(window, name=name), origin=relation)
 
     span = open_window().span
     text_line = index.read_slice(Span(file, line, line)).text.strip()
@@ -70,18 +74,23 @@ def range_place(index: CodeIndex, file: str, start: int, end: int, relation: str
 
 def place_for_line(index: CodeIndex, file: str, line: int, relation: str) -> Place:
     """The function holding ``line``. Outside every function, the class or module-level declaration
-    holding it, when that has at most ``MAX_DEFINITION_LINES`` lines, so the place has a name the
-    moves can follow; otherwise the window around the line."""
-    enclosing = index.enclosing_symbol(file, line) or _enclosing_definition(index, file, line)
-    if enclosing is not None:
-        return function_place(index, enclosing, relation)
-    return window_place(index, file, line, relation)
+    holding it, whole when it has at most ``MAX_DEFINITION_LINES`` lines and otherwise as the window
+    around the line under its name, so the moves can follow that name; outside every definition,
+    the window around the line."""
+    function = index.enclosing_symbol(file, line)
+    if function is not None:
+        return function_place(index, function, relation)
+    definition = _enclosing_definition(index, file, line)
+    if definition is None:
+        return window_place(index, file, line, relation)
+    if definition.size() <= MAX_DEFINITION_LINES:
+        return function_place(index, definition, relation)
+    return window_place(index, file, line, relation, name=definition.name)
 
 
 def _enclosing_definition(index: CodeIndex, file: str, line: int) -> Span | None:
     definitions = (*index.symbols_in(file), *index.declarations_in(file))
-    fitting = [span for span in definitions if span.contains(line) and span.size() <= MAX_DEFINITION_LINES]
-    return min(fitting, key=Span.size, default=None)
+    return min((span for span in definitions if span.contains(line)), key=Span.size, default=None)
 
 
 Move = Callable[[CodeIndex, CodeSlice], list[Place]]
@@ -152,10 +161,13 @@ def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
 
 
 def _callees(index: CodeIndex, opened: CodeSlice) -> list[Place]:
+    """What the opened code calls, the names called from fewest places first: a function called
+    only here says more about this code than a helper called everywhere."""
     if not _is_named(opened.span):
         return []
     places = []
-    for edge in index.callee_edges(opened.span):
+    edges = sorted(index.callee_edges(opened.span), key=lambda edge: index.call_site_count(edge.name))
+    for edge in edges:
         targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
         relation = _with_binding(f"called by {opened.span.name}", edge.binding)
         places += [function_place(index, span, relation) for span in targets]

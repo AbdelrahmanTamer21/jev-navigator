@@ -248,17 +248,65 @@ def test_a_line_on_a_module_constant_opens_the_constant_so_code_naming_it_is_off
     assert "refers to BLOCKED_TOOLS as condition" in offered["limits_test.py:4-6"]
 
 
-def test_a_line_on_a_class_longer_than_the_limit_opens_a_window(tmp_path: Path) -> None:
-    # Arrange
+def long_class_index(root: Path) -> CodeIndex:
     attributes = "".join(f"    FIELD_{number} = {number}\n" for number in range(MAX_DEFINITION_LINES))
-    index = committed_index(tmp_path, {"settings.py": "class Settings:\n" + attributes})
+    body = attributes.replace("    FIELD_60 = 60\n", '    FIELD_60 = build_field("sixty")\n')
+    return committed_index(
+        root,
+        {
+            "mutations.py": "from fields import build_field\n\n\nclass CreateOrder:\n" + body,
+            "fields.py": "def build_field(name):\n    return name\n",
+            "schema.py": "from mutations import CreateOrder\n\nMUTATIONS = [CreateOrder]\n",
+        },
+    )
+
+
+def test_a_line_in_a_class_too_long_to_open_whole_opens_a_window_named_after_the_class(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    index = long_class_index(tmp_path)
 
     # Act
-    place = place_for_line(index, "settings.py", 60, "start")
+    opened = place_for_line(index, "mutations.py", 65, "start").open()
 
     # Assert
-    assert place.open().span.name == ""
-    assert place.open().span.size() == 21
+    assert opened.span == Span("mutations.py", 55, 75, "CreateOrder")
+
+
+def test_moves_start_from_a_window_inside_a_long_class(tmp_path: Path) -> None:
+    # Arrange
+    index = long_class_index(tmp_path)
+
+    # Act
+    offered = {place.key: place.signature for place in offered_from(index, "mutations.py", 65)}
+
+    # Assert
+    assert "called by CreateOrder" in offered["fields.py:1-2"]
+    assert "refers to CreateOrder as collection" in offered["schema.py:3-3"]
+
+
+def test_callees_called_from_few_places_come_first(tmp_path: Path) -> None:
+    # Arrange
+    helpers = "".join(f"def helper_{number}(value):\n    return value\n\n\n" for number in range(9))
+    helper_calls = "".join(f"    helper_{number}(event)\n" for number in range(9))
+    index = committed_index(
+        tmp_path,
+        {
+            "helpers.py": helpers,
+            "events.py": "def save_event(event):\n    return event\n",
+            "handler.py": "def handle(event):\n" + helper_calls + "    save_event(event)\n\n\n"
+            "def audit(event):\n" + helper_calls,
+        },
+    )
+
+    # Act
+    offered = neighbour_signatures(index, "handle")
+
+    # Assert
+    callees = [signature.split("`")[1] for signature in offered.values() if "called by handle" in signature]
+    assert callees[0] == "def save_event(event):"
+    assert len(callees) == 8
 
 
 def test_a_constant_used_as_a_method_receiver_is_passed_on(tmp_path: Path) -> None:
@@ -279,7 +327,9 @@ def test_a_constant_used_as_a_method_receiver_is_passed_on(tmp_path: Path) -> No
 
 
 def numbered_functions(count: int) -> str:
-    return "".join(f"def step_{number}(value):\n    return value + {number}\n\n\n" for number in range(1, count + 1))
+    return "".join(
+        f"def step_{number}(value):\n    return value + {number}\n\n\n" for number in range(1, count + 1)
+    )
 
 
 def test_the_other_functions_of_the_file_are_offered_nearest_first(tmp_path: Path) -> None:
@@ -287,7 +337,9 @@ def test_the_other_functions_of_the_file_are_offered_nearest_first(tmp_path: Pat
     index = committed_index(tmp_path, {"steps.py": numbered_functions(12)})
 
     # Act
-    offered = [place.signature for place in neighbours(index, index.read_slice(index.find_definition("step_10")[0]))]
+    offered = [
+        place.signature for place in neighbours(index, index.read_slice(index.find_definition("step_10")[0]))
+    ]
 
     # Assert
     same_file = [signature.split("`")[1] for signature in offered if "in the same file" in signature]
@@ -299,8 +351,8 @@ def test_a_nested_function_is_offered_only_as_part_of_its_function(tmp_path: Pat
     index = committed_index(
         tmp_path,
         {
-            "steps.py": "def outer(value):\n    def inner():\n        return value\n\n    return inner()\n\n\n"
-            "def other(value):\n    return value\n"
+            "steps.py": "def outer(value):\n    def inner():\n        return value\n\n"
+            "    return inner()\n\n\ndef other(value):\n    return value\n"
         },
     )
 
@@ -313,7 +365,8 @@ def test_a_nested_function_is_offered_only_as_part_of_its_function(tmp_path: Pat
 
 
 @pytest.mark.parametrize(
-    "test_path", ["tests/helpers.py", "app/test_orders.py", "app/orders_test.py", "app/conftest.py", "spec/orders.py"]
+    "test_path",
+    ["tests/helpers.py", "app/test_orders.py", "app/orders_test.py", "app/conftest.py", "spec/orders.py"],
 )
 def test_callers_in_test_files_come_after_the_other_callers(tmp_path: Path, test_path: str) -> None:
     # Arrange
@@ -322,7 +375,8 @@ def test_callers_in_test_files_come_after_the_other_callers(tmp_path: Path, test
         {
             "orders.py": "def place_order(order):\n    return order\n",
             test_path: "from orders import place_order\n\n\ndef check_order():\n    place_order({})\n",
-            "zz/checkout.py": "from orders import place_order\n\n\ndef checkout(order):\n    place_order(order)\n",
+            "zz/checkout.py": "from orders import place_order\n\n\n"
+            "def checkout(order):\n    place_order(order)\n",
         },
     )
 
@@ -336,7 +390,9 @@ def test_callers_in_test_files_come_after_the_other_callers(tmp_path: Path, test
 
 def test_the_lines_before_and_after_stay_off_the_opened_code_in_a_short_file(tmp_path: Path) -> None:
     # Arrange
-    index = committed_index(tmp_path, {"orders.py": "import os\n\ndef place(order):\n    return order\n\nLIMIT = 5\n"})
+    index = committed_index(
+        tmp_path, {"orders.py": "import os\n\ndef place(order):\n    return order\n\nLIMIT = 5\n"}
+    )
 
     # Act
     offered = neighbour_signatures(index, "place")
@@ -352,13 +408,17 @@ def a_move_offering(*places: Place) -> Move:
 
 def test_places_that_open_the_same_lines_are_offered_once(tmp_path: Path) -> None:
     # Arrange
-    index = committed_index(tmp_path, {"routes.py": "".join(f"ROUTE_{number} = {number}\n" for number in range(30))})
+    index = committed_index(
+        tmp_path, {"routes.py": "".join(f"ROUTE_{number} = {number}\n" for number in range(30))}
+    )
     opened = index.read_slice(Span("routes.py", 25, 30))
     window = window_place(index, "routes.py", 11, "mentions a key")
     same_lines = range_place(index, "routes.py", 1, 21, "the start of a co-changed file")
 
     # Act
-    offered = neighbours(index, opened, moves={"keys": a_move_offering(window), "files": a_move_offering(same_lines)})
+    offered = neighbours(
+        index, opened, moves={"keys": a_move_offering(window), "files": a_move_offering(same_lines)}
+    )
 
     # Assert
     assert [place.key for place in offered] == [window.key]
@@ -366,7 +426,9 @@ def test_places_that_open_the_same_lines_are_offered_once(tmp_path: Path) -> Non
 
 def test_a_place_wholly_inside_the_opened_code_is_not_offered(tmp_path: Path) -> None:
     # Arrange
-    index = committed_index(tmp_path, {"routes.py": "".join(f"ROUTE_{number} = {number}\n" for number in range(30))})
+    index = committed_index(
+        tmp_path, {"routes.py": "".join(f"ROUTE_{number} = {number}\n" for number in range(30))}
+    )
     opened = index.read_slice(Span("routes.py", 1, 20))
     inside = range_place(index, "routes.py", 3, 5, "inside")
     overlapping = range_place(index, "routes.py", 15, 25, "overlapping")
@@ -399,7 +461,9 @@ def test_identical_code_in_two_files_stays_two_places(tmp_path: Path) -> None:
 
 def test_a_place_kept_by_an_earlier_move_does_not_use_a_later_moves_cap(tmp_path: Path) -> None:
     # Arrange
-    index = committed_index(tmp_path, {"routes.py": "".join(f"ROUTE_{number} = {number}\n" for number in range(30))})
+    index = committed_index(
+        tmp_path, {"routes.py": "".join(f"ROUTE_{number} = {number}\n" for number in range(30))}
+    )
     opened = index.read_slice(Span("routes.py", 1, 1))
     shared = range_place(index, "routes.py", 5, 6, "shared")
     only_later = range_place(index, "routes.py", 8, 9, "only later")
