@@ -79,9 +79,11 @@ class CodeIndex:
         self._structure = cache(
             lambda: scan_structure(self._code_files, self.root, self._lines_of, self._unparsed)
         )
-        self._calls = cache(lambda: scan_calls(self._code_files, self.root, self._unparsed))
+        self._calls = cache(lambda: scan_calls(self._code_files, self.root, self._unparsed, self._lines_of))
         self._call_counts = cache(lambda: Counter(call.name for call in self._calls()))
-        self._reference_matches = cache(lambda: scan_references(self._code_files, self.root, self._unparsed))
+        self._reference_matches = cache(
+            lambda: scan_references(self._code_files, self.root, self._unparsed, self._lines_of)
+        )
         self._definitions = cache(self._definitions_by_name)
         self._callables = cache(self._callable_spans)
         self._top_level_in = cache(self._top_level_spans)
