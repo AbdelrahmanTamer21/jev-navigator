@@ -32,6 +32,7 @@ DEFAULT_WINDOW_RADIUS = 10
 MAX_TEXT_HITS = 20
 CO_CHANGE_COMMITS = 200
 _COMMIT_MARK = "@@commit@@"
+_REGULAR_FILE_MODES = frozenset({"100644", "100755"})
 
 
 class RevisionMismatchError(ValueError):
@@ -82,9 +83,10 @@ class CodeIndex:
         max_files: int = DEFAULT_MAX_FILES,
         binding_resolver: BindingResolver | None = None,
     ) -> CodeIndex:
-        """The tracked files under ``prefixes`` (every tracked file when none are given)."""
+        """The tracked regular files under ``prefixes`` (every one when none are given). Symbolic links
+        and submodules are left out: a link can point outside the scope, or at a directory."""
         root = Path(root)
-        listed = tools.git(["ls-files", "--", *prefixes], root).splitlines()
+        listed = _regular_files(tools.git(["ls-files", "--stage", "--", *prefixes], root))
         commit = tools.git(["rev-parse", "HEAD"], root).strip()
         status = tools.git(["status", "--porcelain", "--", *prefixes], root).splitlines()
         changed = [line[3:].strip() for line in status if len(line) > 3]
@@ -106,11 +108,12 @@ class CodeIndex:
         *,
         max_files: int = DEFAULT_MAX_FILES,
     ) -> CodeIndex:
-        """The files under ``prefixes`` as they were at ``commit``, read from git objects into a private
-        temporary directory; the checkout is never touched. History lookups still run in ``repository``."""
+        """The regular files under ``prefixes`` as they were at ``commit``, read from git objects into a
+        private temporary directory; the checkout is never touched. History lookups still run in
+        ``repository``. Symbolic links and submodules are left out, as in ``from_git``."""
         repository = Path(repository)
         sha = tools.git(["rev-parse", "--verify", f"{commit}^{{commit}}"], repository).strip()
-        listed = tools.git(["ls-tree", "-r", "--name-only", sha, "--", *prefixes], repository).splitlines()
+        listed = _regular_files(tools.git(["ls-tree", "-r", sha, "--", *prefixes], repository))
         if len(listed) > max_files:
             raise ScopeTooWideError(
                 f"{len(listed)} files is wider than the limit of {max_files}; narrow the scope"
@@ -265,6 +268,7 @@ class CodeIndex:
         hits = sorted(
             TextHit(match["path"]["text"], match["line_number"], match["lines"]["text"].rstrip("\n"))
             for match in matches
+            if match["path"]["text"] in self._scope
         )
         return tuple(hits[:max_hits])
 
@@ -382,6 +386,16 @@ def _receiver(expression: str) -> str | None:
 def _last_identifier(expression: str) -> str:
     tail = expression.replace("?.", ".").split(".")[-1]
     return tail if tail.isidentifier() else ""
+
+
+def _regular_files(listing: str) -> list[str]:
+    """Paths from ``git ls-files --stage`` or ``git ls-tree -r`` output whose mode is a regular file."""
+    files = []
+    for line in listing.splitlines():
+        details, _, path = line.partition("\t")
+        if details.split(" ", 1)[0] in _REGULAR_FILE_MODES:
+            files.append(path)
+    return list(dict.fromkeys(files))
 
 
 def _commits(log: str) -> list[set[str]]:

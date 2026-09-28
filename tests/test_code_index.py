@@ -330,3 +330,29 @@ def test_references_in_lists_the_names_a_function_passes_on_without_calling(
         ("send_invoice", "assignment"),
     }
     assert "scheduler" not in {ref.name for ref in references}
+
+
+def test_tracked_symbolic_links_stay_out_of_the_scope(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "skills/real").mkdir(parents=True)
+    (tmp_path / "skills/real/tool.py").write_text('KEY = "shared.key"\n')
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/main.py").write_text('SETTING = "shared.key"\n')
+    (tmp_path / "app/linked_dir").symlink_to("../skills/real", target_is_directory=True)
+    (tmp_path / "app/linked_file.py").symlink_to("main.py")
+    (tmp_path / "app/outside.py").symlink_to("/etc/hosts")
+    for command in (
+        ["init", "-q"],
+        ["add", "."],
+        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c"],
+    ):
+        subprocess.run(["git", *command], cwd=tmp_path, check=True)
+
+    # Act
+    working = CodeIndex.from_git(tmp_path, prefixes=("app/",))
+    historical = CodeIndex.at_commit(tmp_path, "HEAD", prefixes=("app/",))
+
+    # Assert
+    assert working.files == historical.files == ("app/main.py",)
+    assert [hit.file for hit in working.search_text("shared.key")] == ["app/main.py"]
+    assert [hit.file for hit in historical.search_text("shared.key")] == ["app/main.py"]
