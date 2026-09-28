@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
+from git_repos import git
 
 from jev_navigator.comments import (
     CodeAboveReason,
@@ -177,7 +177,7 @@ def test_comments_in_diff_includes_untouched_comments_above_changed_code(sample_
     # Arrange
     path = sample_repo / "app/comments.py"
     path.write_text(path.read_text().replace("    return amount\n", "    return amount * 2\n"))
-    subprocess.run(["git", "commit", "-qam", "change charge only"], cwd=sample_repo, check=True)
+    git(sample_repo, "commit", "-qam", "change charge only")
     index = CodeIndex.from_git(sample_repo)
 
     # Act

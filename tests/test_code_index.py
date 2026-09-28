@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
-from git_repos import commit_all
+from git_repos import commit_all, git
 
 from jev_navigator.index.code_index import CodeIndex, ScopeTooWideError
 from jev_navigator.index.spans import Span
@@ -130,9 +129,7 @@ def test_every_slice_records_its_source_file_lines_commit_and_how_it_was_reached
     # Arrange
     (sample_repo / "web/handlers.ts").write_text("// changed in the worktree\n")
     index = CodeIndex.from_git(sample_repo)
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=sample_repo, capture_output=True, text=True
-    ).stdout.strip()
+    head = git(sample_repo, "rev-parse", "HEAD").strip()
 
     # Act
     committed = index.read_slice(index.find_definition("check_limits")[0], origin="callee of validate_order")
@@ -157,9 +154,7 @@ def test_find_definition_covers_classes_constants_and_module_assignments(sample_
 
 def test_at_commit_reads_the_old_version_without_touching_the_checkout(sample_repo: Path) -> None:
     # Arrange
-    first_commit = subprocess.run(
-        ["git", "rev-list", "--max-parents=0", "HEAD"], cwd=sample_repo, capture_output=True, text=True
-    ).stdout.strip()
+    first_commit = git(sample_repo, "rev-list", "--max-parents=0", "HEAD").strip()
     checkout_before = (sample_repo / "app/validation.py").read_text()
 
     # Act

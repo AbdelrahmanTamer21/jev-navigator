@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
+from git_repos import git
 
 from jev_navigator.index import tools
 
@@ -12,16 +12,8 @@ MISSING_OBJECT = "0" * 40
 
 def stored_blob(repository: Path, text: str) -> str:
     """Writes ``text`` into the repository's object store only and returns its object id."""
-    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
-    stored = subprocess.run(
-        ["git", "hash-object", "-w", "--stdin"],
-        cwd=repository,
-        input=text,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return stored.stdout.strip()
+    git(repository, "init", "-q")
+    return git(repository, "hash-object", "-w", "--stdin", stdin=text).strip()
 
 
 def test_export_writes_each_blob_at_its_path(tmp_path: Path) -> None:

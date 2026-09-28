@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from git_repos import commit_all
+from git_repos import commit_all, write_files
 
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.imports import imported_modules, imported_names
@@ -22,16 +22,15 @@ ROOT_TSCONFIG = """\
 """
 
 
-def write_files(root: Path, files: dict[str, str]) -> CodeIndex:
-    for name, text in files.items():
-        (root / name).parent.mkdir(parents=True, exist_ok=True)
-        (root / name).write_text(text)
+def indexed(root: Path, files: dict[str, str]) -> CodeIndex:
+    """Writes ``files`` and indexes every one except the JSON configs."""
+    write_files(root, files)
     return CodeIndex(root, [name for name in files if not name.endswith(".json")])
 
 
 def test_an_import_spanning_several_lines_resolves_its_names(tmp_path: Path) -> None:
     # Arrange
-    index = write_files(
+    index = indexed(
         tmp_path,
         {
             "src/app/format.ts": "export function formatPrice(cents: number) {\n  return cents / 100;\n}\n",
@@ -54,7 +53,7 @@ def test_an_import_spanning_several_lines_resolves_its_names(tmp_path: Path) -> 
 
 def test_a_path_alias_from_the_nearest_tsconfig_resolves_to_a_scope_file(tmp_path: Path) -> None:
     # Arrange
-    index = write_files(
+    index = indexed(
         tmp_path,
         {
             "tsconfig.json": ROOT_TSCONFIG,
@@ -78,7 +77,7 @@ def test_a_path_alias_from_the_nearest_tsconfig_resolves_to_a_scope_file(tmp_pat
 
 def test_the_nearest_tsconfig_wins_and_extends_inherits_paths(tmp_path: Path) -> None:
     # Arrange
-    index = write_files(
+    index = indexed(
         tmp_path,
         {
             "tsconfig.json": ROOT_TSCONFIG,
@@ -157,7 +156,7 @@ def test_an_import_after_a_statement_without_semicolon_keeps_its_names() -> None
 
 def test_the_alias_with_the_longest_prefix_wins_like_typescript(tmp_path: Path) -> None:
     # Arrange
-    index = write_files(
+    index = indexed(
         tmp_path,
         {
             "tsconfig.json": (
@@ -179,7 +178,7 @@ def test_the_alias_with_the_longest_prefix_wins_like_typescript(tmp_path: Path) 
 
 def test_an_exact_alias_wins_over_a_wildcard_like_typescript(tmp_path: Path) -> None:
     # Arrange
-    index = write_files(
+    index = indexed(
         tmp_path,
         {
             "tsconfig.json": (
@@ -235,7 +234,7 @@ def test_configs_outside_the_root_or_behind_a_symbolic_link_are_not_read(tmp_pat
         '{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["../repo/src/*"]}}}'
     )
     root = tmp_path / "repo"
-    index = write_files(
+    index = indexed(
         root,
         {
             "tsconfig.json": '{"extends": "../outside/evil.json"}',
