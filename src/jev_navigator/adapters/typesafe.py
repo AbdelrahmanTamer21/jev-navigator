@@ -90,6 +90,7 @@ class _AsyncRunner:
         self._futures: set[concurrent.futures.Future] = set()
         self._lock = threading.Lock()
         self._closed = False
+        self._cancelled = False
         self._thread.start()
         self._ready.wait()
 
@@ -100,11 +101,17 @@ class _AsyncRunner:
         self._loop.close()
 
     def call(self, operation: Coroutine[Any, Any, Any]):
-        if self._closed:
-            operation.close()
-            raise RuntimeError("the TypeSafe client is closed")
-        future = asyncio.run_coroutine_threadsafe(operation, self._loop)
+        return self._call(operation, allow_cancelled=False)
+
+    def _call(self, operation: Coroutine[Any, Any, Any], *, allow_cancelled: bool):
         with self._lock:
+            if self._closed:
+                operation.close()
+                raise RuntimeError("the TypeSafe client is closed")
+            if self._cancelled and not allow_cancelled:
+                operation.close()
+                raise concurrent.futures.CancelledError
+            future = asyncio.run_coroutine_threadsafe(operation, self._loop)
             self._futures.add(future)
         try:
             return future.result()
@@ -114,6 +121,7 @@ class _AsyncRunner:
 
     def cancel(self) -> None:
         with self._lock:
+            self._cancelled = True
             futures = tuple(self._futures)
         for future in futures:
             future.cancel()
@@ -124,7 +132,7 @@ class _AsyncRunner:
             return
         self.cancel()
         try:
-            self.call(operation)
+            self._call(operation, allow_cancelled=True)
         finally:
             self._closed = True
             self._loop.call_soon_threadsafe(self._loop.stop)

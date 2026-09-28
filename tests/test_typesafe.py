@@ -22,10 +22,13 @@ def test_cancel_aborts_an_active_official_sdk_request(monkeypatch: pytest.Monkey
 
     entered = threading.Event()
     release = threading.Event()
+    requests = 0
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            nonlocal requests
             self.rfile.read(int(self.headers["content-length"]))
+            requests += 1
             entered.set()
             release.wait()
 
@@ -61,6 +64,12 @@ def test_cancel_aborts_an_active_official_sdk_request(monkeypatch: pytest.Monkey
 
         assert finished.wait(2), "cancellation left the SDK request blocked"
         assert isinstance(failure[0], concurrent.futures.CancelledError)
+        with pytest.raises(concurrent.futures.CancelledError):
+            client.ask(
+                {"code": "a late beam request"},
+                {"match": {"type": "noul", "instructions": "Does code match?"}},
+            )
+        assert requests == 1
     finally:
         release.set()
         request_thread.join()
@@ -77,13 +86,19 @@ def test_sigint_returns_the_active_http_place_as_resumable(
     pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
-    entered = threading.Event()
+    all_entered = threading.Event()
     release = threading.Event()
+    entered = 0
+    entered_lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            nonlocal entered
             self.rfile.read(int(self.headers["content-length"]))
-            entered.set()
+            with entered_lock:
+                entered += 1
+                if entered == 2:
+                    all_entered.set()
             release.wait()
 
         def log_message(self, format: str, *args: object) -> None:
@@ -95,12 +110,17 @@ def test_sigint_returns_the_active_http_place_as_resumable(
     monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
     monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
     client = TypeSafeJevClient()
-    (tmp_path / "policy.py").write_text("def policy(item):\n    return item\n")
+    (tmp_path / "policy.py").write_text(
+        "def first(item):\n    return item\n\ndef second(item):\n    return item\n"
+    )
     index = CodeIndex(tmp_path, ["policy.py"])
-    place = range_place(index, "policy.py", 1, 2, "candidate")
+    places = [
+        range_place(index, "policy.py", 1, 2, "candidate"),
+        range_place(index, "policy.py", 4, 5, "candidate"),
+    ]
 
     def interrupt_when_sent() -> None:
-        entered.wait()
+        all_entered.wait()
         os.kill(os.getpid(), signal.SIGINT)
 
     interrupter = threading.Thread(target=interrupt_when_sent)
@@ -111,15 +131,14 @@ def test_sigint_returns_the_active_http_place_as_resumable(
             Judge(client),
             "the policy",
             [],
-            budget=SearchBudget(beam_width=1),
+            budget=SearchBudget(beam_width=2),
             moves={},
-            initial_candidates=[(place, 1.0)],
+            initial_candidates=[(place, 1.0) for place in places],
         )
 
         assert result.outcome == Outcome.CANCELLED
-        assert [(entry.place_key, entry.reason) for entry in result.not_inspected] == [
-            (place.key, "cancelled")
-        ]
+        assert {entry.place_key for entry in result.not_inspected} == {place.key for place in places}
+        assert {entry.reason for entry in result.not_inspected} == {"cancelled"}
     finally:
         interrupter.join()
         release.set()

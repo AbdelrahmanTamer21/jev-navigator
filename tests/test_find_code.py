@@ -644,6 +644,68 @@ def test_interrupt_while_opening_a_beam_restores_every_popped_place(tmp_path: Pa
     assert {entry.reason for entry in cancelled.not_inspected} == {"cancelled"}
 
 
+def test_interrupt_while_filtering_a_candidate_resumes_and_processes_it(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "places.txt").write_text("start\ntarget\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    start = range_place(index, "places.txt", 1, 1, "candidate")
+    real_candidate = range_place(index, "places.txt", 2, 2, "move")
+    candidate_opens = 0
+
+    def open_candidate() -> CodeSlice:
+        nonlocal candidate_opens
+        candidate_opens += 1
+        if candidate_opens == 3:
+            raise KeyboardInterrupt
+        return real_candidate.open()
+
+    candidate = Place(
+        real_candidate.key,
+        real_candidate.kind,
+        real_candidate.signature,
+        open_candidate,
+    )
+
+    def offer_candidate(index: CodeIndex, code: CodeSlice) -> list[Place]:
+        del index, code
+        return [candidate]
+
+    client = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.95 if code == "target" else 0.05,
+            could_contain=lambda signature: 0.95,
+        )
+    )
+
+    # Act
+    cancelled = find_code(
+        index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={"candidate": offer_candidate},
+        initial_candidates=[(start, 1.0)],
+    )
+    resumed = find_code(
+        index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={"candidate": offer_candidate},
+        resume=cancelled,
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert [(entry.place_key, entry.reason) for entry in cancelled.not_inspected] == [
+        (start.key, "cancelled")
+    ]
+    assert resumed.outcome == Outcome.FOUND
+    assert resumed.found[0].place_key == candidate.key
+
+
 def test_interrupt_while_recording_a_round_choice_restores_the_popped_place(
     sample_index: CodeIndex,
 ) -> None:

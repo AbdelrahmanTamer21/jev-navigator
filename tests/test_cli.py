@@ -175,7 +175,14 @@ def test_main_maps_a_cancelled_pack_to_the_shell_interrupt_status(
     # Arrange
     from jev_navigator import cli
 
-    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
+    class Client:
+        model = "test"
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "TypeSafeJevClient", Client)
     monkeypatch.setattr(
         cli,
         "create_evidence_pack",

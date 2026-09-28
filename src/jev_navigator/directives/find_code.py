@@ -623,29 +623,36 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
     search.judged_code.add(fingerprint)
     search.visited.add(code.key)
     search.steps += 1
+    set_aside_before = len(search.set_aside)
     try:
         if search.budget.max_depth is not None and item.depth >= search.budget.max_depth:
             return _Opening(item, shown, code.key, fingerprint, [])
         candidates, omitted = neighbours_and_omissions(
             index, code, search.budget.neighbours_per_kind, search.moves, shown.span
         )
+        capped = tuple(
+            NotInspected(
+                place.key,
+                place.signature,
+                "capped",
+                0.5,
+                item.depth + 1,
+                (*item.path, place.key),
+                place,
+            )
+            for place in omitted
+            if place.key not in search.visited
+        )
+        search.set_aside.extend(capped)
+        unseen = [place for place in candidates if place.key not in search.visited]
+        available = [place for place in unseen if place.open().text.strip()]
+        return _Opening(item, shown, code.key, fingerprint, available, capped)
     except BaseException:
+        del search.set_aside[set_aside_before:]
         search.judged_code.discard(fingerprint)
         search.visited -= {item.place.key, code.key}
         search.steps -= 1
         raise
-    capped = tuple(
-        NotInspected(
-            place.key, place.signature, "capped", 0.5, item.depth + 1, (*item.path, place.key), place
-        )
-        for place in omitted
-        if place.key not in search.visited
-    )
-    search.set_aside.extend(capped)
-    unseen = [place for place in candidates if place.key not in search.visited]
-    return _Opening(
-        item, shown, code.key, fingerprint, [place for place in unseen if place.open().text.strip()], capped
-    )
 
 
 @dataclass(frozen=True)
