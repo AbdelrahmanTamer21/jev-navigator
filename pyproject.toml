@@ -15,7 +15,7 @@ jvn = "jev_navigator.cli:main"
 typesafe = ["python-dotenv", "typesafe-sdk"]
 
 [build-system]
-requires = ["uv_build"]
+requires = ["uv_build>=0.11.7,<0.12"]
 build-backend = "uv_build"
 
 [dependency-groups]
