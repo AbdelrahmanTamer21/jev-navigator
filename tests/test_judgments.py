@@ -206,8 +206,32 @@ def test_store_keeps_answers_and_thresholds_but_no_request_text_by_default(tmp_p
 
     # Assert
     stored = path.read_text()
+    record = json.loads(stored.splitlines()[0])
     assert "customer_code" not in stored
+    assert record["request"] is None and record["sent_body_base64"] is None
     assert '"noul_yes_at": 0.8' in stored
+
+
+def test_records_written_before_the_sent_body_was_kept_still_load(tmp_path: Path) -> None:
+    # Arrange
+    path = tmp_path / "answers.jsonl"
+    Judge(ScriptedJevClient(), store=JsonlAnswerStore(path)).check_each(
+        DESCRIBES, [{"code": "x = 1"}], {"doc": {"sentence": "s"}}
+    )
+    older = {
+        key: value
+        for key, value in json.loads(path.read_text()).items()
+        if key not in {"sent_body_base64", "sent_exact"}
+    }
+    path.write_text(json.dumps(older) + "\n")
+
+    # Act
+    record = JsonlAnswerStore(path).records()[0]
+
+    # Assert
+    assert record.sent_exact is False
+    with pytest.raises(ValueError, match="keep_requests"):
+        record.sent_request()
 
 
 def test_secrets_are_masked_before_any_request_leaves() -> None:

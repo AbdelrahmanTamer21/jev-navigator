@@ -114,7 +114,7 @@ def masked_values(value: object, masker: Masker) -> frozenset[str]:
 def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> object:
     """Masks every string by the masker's rules, then hides each of ``values`` wherever it still
     appears. Keys are left as they are; ``refuse_if_secret`` refuses a request with one in a key."""
-    longest_first = sorted(values, key=len, reverse=True)
+    longest_first = sorted(values - {MASK}, key=len, reverse=True)
 
     def hide(text: str) -> str:
         text = masker.mask(text)
