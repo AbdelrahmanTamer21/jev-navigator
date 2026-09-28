@@ -6,3 +6,4 @@ __pycache__/
 dist/
 question-templates/**/review.receipts.jsonl
 question-templates/**/review.report.json
+.debug/
