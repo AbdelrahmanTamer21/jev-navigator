@@ -204,8 +204,9 @@ lines before or after, the start of a co-changed file) gives its range and quote
 code. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
 `scope_incomplete`, and the result keeps three sets: `found`; `searched` and `unsure` (bodies actually
 judged, start places apart in `starts`); and `not_inspected`, each entry with its reason (`budget`,
-`deprioritized`, `capped` or `depth`) and `picked` for a place Jev picked, which a resumed search opens
-first. `searched` means "opened and judged at or below the no bar, probability kept", and `nothing_left`
+`deprioritized`, `capped` or `depth`) and its `QueueTier`: `START`, `PICK` or `MOVE`. Resume
+preserves that role, so waiting starts still open before picks and are never reported as new finds.
+`searched` means "opened and judged at or below the no bar, probability kept", and `nothing_left`
 means "nothing left worth opening"; neither proves that the code does not exist, because one "no" about
 one place can be wrong. When nothing reaches the yes bar, rank the opened places by their
 `contains_target` probability: the best-scored place is the likeliest one. Pass the result back as

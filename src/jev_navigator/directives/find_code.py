@@ -21,7 +21,7 @@ import os
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 
 from ..history import (
     DEFAULT_QUESTION_RESERVE,
@@ -161,12 +161,20 @@ class Visit:
     verdict: NoulVerdict
 
 
+class QueueTier(IntEnum):
+    """Search priority and provenance, preserved through a budget interruption."""
+
+    START = 0
+    PICK = 1
+    MOVE = 2
+
+
 @dataclass(frozen=True)
 class NotInspected:
     """A place the search did not open. ``reason`` is ``budget`` (still worth opening when the budget
     ran out), ``deprioritized`` (its signature scored low; that only lowered its priority, it was never
     judged), ``capped`` (cut by the per-kind neighbour cap) or ``depth`` (beyond the depth limit).
-    ``picked`` marks a place Jev picked to open next; a resumed search opens it before scored places."""
+    ``tier`` preserves starts, picked places and scored neighbours through Resume."""
 
     place_key: str
     signature: str
@@ -175,7 +183,7 @@ class NotInspected:
     depth: int
     path: tuple[str, ...]
     place: Place = field(compare=False, repr=False)
-    picked: bool = False
+    tier: QueueTier = QueueTier.MOVE
 
 
 @dataclass(frozen=True)
@@ -205,14 +213,11 @@ class FindResult:
     starts: tuple[Visit, ...] = ()
 
 
-_START, _PICK, _MOVE = 0, 1, 2
-
-
 @dataclass(order=True)
 class _Queued:
     """Starts come first, then picks in the order they were made, then moves by falling probability."""
 
-    tier: int
+    tier: QueueTier
     rank: float
     order: int
     place: Place = field(compare=False)
@@ -244,18 +249,21 @@ class _Search:
     counter: itertools.count = field(default_factory=itertools.count)
 
     def push(
-        self, place: Place, probability: float, depth: int, path: tuple[str, ...], tier: int = _MOVE
+        self,
+        place: Place,
+        probability: float,
+        depth: int,
+        path: tuple[str, ...],
+        tier: QueueTier = QueueTier.MOVE,
     ) -> None:
         if place.key in self.visited:
             return
         if depth > self.budget.max_depth:
             self.set_aside.append(
-                NotInspected(
-                    place.key, place.signature, "depth", probability, depth, path, place, tier == _PICK
-                )
+                NotInspected(place.key, place.signature, "depth", probability, depth, path, place, tier)
             )
             return
-        rank = -probability if tier == _MOVE else 0.0
+        rank = -probability if tier == QueueTier.MOVE else 0.0
         heapq.heappush(self.queue, _Queued(tier, rank, next(self.counter), place, depth, path, probability))
 
     def next_beam(self, calls_left: int) -> list[_Queued]:
@@ -274,7 +282,7 @@ class _Search:
 
     def still_worth_opening(self, item: _Queued) -> bool:
         """A waiting start or pick always is; a neighbour only when scored above the no bar."""
-        return item.tier != _MOVE or item.probability > self.thresholds.noul_no_at
+        return item.tier != QueueTier.MOVE or item.probability > self.thresholds.noul_no_at
 
 
 def find_code(
@@ -372,7 +380,7 @@ def _begin(
     if options.resume is not None:
         _restore(search, options.resume)
     for place in start:
-        search.push(place, 1.0, 0, (place.key,), _START)
+        search.push(place, 1.0, 0, (place.key,), QueueTier.START)
     return search, judge.scope()
 
 
@@ -443,7 +451,7 @@ def _restore(search: _Search, previous: FindResult) -> None:
     search.unsure += previous.unsure
     search.starts += previous.starts
     for entry in previous.not_inspected:
-        search.push(entry.place, entry.priority, entry.depth, entry.path, _PICK if entry.picked else _MOVE)
+        search.push(entry.place, entry.priority, entry.depth, entry.path, entry.tier)
 
 
 def _stop_reason(search: _Search, judge: Judge, index: CodeIndex) -> Outcome | None:
@@ -584,7 +592,7 @@ def _set_aside_unasked(search: _Search, opening: _Opening) -> None:
             item.depth,
             item.path,
             item.place,
-            item.tier == _PICK,
+            item.tier,
         )
     )
 
@@ -603,7 +611,9 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
         probability = _could_contain(search, response, slot)
         verdict = search.thresholds.noul_verdict(probability)
         path = (*item.path, place.key)
-        search.push(place, probability, item.depth + 1, path, _PICK if slot == picked else _MOVE)
+        search.push(
+            place, probability, item.depth + 1, path, QueueTier.PICK if slot == picked else QueueTier.MOVE
+        )
         offered.append(
             {
                 "place": place.key,
@@ -616,9 +626,9 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
     search.history.append(_open_step(search, opening, visit, offered, response, not_opened))
 
 
-def _file_visit(search: _Search, visit: Visit, tier: int) -> None:
+def _file_visit(search: _Search, visit: Visit, tier: QueueTier) -> None:
     """A start keeps its verdict in ``starts``; only a place the search reached can be found."""
-    if tier == _START:
+    if tier == QueueTier.START:
         search.starts.append(visit)
     elif visit.verdict == NoulVerdict.YES:
         search.found.append(visit)
@@ -659,7 +669,9 @@ def _open_step(
         {"place": visit.place_key, "depth": opening.item.depth, "path": list(visit.path)},
         (FetchedSpan(visit.code.source(), visit.code.text),),
         judgments,
-        f"start judged {visit.verdict}" if opening.item.tier == _START else _DECISIONS[visit.verdict],
+        f"start judged {visit.verdict}"
+        if opening.item.tier == QueueTier.START
+        else _DECISIONS[visit.verdict],
     )
 
 
@@ -691,7 +703,7 @@ def _record_choice(search: _Search, beam: list[_Queued]) -> None:
 def _choice_reason(item: _Queued) -> str:
     """``start`` for a caller's start place, ``open_first`` for a place Jev picked to open next, else
     ``queue_score`` (its could_contain probability)."""
-    return {_START: "start", _PICK: "open_first", _MOVE: "queue_score"}[item.tier]
+    return {QueueTier.START: "start", QueueTier.PICK: "open_first", QueueTier.MOVE: "queue_score"}[item.tier]
 
 
 def _frontier_entry(entry: NotInspected) -> dict:
@@ -732,7 +744,7 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
             item.depth,
             item.path,
             item.place,
-            item.tier == _PICK,
+            item.tier,
         )
         for item in sorted(left)
     ]

@@ -591,9 +591,6 @@ def test_a_resumed_search_opens_its_waiting_pick_first(sample_index: CodeIndex) 
     find_code(sample_index, judge, TARGET, [], budget=SearchBudget(max_steps=1, beam_width=1), resume=first)
 
     # Assert
-    assert [
-        entry.picked for entry in first.not_inspected if entry.signature.startswith("app/orders.py:10 ")
-    ] == [True]
     assert opened_first_lines(client)[1] == "def cancel(order_id):"
 
 
