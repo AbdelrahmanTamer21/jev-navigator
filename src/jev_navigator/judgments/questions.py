@@ -104,8 +104,14 @@ def wording_hash(question: Mapping) -> str:
 
 
 def request_sha256(state: Mapping, questions: Mapping) -> str:
+    """The request's identity: key order and formatting do not change it."""
     encoded = json.dumps({"state": state, "questions": questions}, sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def request_body(state: Mapping, questions: Mapping) -> bytes:
+    """The request as the library hands it to a client, with every key in the order it was built."""
+    return json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode()
 
 
 def content_hash(value: object) -> str:

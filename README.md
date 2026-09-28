@@ -158,7 +158,13 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `JsonlJournal` keeps only the request hash, the question ids and a state hash by default; pass
   `keep_request_text=True` only for your own or open-source code.
 - **No client code in the store.** Request text is kept only with `keep_requests=True`, which is for
-  your own or open-source code (for example a frozen evaluation set). By default the store keeps
+  your own or open-source code (for example a frozen evaluation set). Such a record keeps the request
+  twice: `request`, written with sorted keys for reading, and the body as it was sent
+  (`sent_body_base64`, with `sent_exact` true when the TypeSafe adapter captured the wire bytes).
+  Jev can answer the two orders differently, so ask a stored request again only from
+  `record.sent_request()`, with a judge that has no store. `JsonlJournal(keep_request_text=True)`
+  likewise keeps the body as handed to the client (`body_base64`) and the wire bytes when captured
+  (`sent_body_base64`), and `export_for_review` keeps the order the request is sent in. By default the store keeps
   hashes, question wording, and each item's file, lines and commit, so
   `rebuild_request(record, CodeIndex.at_commit(...), shared)` can rebuild the exact request and prove
   it matches, or name the part that differs.

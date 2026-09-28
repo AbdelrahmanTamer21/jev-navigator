@@ -8,6 +8,7 @@ every fresh answer is stored with the thresholds that were in force.
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import inspect
 import json
@@ -19,7 +20,7 @@ from dataclasses import dataclass, field
 from .answers import JevResponse, NoulAnswer, response_to_raw
 from .client import AsyncJevClient, JevClient
 from .journal import Journal, JournalRequest, RawResponse
-from .questions import Check, Pick, Rate, content_hash, item_path, request_sha256
+from .questions import Check, Pick, Rate, content_hash, item_path, request_body, request_sha256
 from .secrets import (
     Masker,
     Scanner,
@@ -292,8 +293,8 @@ class Judge:
         if prepared.stored is not None:
             return prepared.stored
         self._reserve_call()
-        response = self._dispatch(prepared)
-        return self._finish(prepared, response, thresholds, item_keys, sources, skeleton)
+        dispatched = self._dispatch(prepared)
+        return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton)
 
     async def ask_async(
         self,
@@ -309,8 +310,8 @@ class Judge:
         if prepared.stored is not None:
             return prepared.stored
         self._reserve_call()
-        response = await self._dispatch_async(prepared)
-        return self._finish(prepared, response, thresholds, item_keys, sources, skeleton)
+        dispatched = await self._dispatch_async(prepared)
+        return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton)
 
     def _prepare(self, state: Mapping, questions: Mapping) -> _Prepared:
         state = mask_value(state, self.masker) if self.masker else state
@@ -319,22 +320,23 @@ class Judge:
         request_hash = request_sha256(state, questions)
         stored = self.store.by_request(request_hash) if self.store else None
         accepted = stored.response() if stored is not None and self._accepts(stored.model) else None
-        return _Prepared(state, questions, request_hash, accepted)
+        return _Prepared(state, questions, request_hash, request_body(state, questions), accepted)
 
     def _finish(
         self,
         prepared: _Prepared,
-        response: JevResponse,
+        dispatched: _Dispatched,
         thresholds: Thresholds,
         item_keys: Mapping[str, str] | None,
         sources: Mapping[str, Mapping] | None,
         skeleton: Mapping | None,
     ) -> JevResponse:
+        response = dispatched.response
         with self._bookkeeping:
             for judge in self._chain():
                 judge.served_model = response.model
                 judge.input_tokens += response.input_tokens
-            self._record(prepared, response, thresholds, item_keys or {}, sources or {}, skeleton or {})
+            self._record(prepared, dispatched, thresholds, item_keys or {}, sources or {}, skeleton or {})
         return JevResponse(response.answers, response.model, response.input_tokens, prepared.request_hash)
 
     def _reserve_call(self) -> None:
@@ -350,7 +352,7 @@ class Judge:
             yield judge
             judge = judge._parent
 
-    def _dispatch(self, prepared: _Prepared) -> JevResponse:
+    def _dispatch(self, prepared: _Prepared) -> _Dispatched:
         if _is_async(self.client):
             raise TypeError("this Jev client is async; use the judge's *_async methods")
         request_id = self._journal_request(prepared)
@@ -359,15 +361,15 @@ class Judge:
             if hasattr(self.client, "send"):
                 raw = self.client.send(prepared.state, prepared.questions)
                 self._journal_response(request_id, raw)
-                return self.client.parse(raw)
+                return _Dispatched.from_raw(self.client.parse(raw), raw, prepared)
             response = self.client.ask(prepared.state, prepared.questions)
             self._journal_response(request_id, RawResponse.from_decoded(response_to_raw(response)))
-            return response
+            return _Dispatched(response, prepared.body, sent_exact=False)
         except Exception as error:
             self._journal_failure(request_id, error, raw)
             raise
 
-    async def _dispatch_async(self, prepared: _Prepared) -> JevResponse:
+    async def _dispatch_async(self, prepared: _Prepared) -> _Dispatched:
         """Awaits an async client; a sync client runs in a worker thread."""
         request_id = self._journal_request(prepared)
         raw: RawResponse | None = None
@@ -375,10 +377,10 @@ class Judge:
             if hasattr(self.client, "send"):
                 raw = await _awaited(self.client.send, prepared.state, prepared.questions)
                 self._journal_response(request_id, raw)
-                return self.client.parse(raw)
+                return _Dispatched.from_raw(self.client.parse(raw), raw, prepared)
             response = await _awaited(self.client.ask, prepared.state, prepared.questions)
             self._journal_response(request_id, RawResponse.from_decoded(response_to_raw(response)))
-            return response
+            return _Dispatched(response, prepared.body, sent_exact=False)
         except Exception as error:
             self._journal_failure(request_id, error, raw)
             raise
@@ -386,7 +388,9 @@ class Judge:
     def _journal_request(self, prepared: _Prepared) -> str | None:
         if self.journal is None:
             return None
-        request = JournalRequest(prepared.request_hash, self.client.model, prepared.state, prepared.questions)
+        request = JournalRequest(
+            prepared.request_hash, self.client.model, prepared.state, prepared.questions, prepared.body
+        )
         return self.journal.record_request(request)
 
     def _journal_response(self, request_id: str | None, raw: RawResponse) -> None:
@@ -510,7 +514,7 @@ class Judge:
     def _record(
         self,
         prepared: _Prepared,
-        response: JevResponse,
+        dispatched: _Dispatched,
         thresholds: Thresholds,
         item_keys: Mapping[str, str],
         sources: Mapping[str, Mapping],
@@ -518,6 +522,7 @@ class Judge:
     ) -> None:
         if self.store is None:
             return
+        response = dispatched.response
         self.store.put(
             AnswerRecord(
                 request_sha256=prepared.request_hash,
@@ -530,6 +535,8 @@ class Judge:
                 sources=dict(sources),
                 skeleton=dict(skeleton),
                 request={"state": prepared.state, "questions": prepared.questions},
+                sent_body_base64=base64.b64encode(dispatched.sent_body).decode("ascii"),
+                sent_exact=dispatched.sent_exact,
             )
         )
 
@@ -548,7 +555,24 @@ class _Prepared:
     state: Mapping
     questions: Mapping
     request_hash: str
+    body: bytes
     stored: JevResponse | None
+
+
+@dataclass(frozen=True)
+class _Dispatched:
+    """The parsed answer and the request body that was sent: the wire bytes when the client's
+    transport captured them (``sent_exact``), else the body as the library handed it over."""
+
+    response: JevResponse
+    sent_body: bytes
+    sent_exact: bool
+
+    @classmethod
+    def from_raw(cls, response: JevResponse, raw: RawResponse, prepared: _Prepared) -> _Dispatched:
+        if raw.sent_body is None:
+            return cls(response, prepared.body, sent_exact=False)
+        return cls(response, raw.sent_body, sent_exact=True)
 
 
 @dataclass(frozen=True)

@@ -1,8 +1,9 @@
 """Capture a function's exact first request, to review its questions before any paid call.
 
 Run the function once against ``CapturingJevClient`` (it never calls Jev), then write the captured,
-already-masked request with ``export_for_review``: one JSON file with the request and, per question,
-what code does with the answer, ready for a person or a question-review tool.
+already-masked request with ``export_for_review``: one JSON file with the request, every key in the
+order it is sent, and, per question, what code does with the answer, ready for a person or a
+question-review tool.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ def export_for_review(
         "intended_uses": dict(intended_uses),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n")
+    path.write_text(json.dumps(candidate, indent=2) + "\n")
     return path
 
 

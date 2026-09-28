@@ -10,6 +10,7 @@ import pytest
 from jev_navigator.judgments.journal import JournalRequest, JsonlJournal, RawResponse
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
+from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.judgments.thresholds import Thresholds
 from jev_navigator.testing import ScriptedJevClient
 
@@ -203,3 +204,74 @@ def test_jsonl_journal_keeps_no_request_text_unless_asked(tmp_path: Path) -> Non
     assert "return x + 1" not in (tmp_path / "default.jsonl").read_text()
     assert request["question_ids"] == ["adds_one"] and "state_sha256" in request
     assert "return x + 1" in (tmp_path / "keeping.jsonl").read_text()
+
+
+ORDERED_STATE = {
+    "target": {"description": "the check that limits items per order"},
+    "slice": {"file": "orders.py", "lines": "1-2", "code": "if len(items) > limit:\n    raise"},
+    "candidates": [],
+}
+JEV_BODY = (
+    b'{"model": "jev-1.13.0", "usage": {"input_tokens": 12, "output_tokens": 1},'
+    b' "answers": {"adds_one": {"type": "noul", "noul": 0.9}}}'
+)
+
+
+def test_the_store_keeps_the_request_in_the_order_it_was_sent(tmp_path: Path) -> None:
+    # Arrange
+    path = tmp_path / "answers.jsonl"
+    judge = Judge(ScriptedJevClient(), store=JsonlAnswerStore(path, keep_requests=True))
+    judge.ask(ORDERED_STATE, QUESTIONS, thresholds=Thresholds())
+
+    # Act
+    record = JsonlAnswerStore(path).records()[0]
+    sent_state, sent_questions = record.sent_request()
+
+    # Assert
+    assert list(sent_state) == ["target", "slice", "candidates"]
+    assert list(record.request["state"]) == ["candidates", "slice", "target"]
+    assert sent_questions == QUESTIONS and record.sent_exact is False
+
+
+def test_a_request_asked_again_from_the_store_sends_the_same_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    httpx2 = pytest.importorskip("httpx2")
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key-for-a-mock-transport")
+    sent: list[bytes] = []
+
+    def respond(request):
+        sent.append(request.content)
+        return httpx2.Response(200, content=JEV_BODY, headers={"content-type": "application/json"})
+
+    path = tmp_path / "answers.jsonl"
+    first = Judge(
+        TypeSafeJevClient(transport=httpx2.MockTransport(respond)),
+        store=JsonlAnswerStore(path, keep_requests=True),
+    )
+    first.ask(ORDERED_STATE, QUESTIONS, thresholds=Thresholds())
+    record = JsonlAnswerStore(path).records()[0]
+
+    # Act
+    again = Judge(TypeSafeJevClient(transport=httpx2.MockTransport(respond)))
+    again.ask(*record.sent_request(), thresholds=Thresholds())
+
+    # Assert
+    assert record.sent_exact is True
+    assert base64.b64decode(record.sent_body_base64) == sent[0] == sent[1]
+
+
+def test_the_journal_keeps_the_request_as_handed_to_the_client_in_its_order(tmp_path: Path) -> None:
+    # Arrange
+    journal = JsonlJournal(tmp_path / "journal.jsonl", keep_request_text=True)
+
+    # Act
+    Judge(ScriptedJevClient(), journal=journal).ask(ORDERED_STATE, QUESTIONS, thresholds=Thresholds())
+
+    # Assert
+    request = json.loads((tmp_path / "journal.jsonl").read_text().splitlines()[0])
+    handed = json.loads(base64.b64decode(request["body_base64"]))
+    assert list(handed["state"]) == ["target", "slice", "candidates"]

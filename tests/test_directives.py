@@ -91,3 +91,18 @@ def test_the_capturing_client_answers_each_primitive_in_its_own_shape() -> None:
     assert isinstance(response.answers["which"], ChoiceAnswer)
     assert isinstance(response.answers["how_much"], ScoreAnswer)
     assert response.score("how_much").probabilities == pytest.approx({"0": 1 / 3, "1": 1 / 3, "2": 1 / 3})
+
+
+def test_export_for_review_keeps_the_request_in_the_order_it_is_sent(tmp_path: Path) -> None:
+    # Arrange
+    state = {"target": {"description": "the limit check"}, "slice": {"code": "x = 1"}, "candidates": []}
+    questions = {"b_question": {"type": "noul"}, "a_question": {"type": "noul"}}
+    uses = {"b_question": "open when yes", "a_question": "stop when yes"}
+
+    # Act
+    path = export_for_review(state, questions, uses, tmp_path / "candidate.json", case_id="c1", group_id="g")
+
+    # Assert
+    request = json.loads(path.read_text())["request"]
+    assert list(request["state"]) == ["target", "slice", "candidates"]
+    assert list(request["questions"]) == ["b_question", "a_question"]
