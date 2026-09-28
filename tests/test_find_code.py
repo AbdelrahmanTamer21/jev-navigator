@@ -4,6 +4,7 @@ import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
+import pytest
 from git_repos import commit_files
 
 from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code
@@ -506,3 +507,24 @@ def test_find_code_with_no_moves_opens_only_its_start(sample_index: CodeIndex) -
     # Assert
     assert result.outcome == Outcome.NOTHING_LEFT
     assert result.steps == 1 and len(client.requests) == 1
+
+
+def test_the_default_moves_cannot_be_changed_by_a_caller() -> None:
+    # Act and assert
+    with pytest.raises(TypeError):
+        MOVES["always_open_this"] = lambda index, opened: []  # type: ignore[index]
+
+
+def test_the_result_and_the_stop_step_name_the_moves_the_search_used(sample_index: CodeIndex) -> None:
+    # Arrange
+    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1))
+    chosen = {"callers": MOVES["callers"], "same_file": MOVES["same_file"]}
+
+    # Act
+    chosen_result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index), moves=chosen)
+    default_result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
+
+    # Assert
+    assert chosen_result.moves == ("callers", "same_file")
+    assert chosen_result.history.steps[-1].arguments["moves"] == ["callers", "same_file"]
+    assert default_result.moves == tuple(MOVES)

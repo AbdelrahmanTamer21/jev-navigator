@@ -24,6 +24,18 @@ def test_context_for_comment_describes_the_target_with_the_comment_text(sample_i
     assert "Cancels an order that has not shipped." in client.requests[0][0]["target"]["description"]
 
 
+def test_context_for_comment_searches_with_the_moves_the_caller_chose(sample_index: CodeIndex) -> None:
+    # Arrange
+    client = ScriptedJevClient(nouls=lambda question_id, question, state: 0.1)
+
+    # Act
+    result = context_for_comment(sample_index, Judge(client), "app/orders.py", 11, moves={})
+
+    # Assert
+    assert result.moves == ()
+    assert all(state["candidates"] == [] for state, _ in client.requests)
+
+
 def test_find_similar_code_judges_each_candidate_against_the_subject(sample_index: CodeIndex) -> None:
     # Arrange
     client = ScriptedJevClient(nouls={"same_behaviour": 0.5})

@@ -63,7 +63,9 @@ points outside the index root, is not read: its aliases stay unknown and those b
 commit's tsconfig files along, outside the scope. File lists come from git with NUL separators, so
 names with non-ASCII characters enter the scope as they are on disk, and lines split at newlines only,
 as the parser counts them. A line that is not valid UTF-8 is read with its invalid bytes replaced, the
-same way by `search_text` and by every other lookup.
+same way by `search_text` and by every other lookup. A scope path that is a symbolic link, or that leads
+out of the root (through a linked directory or `..`), raises `UnsafePathError` when the index is built,
+before any tool reads it.
 
 The index parses its scope once, lazily, with three ast-grep scans (symbols and declarations, call
 sites, references), then answers every lookup from those tables; each call site's binding is computed
@@ -188,8 +190,9 @@ with a beam of 3 and depth 3. Everything is a parameter: `SearchBudget` also set
 open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
 `places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `same_file`,
 `keys_mentioned`, `co_changed`, `lines_before`, `rest_of_file`) to a function of the index and the
-opened code that returns places. Pass a subset, or add a function of your own. The directives take
-their check (`check=`) as a parameter too.
+opened code that returns places. Pass a subset, or add a function of your own; `MOVES` itself is
+read-only. `FindResult.moves` and the final `stop` step name the moves a search used, and
+`context_for_comment` takes `moves=` too. The directives take their check (`check=`) as a parameter too.
 
 Directives on top: `context_for_comment` and `find_similar_code`. The library finds code; answering
 questions about that code (is a comment accurate, does a claim hold) is a layer you build on top. A new

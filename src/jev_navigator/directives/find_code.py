@@ -38,7 +38,7 @@ from ..index.spans import CodeSlice
 from ..judgments.judge import CallCapReachedError, Judge
 from ..judgments.questions import Check, Criterion, Pick, content_hash
 from ..judgments.thresholds import NoulVerdict, Thresholds
-from .places import Move, Place, neighbours_and_omissions
+from .places import MOVES, Move, Place, neighbours_and_omissions
 
 FOUND = Check(
     name="contains_target",
@@ -186,6 +186,7 @@ class FindResult:
     history: History | None = None
     stop_judgment: HistoryJudgment | None = None
     unparsed_files: frozenset[str] = frozenset()
+    moves: tuple[str, ...] = ()
 
 
 @dataclass(order=True)
@@ -205,7 +206,7 @@ class _Search:
     questions: SearchQuestions = DEFAULT_SEARCH_QUESTIONS
     stop_rule: StopRule | None = None
     history: History = field(default_factory=History)
-    moves: Mapping[str, Move] | None = None
+    moves: Mapping[str, Move] = MOVES
     stop_judgment: HistoryJudgment | None = None
     queue: list[_Queued] = field(default_factory=list)
     visited: set[str] = field(default_factory=set)
@@ -261,19 +262,8 @@ def find_code(
     ``stop_rule``. ``moves`` chooses how neighbours are listed (default ``places.MOVES``); pass a
     subset, or add a move of your own. Each round's places are asked concurrently in threads;
     ``find_code_async`` is the same search for an async client."""
-    search, judge = _begin(
-        index,
-        judge,
-        target_description,
-        start,
-        budget,
-        thresholds,
-        questions,
-        resume,
-        commit,
-        stop_rule,
-        moves,
-    )
+    options = _SearchOptions(budget, thresholds, questions, resume, commit, stop_rule, moves)
+    search, judge = _begin(index, judge, target_description, start, options)
     while (stop := _stop_reason(search, judge, index)) is None:
         opened = _open_round(index, search, judge)
         if not opened:
@@ -301,19 +291,8 @@ async def find_code_async(
 ) -> FindResult:
     """``find_code`` with each round's places sent concurrently with ``asyncio.gather``; budgets,
     masking, the store, the journal and the history work exactly as in ``find_code``."""
-    search, judge = _begin(
-        index,
-        judge,
-        target_description,
-        start,
-        budget,
-        thresholds,
-        questions,
-        resume,
-        commit,
-        stop_rule,
-        moves,
-    )
+    options = _SearchOptions(budget, thresholds, questions, resume, commit, stop_rule, moves)
+    search, judge = _begin(index, judge, target_description, start, options)
     while (stop := _stop_reason(search, judge, index)) is None:
         opened = _open_round(index, search, judge)
         if not opened:
@@ -326,33 +305,37 @@ async def find_code_async(
     return _result(search, stop, judge, index)
 
 
+@dataclass(frozen=True)
+class _SearchOptions:
+    """The keyword arguments ``find_code`` and ``find_code_async`` share."""
+
+    budget: SearchBudget | None
+    thresholds: Mapping[str, float] | None
+    questions: SearchQuestions
+    resume: FindResult | None
+    commit: str | None
+    stop_rule: StopRule | None
+    moves: Mapping[str, Move] | None
+
+
 def _begin(
-    index: CodeIndex,
-    judge: Judge,
-    target_description: str,
-    start: Sequence[Place],
-    budget: SearchBudget | None,
-    thresholds: Mapping[str, float] | None,
-    questions: SearchQuestions,
-    resume: FindResult | None,
-    commit: str | None,
-    stop_rule: StopRule | None,
-    moves: Mapping[str, Move] | None,
+    index: CodeIndex, judge: Judge, target_description: str, start: Sequence[Place], options: _SearchOptions
 ) -> tuple[_Search, Judge]:
-    if commit is not None:
-        index.require_commit(commit)
+    if options.commit is not None:
+        index.require_commit(options.commit)
     target = {"description": target_description}
+    rule = options.stop_rule
     search = _Search(
         target,
-        judge.effective(thresholds),
-        budget or SearchBudget(),
-        questions,
-        stop_rule,
-        stop_rule.new_history(target) if stop_rule else History(sections={SUBJECT: target}),
-        moves,
+        judge.effective(options.thresholds),
+        options.budget or SearchBudget(),
+        options.questions,
+        rule,
+        rule.new_history(target) if rule else History(sections={SUBJECT: target}),
+        MOVES if options.moves is None else options.moves,
     )
-    if resume is not None:
-        _restore(search, resume)
+    if options.resume is not None:
+        _restore(search, options.resume)
     for place in start:
         search.push(place, 1.0, 0, (place.key,))
     return search, judge.scope()
@@ -706,6 +689,7 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
         search.history,
         search.stop_judgment,
         unparsed,
+        tuple(search.moves),
     )
 
 
@@ -720,7 +704,8 @@ def _stop_step(
             "probability": search.stop_judgment.probability,
             "outcome": search.stop_judgment.outcome,
         }
-    return HistoryStep("stop", {"outcome": outcome}, (), judgments, f"stopped: {outcome}")
+    arguments = {"outcome": outcome, "moves": list(search.moves)}
+    return HistoryStep("stop", arguments, (), judgments, f"stopped: {outcome}")
 
 
 def _reason(search: _Search, item: _Queued) -> str:

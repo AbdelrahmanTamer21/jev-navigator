@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from ..index.code_index import CodeIndex
 from ..index.spans import CodeSlice, Span
@@ -214,14 +215,16 @@ def starting_places(index: CodeIndex, locations: Sequence[tuple[str, int]]) -> l
     return [place_for_line(index, file, line, "start") for file, line in locations]
 
 
-MOVES: Mapping[str, Move] = {
-    "callers": _callers,
-    "callees": _callees,
-    "referenced_by": _referenced_by,
-    "passed_on": _passed_on,
-    "same_file": _same_file,
-    "keys_mentioned": _keys_mentioned,
-    "co_changed": _co_changed,
-    "lines_before": _lines_before,
-    "rest_of_file": _rest_of_file,
-}
+MOVES: Mapping[str, Move] = MappingProxyType(
+    {
+        "callers": _callers,
+        "callees": _callees,
+        "referenced_by": _referenced_by,
+        "passed_on": _passed_on,
+        "same_file": _same_file,
+        "keys_mentioned": _keys_mentioned,
+        "co_changed": _co_changed,
+        "lines_before": _lines_before,
+        "rest_of_file": _rest_of_file,
+    }
+)

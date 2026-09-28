@@ -12,6 +12,7 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
 | `find_code` | a best-first search that opens places until the code a description names is found |
+| `places.MOVES` | the ways a search lists the neighbours of an opened place; pick a subset or add your own |
 | `StopRule`, `History` | your own stop check over a search's history, reading only the sections you select |
 | `LlmStep` | an opt-in LLM call for the cases where Jev's answer is not clear enough |
 
@@ -100,6 +101,16 @@ places best first and returns `found`, `searched`, `unsure` and `not_inspected` 
 Read `searched` and the outcome `nothing_left` as "opened and judged unlikely", never as "the code does
 not exist": one "no" about one place can be wrong. When nothing is found, rank the opened places by
 their probability and treat the best one as the likeliest place.
+
+## Choosing how the search moves
+
+A move is a plain function of the index and the opened code that returns places. `places.MOVES` maps
+each built-in move's name to its function (callers, callees, references, code passed on, the same
+file, quoted keys and environment variables, co-changed files, the lines before and after) and is
+read-only. Pass `moves=` to `find_code`, `find_code_async` or `context_for_comment` to use a subset,
+for example `{name: MOVES[name] for name in ("callers", "callees")}`, or add a function of your own.
+`FindResult.moves` and the final `stop` step of the history name the moves the search used, so every
+result says how it was found.
 
 ## Stopping on your own check
 

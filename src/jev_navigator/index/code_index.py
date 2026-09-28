@@ -42,6 +42,11 @@ class ScopeTooWideError(ValueError):
     """The index was asked to cover more files than its limit."""
 
 
+class UnsafePathError(ValueError):
+    """A scope path is a symbolic link or resolves outside the index root, so reading it could leave
+    the root."""
+
+
 class CodeIndex:
     def __init__(
         self,
@@ -65,6 +70,7 @@ class CodeIndex:
             raise ScopeTooWideError(
                 f"{len(self.files)} files is wider than the limit of {max_files}; narrow the scope"
             )
+        _require_inside(self.root, self.files)
         self._scope = frozenset(self.files)
         self._code_files = tuple(path for path in self.files if language_of(path))
         self._lines_of = cache(self._read_lines)
@@ -386,6 +392,16 @@ def _script_configs(paths: Iterable[str]) -> list[str]:
         and path.endswith(".json")
         and "node_modules/" not in path
     ]
+
+
+def _require_inside(root: Path, files: Iterable[str]) -> None:
+    """Every reader (the parser, ripgrep, plain reads) opens scope files by path, so a path that is a
+    link or leads out of the root is refused before any of them runs."""
+    resolved_root = root.resolve()
+    for file in files:
+        path = root / file
+        if path.is_symlink() or not path.resolve().is_relative_to(resolved_root):
+            raise UnsafePathError(f"{file} is a symbolic link or lies outside {root}")
 
 
 def _split_lines(text: str) -> tuple[str, ...]:
