@@ -104,7 +104,7 @@ class _SpanEntry:
 
 def choose_initial_candidates(index: CodeIndex, judge: Judge, target: str) -> EntrySelection:
     """Select one file and one span, retaining every closed-choice receipt and span alternative."""
-    files = tuple(file for file in index.files if language_of(file))
+    files = tuple(file for file in index.available_files if language_of(file))
     if not files:
         raise ValueError("the repository scope contains no supported code files")
     decisions: list[EntryDecision] = []
@@ -141,9 +141,7 @@ def choose_initial_candidates(index: CodeIndex, judge: Judge, target: str) -> En
     return EntrySelection(selected_file, candidates, tuple(decisions))
 
 
-def _path_entries(
-    index: CodeIndex, files: tuple[str, ...], parent: str
-) -> tuple[_PathEntry, ...]:
+def _path_entries(index: CodeIndex, files: tuple[str, ...], parent: str) -> tuple[_PathEntry, ...]:
     prefix = PurePosixPath(parent).parts
     grouped: dict[tuple[str, str], list[str]] = {}
     for file in files:
@@ -165,9 +163,7 @@ def _path_entries(
 def _path_description(index: CodeIndex, kind: str, path: str, files: list[str]) -> str:
     if kind == "file":
         return f"file {path}: {_preview(index, path, 1)}"
-    examples = "; ".join(
-        f"{file}: {_preview(index, file, 1)}" for file in files[:DIRECTORY_EXAMPLES]
-    )
+    examples = "; ".join(f"{file}: {_preview(index, file, 1)}" for file in files[:DIRECTORY_EXAMPLES])
     return f"directory {path}/ ({len(files)} code files); examples: {examples}"
 
 
@@ -230,8 +226,7 @@ def _choose(judge, question, target, level, parent, entries, describe, identify)
     decisions: list[EntryDecision] = []
     while len(remaining) > MAX_OPTIONS:
         groups = [
-            remaining[offset : offset + MAX_OPTIONS]
-            for offset in range(0, len(remaining), MAX_OPTIONS)
+            remaining[offset : offset + MAX_OPTIONS] for offset in range(0, len(remaining), MAX_OPTIONS)
         ]
         descriptions = [
             f"{level} options {identify(group[0])} through {identify(group[-1])} "
@@ -239,7 +234,13 @@ def _choose(judge, question, target, level, parent, entries, describe, identify)
             for group in groups
         ]
         chosen_group, decision, _ = _pick(
-            judge, question, target, f"{level}_group", parent, groups, descriptions,
+            judge,
+            question,
+            target,
+            f"{level}_group",
+            parent,
+            groups,
+            descriptions,
             lambda group: f"{identify(group[0])}…{identify(group[-1])}",
         )
         decisions.append(decision)
@@ -247,7 +248,12 @@ def _choose(judge, question, target, level, parent, entries, describe, identify)
     if len(remaining) == 1:
         only = remaining[0]
         decision = EntryDecision(
-            level, parent, identify(only), None, {}, None,
+            level,
+            parent,
+            identify(only),
+            None,
+            {},
+            None,
             ({"id": "0", "entry": identify(only), "description": describe(only)},),
         )
         return only, [*decisions, decision], {}
@@ -262,8 +268,7 @@ def _choose(judge, question, target, level, parent, entries, describe, identify)
         identify,
     )
     by_entry = {
-        identify(entry): probabilities.get(str(position), 0.0)
-        for position, entry in enumerate(remaining)
+        identify(entry): probabilities.get(str(position), 0.0) for position, entry in enumerate(remaining)
     }
     return chosen, [*decisions, decision], by_entry
 

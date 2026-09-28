@@ -77,6 +77,7 @@ def create_evidence_pack(
     *,
     thresholds: Thresholds | None = None,
     verbose: bool = False,
+    fact_cache_dir: Path | None = None,
 ) -> dict:
     """Run the real index/search owners and persist their reviewable evidence."""
     repository = repository.resolve()
@@ -91,7 +92,10 @@ def create_evidence_pack(
     try:
         progress.phase("indexing files")
         index = CodeIndex.from_directory(
-            repository, prefixes=prefixes, scan_observer=progress.scan
+            repository,
+            prefixes=prefixes,
+            scan_observer=progress.scan,
+            fact_cache_dir=fact_cache_dir,
         )
         if warning := _scope_warning(len(index.files)):
             print(warning, file=sys.stderr)
@@ -114,9 +118,7 @@ def create_evidence_pack(
             initial_candidates = tuple(
                 (
                     candidate.place,
-                    candidate.selection_probability
-                    if candidate.selection_probability is not None
-                    else 0.0,
+                    candidate.selection_probability if candidate.selection_probability is not None else 0.0,
                 )
                 for candidate in selection.candidates
             )
@@ -239,9 +241,7 @@ def _load_typesafe_api_key(
     path = path or Path.home() / ".config/jvn/env"
     key = dotenv_values(path).get("TYPESAFE_API_KEY") if path.is_file() else None
     if not isinstance(key, str) or not key.strip():
-        raise RuntimeError(
-            "TYPESAFE_API_KEY is unset and ~/.config/jvn/env does not provide it"
-        )
+        raise RuntimeError("TYPESAFE_API_KEY is unset and ~/.config/jvn/env does not provide it")
     environment["TYPESAFE_API_KEY"] = key
 
 
@@ -324,6 +324,7 @@ def _manifest(
                 "completed": list(result.parser_scans_completed),
                 "pending": list(result.parser_scans_pending),
             },
+            "unavailable_files": dict(result.unavailable_files),
             "history": [step.to_json() for step in result.history.steps] if result.history else [],
         },
     }
@@ -398,6 +399,7 @@ def _report(manifest: dict) -> str:
         f"- Coverage caveat: {len(search['not_inspected'])} places were not inspected; "
         f"{len(search['unparsed_files'])} files failed a completed parser scan. "
         f"Pending parser scans: {', '.join(search['parser_scans']['pending']) or 'none'}.",
+        f"- Files that disappeared after inventory: {len(search['unavailable_files'])}.",
         "",
         "## Opened code",
         "",
@@ -422,8 +424,7 @@ def _report(manifest: dict) -> str:
         lines += [
             f"### `{source['file']}:{source['lines'][0]}-{source['lines'][1]}`",
             "",
-            f"Raw P(contains target): **{visit['probability']:.3f}**. Reached by "
-            f"`{source['reached_by']}`.",
+            f"Raw P(contains target): **{visit['probability']:.3f}**. Reached by `{source['reached_by']}`.",
             "",
             f"```{language}",
             visit["code"],
@@ -437,6 +438,10 @@ def _report(manifest: dict) -> str:
         lines += ["| Reason | Priority | Place |", "| --- | ---: | --- |"]
         for entry in search["not_inspected"]:
             lines.append(f"| {entry['reason']} | {entry['priority']:.3f} | `{entry['place']}` |")
-    lines += ["", "The complete source spans, raw probabilities, decisions, and history are in "
-              "`manifest.json`; exact provider responses and request hashes are in `journal.jsonl`.", ""]
+    lines += [
+        "",
+        "The complete source spans, raw probabilities, decisions, and history are in "
+        "`manifest.json`; exact provider responses and request hashes are in `journal.jsonl`.",
+        "",
+    ]
     return "\n".join(lines)

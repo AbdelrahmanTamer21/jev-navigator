@@ -79,7 +79,7 @@ private artifact store; the repository includes only a small public-format sampl
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator import operations, comments
 
-index = CodeIndex.from_git(repo_root, prefixes=("app/", "web/"))  # refuses more than 400 files
+index = CodeIndex.from_git(repo_root, prefixes=("app/", "web/"))
 old = CodeIndex.at_commit(repo_root, "abc123", prefixes=("app/",))  # from git objects, checkout untouched
 index.find_definition("LIMITS_KEY")   # functions, classes, constants, assignments, types, enums
 index.find_callers("validate_order")  # CallSite(file, line, caller, binding), found by name
@@ -117,17 +117,22 @@ same way by `search_text` and by every other lookup. A scope path that is a symb
 out of the root (through a linked directory or `..`), raises `UnsafePathError` when the index is built,
 before any tool reads it.
 
-The index parses its scope once, lazily, with three ast-grep scans (symbols and declarations, call
-sites, references), then answers every lookup from those tables; each call site's binding is computed
-once. Scans run in batches of 100 files, so one slow batch cannot fail the index: a batch that times
-out is logged and listed in `index.unparsed_files` (reading it runs any scan not yet run, so the list
-is complete). The structure scan also lists files the grammar reports ERROR nodes on — a language's
-parser may recover only part of such a file (Flow types in a JavaScript file, for example), so what
-it swallowed must not silently count as indexed; the symbols it did recover still count. Code in
-those files is unknown, not absent: a binding that may depend on them has status
-`unknown` with the files in its reason, and `find_code` reports `scope_incomplete` instead of
-`nothing_left`, with the files in `FindResult.unparsed_files` and in its stop step. Any other ast-grep
-failure (`ToolFailedError`) still fails the lookup that triggered the scan.
+The index extracts symbols, declarations, calls and non-call references together in one ast-grep
+pass over the files a lookup actually needs. Exact-name lookups first use ripgrep to narrow the
+candidate files; opening a known span parses its file directly. The resulting per-file facts are
+cached by source bytes, language, ast-grep version and rule version, so a new index can reuse facts
+without treating changed source or changed parser rules as current. Each call site's binding is
+computed once. There is no default file-count refusal or parser timeout, and no requested file is
+silently omitted.
+
+The facts include grammar ERROR nodes. A language's parser may recover only part of such a file
+(Flow types in a JavaScript file, for example), so what it swallowed must not silently count as
+indexed; the symbols it did recover still count. Code in those files is unknown, not absent: a
+binding that may depend on them has status `unknown`, with the files in its reason. A completed
+search reports `scope_incomplete` instead of `nothing_left`; a budget-limited result reports which
+fact scans completed and which remain pending. A file that disappears after the working-directory
+inventory was built is reported separately as unavailable. Any ast-grep or ripgrep failure other
+than that verified disappearance still fails the lookup that triggered it.
 
 Calls are found by name in the syntax tree, which is not a resolved binding. Every call carries a
 `Binding(status, reason, target)`: `resolved` when a definition in the same file or an import naming

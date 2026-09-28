@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -8,7 +7,7 @@ from git_repos import commit_files
 
 from jev_navigator.directives.find_code import Outcome, find_code
 from jev_navigator.directives.places import neighbours_and_omissions, place_for_line
-from jev_navigator.index import scope_scan, tools
+from jev_navigator.index import tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.judge import Judge
@@ -26,19 +25,6 @@ def ast_grep_runs(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(tools, "ast_grep_rules", counted_rules)
     return runs
-
-
-@pytest.fixture
-def validation_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    original_rules = tools.ast_grep_rules
-
-    def slow_on_validation(rules: str, files, cwd):
-        if "app/validation.py" in files:
-            raise subprocess.TimeoutExpired(["ast-grep"], tools.COMMAND_TIMEOUT_SECONDS)
-        return original_rules(rules, files, cwd)
-
-    monkeypatch.setattr(scope_scan, "BATCH_FILES", 1)
-    monkeypatch.setattr(tools, "ast_grep_rules", slow_on_validation)
 
 
 class CountingResolver:
@@ -114,7 +100,9 @@ def an_adapter_scope(tmp_path: Path) -> CodeIndex:
     )
 
 
-def test_the_scope_is_parsed_once_however_many_lookups_follow(sample_index: CodeIndex, ast_grep_runs) -> None:
+def test_each_file_is_parsed_once_and_a_new_index_reuses_its_facts(
+    sample_index: CodeIndex, ast_grep_runs
+) -> None:
     # Arrange
     opened = [
         sample_index.read_slice(span) for file in sample_index.files for span in sample_index.symbols_in(file)
@@ -127,9 +115,15 @@ def test_the_scope_is_parsed_once_however_many_lookups_follow(sample_index: Code
         sample_index.find_callers(name)
         sample_index.find_references(name)
 
+    cold_runs = len(ast_grep_runs)
+    warm = CodeIndex.from_git(sample_index.root, fact_cache_dir=sample_index.root.parent / "fact-cache")
+    for file in warm.files:
+        warm.symbols_in(file)
+
     # Assert
     assert len(opened) >= 6
-    assert len(ast_grep_runs) == 3
+    assert cold_runs == len(sample_index._code_files)
+    assert len(ast_grep_runs) == cold_runs
 
 
 def test_each_call_site_is_bound_once_however_often_it_is_looked_up(sample_repo: Path) -> None:
@@ -148,6 +142,21 @@ def test_each_call_site_is_bound_once_however_often_it_is_looked_up(sample_repo:
     assert len(resolver.asked) == len(set(resolver.asked))
 
 
+def test_an_external_parser_failure_is_not_relabelled_as_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "module.py").write_text("def run():\n    return 1\n")
+
+    def fail_parser(rules, files, cwd):
+        raise tools.ToolFailedError("ast-grep failed for a real tool reason")
+
+    monkeypatch.setattr(tools, "ast_grep_rules", fail_parser)
+    index = CodeIndex(tmp_path, ["module.py"], fact_cache_dir=tmp_path / "cache")
+
+    with pytest.raises(tools.ToolFailedError, match="real tool reason"):
+        index.functions_in("module.py")
+
+
 def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_path: Path) -> None:
     # Arrange
     index = committed(
@@ -160,45 +169,6 @@ def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_p
 
     # Assert
     assert site.binding.status == "resolved"
-
-
-def test_a_file_that_timed_out_makes_its_names_unknown_not_absent(
-    sample_index: CodeIndex, validation_times_out: None
-) -> None:
-    # Act
-    site = sample_index.find_callers("validate_order")[0]
-
-    # Assert
-    assert sample_index.unparsed_files == {"app/validation.py"}
-    assert sample_index.find_definition("check_limits") == ()
-    assert site.binding.status == "unknown"
-    assert "app/validation.py" in site.binding.reason
-
-
-def test_the_unparsed_list_is_complete_before_any_lookup(
-    sample_index: CodeIndex, validation_times_out: None
-) -> None:
-    # Act
-    unparsed = sample_index.unparsed_files
-
-    # Assert
-    assert unparsed == {"app/validation.py"}
-
-
-def test_a_search_over_a_scope_with_unparsed_files_never_reports_nothing_left(
-    sample_index: CodeIndex, validation_times_out: None
-) -> None:
-    # Arrange
-    judge = Judge(ScriptedJevClient(nouls=lambda question_id, question, state: 0.05))
-    start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
-
-    # Act
-    result = find_code(sample_index, judge, "the item limit check", start)
-
-    # Assert
-    assert result.outcome == Outcome.SCOPE_INCOMPLETE
-    assert result.unparsed_files == {"app/validation.py"}
-    assert result.history.steps[-1].judgments["unparsed_files"] == ["app/validation.py"]
 
 
 def test_a_file_the_grammar_only_partly_recovers_counts_as_unparsed(tmp_path: Path) -> None:

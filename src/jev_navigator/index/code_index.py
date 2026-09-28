@@ -1,15 +1,14 @@
 """Mechanical code lookups over a narrowed set of files: no model, only ast-grep, ripgrep and git.
 
-Every lookup stays inside the scope the index was built with. A scope wider than ``max_files`` is
-refused, because whole-repository searches are slow and send far more code onward than any
-decision needs; the caller narrows first (a directory, a changed-file list, a module). A caller
-that deliberately owns whole-repository navigation passes ``max_files=None``; no file is dropped.
+Every lookup stays inside the scope the index was built with. ``max_files`` is an explicit caller
+policy only; the index has no default refusal and never drops files from a requested scope.
 """
 
 from __future__ import annotations
 
 import hashlib
 import tempfile
+import threading
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from functools import cache
@@ -17,11 +16,12 @@ from pathlib import Path, PurePosixPath
 
 from . import tools
 from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts
+from .fact_cache import FactCache
 from .imports import imported_modules, imported_names, resolve_import
 from .languages import (
     language_of,
 )
-from .scope_scan import FileStructure, ReferenceMatch, Unparsed, scan_calls, scan_references, scan_structure
+from .scope_scan import FileFacts, FileStructure, ReferenceMatch, Unparsed, scan_facts
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
 
@@ -30,8 +30,6 @@ MAX_TEXT_HITS = 20
 CO_CHANGE_COMMITS = 200
 _COMMIT_MARK = "@@commit@@"
 _REGULAR_FILE_MODES = frozenset({"100644", "100755"})
-_PARSER_SCANS = ("structure", "calls", "references")
-
 ScanObserver = Callable[[str, str, int], None]
 
 
@@ -63,6 +61,7 @@ class CodeIndex:
         git_root: Path | None = None,
         binding_resolver: BindingResolver | None = None,
         scan_observer: ScanObserver | None = None,
+        fact_cache_dir: Path | None = None,
     ) -> None:
         self.root = Path(root)
         self.git_root = Path(git_root) if git_root is not None else self.root
@@ -83,27 +82,15 @@ class CodeIndex:
         self._file_sha256 = cache(self._read_file_sha256)
         self._script_paths_in = cache(self._read_script_paths)
         self._unparsed = Unparsed()
+        self._unavailable: dict[str, str] = {}
         self._completed_scans: set[str] = set()
-        self._structure = cache(
-            lambda: self._run_scan(
-                "structure",
-                lambda: scan_structure(self._code_files, self.root, self._lines_of, self._unparsed),
-            )
-        )
-        self._calls = cache(
-            lambda: self._run_scan(
-                "calls", lambda: scan_calls(self._code_files, self.root, self._unparsed)
-            )
-        )
-        self._call_counts = cache(lambda: Counter(call.name for call in self._calls()))
-        self._reference_matches = cache(
-            lambda: self._run_scan(
-                "references",
-                lambda: scan_references(self._code_files, self.root, self._unparsed),
-            )
-        )
+        self._facts: dict[str, FileFacts] = {}
+        self._facts_lock = threading.RLock()
+        self._fact_cache = FactCache(fact_cache_dir)
+        self._files_for_name = cache(self._candidate_files)
+        self._calls_named = cache(self._calls_with_name)
+        self._references_named = cache(self._references_with_name)
         self._definitions = cache(self._definitions_by_name)
-        self._callables = cache(self._callable_spans)
         self._top_level_in = cache(self._top_level_spans)
         self._names_imported = cache(self._read_imported_names)
         self._binding = cache(self._compute_binding)
@@ -117,6 +104,7 @@ class CodeIndex:
         max_files: int | None = None,
         binding_resolver: BindingResolver | None = None,
         scan_observer: ScanObserver | None = None,
+        fact_cache_dir: Path | None = None,
     ) -> CodeIndex:
         """The tracked regular files under ``prefixes`` (every one when none are given). Symbolic links
         and submodules are left out: a link can point outside the scope, or at a directory."""
@@ -132,6 +120,7 @@ class CodeIndex:
             changed_files=changed,
             binding_resolver=binding_resolver,
             scan_observer=scan_observer,
+            fact_cache_dir=fact_cache_dir,
         )
 
     @classmethod
@@ -143,6 +132,7 @@ class CodeIndex:
         max_files: int | None = None,
         binding_resolver: BindingResolver | None = None,
         scan_observer: ScanObserver | None = None,
+        fact_cache_dir: Path | None = None,
     ) -> CodeIndex:
         """Index current files using ripgrep's ignore policy, with Git metadata when available.
 
@@ -161,6 +151,7 @@ class CodeIndex:
             changed_files=changed,
             binding_resolver=binding_resolver,
             scan_observer=scan_observer,
+            fact_cache_dir=fact_cache_dir,
         )
 
     @classmethod
@@ -203,13 +194,8 @@ class CodeIndex:
 
     @property
     def unparsed_files(self) -> frozenset[str]:
-        """Files a scan could not parse in time, or that the grammar reports ERROR nodes on, so what
-        the parser recovered from them is partial. Reading it runs any scan not yet run, so the list is
-        complete. Their definitions and calls are unknown, not absent: bindings that may depend on
-        them say ``unknown``, and a search over the scope never reports ``nothing_left``."""
-        self._structure()
-        self._calls()
-        self._reference_matches()
+        """Files whose grammar reports ERROR nodes, after ensuring every available file has facts."""
+        self._ensure_facts(self._available_files(self._code_files))
         return self._unparsed.files
 
     @property
@@ -223,24 +209,33 @@ class CodeIndex:
 
     @property
     def parser_scans_completed(self) -> tuple[str, ...]:
-        return tuple(scan for scan in _PARSER_SCANS if scan in self._completed_scans)
+        return ("facts",) if not self.parser_scans_pending else ()
 
     @property
     def parser_scans_pending(self) -> tuple[str, ...]:
-        return tuple(scan for scan in _PARSER_SCANS if scan not in self._completed_scans)
+        available = set(self._available_files(self._code_files))
+        return () if available <= self._facts.keys() else ("facts",)
 
-    def _run_scan(self, name: str, scan: Callable[[], object]):
+    @property
+    def unavailable_files(self) -> dict[str, str]:
+        """Inventory entries that disappeared after this working-directory index was created."""
+        return dict(self._unavailable)
+
+    @property
+    def available_files(self) -> tuple[str, ...]:
+        return self._available_files(self.files)
+
+    def _run_scan(self, name: str, scan: Callable[[], object], file_count: int):
         if self.scan_observer is not None:
-            self.scan_observer(name, "started", len(self._code_files))
+            self.scan_observer(name, "started", file_count)
         try:
             result = scan()
         except BaseException:
             if self.scan_observer is not None:
-                self.scan_observer(name, "failed", len(self._code_files))
+                self.scan_observer(name, "failed", file_count)
             raise
-        self._completed_scans.add(name)
         if self.scan_observer is not None:
-            self.scan_observer(name, "completed", len(self._code_files))
+            self.scan_observer(name, "completed", file_count)
         return result
 
     def enclosing_symbol(self, file: str, line: int) -> Span | None:
@@ -260,13 +255,13 @@ class CodeIndex:
 
     def find_definition(self, name: str) -> tuple[Span, ...]:
         """Functions, classes, and module-level constants, assignments, types, interfaces and enums."""
-        return self._definitions().get(name, ())
+        return self._definitions(name)
 
     def find_callers(self, name: str) -> tuple[CallSite, ...]:
         """Calls to ``name`` found by name in the syntax tree, each with its binding status. When one
         line holds both ``x.name(...)`` and ``name(...)``, the plain call stands for that line."""
         sites: dict[tuple[str, int], str | None] = {}
-        for call in self._calls():
+        for call in self._calls_named(name):
             key = (call.file, call.line)
             if call.name == name and (key not in sites or call.receiver is None):
                 sites[key] = call.receiver
@@ -279,7 +274,7 @@ class CodeIndex:
 
     def call_site_count(self, name: str) -> int:
         """How many call sites in scope call ``name``; a name called from fewer places is more specific."""
-        return self._call_counts()[name]
+        return len(self._calls_named(name))
 
     def find_callees(self, function: Span) -> tuple[str, ...]:
         """Names called inside ``function``; see ``callee_edges`` for their bindings."""
@@ -288,7 +283,7 @@ class CodeIndex:
     def callee_edges(self, function: Span) -> tuple[CallEdge, ...]:
         self._require_in_scope(function.file)
         edges: dict[str, CallEdge] = {}
-        for call in self._calls():
+        for call in self._facts_in(function.file).calls:
             inside = call.file == function.file and function.start <= call.line <= function.end
             if inside and call.name not in edges:
                 binding = self.binding_of(call.file, call.line, call.name, call.receiver)
@@ -300,15 +295,15 @@ class CodeIndex:
         decorators, exports, returns, method receivers, types and conditions, each with its role,
         holder and binding. Code reached this way (a callback, a registry entry, a parameter typed
         with a class) has no call edge to follow."""
-        return self._references(match for match in self._reference_matches() if match.name == name)
+        return self._references(self._references_named(name))
 
     def references_in(self, function: Span) -> tuple[Reference, ...]:
         """Names ``function`` passes on without calling them, limited to names defined in scope."""
         self._require_in_scope(function.file)
         inside = (
             match
-            for match in self._reference_matches()
-            if match.file == function.file and function.start <= match.line <= function.end
+            for match in self._facts_in(function.file).references
+            if function.start <= match.line <= function.end
         )
         return tuple(ref for ref in self._references(inside) if self.find_definition(ref.name))
 
@@ -334,7 +329,7 @@ class CodeIndex:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
                 return injected
-        definitions = tuple(span for span in self.find_definition(name) if span in self._callables())
+        definitions = tuple(span for span in self.find_definition(name) if self._is_callable(span))
         facts = CallFacts(
             file,
             name,
@@ -342,23 +337,99 @@ class CodeIndex:
             definitions,
             tuple(span for span in definitions if span in self._top_level_in(file)),
             self._imported_from(file, name),
-            self.unparsed_files,
+            self.observed_unparsed_files | self.unavailable_files.keys(),
         )
         return binding_from_facts(facts)
 
     def _file_structure(self, file: str) -> FileStructure:
         self._require_in_scope(file)
-        return self._structure().get(file, _NO_STRUCTURE)
+        if not language_of(file):
+            return _NO_STRUCTURE
+        return self._facts_in(file).structure
 
-    def _definitions_by_name(self) -> dict[str, tuple[Span, ...]]:
-        by_name: dict[str, dict[Span, None]] = {}
-        for file in self._code_files:
-            for span in (*self.symbols_in(file), *self.declarations_in(file)):
-                by_name.setdefault(span.name, {})[span] = None
-        return {name: tuple(spans) for name, spans in by_name.items()}
+    def _definitions_by_name(self, name: str) -> tuple[Span, ...]:
+        files = self._files_for_name(name)
+        self._ensure_facts(files)
+        definitions = {
+            span: None
+            for file in files
+            for span in (
+                *self._facts_in(file).structure.symbols,
+                *self._facts_in(file).structure.declarations,
+            )
+            if span.name == name
+        }
+        return tuple(definitions)
 
-    def _callable_spans(self) -> frozenset[Span]:
-        return frozenset(span for path in self._code_files for span in self.symbols_in(path))
+    def _is_callable(self, span: Span) -> bool:
+        return span in self._facts_in(span.file).structure.symbols
+
+    def _calls_with_name(self, name: str):
+        files = self._files_for_name(name)
+        self._ensure_facts(files)
+        return tuple(call for file in files for call in self._facts_in(file).calls if call.name == name)
+
+    def _references_with_name(self, name: str):
+        files = self._files_for_name(name)
+        self._ensure_facts(files)
+        return tuple(
+            reference
+            for file in files
+            for reference in self._facts_in(file).references
+            if reference.name == name
+        )
+
+    def _candidate_files(self, name: str) -> tuple[str, ...]:
+        return tools.ripgrep_files(name, self._available_files(self._code_files), self.root)
+
+    def _facts_in(self, file: str) -> FileFacts:
+        self._require_in_scope(file)
+        self._ensure_facts((file,))
+        return self._facts.get(file, FileFacts(_NO_STRUCTURE, (), ()))
+
+    def _ensure_facts(self, files: Sequence[str]) -> None:
+        with self._facts_lock:
+            missing = [file for file in self._available_files(files) if file not in self._facts]
+            if not missing:
+                return
+            to_scan = []
+            contents: dict[str, bytes] = {}
+            for file in missing:
+                try:
+                    content = (self.root / file).read_bytes()
+                except FileNotFoundError:
+                    self._unavailable[file] = "disappeared after inventory"
+                    continue
+                contents[file] = content
+                cached = self._fact_cache.load(file, content)
+                if cached is None:
+                    to_scan.append(file)
+                else:
+                    self._facts[file] = cached
+                    if cached.incomplete:
+                        self._unparsed.add("facts", (file,))
+            if not to_scan:
+                return
+            scanned = self._run_scan(
+                "facts",
+                lambda: self._scan_available_facts(to_scan),
+                len(to_scan),
+            )
+            self._facts.update(scanned)
+            for file, facts in scanned.items():
+                self._fact_cache.save(file, contents[file], facts)
+
+    def _scan_available_facts(self, files: Sequence[str]) -> dict[str, FileFacts]:
+        remaining = tuple(files)
+        while remaining:
+            try:
+                return scan_facts(remaining, self.root, self._lines_of, self._unparsed)
+            except tools.ToolFailedError:
+                available = self._available_files(remaining)
+                if available == remaining:
+                    raise
+                remaining = available
+        return {}
 
     def _top_level_spans(self, file: str) -> frozenset[Span]:
         """Symbols of ``file`` that no class or other function contains."""
@@ -396,7 +467,7 @@ class CodeIndex:
         return self.read_slice(span, origin)
 
     def search_text(self, text: str, max_hits: int = MAX_TEXT_HITS) -> tuple[TextHit, ...]:
-        found = tools.ripgrep_fixed(text, self.files, self.root, max_hits)
+        found = tools.ripgrep_fixed(text, self._available_files(self.files), self.root, max_hits)
         hits = sorted(hit for hit in found if hit.file in self._scope)
         return tuple(hits[:max_hits])
 
@@ -456,11 +527,31 @@ class CodeIndex:
 
     def _read_lines(self, file: str) -> tuple[str, ...]:
         self._require_in_scope(file)
-        return _split_lines((self.root / file).read_text(errors="replace"))
+        try:
+            return _split_lines((self.root / file).read_text(errors="replace"))
+        except FileNotFoundError:
+            self._unavailable[file] = "disappeared after inventory"
+            return ()
 
     def _read_file_sha256(self, file: str) -> str:
         self._require_in_scope(file)
-        return hashlib.sha256((self.root / file).read_bytes()).hexdigest()
+        try:
+            return hashlib.sha256((self.root / file).read_bytes()).hexdigest()
+        except FileNotFoundError:
+            self._unavailable[file] = "disappeared after inventory"
+            return ""
+
+    def _available_files(self, files: Sequence[str]) -> tuple[str, ...]:
+        available = []
+        for file in files:
+            try:
+                if (self.root / file).is_file():
+                    available.append(file)
+                else:
+                    self._unavailable[file] = "disappeared after inventory"
+            except FileNotFoundError:
+                self._unavailable[file] = "disappeared after inventory"
+        return tuple(available)
 
     def _require_in_scope(self, file: str) -> None:
         if file not in self._scope:
@@ -529,9 +620,7 @@ def _changed_paths(status: str) -> list[str]:
 def _working_git_metadata(root: Path, prefixes: Sequence[str]) -> tuple[str, list[str]]:
     try:
         commit = tools.git(["rev-parse", "HEAD"], root).strip()
-        status = tools.git(
-            ["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root
-        )
+        status = tools.git(["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root)
     except tools.ToolFailedError:
         return "", []
     return commit, _changed_paths(status)

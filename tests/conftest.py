@@ -126,4 +126,4 @@ def sample_repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def sample_index(sample_repo: Path) -> CodeIndex:
-    return CodeIndex.from_git(sample_repo)
+    return CodeIndex.from_git(sample_repo, fact_cache_dir=sample_repo.parent / "fact-cache")

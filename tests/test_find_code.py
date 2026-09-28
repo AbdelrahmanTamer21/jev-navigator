@@ -206,14 +206,19 @@ def test_budget_receipt_does_not_start_unused_scope_scans(
         "  find(query: Object): Promise<Array<Object>> { return query; }\n"
         "}\n"
     )
-    index = CodeIndex(tmp_path, ["broken.js"])
+    (tmp_path / "unused.py").write_text("def unused():\n    return 1\n")
+    index = CodeIndex(tmp_path, ["broken.js", "unused.py"], fact_cache_dir=tmp_path / "cache")
+    from jev_navigator.index import code_index
+
+    actual_scan = code_index.scan_facts
+    scanned: list[tuple[str, ...]] = []
+
+    def observe_scan(files, root, lines_of, unparsed):
+        scanned.append(tuple(files))
+        return actual_scan(files, root, lines_of, unparsed)
+
+    monkeypatch.setattr(code_index, "scan_facts", observe_scan)
     index.functions_in("broken.js")
-
-    def unexpected_scan(*args, **kwargs):
-        raise AssertionError("an unused parser scan ran after the search budget was exhausted")
-
-    monkeypatch.setattr("jev_navigator.index.code_index.scan_calls", unexpected_scan)
-    monkeypatch.setattr("jev_navigator.index.code_index.scan_references", unexpected_scan)
     start = range_place(index, "broken.js", 1, 4, "test start")
     client = ScriptedJevClient(nouls=scripted(found=lambda _: 0.05, could_contain=lambda _: 0.05))
 
@@ -228,8 +233,9 @@ def test_budget_receipt_does_not_start_unused_scope_scans(
 
     assert result.outcome == Outcome.BUDGET
     assert result.unparsed_files == {"broken.js"}
-    assert result.parser_scans_completed == ("structure",)
-    assert result.parser_scans_pending == ("calls", "references")
+    assert result.parser_scans_completed == ()
+    assert result.parser_scans_pending == ("facts",)
+    assert scanned == [("broken.js",)]
 
 
 def test_a_beam_opens_several_places_per_round_as_separate_requests(sample_index: CodeIndex) -> None:

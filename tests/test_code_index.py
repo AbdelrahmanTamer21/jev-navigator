@@ -503,6 +503,33 @@ def test_search_text_reads_a_line_that_is_not_utf8_as_the_index_does(tmp_path: P
     assert hits[0].text == 'LABEL = "caf\ufffd"'
 
 
+def test_working_directory_inventory_includes_outer_changes_and_excludes_nested_repositories(
+    tmp_path: Path,
+) -> None:
+    git(tmp_path, "init", "-q", "-b", "main")
+    (tmp_path / "tracked.py").write_text("VALUE = 1\n")
+    git(tmp_path, "add", "tracked.py")
+    git(tmp_path, "commit", "-q", "-m", "tracked")
+    (tmp_path / "tracked.py").write_text("VALUE = 2\n")
+    (tmp_path / "untracked.py").write_text("UNTRACKED = True\n")
+    (tmp_path / ".gitignore").write_text("ignored.py\n")
+    (tmp_path / "ignored.py").write_text("IGNORED = True\n")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    git(nested, "init", "-q", "-b", "main")
+    (nested / "duplicate.py").write_text("DUPLICATE = True\n")
+
+    index = CodeIndex.from_directory(tmp_path)
+
+    assert index.files == (".gitignore", "tracked.py", "untracked.py")
+
+
+def test_non_git_directory_inventory_includes_untracked_files(tmp_path: Path) -> None:
+    (tmp_path / "module.py").write_text("VALUE = 1\n")
+
+    assert CodeIndex.from_directory(tmp_path).files == ("module.py",)
+
+
 def test_search_text_reads_a_line_holding_a_unicode_line_separator(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "messages.js").write_text('const MESSAGE = "first\u2028second";\n')

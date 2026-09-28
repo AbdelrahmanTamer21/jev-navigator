@@ -41,6 +41,7 @@ def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -
         output,
         SearchBudget(max_depth=2, max_steps=3, max_calls=3, beam_width=1),
         client,
+        fact_cache_dir=tmp_path / "fact-cache",
     )
 
     written = json.loads((output / "manifest.json").read_text())
@@ -85,6 +86,7 @@ def test_evidence_pack_chooses_a_real_entry_when_no_start_is_supplied(tmp_path: 
         tmp_path / "evidence-auto",
         SearchBudget(max_depth=2, max_steps=3, max_calls=3, beam_width=1),
         client,
+        fact_cache_dir=tmp_path / "fact-cache",
     )
 
     assert manifest["search"]["outcome"] == "found"
@@ -119,11 +121,10 @@ def test_zero_choice_probability_remains_zero_in_the_uninspected_frontier(tmp_pa
         tmp_path / "zero-probability",
         SearchBudget(max_steps=1, max_calls=2, beam_width=1),
         client,
+        fact_cache_dir=tmp_path / "fact-cache",
     )
 
-    target = next(
-        item for item in manifest["search"]["not_inspected"] if "target" in item["signature"]
-    )
+    target = next(item for item in manifest["search"]["not_inspected"] if "target" in item["signature"])
     assert target["priority"] == 0.0
 
 

@@ -1,18 +1,16 @@
-"""Scope-wide tables built with one ast-grep scan each: symbols and declarations per file, every call
-site, and every non-call reference. Lookups then filter a table instead of running ast-grep again.
+"""Syntax facts extracted together in one ast-grep pass over each requested file set.
 
-Each scan runs in batches of ``BATCH_FILES`` files, so one slow batch cannot fail the index: a batch
-that times out is logged and its files are reported as unparsed, and every other file still counts.
-The structure scan also matches the grammar's ERROR nodes: a file the parser could only recover
+Each requested file set is handed to one ast-grep scan, which schedules parsing across its own worker
+pool without reparsing arbitrary fixed-size batches. The structure rules also match the grammar's
+ERROR nodes: a file the parser could only recover
 partially (Flow types in a JavaScript file, say) is reported as unparsed too. Its matched symbols and
 calls still count — recovery keeps what it could — but whatever the ERROR nodes swallowed is unknown,
-not absent, exactly as for a timed-out batch.
+not absent.
 """
 
 from __future__ import annotations
 
 import logging
-import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,15 +28,15 @@ from .languages import (
 from .spans import Span
 
 LinesOf = Callable[[str], Sequence[str]]
-BATCH_FILES = 100
-
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class Unparsed:
-    """Files a scan could not parse — a timed-out batch, or grammar ERROR nodes the parser only
-    recovered partially; lookups treat them as holding nothing they have not matched."""
+    """Files with grammar ERROR nodes the parser only recovered partially.
+
+    Lookups keep recovered matches while treating anything the parser omitted as unknown.
+    """
 
     files_by_scan: dict[str, set[str]] = field(default_factory=dict)
 
@@ -73,10 +71,56 @@ class ReferenceMatch:
     name: str
 
 
+@dataclass(frozen=True)
+class FileFacts:
+    structure: FileStructure
+    calls: tuple[CallMatch, ...]
+    references: tuple[ReferenceMatch, ...]
+    incomplete: bool = False
+
+
+def scan_facts(
+    files: Sequence[str], root: Path, lines_of: LinesOf, unparsed: Unparsed
+) -> dict[str, FileFacts]:
+    """Extract structure, calls, and references in one parser pass over each supplied file."""
+    matches = _batched(
+        "facts",
+        "\n---\n".join((_structure_rules(files), _call_rules(files), reference_rules())),
+        files,
+        root,
+        unparsed,
+    )
+    structure = _structure_from_matches(
+        files,
+        lines_of,
+        unparsed,
+        (match for match in matches if match["ruleId"] in {"function", "class", "declaration", _ERROR_RULE}),
+    )
+    calls = _calls_from_matches(match for match in matches if match["ruleId"] == "call")
+    references = _references_from_matches(
+        match
+        for match in matches
+        if match["ruleId"] not in {"function", "class", "declaration", _ERROR_RULE, "call"}
+    )
+    return {
+        file: FileFacts(
+            structure[file],
+            tuple(call for call in calls if call.file == file),
+            tuple(reference for reference in references if reference.file == file),
+            file in unparsed.files,
+        )
+        for file in files
+    }
+
+
 def scan_structure(
     files: Sequence[str], root: Path, lines_of: LinesOf, unparsed: Unparsed
 ) -> dict[str, FileStructure]:
     matches = _batched("structure", _structure_rules(files), files, root, unparsed)
+    return _structure_from_matches(files, lines_of, unparsed, matches)
+
+
+def _structure_from_matches(files, lines_of, unparsed, matches):
     functions: dict[str, set[Span]] = {file: set() for file in files}
     classes: dict[str, set[Span]] = {file: set() for file in files}
     declarations: dict[str, set[Span]] = {file: set() for file in files}
@@ -105,11 +149,18 @@ def scan_structure(
 
 def scan_calls(files: Sequence[str], root: Path, unparsed: Unparsed) -> tuple[CallMatch, ...]:
     """Every call whose callee ends in a plain name, with the receiver before the last dot."""
-    rules = "\n---\n".join(
+    return _calls_from_matches(_batched("calls", _call_rules(files), files, root, unparsed))
+
+
+def _call_rules(files: Sequence[str]) -> str:
+    return "\n---\n".join(
         f"id: call\nlanguage: {language}\nrule:\n  pattern: $CALLEE($$$)" for language in _languages(files)
     )
+
+
+def _calls_from_matches(matches) -> tuple[CallMatch, ...]:
     found = []
-    for match in _batched("calls", rules, files, root, unparsed):
+    for match in matches:
         expression = match["metaVariables"]["single"]["CALLEE"]["text"]
         name = last_identifier(expression)
         if name:
@@ -119,6 +170,10 @@ def scan_calls(files: Sequence[str], root: Path, unparsed: Unparsed) -> tuple[Ca
 
 def scan_references(files: Sequence[str], root: Path, unparsed: Unparsed) -> tuple[ReferenceMatch, ...]:
     matches = _batched("references", reference_rules(), files, root, unparsed)
+    return _references_from_matches(matches)
+
+
+def _references_from_matches(matches) -> tuple[ReferenceMatch, ...]:
     return tuple(
         sorted(
             {
@@ -130,17 +185,8 @@ def scan_references(files: Sequence[str], root: Path, unparsed: Unparsed) -> tup
 
 
 def _batched(scan: str, rules: str, files: Sequence[str], root: Path, unparsed: Unparsed) -> list[dict]:
-    matches: list[dict] = []
-    for start in range(0, len(files), BATCH_FILES):
-        batch = files[start : start + BATCH_FILES]
-        try:
-            matches += tools.ast_grep_rules(rules, batch, root)
-        except subprocess.TimeoutExpired:
-            logger.warning(
-                "ast-grep timed out on %d files in the %s scan; they count as unparsed", len(batch), scan
-            )
-            unparsed.add(scan, batch)
-    return matches
+    del scan, unparsed
+    return tools.ast_grep_rules(rules, files, root)
 
 
 def receiver_of(expression: str) -> str | None:

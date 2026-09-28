@@ -214,6 +214,7 @@ class FindResult:
     starts: tuple[Visit, ...] = ()
     parser_scans_completed: tuple[str, ...] = ()
     parser_scans_pending: tuple[str, ...] = ()
+    unavailable_files: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(order=True)
@@ -487,7 +488,9 @@ def _nothing_worth_opening(search: _Search, index: CodeIndex) -> Outcome:
     offered, so the search cannot say it looked everywhere."""
     if search.unsure:
         return Outcome.UNSURE_ONLY
-    return Outcome.SCOPE_INCOMPLETE if index.unparsed_files else Outcome.NOTHING_LEFT
+    return (
+        Outcome.SCOPE_INCOMPLETE if index.unparsed_files or index.unavailable_files else Outcome.NOTHING_LEFT
+    )
 
 
 def _calls_left(search: _Search, judge: Judge) -> int:
@@ -783,8 +786,9 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
     unparsed = index.observed_unparsed_files
     completed_scans = index.parser_scans_completed
     pending_scans = index.parser_scans_pending
+    unavailable = index.unavailable_files
     search.history.append(
-        _stop_step(search, outcome, not_inspected, unparsed, completed_scans, pending_scans)
+        _stop_step(search, outcome, not_inspected, unparsed, completed_scans, pending_scans, unavailable)
     )
     return FindResult(
         outcome,
@@ -803,6 +807,7 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
         tuple(search.starts),
         completed_scans,
         pending_scans,
+        unavailable,
     )
 
 
@@ -813,6 +818,7 @@ def _stop_step(
     unparsed: frozenset[str],
     completed_scans: tuple[str, ...],
     pending_scans: tuple[str, ...],
+    unavailable: Mapping[str, str],
 ) -> HistoryStep:
     judgments: dict[str, object] = {"not_inspected": [_frontier_entry(entry) for entry in not_inspected]}
     if unparsed:
@@ -821,6 +827,8 @@ def _stop_step(
         "completed": list(completed_scans),
         "pending": list(pending_scans),
     }
+    if unavailable:
+        judgments["unavailable_files"] = dict(unavailable)
     if search.stop_judgment is not None:
         judgments["last_stop_check"] = {
             "probability": search.stop_judgment.probability,

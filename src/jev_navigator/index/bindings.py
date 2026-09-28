@@ -57,8 +57,9 @@ def binding_from_facts(facts: CallFacts) -> Binding:
     """``unknown`` when the definition may sit in a file the index could not parse: no definition
     was found, or the file the import names was not parsed. Missing evidence is never absence."""
     unparsed_import = [file for file in facts.imported_from if file in facts.unparsed]
-    if facts.unparsed and (not facts.definitions or unparsed_import):
-        files = ", ".join(sorted(unparsed_import or facts.unparsed)[:5])
+    unparsed_definitions = [span.file for span in facts.definitions if span.file in facts.unparsed]
+    if facts.unparsed and (not facts.definitions or unparsed_import or unparsed_definitions):
+        files = ", ".join(sorted(unparsed_import or unparsed_definitions or facts.unparsed)[:5])
         return Binding(BindingStatus.UNKNOWN, f"{facts.name} may be defined in files not parsed: {files}")
     if not facts.definitions:
         return Binding(BindingStatus.UNRESOLVED, f"no definition of {facts.name} in the index scope")
