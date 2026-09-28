@@ -95,7 +95,8 @@ Test it offline with `ScriptedJevClient` and AAA tests, including the unsure pat
 ## Searching instead of listing
 
 When code cannot list the candidates, search: `find_code(index, judge, description, start)` opens
-places best first and returns `found`, `searched`, `unsure` and `not_inspected` with reasons. Add a
+places (starts, then Jev's picks, then the best-scored neighbours) and returns `found`, `searched`,
+`unsure`, `starts` and `not_inspected` with reasons. A start place never counts as found. Add a
 `StopRule` with your own concrete check when the target is spread over several places.
 
 Read `searched` and the outcome `nothing_left` as "opened and judged unlikely", never as "the code does

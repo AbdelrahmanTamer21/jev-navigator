@@ -22,7 +22,7 @@ _ENVIRONMENT_READ = re.compile(
     r"""(?:environ(?:\.get)?\(?\[?|getenv\(|process\.env\.)\s*["']?([A-Z][A-Z0-9_]{2,})"""
 )
 _QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{5,79})["'`]""")
-_KEY_SHAPE = re.compile(r"[._:/-]|^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
+_KEY_SHAPE = re.compile(r"[._:/-]")
 MAX_KEY_HITS = 30
 _TEST_DIRECTORIES = frozenset({"test", "tests", "__tests__", "spec"})
 _TEST_FILE_NAME = re.compile(r"^test_|_test\.|\.test\.|\.spec\.|^conftest\.py$")
@@ -112,6 +112,7 @@ def neighbours_and_omissions(
     opened: CodeSlice,
     per_kind: int = DEFAULT_NEIGHBOURS_PER_KIND,
     moves: Mapping[str, Move] | None = None,
+    shown: Span | None = None,
 ) -> tuple[list[Place], list[Place]]:
     """The places each move lists for ``opened``, at most ``per_kind`` per move, in the order of
     ``moves`` (default ``MOVES``: callers, callees, code that refers to it without calling it, code
@@ -122,27 +123,29 @@ def neighbours_and_omissions(
     separately, so a caller can report them as not inspected.
 
     Places are one when they open the same lines of the same file, whatever their keys, and a place
-    wholly inside ``opened`` is left out. The first relation found is kept: calls and references come
+    wholly inside the lines a request shows of ``opened`` (``shown``, by default all of them) is left
+    out. The first relation found is kept: calls and references come
     before file position, so the strongest reason a place is a neighbour is the one shown. A move's
     cap counts only places no earlier move kept."""
-    shown: set[str] = set()
+    on_screen = opened.span if shown is None else shown
+    kept_lines: set[str] = set()
     kept: list[Place] = []
     beyond_cap: list[Place] = []
     for build in (MOVES if moves is None else moves).values():
-        new = _new_places(build(index, opened), opened.span, shown)
+        new = _new_places(build(index, opened), on_screen, kept_lines)
         kept += new[:per_kind]
-        shown |= {place.open().span.key for place in new[:per_kind]}
+        kept_lines |= {place.open().span.key for place in new[:per_kind]}
         beyond_cap += new[per_kind:]
-    return kept, _new_places(beyond_cap, opened.span, shown)
+    return kept, _new_places(beyond_cap, on_screen, kept_lines)
 
 
-def _new_places(places: list[Place], opened: Span, shown: set[str]) -> list[Place]:
-    """One place per stretch of lines, leaving out stretches in ``shown`` and inside ``opened``."""
-    seen = set(shown)
+def _new_places(places: list[Place], on_screen: Span, kept_lines: set[str]) -> list[Place]:
+    """One place per stretch of lines, leaving out stretches already kept and those on screen."""
+    seen = set(kept_lines)
     new = []
     for place in places:
         span = place.open().span
-        if span.key not in seen and not _within(span, opened):
+        if span.key not in seen and not _within(span, on_screen):
             seen.add(span.key)
             new.append(place)
     return new
@@ -241,8 +244,8 @@ def _distance(span: Span, opened: Span) -> int:
 def _keys_mentioned(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     """Lines elsewhere that mention an environment variable it reads or a key it quotes, the rarest
     key first. A quoted key has at least six characters and a key's shape: a dot, underscore, colon,
-    slash or dash, or CONSTANT_CASE. A key found on more than ``MAX_KEY_HITS`` lines is too common to
-    point anywhere and is skipped."""
+    slash or dash. A key found on more than ``MAX_KEY_HITS`` lines is too common to point anywhere
+    and is skipped."""
     hits_by_key = {key: _lines_mentioning(index, opened, key) for key in _keys_in(opened.text)}
     usable = [(key, hits) for key, hits in hits_by_key.items() if 0 < len(hits) <= MAX_KEY_HITS]
     rarest_first = sorted(usable, key=lambda item: len(item[1]))
