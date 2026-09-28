@@ -62,7 +62,8 @@ points outside the index root, is not read: its aliases stay unknown and those b
 `candidate`. `jsconfig.json` and tsconfig `references` are not read. `CodeIndex.at_commit` brings the
 commit's tsconfig files along, outside the scope. File lists come from git with NUL separators, so
 names with non-ASCII characters enter the scope as they are on disk, and lines split at newlines only,
-as the parser counts them.
+as the parser counts them. A line that is not valid UTF-8 is read with its invalid bytes replaced, the
+same way by `search_text` and by every other lookup.
 
 The index parses its scope once, lazily, with three ast-grep scans (symbols and declarations, call
 sites, references), then answers every lookup from those tables; each call site's binding is computed

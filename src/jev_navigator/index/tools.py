@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+
+from .spans import TextHit
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +45,9 @@ def ast_grep_rules(rules_yaml: str, files: Sequence[str], cwd: Path) -> list[dic
     return _json_list(output)
 
 
-def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[dict]:
+def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:
+    """The lines holding ``text``. JSON events are split at newlines only, since a line of code may
+    hold a Unicode line separator that ``str.splitlines`` would split."""
     if not files:
         return []
     output = run_command(
@@ -50,8 +55,20 @@ def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> 
         cwd,
         no_match_exit=_NO_MATCHES_EXIT,
     )
-    events = (json.loads(line) for line in output.splitlines() if line.strip())
-    return [event["data"] for event in events if event.get("type") == "match"]
+    events = (json.loads(line) for line in output.split("\n") if line.strip())
+    return [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
+
+
+def _text_hit(match: dict) -> TextHit:
+    return TextHit(_decoded(match["path"]), match["line_number"], _decoded(match["lines"]).rstrip("\r\n"))
+
+
+def _decoded(field: dict) -> str:
+    """ripgrep reports a path or line that is not valid UTF-8 as base64 ``bytes`` instead of ``text``;
+    it is decoded the way the index reads files, with invalid bytes replaced."""
+    if "text" in field:
+        return field["text"]
+    return base64.b64decode(field["bytes"]).decode("utf-8", errors="replace")
 
 
 def git(arguments: Sequence[str], cwd: Path) -> str:
