@@ -69,10 +69,17 @@ before any tool reads it.
 
 The index parses its scope once, lazily, with three ast-grep scans (symbols and declarations, call
 sites, references), then answers every lookup from those tables; each call site's binding is computed
-once. Scans run in batches of 100 files, so one slow batch cannot fail the index: a batch that times
+once. A `.js` file whose leading comments (before any code, after an optional byte-order mark or
+shebang) carry the `@flow` pragma is parsed as `flow`: no Flow grammar is maintained, so these files
+ride on the tsx grammar — the closest superset — scanned in their own invocation through a
+`languageGlobs` sgconfig written outside the scanned repository. Plain JavaScript keeps the
+JavaScript grammar unchanged. The tsx grammar is an incidental superset, not a Flow parser: Flow-only
+constructs it cannot recover (exact object types `{| |}`, `export opaque type`, variance annotations,
+`?T` in static property types, inexact objects `...`) still surface as ERROR nodes below. Scans run in
+batches of 100 files, so one slow batch cannot fail the index: a batch that times
 out is logged and listed in `index.unparsed_files` (reading it runs any scan not yet run, so the list
 is complete). The structure scan also lists files the grammar reports ERROR nodes on — a language's
-parser may recover only part of such a file (Flow types in a JavaScript file, for example), so what
+parser may recover only part of such a file, so what
 it swallowed must not silently count as indexed; the symbols it did recover still count. Code in
 those files is unknown, not absent: a binding that may depend on them has status
 `unknown` with the files in its reason, and `find_code` reports `scope_incomplete` instead of

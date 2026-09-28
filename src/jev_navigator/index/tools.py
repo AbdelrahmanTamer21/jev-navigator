@@ -6,7 +6,9 @@ import base64
 import json
 import logging
 import subprocess
+import tempfile
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from pathlib import Path
 
 from .spans import TextHit
@@ -34,14 +36,24 @@ def run_command(arguments: Sequence[str], cwd: Path, *, no_match_exit: int | Non
     return completed.stdout
 
 
-def ast_grep_rules(rules_yaml: str, files: Sequence[str], cwd: Path) -> list[dict]:
+def ast_grep_rules(rules_yaml: str, files: Sequence[str], cwd: Path, config: str | None = None) -> list[dict]:
+    """The matches of ``rules_yaml`` over ``files``. ``config``, when given, is sgconfig YAML text
+    (a ``languageGlobs`` remapping, say); it is written to a temporary file outside every repository
+    and passed with ``-c``."""
     if not files:
         return []
-    output = run_command(
-        [AST_GREP, "scan", "--inline-rules", rules_yaml, "--json=compact", *files],
-        cwd,
-        no_match_exit=_NO_MATCHES_EXIT,
-    )
+    with ExitStack() as resources:
+        command = [AST_GREP, "scan", "--inline-rules", rules_yaml]
+        if config is not None:
+            directory = resources.enter_context(tempfile.TemporaryDirectory(prefix="jev-navigator-sgconfig-"))
+            path = Path(directory) / "sgconfig.yml"
+            path.write_text(config)
+            command += ["--config", str(path)]
+        output = run_command(
+            [*command, "--json=compact", *files],
+            cwd,
+            no_match_exit=_NO_MATCHES_EXIT,
+        )
     return _json_list(output)
 
 

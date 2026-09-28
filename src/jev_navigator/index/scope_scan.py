@@ -21,9 +21,13 @@ from . import tools
 from .languages import (
     CLASS_KINDS,
     DECLARATION_RULES,
+    FLOW_LANGUAGE,
+    FLOW_SGCONFIG,
     FUNCTION_KINDS,
     declared_name,
     function_name,
+    grammar_of,
+    language_for,
     language_of,
     reference_rules,
 )
@@ -76,7 +80,7 @@ class ReferenceMatch:
 def scan_structure(
     files: Sequence[str], root: Path, lines_of: LinesOf, unparsed: Unparsed
 ) -> dict[str, FileStructure]:
-    matches = _batched("structure", _structure_rules(files), files, root, unparsed)
+    matches = _batched("structure", files, lines_of, _structure_rules, root, unparsed)
     functions: dict[str, set[Span]] = {file: set() for file in files}
     classes: dict[str, set[Span]] = {file: set() for file in files}
     declarations: dict[str, set[Span]] = {file: set() for file in files}
@@ -103,13 +107,12 @@ def scan_structure(
     }
 
 
-def scan_calls(files: Sequence[str], root: Path, unparsed: Unparsed) -> tuple[CallMatch, ...]:
+def scan_calls(
+    files: Sequence[str], root: Path, unparsed: Unparsed, lines_of: LinesOf
+) -> tuple[CallMatch, ...]:
     """Every call whose callee ends in a plain name, with the receiver before the last dot."""
-    rules = "\n---\n".join(
-        f"id: call\nlanguage: {language}\nrule:\n  pattern: $CALLEE($$$)" for language in _languages(files)
-    )
     found = []
-    for match in _batched("calls", rules, files, root, unparsed):
+    for match in _batched("calls", files, lines_of, _call_rules, root, unparsed):
         expression = match["metaVariables"]["single"]["CALLEE"]["text"]
         name = last_identifier(expression)
         if name:
@@ -117,8 +120,10 @@ def scan_calls(files: Sequence[str], root: Path, unparsed: Unparsed) -> tuple[Ca
     return tuple(sorted(found, key=lambda call: (call.file, call.line)))
 
 
-def scan_references(files: Sequence[str], root: Path, unparsed: Unparsed) -> tuple[ReferenceMatch, ...]:
-    matches = _batched("references", reference_rules(), files, root, unparsed)
+def scan_references(
+    files: Sequence[str], root: Path, unparsed: Unparsed, lines_of: LinesOf
+) -> tuple[ReferenceMatch, ...]:
+    matches = _batched("references", files, lines_of, reference_rules, root, unparsed)
     return tuple(
         sorted(
             {
@@ -129,17 +134,28 @@ def scan_references(files: Sequence[str], root: Path, unparsed: Unparsed) -> tup
     )
 
 
-def _batched(scan: str, rules: str, files: Sequence[str], root: Path, unparsed: Unparsed) -> list[dict]:
+def _batched(
+    scan: str,
+    files: Sequence[str],
+    lines_of: LinesOf,
+    rules_of: Callable[[Sequence[str]], str],
+    root: Path,
+    unparsed: Unparsed,
+) -> list[dict]:
     matches: list[dict] = []
-    for start in range(0, len(files), BATCH_FILES):
-        batch = files[start : start + BATCH_FILES]
-        try:
-            matches += tools.ast_grep_rules(rules, batch, root)
-        except subprocess.TimeoutExpired:
-            logger.warning(
-                "ast-grep timed out on %d files in the %s scan; they count as unparsed", len(batch), scan
-            )
-            unparsed.add(scan, batch)
+    for config, group, languages in _scan_groups(files, lines_of):
+        rules = rules_of(languages)
+        for start in range(0, len(group), BATCH_FILES):
+            batch = group[start : start + BATCH_FILES]
+            try:
+                matches += tools.ast_grep_rules(rules, batch, root, config=config)
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "ast-grep timed out on %d files in the %s scan; they count as unparsed",
+                    len(batch),
+                    scan,
+                )
+                unparsed.add(scan, batch)
     return matches
 
 
@@ -156,19 +172,48 @@ def last_identifier(expression: str) -> str:
 _ERROR_RULE = "parse_error"
 
 
-def _structure_rules(files: Sequence[str]) -> str:
+def _structure_rules(languages: Sequence[str]) -> str:
     documents = []
-    for language in _languages(files):
+    for language in languages:
         documents.append(_kind_rule("function", language, FUNCTION_KINDS[language]))
         documents.append(_kind_rule("class", language, CLASS_KINDS[language]))
-        documents.append(f"id: declaration\nlanguage: {language}\nrule:\n{DECLARATION_RULES[language]}")
-        documents.append(f"id: {_ERROR_RULE}\nlanguage: {language}\nrule:\n  kind: ERROR")
+        documents.append(
+            f"id: declaration\nlanguage: {grammar_of(language)}\nrule:\n{DECLARATION_RULES[language]}"
+        )
+        documents.append(f"id: {_ERROR_RULE}\nlanguage: {grammar_of(language)}\nrule:\n  kind: ERROR")
     return "\n---\n".join(documents)
+
+
+def _call_rules(languages: Sequence[str]) -> str:
+    return "\n---\n".join(
+        f"id: call\nlanguage: {grammar_of(language)}\nrule:\n  pattern: $CALLEE($$$)"
+        for language in languages
+    )
 
 
 def _kind_rule(rule_id: str, language: str, kinds: Sequence[str]) -> str:
     listed = "".join(f"\n    - kind: {kind}" for kind in kinds)
-    return f"id: {rule_id}\nlanguage: {language}\nrule:\n  any:{listed}"
+    return f"id: {rule_id}\nlanguage: {grammar_of(language)}\nrule:\n  any:{listed}"
+
+
+def _scan_groups(files: Sequence[str], lines_of: LinesOf) -> list[tuple[str | None, list[str], list[str]]]:
+    """(sgconfig, files, languages) per invocation: every non-flow file scanned together exactly as
+    before, and the ``@flow`` files in their own invocation, where the config's ``languageGlobs``
+    parses the JavaScript suffixes with the tsx grammar. The globs are global per invocation, so
+    mixing the two would re-parse plain JavaScript files too."""
+    plain: list[str] = []
+    flow: list[str] = []
+    for file in files:
+        if language_for(file, lines_of(file)) == FLOW_LANGUAGE:
+            flow.append(file)
+        else:
+            plain.append(file)
+    groups: list[tuple[str | None, list[str], list[str]]] = []
+    if plain:
+        groups.append((None, plain, _languages(plain)))
+    if flow:
+        groups.append((FLOW_SGCONFIG, flow, [FLOW_LANGUAGE]))
+    return groups
 
 
 def _languages(files: Sequence[str]) -> list[str]:
