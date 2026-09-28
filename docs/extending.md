@@ -83,7 +83,9 @@ Why it is built this way:
   is in `{item}.called`; Jev is never asked to guess what an unseen call does. This holds for one level
   only: a write two calls down is not in the state, so read "no" as "no write within one call", or
   expand further in code. Each entry in `called` keeps its binding status, so a call the index could
-  not resolve stays visible instead of looking like a proven one.
+  not resolve stays visible instead of looking like a proven one. A yes can rest on the body of a
+  function the index could not prove (`candidate`, `unresolved` or `unknown`); when you need proof,
+  keep only the entries whose binding is `resolved`.
 - Each handler is its own question, so one handler cannot hide another.
 - Unsure stays unsure: it is reported, never counted as "does not write".
 
@@ -94,6 +96,10 @@ Test it offline with `ScriptedJevClient` and AAA tests, including the unsure pat
 When code cannot list the candidates, search: `find_code(index, judge, description, start)` opens
 places best first and returns `found`, `searched`, `unsure` and `not_inspected` with reasons. Add a
 `StopRule` with your own concrete check when the target is spread over several places.
+
+Read `searched` and the outcome `nothing_left` as "opened and judged unlikely", never as "the code does
+not exist": one "no" about one place can be wrong. When nothing is found, rank the opened places by
+their probability and treat the best one as the likeliest place.
 
 ## Stopping on your own check
 

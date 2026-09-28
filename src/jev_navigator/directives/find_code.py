@@ -167,10 +167,12 @@ class NotInspected:
 
 @dataclass(frozen=True)
 class FindResult:
-    """Three explicit sets: ``found``; ``searched`` (bodies judged and not the target) plus ``unsure``;
-    and ``not_inspected``, the frontier a later call can resume from with ``resume=``.
-    ``unparsed_files`` lists scope files the index could not parse; while it is not empty the outcome
-    is never ``nothing_left``."""
+    """Three explicit sets: ``found``; ``searched`` (opened and judged at or below the no bar, each
+    with its probability) plus ``unsure``; and ``not_inspected``, the frontier a later call can resume
+    from with ``resume=``. Neither ``searched`` nor the outcome ``nothing_left`` proves the code is
+    absent: one "no" about one place can be wrong. When nothing is found, rank the opened places by
+    their probability; the best one is the likeliest place. ``unparsed_files`` lists scope files the
+    index could not parse; while it is not empty the outcome is never ``nothing_left``."""
 
     outcome: Outcome
     found: tuple[Visit, ...]

@@ -175,7 +175,11 @@ cache. A low neighbour score only lowers that neighbour's priority; it is never 
 the code is not there. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
 `scope_incomplete`, and the result
 keeps three sets: `found`; `searched` and `unsure` (bodies actually judged); and `not_inspected`, each
-entry with its reason (`budget`, `deprioritized`, `capped` or `depth`). Pass the result back as
+entry with its reason (`budget`, `deprioritized`, `capped` or `depth`). `searched` means "opened and
+judged at or below the no bar, probability kept", and `nothing_left` means "nothing left worth
+opening"; neither proves that the code does not exist, because one "no" about one place can be wrong.
+When nothing reaches the yes bar, rank the opened places by their `contains_target` probability: the
+best-scored place is the likeliest one. Pass the result back as
 `resume=` to continue from that frontier with a fresh budget. Pass `commit=` to require that the index
 holds exactly that revision (use `CodeIndex.at_commit` for history); a mismatch raises
 `RevisionMismatchError`. Nothing escalates on its own. The default budget is 24 steps and 24 calls
