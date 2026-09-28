@@ -6,7 +6,14 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code
-from jev_navigator.directives.places import Place, function_place, neighbours, place_for_line
+from jev_navigator.directives.places import (
+    MOVES,
+    Place,
+    function_place,
+    neighbours,
+    place_for_line,
+    window_place,
+)
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
 from jev_navigator.judgments.judge import Judge
@@ -469,3 +476,39 @@ def test_a_quoted_key_matches_whole_names_only(tmp_path: Path) -> None:
     # Assert
     mentions = {key.split(":")[0] for key, signature in offered.items() if "mentions `invoice`" in signature}
     assert mentions == {"config.yaml"}
+
+
+def test_the_caller_chooses_which_moves_list_neighbours(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(
+        tmp_path,
+        {
+            "orders.py": (
+                "def place(order):\n    return refund(order)\n\n\ndef refund(order):\n    return None\n"
+            )
+        },
+    )
+    opened = index.read_slice(index.find_definition("place")[0])
+
+    def always_the_config(index: CodeIndex, code: CodeSlice) -> list[Place]:
+        return [window_place(index, "orders.py", 1, "a custom move")]
+
+    # Act
+    same_file_only = neighbours(index, opened, moves={"same_file": MOVES["same_file"]})
+    custom = neighbours(index, opened, moves={"custom": always_the_config})
+
+    # Assert
+    assert [place.signature.split(" (")[-1] for place in same_file_only] == ["in the same file as place)"]
+    assert [place.signature.endswith("(a custom move)") for place in custom] == [True]
+
+
+def test_find_code_with_no_moves_opens_only_its_start(sample_index: CodeIndex) -> None:
+    # Arrange
+    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.9))
+
+    # Act
+    result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index), moves={})
+
+    # Assert
+    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.steps == 1 and len(client.requests) == 1
