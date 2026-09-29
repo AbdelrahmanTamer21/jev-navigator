@@ -225,6 +225,10 @@ only when the node does not contain its binding name (for example an assigned an
 This keeps a method on a one-line TypeScript class distinct from its enclosing class.
 Persistent facts are keyed by source bytes, language, parser version and `FACT_RULE_VERSION`.
 A change to extracted facts must change that rule identity so existing cached results are reparsed.
+Name lookups reuse an in-memory index of parsed definitions, calls and references, including facts
+loaded from the persistent cache. Text discovery searches only files without facts. A bidirectional
+trace prepares the scoped fact inventory in one batch before walking incoming and outgoing links;
+it does not launch one repository search for every encountered name.
 
 ## Structural measurements without model calls
 

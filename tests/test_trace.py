@@ -17,6 +17,33 @@ from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
 
+def test_trace_batches_inventory_before_resolving_each_name(tmp_path, monkeypatch):
+    from jev_navigator import operations
+    from jev_navigator.index import tools
+
+    index = _workflow_index(tmp_path)
+    root = index.enclosing_symbol("workflow.py", 7)
+    searches = []
+    run = tools.run_command
+
+    def observe(arguments, *args, **kwargs):
+        if arguments[0] == tools.RIPGREP:
+            searches.append(arguments)
+        return run(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(tools, "run_command", observe)
+    graph = operations.trace_graph(index, (root,))
+    assert {span.name for span in graph.functions} == {
+        "handle_order",
+        "audit",
+        "normalize",
+        "respond",
+        "reject",
+    }
+    assert graph.stop == "fixed_point"
+    assert searches == [], "A complete static walk needs one fact inventory, not a search per name"
+
+
 def _workflow_source(*, transformation: bool, registration: bool, consumer: bool) -> str:
     imports = ["from pipeline import normalize"] if transformation else []
     if consumer:

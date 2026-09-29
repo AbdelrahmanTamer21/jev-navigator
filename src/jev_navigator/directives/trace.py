@@ -173,7 +173,14 @@ def trace_workflow(
         return stopped
 
     if not stopped:
-        items = tuple(_trace_item(index, span, graph.links) for span in graph.functions)
+        links_by_function: dict[str, list[operations.TraceLink]] = {}
+        for link in graph.links:
+            endpoints = {span.key for span in (link.source, link.target) if span is not None}
+            for key in endpoints:
+                links_by_function.setdefault(key, []).append(link)
+        items = tuple(
+            _trace_item(index, span, links_by_function.get(span.key, ())) for span in graph.functions
+        )
         try:
             for name, result in judge.iter_check_every(
                 checks,
@@ -229,12 +236,11 @@ def trace_workflow(
 
 def _trace_item(index: CodeIndex, span: Span, links: Sequence[operations.TraceLink]) -> dict[str, object]:
     source = index.read_slice(span, origin="trace workflow")
-    related = [link for link in links if _touches(span, link)]
     return {
         **source.source(),
         "span_key": span.key,
         "code": source.text,
-        "links": [_link_item(index, link) for link in related],
+        "links": [_link_item(index, link) for link in links],
     }
 
 
@@ -262,12 +268,6 @@ def _span_item(span: Span | None) -> Mapping[str, object] | None:
     if span is None:
         return None
     return {"key": span.key, "file": span.file, "lines": [span.start, span.end], "name": span.name}
-
-
-def _touches(span: Span, link: operations.TraceLink) -> bool:
-    return (link.source is not None and link.source.key == span.key) or (
-        link.target is not None and link.target.key == span.key
-    )
 
 
 def _item_span_key(item: Mapping) -> str:

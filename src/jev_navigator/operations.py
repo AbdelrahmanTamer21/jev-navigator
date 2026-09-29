@@ -119,6 +119,10 @@ def trace_graph(
     """
     _require_depth(depth)
     unique_roots = tuple({span.key: span for span in roots}.values())
+    if unique_roots and depth != 0 and not (cancelled is not None and cancelled()):
+        # A bidirectional trace searches the whole scope for incoming relationships. Build that
+        # fact inventory once, rather than grep every distinct name across still-unparsed files.
+        index.functions_in_files(index.files)
     functions = {span.key: span for span in unique_roots}
     frontier = list(unique_roots)
     links: dict[tuple, TraceLink] = {}
