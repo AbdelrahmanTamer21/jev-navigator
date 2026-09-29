@@ -241,7 +241,7 @@ counts = count_symbols(index)
 print(counts.total, counts.coverage)
 
 ranking = largest_functions(index)  # includes methods and nested functions
-for symbol in ranking.biggest:      # retains all ties for the largest function
+for symbol in ranking.biggest:  # retains all ties for the largest function
     print(symbol.span, symbol.size)
 
 between = [symbol for symbol in ranking.measured if 20 <= symbol.size <= 50]
