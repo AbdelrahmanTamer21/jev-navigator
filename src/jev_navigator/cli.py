@@ -19,6 +19,7 @@ from time import monotonic
 from .adapters.typesafe import TypeSafeJevClient
 from .cli_resume import load_resume, save_resume
 from .directives.entry import EntrySelection, choose_initial_candidates
+from .directives.find_all import FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
 from .directives.places import Place, place_for_line
 from .index.code_index import CodeIndex
@@ -33,6 +34,7 @@ NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours
 POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
+DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -44,7 +46,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser = _parser()
         (_command_parser(parser, args.topic) if args.topic else parser).print_help()
         return 0
-    if args.command != "find":
+    if args.command not in ("find", "findall"):
         raise AssertionError(f"unhandled command: {args.command}")
     budget = SearchBudget(
         max_depth=args.max_depth,
@@ -76,18 +78,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             client,
             thresholds=Thresholds.from_env(),
             verbose=args.verbose,
-            resume_from=Path(args.resume).expanduser() if args.resume else None,
+            workflow=args.command,
+            resume_from=Path(args.resume).expanduser() if getattr(args, "resume", None) else None,
         )
     except Exception as error:
-        print(f"jvn find: {error}", file=sys.stderr)
+        print(f"jvn {args.command}: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("jvn find: cancelled", file=sys.stderr)
+        print(f"jvn {args.command}: cancelled", file=sys.stderr)
         return 130
     finally:
         if client is not None:
             client.close()
     search_outcome = manifest["search"]["outcome"]
+    resume_directory = (
+        str(output.resolve())
+        if args.command == "find" and search_outcome in ("budget", "cancelled")
+        else None
+    )
     if args.json:
         print(
             json.dumps(
@@ -97,14 +105,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "report": str(output.resolve() / "report.md"),
                     "search": manifest["search"],
                     "provider": manifest["provider"],
-                    "resume": (str(output.resolve()) if search_outcome in ("budget", "cancelled") else None),
+                    "resume": resume_directory,
                 }
             )
         )
     else:
         print(f"evidence pack: {output.resolve()}")
         print(f"outcome: {search_outcome} ({manifest['search']['calls']} live calls)")
-        if search_outcome in ("budget", "cancelled"):
+        if resume_directory is not None:
             print(f"resume: use --resume {output.resolve()} with the same target and repository")
     return 130 if search_outcome == "cancelled" else 0
 
@@ -121,9 +129,14 @@ def create_evidence_pack(
     thresholds: Thresholds | None = None,
     verbose: bool = False,
     fact_cache_dir: Path | None = None,
+    workflow: str = "find",
     resume_from: Path | None = None,
 ) -> dict:
     """Run the real index/search owners and persist their reviewable evidence."""
+    if workflow not in ("find", "findall"):
+        raise ValueError(f"unknown search workflow: {workflow}")
+    if resume_from is not None and workflow != "find":
+        raise ValueError("saved-frontier resume currently belongs to the find workflow")
     repository = repository.resolve()
     output = output.resolve()
     _validate_budget(budget)
@@ -169,6 +182,7 @@ def create_evidence_pack(
             store=JsonlAnswerStore(output / "answers.jsonl"),
         )
         selection: EntrySelection | None = None
+        started = monotonic()
         entry_pending = False
         if resume is not None:
             start_places = []
@@ -198,10 +212,8 @@ def create_evidence_pack(
             )
         if entry_pending:
             result = FindResult(Outcome.BUDGET, (), (), (), (), 0, 0)
-            duration_seconds = 0.0
         else:
             progress.phase("navigating code")
-            started = monotonic()
             result = find_code(
                 index,
                 judge,
@@ -212,10 +224,16 @@ def create_evidence_pack(
                 initial_candidates=initial_candidates,
                 resume=resume,
             )
-            duration_seconds = monotonic() - started
+        seed_calls = judge.calls
+        seed_duration_seconds = monotonic() - started
+        enumeration = None
+        if workflow == "findall" and result.outcome != Outcome.CANCELLED:
+            progress.phase("expanding seed and checking remaining functions")
+            enumeration = find_all(index, judge, target, [visit.code.span for visit in result.found])
+        duration_seconds = monotonic() - started
         progress.phase("writing evidence pack")
         scope_unavailable: dict[str, str] = {}
-        if result.outcome in (Outcome.BUDGET, Outcome.CANCELLED):
+        if workflow == "find" and result.outcome in (Outcome.BUDGET, Outcome.CANCELLED):
             scope_unavailable = save_resume(
                 output / "resume.json", index, result, entry_pending=entry_pending
             )
@@ -231,17 +249,23 @@ def create_evidence_pack(
             requested_model=getattr(client, "model", "unknown"),
             served_model=judge.served_model,
             input_tokens=judge.input_tokens,
-            duration_seconds=duration_seconds,
-            total_calls=judge.calls,
+            duration_seconds=seed_duration_seconds,
+            total_calls=seed_calls,
             entry_selection=selection,
             previous=previous,
             resume_from=resume_from,
             entry_pending=entry_pending,
             scope_unavailable=scope_unavailable,
         )
+        if enumeration is not None:
+            manifest["workflow"] = "findall"
+            manifest["seed_search"] = manifest["search"]
+            manifest["search"] = _find_all_summary(enumeration, judge.calls, duration_seconds)
         _write_json(output / "manifest.json", manifest)
-        (output / "report.md").write_text(_report(manifest))
-        outcome = str(result.outcome)
+        (output / "report.md").write_text(
+            _find_all_report(manifest) if enumeration is not None else _report(manifest)
+        )
+        outcome = str(manifest["search"]["outcome"])
         return manifest
     except KeyboardInterrupt:
         outcome = "cancelled"
@@ -295,9 +319,30 @@ Find stops on a match; it is not an exhaustive find-all or an end-to-end trace.
 For JSON field names, types and defaults: jvn schema find. Full examples: docs/cli.md.""",
     )
     schema = commands.add_parser("schema", help="print a command's JSON request schema (no model calls)")
-    schema.add_argument("topic", choices=("find",), help="command whose request schema to show")
+    schema.add_argument("topic", choices=("find", "findall"), help="command whose request schema to show")
     help_command = commands.add_parser("help", help="show general or command-specific help")
-    help_command.add_argument("topic", nargs="?", choices=("find", "schema"))
+    help_command.add_argument("topic", nargs="?", choices=("find", "findall", "schema"))
+    _add_search_arguments(find)
+    find.add_argument(
+        "--resume",
+        help="Prior budget-stopped evidence pack; continue its saved frontier into a new output pack",
+    )
+    findall = commands.add_parser(
+        "findall",
+        help="find matching function bodies, including disconnected implementations",
+        description="Find a seed, expand code relationships, then judge remaining function bodies.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='jvn findall "functions that reject an order exceeding the item limit"\n'
+        "Default: 48 live model calls; --max-calls none lifts it. No file cap.\n"
+        "Coverage describes functions examined, not proof of absence.\n"
+        "All existing scope, output and request-display options are available.\n"
+        'JSON: {"command":"findall","target":"functions checking the order item limit"}',
+    )
+    _add_search_arguments(findall, max_calls=DEFAULT_FIND_ALL_MAX_CALLS)
+    return parser
+
+
+def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEFAULT_MAX_CALLS) -> None:
     find.add_argument(
         "target", help="Behavior to locate; name the concrete check, decision or transformation"
     )
@@ -321,10 +366,6 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
         "--out",
         help="New or empty output directory (default: a unique run under ./jvn-results)",
     )
-    scope.add_argument(
-        "--resume",
-        help="Prior budget-stopped evidence pack; continue its saved frontier into a new output pack",
-    )
     defaults = SearchBudget()
     limits.add_argument(
         "--max-depth",
@@ -341,10 +382,10 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     limits.add_argument(
         "--max-calls",
         type=_count_or_none,
-        default=DEFAULT_MAX_CALLS,
+        default=max_calls,
         metavar="N|none",
         help=(
-            f"Maximum model requests, including entry selection (default: {DEFAULT_MAX_CALLS}; "
+            f"Maximum model requests, including entry selection (default: {max_calls}; "
             "'none' for no cap; not a token cap)"
         ),
     )
@@ -383,7 +424,6 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
         action="store_true",
         help="show expanded masked requests on stderr (default: concise live progress)",
     )
-    return parser
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -409,8 +449,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         parser.error("JSON request must be an object")
     command = payload.get("command", "find")
     # The command parser is the option schema for both input formats.
-    if command != "find":
-        parser.error(f"unknown JSON command: {command!r}; expected find")
+    if command not in ("find", "findall"):
+        parser.error(f"unknown JSON command: {command!r}; expected find or findall")
     actions = _request_actions(_command_parser(parser, command))
     arguments = [command]
     for name, value in payload.items():
@@ -459,7 +499,8 @@ def _request_actions(parser: argparse.ArgumentParser) -> dict[str, argparse.Acti
 
 
 def _request_schema(parser: argparse.ArgumentParser) -> dict:
-    properties = {"command": {"type": "string", "const": "find", "default": "find"}}
+    command = parser.prog.rsplit(" ", 1)[-1]
+    properties = {"command": {"type": "string", "const": command, "default": command}}
     required = []
     for name, action in _request_actions(parser).items():
         numeric = action.type in (int, _count_or_none)
@@ -481,7 +522,7 @@ def _request_schema(parser: argparse.ArgumentParser) -> dict:
         properties[name] = field
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "jvn find request",
+        "title": f"jvn {command} request",
         "type": "object",
         "properties": properties,
         "required": required,
@@ -665,6 +706,70 @@ def _manifest(
             ],
         },
     }
+
+
+def _find_all_summary(result: FindAllResult, calls: int, elapsed: float) -> dict:
+    def answer(value):
+        return {
+            "source": {key: value.item[key] for key in ("file", "lines", "commit", "file_sha256")},
+            "code": value.item["code"],
+            "name": value.item["name"],
+            "probability": value.probability,
+            "verdict": value.verdict,
+            "request_sha256": value.request_sha256,
+            "from_store": value.from_store,
+        }
+
+    return {
+        "outcome": result.stopped_by,
+        "coverage": result.coverage,
+        "unit": "function",
+        "calls": calls,
+        "enumeration_calls": result.calls,
+        "duration_seconds": round(elapsed, 3),
+        "found": [answer(value) for value in result.matched],
+        "unsure": [answer(value) for value in result.uncertain],
+        "searched": [answer(value) for value in result.negative],
+        "remaining_files": list(result.remaining_files),
+        "unparsed_files": sorted(result.unparsed_files),
+        "unsupported_files": list(result.unsupported_files),
+        "unavailable_files": dict(result.unavailable_files),
+        "graph": asdict(result.graph),
+    }
+
+
+def _find_all_report(manifest: dict) -> str:
+    search = manifest["search"]
+    lines = [
+        "# Find All evidence pack",
+        "",
+        f"Target: {manifest['target']}",
+        "",
+        f"Outcome: **{search['outcome']}**. Coverage: **{search['coverage']}**.",
+        f"{search['calls']} live requests; "
+        f"{search['duration_seconds']:.3f}s for seed search and enumeration.",
+        "",
+        "Coverage counts function bodies examined. It does not prove model accuracy, behavioral "
+        "equivalence or absence of other implementations. Uncertain graph bindings remain uncertain.",
+        "",
+        "| Result | P(contains target) | Function | Source |",
+        "| --- | ---: | --- | --- |",
+    ]
+    for group in ("found", "unsure", "searched"):
+        for value in search[group]:
+            source = value["source"]
+            lines.append(
+                f"| {group} | {value['probability']:.3f} | `{value['name']}` | "
+                f"`{source['file']}:{source['lines'][0]}-{source['lines'][1]}` |"
+            )
+    lines += ["", "## Coverage gaps", ""]
+    for field in ("remaining_files", "unparsed_files", "unsupported_files", "unavailable_files"):
+        lines.append(f"- {field}: {', '.join(search[field]) or 'none'}")
+    lines += ["", "## Matching bodies", ""]
+    for value in search["found"]:
+        source = value["source"]
+        lines += [f"### {source['file']}:{source['lines'][0]}", "", "```", value["code"], "```", ""]
+    return "\n".join(lines) + "\n"
 
 
 def _navigator_provenance() -> dict:

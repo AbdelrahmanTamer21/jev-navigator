@@ -14,6 +14,7 @@ that are absent from the source?” rather than “find everything important”.
 - [JSON requests](#json-requests)
 - [Results, progress and exit status](#results-progress-and-exit-status)
 - [Agent workflow](#agent-workflow)
+- [Find All function search](#find-all-function-search)
 
 ## Start with one command
 
@@ -183,3 +184,21 @@ records preserve request/response evidence; inspect their exact-capture flags wh
 Schema discovery and structured calls take inspiration from the
 [Google Workspace CLI's agent guidance](https://github.com/googleworkspace/cli/blob/main/CONTEXT.md).
 The Python library remains the interface for composing a custom planner or a broader workflow.
+
+## Find All function search
+
+Use `jvn findall "functions enforcing the order item limit"` with the same scope, output and
+request-display options as `find`. `jvn schema findall` describes the JSON input. Find All defaults
+to 48 live model calls, twice the 24-call `find` default. Use `--max-calls N` to change it or
+`--max-calls none` (JSON `null`) to remove it. Parsing, graph traversal and cached answers are free. Depth/step/neighbour and preview options affect seed discovery only; the
+function enumeration reads complete bodies. The call allowance is shared across seed discovery and enumeration. A budget stop writes completed
+judgments and remaining coverage to a partial evidence pack.
+
+The result includes `seed_search`, and `search` records `found`, `unsure`, `searched`, source hashes,
+request identities, the static graph and coverage gaps. `functions_examined` means every enumerated
+function was judged; it does not prove the model found every behavior. `scope_incomplete` retains
+unsupported, unparsed or unavailable files. See the library composition in [extending.md](extending.md#compose-a-seed-first-find-all-search).
+
+`seed_search.calls` counts seed discovery; `search.enumeration_calls` counts the following enumeration.
+Their sum is `search.calls`, the whole workflow's actual model-request count.
+Saved-frontier `--resume` currently applies to `find`; Find All does not advertise that option.

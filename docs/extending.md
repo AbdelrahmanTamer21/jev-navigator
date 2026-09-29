@@ -12,6 +12,7 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
 | `find_code` | a best-first search that opens places until the code a description names is found |
+| `find_all` | seed-first function search: expand the static component, batch containment judgments, then examine disconnected functions |
 | `places.MOVES` | the ways a search lists the neighbours of an opened place; pick a subset or add your own |
 | `StopRule`, `History` | your own stop check over a search's history, reading only the sections you select |
 | `LlmStep` | an opt-in LLM call for the cases where Jev's answer is not clear enough |
@@ -93,6 +94,48 @@ Why it is built this way:
 Test it offline with `ScriptedJevClient` and AAA tests, including the unsure path, before any paid call.
 
 ## Searching instead of listing
+
+### Compose a seed-first Find All search
+
+This is an ordinary function composition, not a workflow interpreter. Obtain concrete seeds from
+`find_code` or a symbol lookup, follow relationships with `operations.trace_graph`, and judge each
+candidate body with the existing containment question. `find_all` combines the latter two pieces:
+
+```python
+from jev_navigator.directives.find_all import find_all
+
+seeds = index.find_definition("check_limits")
+result = find_all(index, judge, "the check that limits items per order", seeds)
+for match in result.matched:
+    print(match.item["file"], match.item["lines"], match.probability)
+```
+
+The seed is a candidate, not an assumed match. Connected functions are examined first; the fallback
+then enumerates every other in-scope function, even with unrelated names. Both phases batch atomic
+questions through `Judge`; code deduplicates by source span. Entire bodies and source hashes are
+retained. `CodeIndex.functions_in_files` batches fact collection instead of launching a parser scan
+for each file. No default file or live-call cap is added by this composition.
+
+Pass `include_disconnected=False` for a deliberately partial, component-only search. Supply a `Check`
+through `check=` to examine another concrete property of each body; use `{item}.code` and the shared
+`target.description`. Independent additional properties belong in `Judge.check_every`, which asks
+them together and keeps the answers separate. The engineer authors the branches and stopping rule;
+Jev does not decide whether to invent a workflow or declare the repository fully understood.
+Checks in one batch need distinct names because each name identifies its returned result list.
+
+`functions_examined` means the function inventory was examined, not that every semantic answer is
+correct. Module-level statements, declarations and multi-function behaviors require a different
+unit/composition. `uncertain`, parser failures, unavailable files and unsupported grammars remain
+visible. A graph link marked candidate never becomes a proven call because its body matched.
+Cancellation keeps coverage partial and reporting does not trigger scans of untouched files.
+Provider errors propagate; retained journal receipts describe the work actually performed.
+
+The CLI composes entry selection and `find_code` with this function. A seed-search miss still permits
+the disconnected fallback. Use `jvn findall "functions that enforce the order item limit"` or
+`jvn --json '{"command":"findall","target":"functions that enforce the order item limit"}'`.
+The evidence pack retains the seed search, per-function answers and raw request identities.
+
+### Find one location
 
 When code cannot list the candidates, search: `find_code(index, judge, description, start)` opens
 places (starts, then Jev's picks, then the best-scored neighbours) and returns `found`, `searched`,

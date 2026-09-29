@@ -13,6 +13,25 @@ composes both into searches such as "find the code this sentence describes". An 
 The library finds code. Judging that code (is a comment accurate, does a rule hold everywhere) is a
 layer you build on top; [docs/extending.md](docs/extending.md) shows how to compose one.
 
+## Find every matching function
+
+```bash
+jvn findall "functions that reject an order exceeding the item limit"
+jvn --json '{"command":"findall","target":"functions that reject an order exceeding the item limit"}'
+jvn help findall
+jvn schema findall
+```
+
+`find` locates an implementation; `findall` finds a seed, examines related functions, then checks
+remaining function bodies for disconnected implementations. It uses batched Jev judgments and
+defaults to 48 live model calls (twice `find`); `--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
+`./jvn-results/` directory. `functions_examined` describes coverage of function bodies, not a proof
+of semantic equivalence or completeness across arbitrary code fragments. Uncertain answers and
+unreadable or unsupported source stay visible.
+
+For an engineer-authored library composition and its limits, see
+[Extending: seed-first Find All](docs/extending.md#compose-a-seed-first-find-all-search).
+
 ## Install
 
 ```sh
