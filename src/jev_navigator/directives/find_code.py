@@ -963,4 +963,6 @@ def _stop_step(
 def _reason(search: _Search, item: _Queued, outcome: Outcome) -> str:
     if outcome == Outcome.CANCELLED:
         return "cancelled"
-    return "budget" if search.still_worth_opening(item) else "deprioritized"
+    if not search.still_worth_opening(item):
+        return "deprioritized"
+    return "target_found" if outcome == Outcome.FOUND else outcome.value

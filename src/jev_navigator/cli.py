@@ -334,6 +334,7 @@ def _manifest(
                     "depth": entry.depth,
                     "path": list(entry.path),
                     "tier": entry.tier.name.lower(),
+                    "included_in_opened_span": _included_in_opened_span(entry.place.open(), result),
                 }
                 for entry in result.not_inspected
             ],
@@ -397,6 +398,27 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True, default=str) + "\n")
 
 
+def _included_in_opened_span(candidate, result: FindResult) -> str | None:
+    span = candidate.span
+    for visit in (*result.found, *result.starts, *result.unsure, *result.searched):
+        opened = visit.code.span
+        if opened.file == span.file and opened.start <= span.start and span.end <= opened.end:
+            return visit.place_key
+    return None
+
+
+_FRONTIER_REASONS = {
+    "target_found": "Search stopped after finding a match",
+    "deprioritized": "Candidate score did not exceed the opening threshold",
+    "budget": "Configured search limit reached",
+    "depth": "Configured depth limit reached",
+    "cancelled": "Search cancelled",
+    "stop_rule": "Caller stop condition met",
+    "scope_incomplete": "Source scope incomplete",
+    "neighbours_per_kind": "Configured neighbour limit reached",
+}
+
+
 def _report(manifest: dict) -> str:
     source = manifest["source"]
     search = manifest["search"]
@@ -407,14 +429,15 @@ def _report(manifest: dict) -> str:
         f"- Navigator: `{manifest['navigator']['package_version']}` at "
         f"`{manifest['navigator']['source_revision'] or manifest['navigator']['source_tree_sha256']}`",
         f"- Revision: `{source['revision']}`",
-        f"- Scope: {', '.join(f'`{prefix}`' for prefix in source['prefixes'])}",
+        f"- Scope: {', '.join(f'`{prefix}`' for prefix in source['prefixes']) or 'whole directory'}",
         f"- Target: {manifest['target']}",
         f"- Outcome: **{search['outcome']}**",
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
         f"`{manifest['provider']['served_model']}`",
-        f"- Elapsed: {search['duration_seconds']:.3f} seconds",
-        f"- Coverage caveat: {len(search['not_inspected'])} places were not inspected; "
+        f"- Navigation elapsed: {search['duration_seconds']:.3f} seconds "
+        "(indexing and entry selection excluded)",
+        f"- Coverage caveat: {len(search['not_inspected'])} candidates were not independently opened; "
         f"{len(search['unparsed_files'])} files failed a completed parser scan. "
         f"Pending parser scans: {', '.join(search['parser_scans']['pending']) or 'none'}.",
         f"- Files that disappeared after inventory: {len(search['unavailable_files'])}.",
@@ -449,17 +472,34 @@ def _report(manifest: dict) -> str:
             "```",
             "",
         ]
-    lines += ["## Not inspected", ""]
+    lines += [
+        "## Candidates not independently opened",
+        "",
+        "This records separate candidate evaluations, not unseen text. Some candidates were already "
+        "included in a larger opened span; that does not give them an independent model judgment.",
+        "",
+    ]
     if not search["not_inspected"]:
-        lines.append("The search left no frontier places uninspected.")
+        lines.append("The search left no candidates awaiting an independent opening.")
     else:
-        lines += ["| Reason | Priority | Place |", "| --- | ---: | --- |"]
+        lines += [
+            "| Why no separate opening | Recorded candidate score | Code coverage | Place |",
+            "| --- | ---: | --- | --- |",
+        ]
         for entry in search["not_inspected"]:
-            lines.append(f"| {entry['reason']} | {entry['priority']:.3f} | `{entry['place']}` |")
+            reason = _FRONTIER_REASONS.get(entry["reason"], entry["reason"])
+            included = entry.get("included_in_opened_span")
+            coverage = (
+                f"Lines included in opened span `{included}`"
+                if included
+                else "No containing opened span recorded"
+            )
+            lines.append(f"| {reason} | {entry['priority']:.3f} | {coverage} | `{entry['place']}` |")
     lines += [
         "",
         "The complete source spans, raw probabilities, decisions, and history are in "
-        "`manifest.json`; exact provider responses and request hashes are in `journal.jsonl`.",
+        "`manifest.json`; provider response records and request hashes are in `journal.jsonl`. "
+        "Each response record’s `exact` flag distinguishes wire capture from SDK-decoded data.",
         "",
     ]
     return "\n".join(lines)

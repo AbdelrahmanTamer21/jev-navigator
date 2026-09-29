@@ -113,6 +113,14 @@ is omitted. Each run retains its report, manifest and request journal. Generated
 are excluded from the CLI's source inventory so repeated searches do not search their own evidence.
 Library callers can similarly pass `exclude_paths` to `CodeIndex.from_directory`.
 
+The CLI report distinguishes candidates not independently opened from text already included inside
+a larger opened span. `target_found` means the search stopped after finding a match; `budget` means an
+actual configured limit stopped an otherwise viable candidate. The recorded candidate score is the
+entry Choice probability for an initial alternative or the could-contain Noul probability for a
+navigation neighbour; those are different judgments. Navigation elapsed time excludes indexing and
+entry selection. Journal `exact` flags, not the presence of JSON, determine whether responses are
+wire captures or re-encoded SDK data.
+
 ## Choosing how the search moves
 
 A move is a plain function of the index and the opened code that returns places. `places.MOVES` maps

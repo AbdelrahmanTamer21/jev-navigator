@@ -62,7 +62,7 @@ def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -
     assert written["search"]["found"][0]["source"]["file"] == "app/policy.py"
     assert written["search"]["found"][0]["probability"] == 0.96
     assert written["search"]["history"][-1]["operation"] == "stop"
-    assert "Not inspected" in (output / "report.md").read_text()
+    assert "Candidates not independently opened" in (output / "report.md").read_text()
     assert (output / "journal.jsonl").read_text()
 
 
@@ -329,3 +329,30 @@ def test_find_defaults_to_unique_results_under_invocation_directory(tmp_path, mo
         assert (pack / "journal.jsonl").is_file()
     if not search_here:
         assert not (repository / "jvn-results").exists()
+
+
+def test_report_distinguishes_included_lines_from_an_unopened_candidate(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "policy.py").write_text(
+        "class Policy:\n    def classify(self, probability):\n        return probability >= 0.8\n"
+    )
+    manifest = create_evidence_pack(
+        repository,
+        (),
+        "the complete policy",
+        (),
+        tmp_path / "pack",
+        SearchBudget(beam_width=1),
+        ScriptedJevClient(nouls=lambda *_: 0.95),
+        fact_cache_dir=tmp_path / "cache",
+    )
+    assert manifest["search"]["outcome"] == "found"
+    assert manifest["search"]["not_inspected"]
+    covered = [entry for entry in manifest["search"]["not_inspected"] if entry["included_in_opened_span"]]
+    assert covered
+    assert all(entry["included_in_opened_span"] == "policy.py:1-3" for entry in covered)
+    report = (tmp_path / "pack" / "report.md").read_text()
+    assert "Lines included in opened span" in report
+    assert "Candidates not independently opened" in report
+    assert "Search stopped after finding a match" in report
