@@ -15,6 +15,7 @@ that are absent from the source?” rather than “find everything important”.
 - [Results, progress and exit status](#results-progress-and-exit-status)
 - [Agent workflow](#agent-workflow)
 - [Find All function search](#find-all-function-search)
+- [Workflow trace](#workflow-trace)
 
 ## Start with one command
 
@@ -202,3 +203,36 @@ unsupported, unparsed or unavailable files. See the library composition in [exte
 `seed_search.calls` counts seed discovery; `search.enumeration_calls` counts the following enumeration.
 Their sum is `search.calls`, the whole workflow's actual model-request count.
 Saved-frontier `--resume` currently applies to `find`; Find All does not advertise that option.
+
+## Workflow trace
+
+Start from a known function and inspect the connected workflow:
+
+```sh
+jvn trace "how an order request becomes an HTTP result" --start app/orders.py:42
+jvn --json '{"command":"trace","target":"order request to HTTP result","start":["app/orders.py:42"]}'
+jvn help trace
+jvn schema trace
+```
+
+`--start PATH:LINE` is required and repeatable; paths are relative to `--repo` (current directory by
+default). Use `find` first when the entry point is unknown. `--prefix` narrows scope, `--out` chooses
+a new output directory, and `--verbose` displays masked requests. Without `--out`, packs go under
+`./jvn-results/` in the invocation directory.
+
+Static relationships drive traversal. Jev receives batched, independent questions about input
+origin, transformation, handoff, outcome and relevant branches. The manifest retains all walked
+functions and links, including uncertain bindings. Positive evidence does not prove a complete
+end-to-end path or model accuracy.
+
+There is no default depth or model-call limit for trace. Set `--max-depth N` or `--max-calls N`
+explicitly when needed; `--max-calls none` is unlimited. Outcomes preserve `depth`, `budget`,
+`cancelled` and `completed` separately. A budget stop retains completed answer batches and leaves
+unexamined evidence unresolved. Saved-frontier `--resume` currently belongs to `find`.
+
+JSON stdout contains `output_directory`, `manifest`, `report`, `trace`, `provider` and `resume`
+(`null` for trace). Progress and requests stay on stderr. See `trace.outcome`, its obligations and
+`unresolved_links` before interpreting coverage. Ctrl-C stops the command with exit 130; an abrupt
+interruption can leave the journal and answer store without a final manifest. The library also
+offers cooperative cancellation between traversal steps and model batches that writes a partial
+pack.

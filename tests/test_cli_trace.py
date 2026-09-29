@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from git_repos import commit_files
 
 from jev_navigator.cli_trace import SCHEMA_VERSION, create_trace_evidence_pack
@@ -41,6 +42,63 @@ WORKFLOW_FILES = {
 }
 
 QUESTION = "How does an order request become an HTTP result?"
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_trace_command_writes_a_real_pack_with_default_output(
+    tmp_path: Path, monkeypatch, capsys, json_mode: bool
+) -> None:
+    from jev_navigator import cli
+
+    repository = _workflow_repository(tmp_path)
+    client = _evidence_client()
+    client.close = lambda: None
+    monkeypatch.setattr(cli, "TypeSafeJevClient", lambda: client)
+    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.chdir(tmp_path)
+    request = {
+        "command": "trace",
+        "target": QUESTION,
+        "repo": str(repository),
+        "start": ["workflow.py:8"],
+        "max_calls": 1,
+    }
+    argv = (
+        ["--json", json.dumps(request)]
+        if json_mode
+        else ["trace", QUESTION, "--repo", str(repository), "--start", "workflow.py:8", "--max-calls", "1"]
+    )
+    assert cli.main(argv) == 0
+    output = capsys.readouterr()
+    packs = list((tmp_path / "jvn-results").glob("*/manifest.json"))
+    assert len(packs) == 1
+    manifest = json.loads(packs[0].read_text())
+    assert manifest["trace"]["outcome"] == "completed"
+    assert manifest["trace"]["links"]
+    assert len(client.requests) == 1
+    if json_mode:
+        response = json.loads(output.out)
+        assert Path(response["manifest"]) == packs[0]
+        assert response["trace"] == manifest["trace"]
+    else:
+        assert "completed (1 live calls)" in output.out
+
+
+def test_trace_schema_and_help_describe_the_real_start_requirement(capsys) -> None:
+    from jev_navigator.cli import main
+
+    assert main(["schema", "trace"]) == 0
+    schema = json.loads(capsys.readouterr().out)
+    assert set(schema["required"]) == {"target", "start"}
+    assert schema["properties"]["start"]["minItems"] == 1
+    assert schema["properties"]["start"]["type"] == "array"
+    assert schema["examples"][0]["command"] == "trace"
+    assert "max_steps" not in schema["properties"]
+    assert main(["help", "trace"]) == 0
+    assert "--start" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as error:
+        main(["trace", QUESTION])
+    assert error.value.code == 2
 
 
 def _workflow_repository(root: Path, *, registration: bool = True) -> Path:

@@ -13,6 +13,19 @@ composes both into searches such as "find the code this sentence describes". An 
 The library finds code. Judging that code (is a comment accurate, does a rule hold everywhere) is a
 layer you build on top; [docs/extending.md](docs/extending.md) shows how to compose one.
 
+## Trace a known workflow
+
+```sh
+jvn trace "how an order request becomes an HTTP result" --start app/orders.py:42
+jvn --json '{"command":"trace","target":"order request to HTTP result","start":["app/orders.py:42"]}'
+jvn help trace
+```
+
+Trace follows static relationships and batches atomic evidence judgments. It preserves uncertain
+bindings, partial coverage and request evidence in `./jvn-results/`. A positive judgment is evidence,
+not proof of a complete path. Use `find` first if the starting function is unknown.
+See [trace options and outputs](docs/cli.md#workflow-trace).
+
 ## Find every matching function
 
 ```bash

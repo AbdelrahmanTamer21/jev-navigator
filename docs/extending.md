@@ -288,4 +288,5 @@ Outcomes distinguish completion, an explicit depth boundary, call budget and can
 Cancellation is cooperative between static steps and live model batches; already answered batches
 are retained in full, and a request already in flight is not aborted by the callback.
 `answers_from` with the prior served-model identity reuses identical stored answers without calls.
-This is a library/pack API; the `jvn trace` command is not registered yet.
+Use `jvn trace "order request to HTTP result" --start app/orders.py:42` for the same pack from the
+CLI. `jvn schema trace` describes JSON input; [the CLI guide](cli.md#workflow-trace) explains options.
