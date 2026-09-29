@@ -283,6 +283,17 @@ def test_the_pragma_scan_stops_at_real_code_even_when_the_head_is_long() -> None
     assert not has_flow_pragma([*long_head, "const a = 1; /* @flow */"])
 
 
+def test_a_method_on_a_one_line_class_is_named_and_counted_itself(tmp_path: Path) -> None:
+    """`class Box { v() { return 1; } }` on one line must give the class its own class span and the
+    method its own function span, not one function named after the class that swallows both."""
+    # Arrange
+    index = committed(tmp_path, {"src/box.ts": "class Box { v() { return 1; } }\n"})
+
+    # Act and assert
+    assert [(span.name, span.start, span.end) for span in index.functions_in("src/box.ts")] == [("v", 1, 1)]
+    assert {span.name for span in index.symbols_in("src/box.ts")} == {"Box", "v"}
+
+
 def test_a_flow_typed_class_keeps_its_methods(tmp_path: Path) -> None:
     """eval: `@flow` methods are recovered, not merely reported as omitted. The deciding spans the
     navigation needs (the class, its constructor and methods, module functions) resolve, the file

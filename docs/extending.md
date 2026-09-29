@@ -216,3 +216,12 @@ Test every function offline with `ScriptedJevClient` (or `AsyncScriptedJevClient
 Assert form. Script the unsure and low-confidence answers too, and assert what your code does with
 them. `CapturingJevClient` records a function's exact first request, so you can review the question
 text before any paid call.
+
+
+### Parser facts and naming
+
+Function and class names come from the matched AST node, with the containing physical line used
+only when the node does not contain its binding name (for example an assigned anonymous function).
+This keeps a method on a one-line TypeScript class distinct from its enclosing class.
+Persistent facts are keyed by source bytes, language, parser version and `FACT_RULE_VERSION`.
+A change to extracted facts must change that rule identity so existing cached results are reparsed.
