@@ -611,3 +611,20 @@ def test_a_place_kept_by_an_earlier_move_does_not_use_a_later_moves_cap(tmp_path
     # Assert
     assert [place.key for place in kept] == [shared.key, only_later.key]
     assert omitted == []
+
+
+def test_document_window_navigation_retains_text_edges_without_syntax_scanning(tmp_path):
+    index = committed_index(
+        tmp_path,
+        {
+            "README.md": 'The setting is "policy.limit".\n',
+            "policy.py": 'def check(settings):\n    return settings["policy.limit"]\n',
+        },
+    )
+    opened = index.read_window("README.md", 1)
+    offered = neighbours(index, opened)
+    assert any(place.open().span.file == "policy.py" for place in offered)
+    assert index.references_in(opened.span) == ()
+    assert index.callee_edges(opened.span) == ()
+    assert index.functions_in("README.md") == ()
+    assert index.read_window("README.md", 1).text == 'The setting is "policy.limit".'

@@ -27,10 +27,19 @@ from .judgments.thresholds import Thresholds
 from .progress import ProgressJournal, TerminalProgress
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
+NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
+POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    args = _parse_args(argv)
+    if args.command == "schema":
+        print(json.dumps(_request_schema(_command_parser(_parser(), args.topic)), indent=2))
+        return 0
+    if args.command == "help":
+        parser = _parser()
+        (_command_parser(parser, args.topic) if args.topic else parser).print_help()
+        return 0
     if args.command != "find":
         raise AssertionError(f"unhandled command: {args.command}")
     budget = SearchBudget(
@@ -43,6 +52,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_slice_chars=args.max_slice_chars,
         max_line_chars=args.max_line_chars,
     )
+    try:
+        _validate_budget(budget)
+    except ValueError as error:
+        _parser().error(str(error))
     repository = Path(args.repo).resolve()
     output = Path(args.out).expanduser() if args.out else _default_output(repository)
     client: TypeSafeJevClient | None = None
@@ -69,9 +82,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         if client is not None:
             client.close()
-    print(f"evidence pack: {output.resolve()}")
     search_outcome = manifest["search"]["outcome"]
-    print(f"outcome: {search_outcome} ({manifest['search']['calls']} live calls)")
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "output_directory": str(output.resolve()),
+                    "manifest": str(output.resolve() / "manifest.json"),
+                    "report": str(output.resolve() / "report.md"),
+                    "search": manifest["search"],
+                    "provider": manifest["provider"],
+                }
+            )
+        )
+    else:
+        print(f"evidence pack: {output.resolve()}")
+        print(f"outcome: {search_outcome} ({manifest['search']['calls']} live calls)")
     return 130 if search_outcome == "cancelled" else 0
 
 
@@ -104,6 +130,7 @@ def create_evidence_pack(
         index = CodeIndex.from_directory(
             repository,
             prefixes=prefixes,
+            exclude_paths=(output, Path.cwd() / "jvn-results"),
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )
@@ -176,52 +203,236 @@ def create_evidence_pack(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="jvn",
-        description="Navigate code with reviewable Jev judgments.",
+        description="Find code by behavior. Code follows relationships; Jev judges concrete evidence.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  jvn find "where are evidence quotes rejected?"
+  jvn find "where is an order's item count checked?" --repo /path/to/repository
+  jvn --json request.json
+  cat request.json | jvn --json -
+  jvn --json '{"target":"where are evidence quotes rejected?"}'
+
+For agents: jvn schema find prints the request's JSON Schema without making model calls.
+JSON mode writes results to stdout; progress goes to stderr. Ctrl-C cancels.
+Results default to ./jvn-results/<directory>-<timestamp> in the invocation directory.
+Credentials: process environment, then ~/.config/jvn/env (TYPESAFE_API_KEY / TYPESAFE_BASE_URL).
+Use jvn help find for options and examples. Exit codes: 0 completed, 1 failed, 2 invalid input, 130 cancelled.
+A completed search can have a non-found outcome; inspect search.outcome in JSON output.""",
     )
-    commands = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument(
+        "--json", metavar="REQUEST", help="JSON object, request file, or - for stdin; emit JSON"
+    )
+    commands = parser.add_subparsers(dest="command")
     find = commands.add_parser(
         "find",
         help="find semantically described code and write a versioned evidence pack",
-        description="Run one live find_code search and write a versioned evidence pack.",
+        description="Find semantically described code and save a reviewable evidence pack.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  jvn find "the check that limits items per order"
+  jvn find "the order limit" --prefix app/ --prefix tests/
+  jvn find "the order limit" --start app/orders.py:42 --out ./order-evidence
+  jvn find "the order limit" --max-calls 8 --max-depth 3 --max-steps 8
+  jvn find "the order limit" --beam-width 1 --neighbours-per-kind 8
+  jvn find "the order limit" --preview-lines 8 --max-slice-chars 12000 --max-line-chars 240
+  jvn find "the order limit" --verbose
+
+All flags are optional. No default depth, step, call or neighbour-count cap.
+Explicit limits may leave work unexplored; inspect the result's outcome and not_inspected entries.
+Find stops on a match; it is not an exhaustive find-all or an end-to-end trace.
+For JSON field names, types and defaults: jvn schema find. Full examples: docs/cli.md.""",
     )
-    find.add_argument("target", help="Semantic description of the code to find")
-    find.add_argument("--repo", default=".", help="Git repository to inspect (default: current directory)")
+    schema = commands.add_parser("schema", help="print a command's JSON request schema (no model calls)")
+    schema.add_argument("topic", choices=("find",), help="command whose request schema to show")
+    help_command = commands.add_parser("help", help="show general or command-specific help")
+    help_command.add_argument("topic", nargs="?", choices=("find", "schema"))
     find.add_argument(
-        "--prefix", action="append", default=[], help="Optional tracked file or directory scope; repeatable"
+        "target", help="Behavior to locate; name the concrete check, decision or transformation"
     )
-    find.add_argument(
+    scope = find.add_argument_group("Scope and results")
+    limits = find.add_argument_group("Optional search limits")
+    evidence = find.add_argument_group("Search scheduling and model context")
+    scope.add_argument(
+        "--repo", default=".", help="Directory to inspect (default: current directory; Git optional)"
+    )
+    scope.add_argument(
+        "--prefix", action="append", default=[], help="Optional file or directory scope; repeatable"
+    )
+    scope.add_argument(
         "--start",
         action="append",
         default=[],
         metavar="PATH:LINE",
         help="Known entry or caller line; repeatable. Without one, jvn chooses a narrow entry point.",
     )
-    find.add_argument(
+    scope.add_argument(
         "--out",
-        help="New or empty output directory (default: a unique directory under ~/.local/share)",
+        help="New or empty output directory (default: a unique run under ./jvn-results)",
     )
     defaults = SearchBudget()
-    find.add_argument("--max-depth", type=int, default=defaults.max_depth)
-    find.add_argument("--max-steps", type=int, default=defaults.max_steps)
-    find.add_argument("--max-calls", type=int, default=defaults.max_calls)
-    find.add_argument("--beam-width", type=int, default=defaults.beam_width)
-    find.add_argument("--neighbours-per-kind", type=int, default=defaults.neighbours_per_kind)
-    find.add_argument("--preview-lines", type=int, default=defaults.preview_lines)
-    find.add_argument("--max-slice-chars", type=int, default=defaults.max_slice_chars)
-    find.add_argument("--max-line-chars", type=int, default=defaults.max_line_chars)
+    limits.add_argument(
+        "--max-depth",
+        type=int,
+        default=defaults.max_depth,
+        help="Maximum relationship hops from a start (0 means starts only; default: unlimited)",
+    )
+    limits.add_argument(
+        "--max-steps",
+        type=int,
+        default=defaults.max_steps,
+        help="Maximum distinct code openings during navigation (default: unlimited)",
+    )
+    limits.add_argument(
+        "--max-calls",
+        type=int,
+        default=defaults.max_calls,
+        help="Maximum model requests, including entry selection (default: unlimited; not a token cap)",
+    )
+    evidence.add_argument(
+        "--beam-width",
+        type=int,
+        default=defaults.beam_width,
+        help="Places opened per round (default: 3; 1 makes navigation sequential)",
+    )
+    limits.add_argument(
+        "--neighbours-per-kind",
+        type=int,
+        default=defaults.neighbours_per_kind,
+        help="Candidates retained per relationship kind per opening (default: unlimited)",
+    )
+    evidence.add_argument(
+        "--preview-lines",
+        type=int,
+        default=defaults.preview_lines,
+        help="Leading lines shown for each candidate preview (default: 8; 0 hides preview code)",
+    )
+    evidence.add_argument(
+        "--max-slice-chars",
+        type=int,
+        default=defaults.max_slice_chars,
+        help="Characters allowed in one opened code slice (default: 12000; not the whole request)",
+    )
+    evidence.add_argument(
+        "--max-line-chars",
+        type=int,
+        default=defaults.max_line_chars,
+        help="Characters shown per source/preview/signature line (default: 240)",
+    )
     find.add_argument(
         "--verbose",
         action="store_true",
-        help="print expanded masked requests as they are sent",
+        help="show expanded masked requests on stderr (default: concise live progress)",
     )
     return parser
 
 
+def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.json is None:
+        if args.command is None:
+            parser.error("a command or --json FILE is required")
+        return args
+    if args.command is not None:
+        parser.error("use --json FILE on its own; put command options in the JSON request")
+    try:
+        if args.json.lstrip().startswith(("{", "[")):
+            payload = json.loads(args.json)
+        elif args.json == "-":
+            payload = json.load(sys.stdin)
+        else:
+            with Path(args.json).expanduser().open(encoding="utf-8") as source:
+                payload = json.load(source)
+    except (OSError, ValueError) as error:
+        parser.error(f"cannot read JSON request: {error}")
+    if not isinstance(payload, dict):
+        parser.error("JSON request must be an object")
+    command = payload.get("command", "find")
+    # The command parser is the option schema for both input formats.
+    if command != "find":
+        parser.error(f"unknown JSON command: {command!r}; expected find")
+    actions = _request_actions(_command_parser(parser, command))
+    arguments = [command]
+    for name, value in payload.items():
+        if name == "command":
+            continue
+        action = actions.get(name)
+        if action is None:
+            parser.error(f"unknown JSON field: {name}")
+        if value is None and action.default is None and action.option_strings:
+            continue
+        if isinstance(action, argparse._StoreTrueAction):
+            if not isinstance(value, bool):
+                parser.error(f"JSON field {name} must be a boolean")
+            if value:
+                arguments.append(action.option_strings[0])
+            continue
+        values = value if isinstance(action, argparse._AppendAction) else [value]
+        if not isinstance(values, list):
+            parser.error(f"JSON field {name} must be an array")
+        expected_type = action.type or str
+        for item in values:
+            if expected_type is int and isinstance(item, float) and item.is_integer():
+                item = int(item)
+            if type(item) is not expected_type:
+                parser.error(f"JSON field {name} must contain {expected_type.__name__} values")
+            if action.option_strings:
+                arguments.append(f"{action.option_strings[0]}={item}")
+    if "target" in payload:
+        # A target beginning with '--' is still text, never another option.
+        arguments.extend(["--", payload["target"]])
+    parsed = parser.parse_args(arguments)
+    parsed.json = args.json
+    return parsed
+
+
+def _command_parser(parser: argparse.ArgumentParser, command: str) -> argparse.ArgumentParser:
+    commands = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+    return commands.choices[command]
+
+
+def _request_actions(parser: argparse.ArgumentParser) -> dict[str, argparse.Action]:
+    return {action.dest: action for action in parser._actions if action.dest != "help"}
+
+
+def _request_schema(parser: argparse.ArgumentParser) -> dict:
+    properties = {"command": {"type": "string", "const": "find", "default": "find"}}
+    required = []
+    for name, action in _request_actions(parser).items():
+        field = {"description": action.help, "type": "integer" if action.type is int else "string"}
+        if isinstance(action, argparse._StoreTrueAction):
+            field["type"] = "boolean"
+        elif isinstance(action, argparse._AppendAction):
+            field.update(type="array", items={"type": field["type"]})
+        if action.option_strings:
+            field["default"] = action.default
+            if action.default is None:
+                field["type"] = [field["type"], "null"]
+        else:
+            required.append(name)
+        if name in NON_NEGATIVE_BUDGET_FIELDS:
+            field["minimum"] = 0
+        elif name in POSITIVE_BUDGET_FIELDS:
+            field["minimum"] = 1
+        properties[name] = field
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "jvn find request",
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+        "examples": [{"target": "the check that limits how many items an order may have"}],
+    }
+
+
 def _validate_budget(budget: SearchBudget) -> None:
-    non_negative = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
-    positive = ("beam_width", "max_slice_chars", "max_line_chars")
-    invalid = [name for name in non_negative if (value := getattr(budget, name)) is not None and value < 0]
-    invalid += [name for name in positive if getattr(budget, name) < 1]
+    invalid = [
+        name
+        for name in NON_NEGATIVE_BUDGET_FIELDS
+        if (value := getattr(budget, name)) is not None and value < 0
+    ]
+    invalid += [name for name in POSITIVE_BUDGET_FIELDS if getattr(budget, name) < 1]
     if invalid:
         raise ValueError(f"invalid search budget fields: {', '.join(invalid)}")
 
@@ -234,7 +445,7 @@ def _prepare_output(output: Path) -> None:
 
 def _default_output(repository: Path) -> Path:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-    return Path.home() / ".local/share/jev-navigator/evidence-packs" / f"{repository.name}-{stamp}"
+    return Path.cwd() / "jvn-results" / f"{repository.name}-{stamp}"
 
 
 def _scope_warning(file_count: int) -> str | None:
@@ -333,6 +544,7 @@ def _manifest(
                     "depth": entry.depth,
                     "path": list(entry.path),
                     "tier": entry.tier.name.lower(),
+                    "included_in_opened_span": _included_in_opened_span(entry.place.open(), result),
                 }
                 for entry in result.not_inspected
             ],
@@ -396,6 +608,27 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True, default=str) + "\n")
 
 
+def _included_in_opened_span(candidate, result: FindResult) -> str | None:
+    span = candidate.span
+    for visit in (*result.found, *result.starts, *result.unsure, *result.searched):
+        opened = visit.code.span
+        if opened.file == span.file and opened.start <= span.start and span.end <= opened.end:
+            return visit.place_key
+    return None
+
+
+_FRONTIER_REASONS = {
+    "target_found": "Search stopped after finding a match",
+    "deprioritized": "Candidate score did not exceed the opening threshold",
+    "budget": "Configured search limit reached",
+    "depth": "Configured depth limit reached",
+    "cancelled": "Search cancelled",
+    "stop_rule": "Caller stop condition met",
+    "scope_incomplete": "Source scope incomplete",
+    "neighbours_per_kind": "Configured neighbour limit reached",
+}
+
+
 def _report(manifest: dict) -> str:
     source = manifest["source"]
     search = manifest["search"]
@@ -406,14 +639,15 @@ def _report(manifest: dict) -> str:
         f"- Navigator: `{manifest['navigator']['package_version']}` at "
         f"`{manifest['navigator']['source_revision'] or manifest['navigator']['source_tree_sha256']}`",
         f"- Revision: `{source['revision']}`",
-        f"- Scope: {', '.join(f'`{prefix}`' for prefix in source['prefixes'])}",
+        f"- Scope: {', '.join(f'`{prefix}`' for prefix in source['prefixes']) or 'whole directory'}",
         f"- Target: {manifest['target']}",
         f"- Outcome: **{search['outcome']}**",
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
         f"`{manifest['provider']['served_model']}`",
-        f"- Elapsed: {search['duration_seconds']:.3f} seconds",
-        f"- Coverage caveat: {len(search['not_inspected'])} places were not inspected; "
+        f"- Navigation elapsed: {search['duration_seconds']:.3f} seconds "
+        "(indexing and entry selection excluded)",
+        f"- Coverage caveat: {len(search['not_inspected'])} candidates were not independently opened; "
         f"{len(search['unparsed_files'])} files failed a completed parser scan. "
         f"Pending parser scans: {', '.join(search['parser_scans']['pending']) or 'none'}.",
         f"- Files that disappeared after inventory: {len(search['unavailable_files'])}.",
@@ -448,17 +682,34 @@ def _report(manifest: dict) -> str:
             "```",
             "",
         ]
-    lines += ["## Not inspected", ""]
+    lines += [
+        "## Candidates not independently opened",
+        "",
+        "This records separate candidate evaluations, not unseen text. Some candidates were already "
+        "included in a larger opened span; that does not give them an independent model judgment.",
+        "",
+    ]
     if not search["not_inspected"]:
-        lines.append("The search left no frontier places uninspected.")
+        lines.append("The search left no candidates awaiting an independent opening.")
     else:
-        lines += ["| Reason | Priority | Place |", "| --- | ---: | --- |"]
+        lines += [
+            "| Why no separate opening | Recorded candidate score | Code coverage | Place |",
+            "| --- | ---: | --- | --- |",
+        ]
         for entry in search["not_inspected"]:
-            lines.append(f"| {entry['reason']} | {entry['priority']:.3f} | `{entry['place']}` |")
+            reason = _FRONTIER_REASONS.get(entry["reason"], entry["reason"])
+            included = entry.get("included_in_opened_span")
+            coverage = (
+                f"Lines included in opened span `{included}`"
+                if included
+                else "No containing opened span recorded"
+            )
+            lines.append(f"| {reason} | {entry['priority']:.3f} | {coverage} | `{entry['place']}` |")
     lines += [
         "",
         "The complete source spans, raw probabilities, decisions, and history are in "
-        "`manifest.json`; exact provider responses and request hashes are in `journal.jsonl`.",
+        "`manifest.json`; provider response records and request hashes are in `journal.jsonl`. "
+        "Each response record’s `exact` flag distinguishes wire capture from SDK-decoded data.",
         "",
     ]
     return "\n".join(lines)

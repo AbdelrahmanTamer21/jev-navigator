@@ -109,6 +109,24 @@ def test_a_system_discovered_initial_candidate_can_be_found(sample_index: CodeIn
     assert result.found[0].code.span.name == "check_limits"
 
 
+def test_found_search_records_why_a_viable_alternative_was_not_opened(sample_index):
+    target = function_place(sample_index, sample_index.find_definition("check_limits")[0])
+    other = function_place(sample_index, sample_index.find_definition("place")[0])
+    result = find_code(
+        sample_index,
+        Judge(ScriptedJevClient(nouls=lambda *_: 0.95)),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        initial_candidates=[(target, 0.9), (other, 0.8)],
+        moves={},
+    )
+    assert result.outcome == Outcome.FOUND
+    assert len(result.not_inspected) == 1
+    assert result.not_inspected[0].place_key == other.key
+    assert result.not_inspected[0].reason == "target_found"
+
+
 def test_a_low_choice_probability_does_not_discard_an_unjudged_entry_alternative(
     sample_index: CodeIndex,
 ) -> None:

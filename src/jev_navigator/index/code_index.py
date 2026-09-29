@@ -134,6 +134,7 @@ class CodeIndex:
         prefixes: Sequence[str] = (),
         *,
         max_files: int | None = None,
+        exclude_paths: Sequence[Path] = (),
         binding_resolver: BindingResolver | None = None,
         scan_observer: ScanObserver | None = None,
         fact_cache_dir: Path | None = None,
@@ -145,7 +146,12 @@ class CodeIndex:
         also carries its current file SHA-256, so either case identifies the inspected bytes.
         """
         root = Path(root)
-        files = tools.listed_files(root, prefixes)
+        excluded = tuple(path.resolve() for path in exclude_paths)
+        files = tuple(
+            file
+            for file in tools.listed_files(root, prefixes)
+            if not any((root / file).resolve().is_relative_to(path) for path in excluded)
+        )
         commit, changed = _working_git_metadata(root, prefixes)
         return cls(
             root,
@@ -393,7 +399,11 @@ class CodeIndex:
 
     def _ensure_facts(self, files: Sequence[str]) -> None:
         with self._facts_lock:
-            missing = [file for file in self._available_files(files) if file not in self._facts]
+            missing = [
+                file
+                for file in self._available_files(files)
+                if language_of(file) is not None and file not in self._facts
+            ]
             if not missing:
                 return
             to_scan = []

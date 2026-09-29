@@ -103,6 +103,29 @@ Read `searched` and the outcome `nothing_left` as "opened and judged unlikely", 
 not exist": one "no" about one place can be wrong. When nothing is found, rank the opened places by
 their probability and treat the best one as the likeliest place.
 
+Documents and other files without a supported code grammar remain searchable as text and can
+participate in text-based moves. Syntax operations return no symbols, calls or references for them;
+they are never sent to ast-grep with an empty language rule. This does not claim their text was
+parsed as code.
+
+The CLI creates a unique run directory under `jvn-results/` in the invocation directory when `--out`
+is omitted. Each run retains its report, manifest and request journal. Generated result directories
+are excluded from the CLI's source inventory so repeated searches do not search their own evidence.
+Library callers can similarly pass `exclude_paths` to `CodeIndex.from_directory`.
+
+Agents can pass the same CLI request as JSON with `jvn --json request.json`, an inline JSON object,
+or `jvn --json -` for stdin. `jvn schema find` emits its JSON Schema without model calls. The CLI parser remains the single owner of options, types and defaults. `target` is
+required; `command` defaults to `find`. JSON mode emits the result and evidence-pack paths on
+stdout while progress stays on stderr. See the README for the request and result fields.
+
+The CLI report distinguishes candidates not independently opened from text already included inside
+a larger opened span. `target_found` means the search stopped after finding a match; `budget` means an
+actual configured limit stopped an otherwise viable candidate. The recorded candidate score is the
+entry Choice probability for an initial alternative or the could-contain Noul probability for a
+navigation neighbour; those are different judgments. Navigation elapsed time excludes indexing and
+entry selection. Journal `exact` flags, not the presence of JSON, determine whether responses are
+wire captures or re-encoded SDK data.
+
 ## Choosing how the search moves
 
 A move is a plain function of the index and the opened code that returns places. `places.MOVES` maps
