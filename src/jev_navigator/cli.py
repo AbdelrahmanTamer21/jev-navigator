@@ -18,6 +18,7 @@ from time import monotonic
 
 from .adapters.typesafe import TypeSafeJevClient
 from .cli_resume import load_resume, save_resume
+from .cli_trace import create_trace_evidence_pack
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
@@ -46,17 +47,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser = _parser()
         (_command_parser(parser, args.topic) if args.topic else parser).print_help()
         return 0
-    if args.command not in ("find", "findall"):
+    if args.command not in ("find", "findall", "trace"):
         raise AssertionError(f"unhandled command: {args.command}")
     budget = SearchBudget(
-        max_depth=args.max_depth,
-        max_steps=args.max_steps,
-        max_calls=args.max_calls,
-        beam_width=args.beam_width,
-        neighbours_per_kind=args.neighbours_per_kind,
-        preview_lines=args.preview_lines,
-        max_slice_chars=args.max_slice_chars,
-        max_line_chars=args.max_line_chars,
+        **{
+            name: getattr(args, name)
+            for name in (*NON_NEGATIVE_BUDGET_FIELDS, *POSITIVE_BUDGET_FIELDS)
+            if hasattr(args, name)
+        }
     )
     try:
         _validate_budget(budget)
@@ -68,19 +66,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _load_typesafe_environment(os.environ)
         client = TypeSafeJevClient()  # model=None resolves TYPESAFE_DEFAULT_MODEL in the adapter
-        manifest = create_evidence_pack(
-            repository,
-            tuple(args.prefix),
-            args.target,
-            tuple(args.start),
-            output,
-            budget,
-            client,
-            thresholds=Thresholds.from_env(),
-            verbose=args.verbose,
-            workflow=args.command,
-            resume_from=Path(args.resume).expanduser() if getattr(args, "resume", None) else None,
-        )
+        if args.command == "trace":
+            manifest = create_trace_evidence_pack(
+                repository,
+                args.target,
+                tuple(args.start),
+                output,
+                client,
+                prefixes=tuple(args.prefix),
+                thresholds=Thresholds.from_env(),
+                depth=budget.max_depth,
+                max_calls=budget.max_calls,
+                verbose=args.verbose,
+            )
+        else:
+            manifest = create_evidence_pack(
+                repository,
+                tuple(args.prefix),
+                args.target,
+                tuple(args.start),
+                output,
+                budget,
+                client,
+                thresholds=Thresholds.from_env(),
+                verbose=args.verbose,
+                workflow=args.command,
+                resume_from=Path(args.resume).expanduser() if getattr(args, "resume", None) else None,
+            )
     except Exception as error:
         print(f"jvn {args.command}: {error}", file=sys.stderr)
         return 1
@@ -90,7 +102,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         if client is not None:
             client.close()
-    search_outcome = manifest["search"]["outcome"]
+    result_key = "trace" if args.command == "trace" else "search"
+    result = manifest[result_key]
+    search_outcome = result["outcome"]
+    calls = manifest["provider"]["calls"] if args.command == "trace" else result["calls"]
     resume_directory = (
         str(output.resolve())
         if args.command == "find" and search_outcome in ("budget", "cancelled")
@@ -103,7 +118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "output_directory": str(output.resolve()),
                     "manifest": str(output.resolve() / "manifest.json"),
                     "report": str(output.resolve() / "report.md"),
-                    "search": manifest["search"],
+                    result_key: result,
                     "provider": manifest["provider"],
                     "resume": resume_directory,
                 }
@@ -111,7 +126,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     else:
         print(f"evidence pack: {output.resolve()}")
-        print(f"outcome: {search_outcome} ({manifest['search']['calls']} live calls)")
+        print(f"outcome: {search_outcome} ({calls} live calls)")
         if resume_directory is not None:
             print(f"resume: use --resume {output.resolve()} with the same target and repository")
     return 130 if search_outcome == "cancelled" else 0
@@ -319,9 +334,11 @@ Find stops on a match; it is not an exhaustive find-all or an end-to-end trace.
 For JSON field names, types and defaults: jvn schema find. Full examples: docs/cli.md.""",
     )
     schema = commands.add_parser("schema", help="print a command's JSON request schema (no model calls)")
-    schema.add_argument("topic", choices=("find", "findall"), help="command whose request schema to show")
+    schema.add_argument(
+        "topic", choices=("find", "findall", "trace"), help="command whose request schema to show"
+    )
     help_command = commands.add_parser("help", help="show general or command-specific help")
-    help_command.add_argument("topic", nargs="?", choices=("find", "findall", "schema"))
+    help_command.add_argument("topic", nargs="?", choices=("find", "findall", "trace", "schema"))
     _add_search_arguments(find)
     find.add_argument(
         "--resume",
@@ -339,6 +356,33 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
         'JSON: {"command":"findall","target":"functions checking the order item limit"}',
     )
     _add_search_arguments(findall, max_calls=DEFAULT_FIND_ALL_MAX_CALLS)
+    trace = commands.add_parser(
+        "trace",
+        help="trace a known entry point and judge source evidence in batches",
+        description="Follow static code relationships and inspect five atomic evidence obligations.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='jvn trace "how an order becomes an HTTP result" --start app/orders.py:42\n'
+        'JSON: {"command":"trace","target":"order to HTTP result","start":["app/orders.py:42"]}\n'
+        "Start paths are relative to --repo. Unknown bindings remain visible.\n"
+        "No default depth or model-call cap; --max-calls sets an optional request allowance.\n"
+        "A completed trace is not proof of semantic completeness. Saved-frontier resume belongs to find.",
+    )
+    trace.add_argument("target", help="Concrete workflow, transformation or outcome to trace")
+    trace.add_argument(
+        "--start",
+        action="append",
+        required=True,
+        metavar="PATH:LINE",
+        help="Known function entry line; required and repeatable",
+    )
+    trace.add_argument("--repo", default=".", help="Source directory (default: current directory)")
+    trace.add_argument("--prefix", action="append", default=[], help="Optional source scope; repeatable")
+    trace.add_argument("--out", help="New or empty output directory (default: ./jvn-results/<run>)")
+    trace.add_argument("--max-depth", type=int, help="Optional maximum static relationship hops")
+    trace.add_argument(
+        "--max-calls", type=_count_or_none, help="Optional model-request cap; none is unlimited"
+    )
+    trace.add_argument("--verbose", action="store_true", help="Print expanded masked model requests")
     return parser
 
 
@@ -449,8 +493,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         parser.error("JSON request must be an object")
     command = payload.get("command", "find")
     # The command parser is the option schema for both input formats.
-    if command not in ("find", "findall"):
-        parser.error(f"unknown JSON command: {command!r}; expected find or findall")
+    if command not in ("find", "findall", "trace"):
+        parser.error(f"unknown JSON command: {command!r}; expected find, findall or trace")
     actions = _request_actions(_command_parser(parser, command))
     arguments = [command]
     for name, value in payload.items():
@@ -509,11 +553,13 @@ def _request_schema(parser: argparse.ArgumentParser) -> dict:
             field["type"] = "boolean"
         elif isinstance(action, argparse._AppendAction):
             field.update(type="array", items={"type": field["type"]})
+            if action.required:
+                field["minItems"] = 1
         if action.option_strings:
             field["default"] = action.default
-            if action.default is None or action.type is _count_or_none:
+            if not action.required and (action.default is None or action.type is _count_or_none):
                 field["type"] = [field["type"], "null"]
-        else:
+        if not action.option_strings or action.required:
             required.append(name)
         if name in NON_NEGATIVE_BUDGET_FIELDS:
             field["minimum"] = 0
@@ -527,7 +573,13 @@ def _request_schema(parser: argparse.ArgumentParser) -> dict:
         "properties": properties,
         "required": required,
         "additionalProperties": False,
-        "examples": [{"target": "the check that limits how many items an order may have"}],
+        "examples": [
+            {
+                "command": command,
+                "target": "the check that limits how many items an order may have",
+                **({"start": ["app/orders.py:42"]} if command == "trace" else {}),
+            }
+        ],
     }
 
 
