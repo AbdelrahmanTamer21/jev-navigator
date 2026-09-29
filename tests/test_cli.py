@@ -89,6 +89,7 @@ def test_findall_pack_composes_seed_search_with_disconnected_enumeration(tmp_pat
         return 0.96 if "len(" in code else 0.04
 
     output = tmp_path / "all-evidence"
+    client = ScriptedJevClient(nouls=answer)
     manifest = create_evidence_pack(
         repository,
         (),
@@ -96,7 +97,7 @@ def test_findall_pack_composes_seed_search_with_disconnected_enumeration(tmp_pat
         ("entry.py:4",),
         output,
         SearchBudget(beam_width=1),
-        ScriptedJevClient(nouls=answer),
+        client,
         workflow="findall",
         fact_cache_dir=tmp_path / "facts",
     )
@@ -107,6 +108,8 @@ def test_findall_pack_composes_seed_search_with_disconnected_enumeration(tmp_pat
     assert saved["search"]["coverage"] == "functions_examined"
     assert {item["name"] for item in saved["search"]["found"]} == {"admit", "fits"}
     assert saved["seed_search"]["outcome"] == "found"
+    assert saved["search"]["calls"] == len(client.requests)
+    assert saved["seed_search"]["calls"] + saved["search"]["enumeration_calls"] == len(client.requests)
     assert all(item["request_sha256"] for item in saved["search"]["found"])
     assert "independent.py" in (output / "report.md").read_text()
     assert (output / "journal.jsonl").read_text()

@@ -150,6 +150,7 @@ def create_evidence_pack(
             store=JsonlAnswerStore(output / "answers.jsonl"),
         )
         selection: EntrySelection | None = None
+        started = monotonic()
         if starts:
             start_places = [_parse_start(index, start) for start in starts]
             initial_candidates: tuple[tuple[Place, float], ...] = ()
@@ -165,7 +166,6 @@ def create_evidence_pack(
                 for candidate in selection.candidates
             )
         progress.phase("navigating code")
-        started = monotonic()
         result = find_code(
             index,
             judge,
@@ -175,6 +175,8 @@ def create_evidence_pack(
             commit=None,
             initial_candidates=initial_candidates,
         )
+        seed_calls = judge.calls
+        seed_duration_seconds = monotonic() - started
         enumeration = None
         if workflow == "findall" and result.outcome != "cancelled":
             progress.phase("expanding seed and checking remaining functions")
@@ -193,8 +195,8 @@ def create_evidence_pack(
             requested_model=getattr(client, "model", "unknown"),
             served_model=judge.served_model,
             input_tokens=judge.input_tokens,
-            duration_seconds=duration_seconds,
-            total_calls=judge.calls,
+            duration_seconds=seed_duration_seconds,
+            total_calls=seed_calls,
             entry_selection=selection,
         )
         if enumeration is not None:
