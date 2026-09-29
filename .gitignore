@@ -7,3 +7,4 @@ dist/
 question-templates/**/review.receipts.jsonl
 question-templates/**/review.report.json
 .debug/
+jvn-results/

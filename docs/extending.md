@@ -103,6 +103,16 @@ Read `searched` and the outcome `nothing_left` as "opened and judged unlikely", 
 not exist": one "no" about one place can be wrong. When nothing is found, rank the opened places by
 their probability and treat the best one as the likeliest place.
 
+Documents and other files without a supported code grammar remain searchable as text and can
+participate in text-based moves. Syntax operations return no symbols, calls or references for them;
+they are never sent to ast-grep with an empty language rule. This does not claim their text was
+parsed as code.
+
+The CLI creates a unique run directory under `jvn-results/` in the invocation directory when `--out`
+is omitted. Each run retains its report, manifest and request journal. Generated result directories
+are excluded from the CLI's source inventory so repeated searches do not search their own evidence.
+Library callers can similarly pass `exclude_paths` to `CodeIndex.from_directory`.
+
 ## Choosing how the search moves
 
 A move is a plain function of the index and the opened code that returns places. `places.MOVES` maps

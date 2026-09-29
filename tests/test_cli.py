@@ -293,3 +293,39 @@ def test_dotenv_base_url_reaches_the_real_sdk_system_one_endpoint(
 def test_large_scope_warning_starts_above_twenty_thousand_files() -> None:
     assert _scope_warning(20_000) is None
     assert "20,001" in _scope_warning(20_001)
+
+
+@pytest.mark.parametrize("search_here", [False, True])
+def test_find_defaults_to_unique_results_under_invocation_directory(tmp_path, monkeypatch, search_here):
+    from jev_navigator import cli
+
+    repository = tmp_path if search_here else tmp_path / "repo"
+    repository.mkdir(exist_ok=True)
+    (repository / "policy.py").write_text("def admit(item):\n    return len(item) <= 3\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+
+    class Client(ScriptedJevClient):
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        cli,
+        "TypeSafeJevClient",
+        lambda: Client(
+            nouls=lambda question_id, question, state: 1.0,
+            choices={"open_first": {"0": 1.0}},
+        ),
+    )
+    for _ in range(2):
+        assert main(["find", "the policy", "--repo", str(repository)]) == 0
+    packs = list((tmp_path / "jvn-results").iterdir())
+    assert len(packs) == 2
+    for pack in packs:
+        manifest = json.loads((pack / "manifest.json").read_text())
+        assert manifest["search"]["outcome"] == "found"
+        assert manifest["source"]["tracked_files"] == 1
+        assert (pack / "report.md").is_file()
+        assert (pack / "journal.jsonl").is_file()
+    if not search_here:
+        assert not (repository / "jvn-results").exists()

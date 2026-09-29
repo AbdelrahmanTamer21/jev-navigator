@@ -104,6 +104,7 @@ def create_evidence_pack(
         index = CodeIndex.from_directory(
             repository,
             prefixes=prefixes,
+            exclude_paths=(output, Path.cwd() / "jvn-results"),
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )
@@ -198,7 +199,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     find.add_argument(
         "--out",
-        help="New or empty output directory (default: a unique directory under ~/.local/share)",
+        help="New or empty output directory (default: a unique run under ./jvn-results)",
     )
     defaults = SearchBudget()
     find.add_argument("--max-depth", type=int, default=defaults.max_depth)
@@ -234,7 +235,7 @@ def _prepare_output(output: Path) -> None:
 
 def _default_output(repository: Path) -> Path:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-    return Path.home() / ".local/share/jev-navigator/evidence-packs" / f"{repository.name}-{stamp}"
+    return Path.cwd() / "jvn-results" / f"{repository.name}-{stamp}"
 
 
 def _scope_warning(file_count: int) -> str | None:
