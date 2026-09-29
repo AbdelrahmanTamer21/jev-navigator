@@ -93,7 +93,8 @@ def test_incomplete_registrations_are_refused():
         RoundRegistration(case_ids=CASES, questions={}, rule=RULE)
 
 
-def test_registered_hash_selects_real_stored_answers_and_rejects_reworded_questions(tmp_path):
+@pytest.mark.parametrize("code", ["x = 1", 'api_key = "synthetic-test-value"'])
+def test_registered_hash_selects_real_stored_answers_and_rejects_reworded_questions(tmp_path, code):
     from dataclasses import replace
 
     from jev_navigator.judgments.judge import Judge
@@ -102,7 +103,7 @@ def test_registered_hash_selects_real_stored_answers_and_rejects_reworded_questi
     from jev_navigator.testing import ScriptedJevClient
 
     reg = registration()
-    state = {"case_id": "case-01", "code": "x = 1"}
+    state = {"case_id": "case-01", "code": code}
     path = tmp_path / "answers.jsonl"
     Judge(ScriptedJevClient(nouls={"keep": 0.9}), store=JsonlAnswerStore(path)).ask(
         state, reg.questions, thresholds=Thresholds()

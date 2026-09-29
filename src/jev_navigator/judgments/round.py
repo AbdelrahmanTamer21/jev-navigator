@@ -38,6 +38,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .secrets import Masker, SecretMasker, mask_request
+
+DEFAULT_MASKER = SecretMasker()
+
 MANIFEST_LINE = "manifest.json sha256: "
 REGISTRATION_FILE = "registration.json"
 MANIFEST_FILE = "manifest.json"
@@ -184,16 +188,22 @@ def verify(round_dir: Path, registration: RoundRegistration | None = None) -> di
     return fields
 
 
-def registered_request_sha256(registration: RoundRegistration, state: dict) -> str:
+def registered_request_sha256(
+    registration: RoundRegistration, state: dict, *, masker: Masker | None = DEFAULT_MASKER
+) -> str:
     """A request is part of the round only when asked with the registered questions.
 
     Compare against the ``request_sha256`` an ``AnswerRecord`` (or a Journal line) already
     carries: a stored answer whose hash differs was asked under other questions and must not
-    count towards the round.
+    count towards the round. Use the same ``masker`` configuration as the Judge; the default
+    applies its built-in secret masking before hashing.
     """
     from .questions import request_sha256
 
-    return request_sha256(state, registration.questions)
+    questions = registration.questions
+    if masker:
+        state, questions, _ = mask_request(state, questions, masker)
+    return request_sha256(state, questions)
 
 
 def _write_json(path: Path, value: dict) -> str:

@@ -488,6 +488,8 @@ Pass `rule_source=inspect.getsource(rule_function)` when code implements the sco
 An optional `verifier_report=Path(...)` is copied into the round and its content is checked by
 `verify`; a missing supplied report is an error. `library_commit` is caller-supplied provenance;
 `checkout_commit` and `uncommitted_changes` describe the working directory at freeze time.
+Request identity uses the same built-in secret masking as `Judge`. If the caller supplies a
+custom masker or disables masking, pass that same `masker` to `registered_request_sha256`.
 Neither a question hash nor a frozen manifest proves model quality or dataset completeness.
 
 ## Tests
