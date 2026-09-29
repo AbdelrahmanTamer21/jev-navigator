@@ -494,8 +494,11 @@ Neither a question hash nor a frozen manifest proves model quality or dataset co
 
 `uv run pytest --basetemp=<scratch dir>`. Tests run offline against small real git repositories and
 `ScriptedJevClient`. The TypeSafe adapter's test runs only with the extra installed:
-`uv run --extra typesafe pytest`. CI runs the suite on Python 3.11 and 3.13, each with and without
-the extra.
+`uv run --extra typesafe pytest`. Run `uv run ruff check src tests` and
+`uv run ruff format --check src tests` before pushing. Local checks are the normal validation
+path for this small library; pushes and pull requests do not launch hosted CI. The `tests`
+workflow is available through GitHub Actions **Run workflow** when an explicit cross-version
+check is needed (Python 3.11 and 3.13, each with and without the TypeSafe extra).
 
 ## License
 
