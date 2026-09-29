@@ -162,7 +162,8 @@ index.co_changed_files(file)
 operations.slice_around(index, file, line)  # the enclosing function, or a window
 operations.code_described_by_comment(index, file, line)  # the whole next symbol or block
 operations.callers_of_file(index, path)
-operations.trace_callers(index, symbol, depth)  # and trace_callees; depth capped at 3
+operations.trace_callers(index, symbol)  # and trace_callees; optional depth, otherwise fixed point
+operations.trace_graph(index, index.find_definition(symbol))  # calls and non-call references
 operations.similar_functions(index, symbol)
 operations.code_named_in_doc(index, text)
 
@@ -236,6 +237,28 @@ pluggable rules (`jev_navigator.facts`): each `Fact` has a name, offsets, line a
 is `FactRule(name, pattern, keep=None)`; the shipped `DEFAULT_COMMENT_RULES` (TODO without owner,
 commented-out code, date, ticket reference) are examples. `outside_names` is an optional filter that
 skips matches inside paths, file names or identifiers: `DATE.with_filter(outside_names)`.
+
+### Static trace graphs
+
+`operations.trace_graph(index, roots)` follows both callers and callees, including non-call
+references such as callback registrations. It makes no model calls. Choose concrete root spans
+from the index when several functions share a name; resolved imports retain their actual target.
+
+```python
+roots = [span for span in index.find_definition("handle") if span.file == "app/orders.py"]
+stop_requested = False  # your host can set this when the user cancels
+graph = operations.trace_graph(index, roots, cancelled=lambda: stop_requested)
+for link in graph.links:
+    print(link.source, link.target, link.relation, link.binding)
+print(graph.stop)  # fixed_point, depth, or cancelled
+```
+
+With no `depth`, traversal visits each reachable function once and stops when the frontier is
+empty. An explicit `depth=2` limits traversal to two hops; cancellation is checked between functions.
+There is no hidden depth, neighbour or frontier cap. Missing endpoints and uncertain bindings stay
+visible in `graph.links`. `fixed_point` means the available static graph is exhausted; it does not
+prove that runtime dispatch is resolved or that every stage relevant to your question is covered.
+This is a library operation; the higher-level Jev-backed trace CLI is still in development.
 
 ## Layer 2: judgments
 

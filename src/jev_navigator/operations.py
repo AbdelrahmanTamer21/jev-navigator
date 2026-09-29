@@ -7,7 +7,7 @@ their own: in a script, a test, or a pipeline that never calls a model.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
 from .index.bindings import Binding
@@ -16,9 +16,6 @@ from .index.languages import language_of
 from .index.spans import CallSite, CodeSlice, Span
 
 MAX_FUNCTION_LINES = 120
-NEIGHBOURS_PER_FUNCTION = 12
-FRONTIER_PER_HOP = 16
-MAX_TRACE_DEPTH = 3
 _DOC_IDENTIFIER = re.compile(
     r"`([A-Za-z_][\w.]*)(?:\(\))?`"
     r"|\b([a-z]+(?:_[a-z0-9]+)+|[a-z]+(?:[A-Z][a-z0-9]*)+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b"
@@ -37,6 +34,31 @@ class TraceStep:
     function: Span
     reached_from: str
     binding: Binding | None = None
+
+
+@dataclass(frozen=True)
+class TraceLink:
+    """One static call or reference. Missing endpoints and non-resolved bindings remain evidence
+    gaps; walking the graph never turns a name match into a proven edge."""
+
+    hop: int
+    source: Span | None
+    target: Span | None
+    relation: str
+    name: str
+    file: str
+    line: int
+    binding: Binding | None = None
+
+
+@dataclass(frozen=True)
+class TraceGraph:
+    """The finite static component reached from ``roots`` and why traversal stopped."""
+
+    roots: tuple[Span, ...]
+    functions: tuple[Span, ...]
+    links: tuple[TraceLink, ...]
+    stop: str
 
 
 def slice_around(index: CodeIndex, file: str, line: int, radius: int = 10) -> CodeSlice:
@@ -72,14 +94,51 @@ def callers_of_file(index: CodeIndex, path: str) -> tuple[CallSite, ...]:
     return tuple(sorted(sites, key=lambda site: (site.file, site.line)))
 
 
-def trace_callers(index: CodeIndex, symbol: str, depth: int) -> tuple[TraceStep, ...]:
-    """Functions calling ``symbol``, then their callers, up to ``depth`` hops, nearest first."""
+def trace_callers(index: CodeIndex, symbol: str, depth: int | None = None) -> tuple[TraceStep, ...]:
+    """Functions calling ``symbol``, then their callers, to a fixed point or explicit depth."""
     return _trace(index, symbol, depth, _caller_functions)
 
 
-def trace_callees(index: CodeIndex, symbol: str, depth: int) -> tuple[TraceStep, ...]:
-    """Functions ``symbol`` calls that are defined in scope, then theirs, up to ``depth`` hops."""
+def trace_callees(index: CodeIndex, symbol: str, depth: int | None = None) -> tuple[TraceStep, ...]:
+    """In-scope callees of ``symbol``, then theirs, to a fixed point or explicit depth."""
     return _trace(index, symbol, depth, _callee_functions)
+
+
+def trace_graph(
+    index: CodeIndex,
+    roots: Sequence[Span],
+    *,
+    depth: int | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> TraceGraph:
+    """Walk calls and non-call references from concrete roots.
+
+    With no ``depth`` this stops only when the finite static frontier is empty. An explicit depth is
+    caller policy. ``cancelled`` is checked between functions so an owning host can interrupt a
+    large component without a hidden time or size limit.
+    """
+    _require_depth(depth)
+    unique_roots = tuple({span.key: span for span in roots}.values())
+    functions = {span.key: span for span in unique_roots}
+    frontier = list(unique_roots)
+    links: dict[tuple, TraceLink] = {}
+    hop = 0
+    while frontier and (depth is None or hop < depth):
+        hop += 1
+        next_frontier: list[Span] = []
+        for function in frontier:
+            if cancelled is not None and cancelled():
+                return TraceGraph(unique_roots, tuple(functions.values()), tuple(links.values()), "cancelled")
+            for link in _links_at(index, function, hop):
+                links.setdefault(_link_key(link), link)
+                neighbour = _other_end(function, link)
+                if neighbour is None or neighbour.key in functions:
+                    continue
+                functions[neighbour.key] = neighbour
+                next_frontier.append(neighbour)
+        frontier = next_frontier
+    stop = "depth" if frontier else "fixed_point"
+    return TraceGraph(unique_roots, tuple(functions.values()), tuple(links.values()), stop)
 
 
 def similar_functions(index: CodeIndex, symbol: str, limit: int = 10) -> tuple[Span, ...]:
@@ -159,15 +218,17 @@ def _indent(text: str) -> int:
     return len(text) - len(text.lstrip())
 
 
-def _trace(index: CodeIndex, symbol: str, depth: int, neighbours) -> tuple[TraceStep, ...]:
-    depth = min(depth, MAX_TRACE_DEPTH)
+def _trace(index: CodeIndex, symbol: str, depth: int | None, neighbours) -> tuple[TraceStep, ...]:
+    _require_depth(depth)
     frontier = list(index.find_definition(symbol))
     seen = {span.key for span in frontier}
     steps: list[TraceStep] = []
-    for hop in range(1, depth + 1):
+    hop = 0
+    while frontier and (depth is None or hop < depth):
+        hop += 1
         reached = _next_hop(index, frontier, hop, seen, neighbours)
         steps += reached
-        frontier = [step.function for step in reached][:FRONTIER_PER_HOP]
+        frontier = [step.function for step in reached]
     return tuple(steps)
 
 
@@ -176,7 +237,7 @@ def _next_hop(
 ) -> list[TraceStep]:
     reached = []
     for function in frontier:
-        for neighbour, binding in neighbours(index, function)[:NEIGHBOURS_PER_FUNCTION]:
+        for neighbour, binding in neighbours(index, function):
             if neighbour.key in seen:
                 continue
             seen.add(neighbour.key)
@@ -184,9 +245,120 @@ def _next_hop(
     return reached
 
 
+def _require_depth(depth: int | None) -> None:
+    if depth is not None and depth < 0:
+        raise ValueError("trace depth must be non-negative")
+
+
+def _links_at(index: CodeIndex, function: Span, hop: int) -> tuple[TraceLink, ...]:
+    links: list[TraceLink] = []
+    for edge in index.callee_edges(function):
+        targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
+        if not targets:
+            links.append(
+                TraceLink(hop, function, None, "call", edge.name, function.file, edge.line, edge.binding)
+            )
+        else:
+            links.extend(
+                TraceLink(hop, function, target, "call", edge.name, function.file, edge.line, edge.binding)
+                for target in targets
+            )
+    for site in index.find_callers(function.name):
+        if not _binding_can_target(site.binding, function):
+            continue
+        links.append(
+            TraceLink(
+                hop,
+                site.caller,
+                function,
+                "call",
+                function.name,
+                site.file,
+                site.line,
+                site.binding,
+            )
+        )
+    for reference in index.references_in(function):
+        targets = (
+            [reference.binding.target]
+            if reference.binding is not None and reference.binding.target is not None
+            else index.find_definition(reference.name)
+        )
+        if not targets:
+            links.append(
+                TraceLink(
+                    hop,
+                    function,
+                    None,
+                    reference.role,
+                    reference.name,
+                    reference.file,
+                    reference.line,
+                    reference.binding,
+                )
+            )
+        else:
+            links.extend(
+                TraceLink(
+                    hop,
+                    function,
+                    target,
+                    reference.role,
+                    reference.name,
+                    reference.file,
+                    reference.line,
+                    reference.binding,
+                )
+                for target in targets
+            )
+    for reference in index.find_references(function.name):
+        if not _binding_can_target(reference.binding, function):
+            continue
+        links.append(
+            TraceLink(
+                hop,
+                reference.holder,
+                function,
+                reference.role,
+                function.name,
+                reference.file,
+                reference.line,
+                reference.binding,
+            )
+        )
+    return tuple(links)
+
+
+def _other_end(function: Span, link: TraceLink) -> Span | None:
+    if link.source is not None and link.source.key == function.key:
+        return link.target
+    if link.target is not None and link.target.key == function.key:
+        return link.source
+    return None
+
+
+def _binding_can_target(binding: Binding | None, function: Span) -> bool:
+    return binding is None or binding.target is None or binding.target.key == function.key
+
+
+def _link_key(link: TraceLink) -> tuple:
+    return (
+        link.source.key if link.source is not None else "",
+        link.target.key if link.target is not None else "",
+        link.relation,
+        link.name,
+        link.file,
+        link.line,
+        link.binding.status if link.binding is not None else "",
+        link.binding.reason if link.binding is not None else "",
+    )
+
+
 def _caller_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Binding | None]]:
     return [
-        (site.caller, site.binding) for site in index.find_callers(function.name) if site.caller is not None
+        (site.caller, site.binding)
+        for site in index.find_callers(function.name)
+        if site.caller is not None and _binding_can_target(site.binding, function)
     ]
 
 
