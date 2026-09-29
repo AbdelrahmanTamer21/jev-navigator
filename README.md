@@ -10,6 +10,10 @@ composes both into searches such as "find the code this sentence describes". An 
 
 > **Jev gets concrete state and one closed judgment; code owns goals, loops and stopping.**
 
+Coding agents can load the focused [JVN skill](skills/jvn/SKILL.md) for choosing a search,
+using JSON requests, reading evidence and handling partial results. Install it by linking or copying
+the `skills/jvn` directory into your agent harness's skills directory.
+
 The library finds code. Judging that code (is a comment accurate, does a rule hold everywhere) is a
 layer you build on top; [docs/extending.md](docs/extending.md) shows how to compose one.
 
