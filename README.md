@@ -461,6 +461,35 @@ calls Jev and answers every question neutrally. Write the captured, already-mask
 with the request and, per question, what code does with the answer. Read it, or pass it to a
 question-review tool, before any paid call, and pilot a small set of cases first.
 
+## Register a benchmark before running it
+
+`judgments.round` freezes the ordered case IDs, exact questions and scoring rule before
+model calls. Keep the generated `FROZEN.txt` in a trusted versioned record; the local hash
+chain detects edits beneath that anchor, not replacement of the entire chain.
+
+```python
+from pathlib import Path
+from jev_navigator.judgments.round import RoundRegistration, freeze, verify, registered_request_sha256
+
+registration = RoundRegistration(
+    case_ids=("order-limit",),
+    questions={"found": {"type": "noul", "instructions": "Does the supplied code enforce the order limit?"}},
+    rule={"yes_at": 0.9},
+    library_commit="",  # Supply the verified navigator revision when known; empty means unknown.
+)
+round_dir = Path("jvn-results/order-limit-round")
+freeze(round_dir, registration)  # Creates the directory; refuses to overwrite a frozen round.
+verify(round_dir, registration)  # Call before scoring stored answers.
+request_hash = registered_request_sha256(registration, {"code": "..."})
+# store.by_request(request_hash) retrieves the answer for this exact state/question identity.
+```
+
+Pass `rule_source=inspect.getsource(rule_function)` when code implements the scoring rule.
+An optional `verifier_report=Path(...)` is copied into the round and its content is checked by
+`verify`; a missing supplied report is an error. `library_commit` is caller-supplied provenance;
+`checkout_commit` and `uncommitted_changes` describe the working directory at freeze time.
+Neither a question hash nor a frozen manifest proves model quality or dataset completeness.
+
 ## Tests
 
 `uv run pytest --basetemp=<scratch dir>`. Tests run offline against small real git repositories and
