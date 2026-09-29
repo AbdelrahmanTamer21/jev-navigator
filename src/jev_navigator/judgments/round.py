@@ -42,6 +42,7 @@ MANIFEST_LINE = "manifest.json sha256: "
 REGISTRATION_FILE = "registration.json"
 MANIFEST_FILE = "manifest.json"
 SIDECAR_FILE = "FROZEN.txt"
+VERIFIER_REPORT_FILE = "verifier-report.txt"
 
 
 class FrozenRoundError(RuntimeError):
@@ -55,6 +56,8 @@ class RoundRegistration:
     ``questions`` and ``rule`` are JSON-serializable values; ``rule_source`` freezes the
     decision rule's code text when the rule is code. ``case_ids`` is the exact, ordered
     population of the round; scoring must account for every one of them and no other.
+    Supply ``library_commit`` explicitly when known; an empty value means unknown, never
+    the commit of the caller's unrelated working directory.
     """
 
     case_ids: tuple[str, ...]
@@ -74,8 +77,6 @@ class RoundRegistration:
             raise FrozenRoundError("a round needs questions and a rule")
         if not self.python:
             object.__setattr__(self, "python", ".".join(platform.python_version_tuple()[:2]))
-        if not self.library_commit:
-            object.__setattr__(self, "library_commit", _git_commit(Path.cwd()) or "")
 
     def to_json(self) -> dict:
         return {
@@ -113,14 +114,26 @@ def freeze(round_dir: Path, registration: RoundRegistration, verifier_report: Pa
     round_dir = Path(round_dir)
     if (round_dir / SIDECAR_FILE).exists():
         raise FrozenRoundError(f"{round_dir}: already frozen; a frozen round is never re-frozen")
+    report_bytes = None
+    if verifier_report is not None:
+        try:
+            report_bytes = Path(verifier_report).read_bytes()
+        except OSError as exc:
+            raise FrozenRoundError(f"cannot read verifier report: {exc}") from exc
+    round_dir.mkdir(parents=True, exist_ok=True)
+    if report_bytes is not None:
+        (round_dir / VERIFIER_REPORT_FILE).write_bytes(report_bytes)
     fields = {
         "frozen_at": datetime.now(UTC).isoformat(),
         "library_commit": registration.library_commit,
         "python": registration.python,
+        "checkout_commit": _git_commit(Path.cwd()),
         "uncommitted_changes": _checkout_dirty(Path.cwd()),
         "registration_sha256": _write_json(round_dir / REGISTRATION_FILE, registration.to_json()),
         "questions_sha256": _hash_value(registration.questions),
-        "verifier_report_sha256": _hash_file(verifier_report),
+        "verifier_report_sha256": hashlib.sha256(report_bytes).hexdigest()
+        if report_bytes is not None
+        else None,
     }
     manifest_sha = _write_json(round_dir / MANIFEST_FILE, fields)
     (round_dir / SIDECAR_FILE).write_text(MANIFEST_LINE + manifest_sha + "\n")
@@ -133,15 +146,19 @@ def verify(round_dir: Path, registration: RoundRegistration | None = None) -> di
     With ``registration`` given, the code's own registration must agree with the frozen one —
     this is how a checkout keeps a round registered: an edited registration fails the frozen
     manifest, and a rule's frozen source must still match. The hash chain (FROZEN.txt binds
-    the manifest, the manifest binds the registration) means any post-freeze edit anywhere in
-    the chain is detected.
+    the manifest, the manifest binds the registration and retained report) detects changes
+    beneath an unchanged sidecar. Retain that sidecar in a trusted versioned record: this
+    local hash chain is not a signature and cannot detect replacement of the whole chain.
     """
     round_dir = Path(round_dir)
     sidecar, manifest_path = round_dir / SIDECAR_FILE, round_dir / MANIFEST_FILE
     if not sidecar.exists() or not manifest_path.exists():
         raise FrozenRoundError(f"{round_dir}: no frozen manifest to verify")
-    bound = [line.removeprefix(MANIFEST_LINE).strip() for line in sidecar.read_text().splitlines()
-             if line.startswith(MANIFEST_LINE)]
+    bound = [
+        line.removeprefix(MANIFEST_LINE).strip()
+        for line in sidecar.read_text().splitlines()
+        if line.startswith(MANIFEST_LINE)
+    ]
     if not bound:
         raise FrozenRoundError(f"{round_dir}: {SIDECAR_FILE} binds no manifest")
     if hashlib.sha256(manifest_path.read_bytes()).hexdigest() != bound[-1]:
@@ -156,12 +173,14 @@ def verify(round_dir: Path, registration: RoundRegistration | None = None) -> di
     _same("questions", _hash_value(frozen.questions), fields["questions_sha256"])
     if registration is not None:
         _same("registration", registration.to_json(), frozen.to_json())
-        if frozen.rule_source and registration.rule_source != frozen.rule_source:
-            raise FrozenRoundError("the rule's frozen source differs from the live registration's")
     _same("library commit", frozen.library_commit, fields["library_commit"])
     _same("python", frozen.python, fields["python"])
-    if fields.get("verifier_report_sha256"):
-        _same("verifier report hash present in fields", bool(fields["verifier_report_sha256"]), True)
+    if fields.get("verifier_report_sha256") is not None:
+        try:
+            report_hash = hashlib.sha256((round_dir / VERIFIER_REPORT_FILE).read_bytes()).hexdigest()
+        except OSError as exc:
+            raise FrozenRoundError(f"cannot read frozen verifier report: {exc}") from exc
+        _same("verifier report", report_hash, fields["verifier_report_sha256"])
     return fields
 
 
@@ -182,19 +201,18 @@ def _write_json(path: Path, value: dict) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _hash_file(path: Path | None) -> str | None:
-    return hashlib.sha256(path.read_bytes()).hexdigest() if path and path.exists() else None
-
-
 def _hash_value(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def _checkout_dirty(repository: Path) -> bool:
+def _checkout_dirty(repository: Path) -> bool | None:
     if _git_commit(repository) is None:
-        return False  # not a checkout (e.g. tests in tmp)
-    return bool(subprocess.run(["git", "status", "--porcelain"], cwd=repository,
-                               capture_output=True, text=True, check=True).stdout)
+        return None  # checkout state is unknown outside a repository
+    return bool(
+        subprocess.run(
+            ["git", "status", "--porcelain"], cwd=repository, capture_output=True, text=True, check=True
+        ).stdout
+    )
 
 
 def _git_commit(repository: Path) -> str | None:
