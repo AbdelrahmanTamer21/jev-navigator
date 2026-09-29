@@ -145,7 +145,10 @@ def _structure_from_matches(files, lines_of, unparsed, matches):
             declarations[file].add(Span(file, start, end, declared_name(first_line)))
         else:
             target = functions if match["ruleId"] == "function" else classes
-            target[file].add(Span(file, start, end, function_name(first_line)))
+            # The matched node's own text names the symbol even when the physical line opens with
+            # another declaration's head: a method on a one-line class shares the line `class Box`
+            # opens, and naming it from that line would collapse it into the class's span.
+            target[file].add(Span(file, start, end, function_name(match["text"], first_line)))
     return {
         file: FileStructure(
             _ordered(functions[file]),

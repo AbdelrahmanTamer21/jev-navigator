@@ -138,3 +138,31 @@ def test_concurrent_writers_publish_one_complete_entry(tmp_path, example, monkey
         for job in jobs:
             job.result()
     assert cache.load("module.py", content) == facts
+
+
+def test_node_name_fix_reparses_facts_cached_by_the_previous_rule_version(tmp_path, monkeypatch):
+    from jev_navigator.index.code_index import CodeIndex
+    from jev_navigator.index.scope_scan import FileFacts, FileStructure
+    from jev_navigator.index.spans import Span
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    content = b"class Box { v() { return 1; } }\n"
+    (repo / "box.ts").write_bytes(content)
+    cache_root = tmp_path / "cache"
+    # Persisted v8 artifact: the method was named from its enclosing physical line, so both
+    # declarations collapsed into Box. A parser correction must invalidate this old result.
+    collapsed = Span("box.ts", 1, 1, "Box")
+    old = FileFacts(FileStructure((collapsed,), (collapsed,), ()), (), (), False)
+    with monkeypatch.context() as previous:
+        previous.setattr(fact_cache, "FACT_RULE_VERSION", "combined-facts-v8-export-surface")
+        FactCache(cache_root).save("box.ts", content, old)
+    scans = []
+    index = CodeIndex.from_directory(
+        repo,
+        fact_cache_dir=cache_root,
+        scan_observer=lambda *event: scans.append(event),
+    )
+    assert [span.name for span in index.functions_in("box.ts")] == ["v"]
+    assert {span.name for span in index.symbols_in("box.ts")} == {"Box", "v"}
+    assert any(event[1] == "started" for event in scans)
