@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -558,3 +559,14 @@ def test_every_result_carries_the_hash_of_the_masked_request_that_answered_it(tm
     assert picked.request_sha256 == sent_hashes[2]
     assert decision.request_sha256 == sent_hashes[3]
     assert decision.route.request_sha256 == sent_hashes[3]
+
+
+def test_independent_checks_cannot_silently_share_a_result_name() -> None:
+    client = ScriptedJevClient(default_noul=0.9)
+    judge = Judge(client)
+    other = replace(DESCRIBES, instructions="Does `{item}.code` write a database row?")
+
+    with pytest.raises(ValueError, match="unique names"):
+        judge.check_every([DESCRIBES, other], [{"code": "return 1"}])
+
+    assert client.requests == []

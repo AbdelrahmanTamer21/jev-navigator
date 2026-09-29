@@ -471,6 +471,8 @@ class Judge:
         per-item store key is made from that pair; a batch masks its items, their question wording
         and the shared state together, as the request that carries them will be.
         """
+        if len({check.name for check in checks}) != len(checks):
+            raise ValueError("independent checks require unique names for their result lists")
         shared = shared or {}
         budget = MAX_STATE_CHARS if batch_budget is None else batch_budget
         plan = _CheckPlan(list_name, checks, items, shared, thresholds or self.thresholds, budget)

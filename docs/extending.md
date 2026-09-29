@@ -121,6 +121,7 @@ through `check=` to examine another concrete property of each body; use `{item}.
 `target.description`. Independent additional properties belong in `Judge.check_every`, which asks
 them together and keeps the answers separate. The engineer authors the branches and stopping rule;
 Jev does not decide whether to invent a workflow or declare the repository fully understood.
+Checks in one batch need distinct names because each name identifies its returned result list.
 
 `functions_examined` means the function inventory was examined, not that every semantic answer is
 correct. Module-level statements, declarations and multi-function behaviors require a different
