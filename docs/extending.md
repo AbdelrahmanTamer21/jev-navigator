@@ -225,3 +225,31 @@ only when the node does not contain its binding name (for example an assigned an
 This keeps a method on a one-line TypeScript class distinct from its enclosing class.
 Persistent facts are keyed by source bytes, language, parser version and `FACT_RULE_VERSION`.
 A change to extracted facts must change that rule identity so existing cached results are reparsed.
+
+## Structural measurements without model calls
+
+Use `directives.statistics` for function/class counts and inclusive physical line sizes. It reuses
+one batched parser-fact inventory; Jev is not needed for arithmetic.
+
+```python
+from pathlib import Path
+from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.directives.statistics import count_symbols, largest_functions
+
+index = CodeIndex.from_directory(Path("."))
+counts = count_symbols(index)
+print(counts.total, counts.coverage)
+
+ranking = largest_functions(index)  # includes methods and nested functions
+for symbol in ranking.biggest:      # retains all ties for the largest function
+    print(symbol.span, symbol.size)
+
+between = [symbol for symbol in ranking.measured if 20 <= symbol.size <= 50]
+function_counts = count_symbols(index, kinds=("function",))
+```
+
+A `limit` restricts the displayed ranking, not the measured inventory or counts. Inspect coverage
+for unreadable, unsupported and partially parsed files; recovered symbol counts are not proof that
+all source parsed successfully. An unrequested symbol kind is omitted, not represented as zero.
+Same-line nesting can have no known holder because the current index records line spans rather
+than AST parent identities. The structural CLI adapter is not part of this library contract.
