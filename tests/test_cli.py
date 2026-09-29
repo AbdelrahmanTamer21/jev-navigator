@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import os
@@ -67,6 +68,152 @@ def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -
     assert written["search"]["history"][-1]["operation"] == "stop"
     assert "Candidates not independently opened" in (output / "report.md").read_text()
     assert (output / "journal.jsonl").read_text()
+
+
+def test_budget_pack_reopens_its_saved_frontier_in_a_second_cli_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from jev_navigator import cli
+
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/entry.py": "from .policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "app/policy.py": "def admit(item):\n    return len(item) <= 3\n",
+        },
+    )
+    clients: list[ScriptedJevClient] = []
+
+    def client() -> ScriptedJevClient:
+        instance = ScriptedJevClient(
+            nouls=lambda question_id, question, state: (
+                0.96 if "len(item) <= 3" in state["slice"]["code"] else 0.04
+            ),
+            choices={"open_first": {"0": 1.0}},
+        )
+        instance.close = lambda: None
+        clients.append(instance)
+        return instance
+
+    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "TypeSafeJevClient", client)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    common = ["find", "the item limit", "--repo", str(repository), "--start", "app/entry.py:4"]
+
+    assert main([*common, "--max-calls", "1", "--beam-width", "1", "--out", str(first)]) == 0
+    cap = json.loads((first / "manifest.json").read_text())
+    assert cap["search"]["outcome"] == "budget"
+    assert cap["search"]["calls"] == len(clients[0].requests) == 1
+    assert cap["search"]["not_inspected"]
+    assert (first / "resume.json").is_file()
+    cap_bytes = (first / "manifest.json").read_bytes()
+    capsys.readouterr()
+
+    assert (
+        main([*common, "--max-calls", "1", "--beam-width", "1", "--resume", str(first), "--out", str(second)])
+        == 0
+    )
+    resumed = json.loads((second / "manifest.json").read_text())
+    assert resumed["search"]["outcome"] == "found"
+    assert resumed["search"]["found"][0]["source"]["file"] == "app/policy.py"
+    assert resumed["search"]["starts"] == cap["search"]["starts"]
+    assert resumed["search"]["calls"] == 2
+    assert resumed["search"]["steps"] == 2
+    assert len(resumed["search"]["history"]) > len(cap["search"]["history"])
+    assert len(clients[1].requests) == 1
+    assert (first / "manifest.json").read_bytes() == cap_bytes
+    assert (second / "answers.jsonl").read_text().count("\n") == 2
+
+
+def test_entry_selection_replays_cached_calls_after_its_cap(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/one.py": "def one():\n    return 1\n",
+            "app/two.py": "def two():\n    return 2\n",
+            "tests/test_one.py": "def test_one():\n    assert True\n",
+        },
+    )
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    budget = SearchBudget(max_calls=1, beam_width=1)
+    client1 = ScriptedJevClient()
+    cap = create_evidence_pack(repository, (), "find one", (), first, budget, client1)
+
+    assert cap["search"]["outcome"] == "budget"
+    assert cap["entry_selection"] is None
+    assert json.loads((first / "resume.json").read_text())["stage"] == "entry"
+    assert len(client1.requests) == 1
+
+    client2 = ScriptedJevClient()
+    resumed = create_evidence_pack(repository, (), "find one", (), second, budget, client2, resume_from=first)
+    assert resumed["entry_selection"] is not None
+    assert resumed["search"]["calls"] == 2
+    assert resumed["search"]["entry_calls"] == 2
+    assert len(client2.requests) == 1  # the first entry decision came from answers.jsonl
+    assert json.loads((second / "resume.json").read_text())["stage"] == "navigation"
+
+
+def test_resume_rejects_changed_source_before_reusing_the_frontier(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    commit_files(repository, {"policy.py": "def policy():\n    return 1\n"})
+    first = tmp_path / "first"
+    create_evidence_pack(
+        repository, (), "policy", ("policy.py:1",), first, SearchBudget(max_calls=0), ScriptedJevClient()
+    )
+    (repository / "policy.py").write_text("def policy():\n    return 2\n")
+    next_client = ScriptedJevClient()
+
+    with pytest.raises(ValueError, match="source or scope changed"):
+        create_evidence_pack(
+            repository,
+            (),
+            "policy",
+            ("policy.py:1",),
+            tmp_path / "second",
+            SearchBudget(max_calls=1),
+            next_client,
+            resume_from=first,
+        )
+    assert next_client.requests == []
+
+
+def test_budget_pack_survives_an_unreadable_unopened_file(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/live.py": "def live():\n    return 1\n",
+            "app/unreadable.py": "def unavailable():\n    return 2\n",
+        },
+    )
+    unreadable = repository / "app/unreadable.py"
+    unreadable.chmod(0)
+    try:
+        output = tmp_path / "evidence"
+        client = ScriptedJevClient()
+        manifest = create_evidence_pack(
+            repository,
+            (),
+            "live behavior",
+            ("app/live.py:1",),
+            output,
+            SearchBudget(max_calls=0, max_depth=0),
+            client,
+        )
+        assert manifest["search"]["outcome"] == "budget"
+        assert manifest["search"]["unavailable_files"]["app/unreadable.py"]
+        assert (output / "resume.json").is_file()
+        assert (
+            "PermissionError"
+            in json.loads((output / "resume.json").read_text())["unavailable_files"]["app/unreadable.py"]
+        )
+        assert client.requests == []
+    finally:
+        unreadable.chmod(0o600)
 
 
 def test_evidence_pack_chooses_a_real_entry_when_no_start_is_supplied(tmp_path: Path) -> None:
@@ -172,10 +319,10 @@ def test_cancelled_navigation_writes_a_resumable_evidence_pack(tmp_path: Path) -
     assert records[-1]["outcome"] == "cancelled"
 
 
-def test_main_maps_a_cancelled_pack_to_the_shell_interrupt_status(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Arrange
+@pytest.fixture
+def offline_main(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """``main`` without credentials or a search: each pack request is recorded by parameter name and
+    answered with ``outcome``."""
     from jev_navigator import cli
 
     class Client:
@@ -184,19 +331,60 @@ def test_main_maps_a_cancelled_pack_to_the_shell_interrupt_status(
         def close(self) -> None:
             pass
 
+    signature = inspect.signature(cli.create_evidence_pack)
+    calls: dict = {"outcome": "found", "packs": []}
+
+    def create_evidence_pack(*args, **kwargs):
+        calls["packs"].append(signature.bind(*args, **kwargs).arguments)
+        return {"search": {"outcome": calls["outcome"], "calls": 1}, "provider": {"requested_model": "test"}}
+
     monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
     monkeypatch.setattr(cli, "TypeSafeJevClient", Client)
-    monkeypatch.setattr(
-        cli,
-        "create_evidence_pack",
-        lambda *args, **kwargs: {"search": {"outcome": "cancelled", "calls": 1}},
-    )
+    monkeypatch.setattr(cli, "create_evidence_pack", create_evidence_pack)
+    return calls
+
+
+def test_main_maps_a_cancelled_pack_to_the_shell_interrupt_status(tmp_path: Path, offline_main: dict) -> None:
+    # Arrange
+    offline_main["outcome"] = "cancelled"
 
     # Act
     status = main(["find", "the policy", "--repo", str(tmp_path), "--out", str(tmp_path / "out")])
 
     # Assert
     assert status == 130
+
+
+@pytest.mark.parametrize(
+    ("request_options", "max_calls"),
+    [
+        ({}, 24),
+        ({"--max-calls": "5"}, 5),
+        ({"--max-calls": "none"}, None),
+    ],
+    ids=["capped-by-default", "explicit-cap", "explicitly-uncapped"],
+)
+@pytest.mark.parametrize("input_mode", ["flags", "json"])
+def test_live_calls_are_capped_unless_the_caller_lifts_the_cap(
+    tmp_path: Path, offline_main: dict, input_mode: str, request_options: dict, max_calls: int | None
+) -> None:
+    # Arrange
+    if input_mode == "flags":
+        arguments = ["find", "the policy", "--repo", str(tmp_path), "--out", str(tmp_path / "out")]
+        arguments += [part for option in request_options.items() for part in option]
+    else:
+        request = {"target": "the policy", "repo": str(tmp_path), "out": str(tmp_path / "out")}
+        if request_options:
+            value = request_options["--max-calls"]
+            request["max_calls"] = None if value == "none" else int(value)
+        arguments = ["--json", json.dumps(request)]
+
+    # Act
+    status = main(arguments)
+
+    # Assert
+    assert status == 0
+    assert offline_main["packs"][0]["budget"].max_calls == max_calls
 
 
 def repository_commit(repository: Path) -> str:
@@ -397,6 +585,7 @@ def test_report_distinguishes_included_lines_from_an_unopened_candidate(tmp_path
         ('{"target": "policy", "max_steps": "two"}', "max_steps"),
         ('{"target": "policy", "max_steps": true}', "max_steps"),
         ('{"target": "policy", "max_steps": -1}', "max_steps"),
+        ('{"target": "policy", "max_calls": "none"}', "max_calls"),
         ('{"target": "policy", "beam_width": 0}', "beam_width"),
         ('{"target": "policy", "prefix": "app/"}', "prefix"),
         ('{"target": "policy", "verbose": "yes"}', "verbose"),
@@ -540,7 +729,7 @@ def test_schema_discovery_needs_no_credentials_or_model(monkeypatch, capsys):
     assert fields["start"]["items"] == {"type": "string"}
     assert fields["beam_width"]["default"] == 3
     assert fields["beam_width"]["minimum"] == 1
-    assert fields["max_calls"]["default"] is None
+    assert fields["max_calls"]["default"] == 24
     assert fields["max_calls"]["type"] == ["integer", "null"]
     assert fields["repo"]["default"] == "."
     assert fields["verbose"]["type"] == "boolean"
