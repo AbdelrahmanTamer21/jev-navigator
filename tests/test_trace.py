@@ -1,0 +1,323 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from jev_navigator.directives.trace import (
+    TRACE_EVIDENCE_CHECKS,
+    EvidenceStatus,
+    trace_workflow,
+)
+from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.index.spans import CodeSlice, Span
+from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.store import JsonlAnswerStore
+from jev_navigator.testing import ScriptedJevClient
+
+
+def _workflow_source(*, transformation: bool, registration: bool, consumer: bool) -> str:
+    imports = ["from pipeline import normalize"] if transformation else []
+    if consumer:
+        imports.append("from delivery import reject, respond")
+    lines = [*imports, "", "def audit(value):", "    return value", "", "def handle_order(request):"]
+    lines += ["    payload = request.body"]
+    lines += ["    normalized = normalize(payload)" if transformation else "    normalized = payload"]
+    lines += ["    audit(normalized)", "    if normalized['accepted']:"]
+    if consumer:
+        lines += ["        return respond(normalized)", "    return reject(normalized)"]
+    else:
+        lines += ["        return normalized", "    return normalized"]
+    if registration:
+        lines += ["", "HANDLERS = {'POST /orders': handle_order}"]
+    return "\n".join(lines) + "\n"
+
+
+def _workflow_index(
+    root: Path, *, transformation: bool = True, registration: bool = True, consumer: bool = True
+) -> CodeIndex:
+    (root / "workflow.py").write_text(
+        _workflow_source(
+            transformation=transformation,
+            registration=registration,
+            consumer=consumer,
+        )
+    )
+    (root / "pipeline.py").write_text(
+        "def normalize(payload):\n    return {'accepted': payload != '', 'payload': payload}\n"
+    )
+    (root / "delivery.py").write_text(
+        "def respond(order):\n"
+        "    return {'status': 201, 'body': order}\n\n"
+        "def reject(order):\n"
+        "    return {'status': 422, 'body': order}\n"
+    )
+    return CodeIndex.from_directory(root)
+
+
+def _evidence_client() -> ScriptedJevClient:
+    signals = {
+        "trace_input_origin": "request.body",
+        "trace_transformation": "normalize(payload)",
+        "trace_handoff": "HANDLERS =",
+        "trace_observable_outcome": "respond(normalized)",
+        "trace_relevant_branch": "if normalized['accepted']",
+    }
+
+    def answer(question_id, _question, state):
+        name = question_id.split("@", 1)[0]
+        slot = int(question_id.rsplit("#", 1)[1])
+        item = state["trace"][slot]
+        return 0.95 if signals[name] in json.dumps(item) else 0.05
+
+    return ScriptedJevClient(nouls=answer)
+
+
+def _trace(index: CodeIndex):
+    client = _evidence_client()
+    root = index.find_definition("handle_order")[0]
+    result = trace_workflow(index, Judge(client), "How does an order request become an HTTP result?", [root])
+    return result, client
+
+
+def _statuses(result) -> dict[str, EvidenceStatus]:
+    return {obligation.name: obligation.status for obligation in result.obligations}
+
+
+def test_complete_workflow_has_source_backed_evidence_for_each_atomic_obligation(
+    tmp_path: Path,
+) -> None:
+    index = _workflow_index(tmp_path)
+
+    # Act
+    result, client = _trace(index)
+
+    # Assert: the real parser and binding graph establish connectivity independently of Jev.
+    assert result.graph.stop == "fixed_point"
+    assert {span.name for span in result.graph.functions} == {
+        "audit",
+        "handle_order",
+        "normalize",
+        "reject",
+        "respond",
+    }
+    assert {
+        (link.source.name, link.target.name)
+        for link in result.graph.links
+        if link.source is not None
+        and link.target is not None
+        and link.binding is not None
+        and link.binding.proven
+        and link.relation == "call"
+    } >= {
+        ("handle_order", "normalize"),
+        ("handle_order", "respond"),
+        ("handle_order", "reject"),
+    }
+    registration = next(link for link in result.graph.links if link.relation == "collection")
+    assert registration.target is not None and registration.target.name == "handle_order"
+    assert registration.binding is not None and registration.binding.proven
+
+    assert _statuses(result) == {
+        check.name: EvidenceStatus.EVIDENCE_BACKED for check in TRACE_EVIDENCE_CHECKS
+    }
+    # Assert: request transport only. The five typed obligations reach the external Jev client port
+    # together in one batched request, which asks every question family about every supplied item.
+    assert len(client.requests) == 1, "the five evidence duties travel together, not one round trip each"
+    state, questions = client.requests[0]
+    assert state["workflow"] == {"question": "How does an order request become an HTTP result?"}
+    assert state["trace"], "the batched request carries the supplied items"
+    for slot in range(len(state["trace"])):
+        asked = {f"{check.question_id}#{slot}" for check in TRACE_EVIDENCE_CHECKS}
+        assert asked <= set(questions), f"item {slot} is not asked about by every question family"
+    for obligation in result.obligations:
+        assert obligation.evidence
+        for evidence in obligation.evidence:
+            assert evidence.item["file"]
+            assert evidence.item["lines"]
+            assert "commit" in evidence.item
+            assert evidence.item["file_sha256"]
+            assert evidence.request_sha256
+    assert {span.name for span in result.excluded} == {"audit", "reject"}
+
+
+@pytest.mark.parametrize(
+    ("missing", "expected_gap"),
+    [
+        ("transformation", "trace_transformation"),
+        ("registration", "trace_handoff"),
+        ("consumer", "trace_observable_outcome"),
+    ],
+)
+def test_damaged_real_workflow_reports_the_specific_missing_evidence(
+    tmp_path: Path, missing: str, expected_gap: str
+) -> None:
+    index = _workflow_index(
+        tmp_path,
+        transformation=missing != "transformation",
+        registration=missing != "registration",
+        consumer=missing != "consumer",
+    )
+
+    # Act
+    result, _ = _trace(index)
+
+    # Assert
+    statuses = _statuses(result)
+    assert statuses[expected_gap] == EvidenceStatus.GAP_TO_INVESTIGATE
+    assert statuses["trace_input_origin"] == EvidenceStatus.EVIDENCE_BACKED
+    assert statuses["trace_relevant_branch"] == EvidenceStatus.EVIDENCE_BACKED
+    if missing != "transformation":
+        assert statuses["trace_transformation"] == EvidenceStatus.EVIDENCE_BACKED
+    if missing != "registration":
+        assert statuses["trace_handoff"] == EvidenceStatus.EVIDENCE_BACKED
+    if missing != "consumer":
+        assert statuses["trace_observable_outcome"] == EvidenceStatus.EVIDENCE_BACKED
+
+
+def test_unsure_judgment_stays_unresolved_instead_of_becoming_a_gap(tmp_path: Path) -> None:
+    index = _workflow_index(tmp_path)
+    client = ScriptedJevClient(default_noul=0.5)
+    root = index.find_definition("handle_order")[0]
+
+    # Act
+    result = trace_workflow(index, Judge(client), "How are orders handled?", [root])
+
+    # Assert
+    assert {obligation.status for obligation in result.obligations} == {EvidenceStatus.UNRESOLVED}
+    assert all(obligation.unresolved for obligation in result.obligations)
+    assert result.included == (root,)
+    assert {span.name for span in result.excluded} == {"audit", "normalize", "reject", "respond"}
+
+
+def test_name_only_and_missing_targets_remain_unresolved_static_links(tmp_path: Path) -> None:
+    (tmp_path / "workflow.py").write_text("def start(value):\n    notify(value)\n    missing_sink(value)\n")
+    (tmp_path / "first.py").write_text("def notify(value):\n    return value\n")
+    (tmp_path / "second.py").write_text("def notify(value):\n    return value\n")
+    index = CodeIndex.from_directory(tmp_path)
+    root = index.find_definition("start")[0]
+
+    # Act
+    result = trace_workflow(
+        index,
+        Judge(ScriptedJevClient(default_noul=0.05)),
+        "Where is a value notified?",
+        [root],
+    )
+
+    # Assert
+    notify = [link for link in result.unresolved_links if link.name == "notify"]
+    assert len(notify) == 2
+    assert all(link.binding is not None and link.binding.status == "candidate" for link in notify)
+    missing = next(link for link in result.unresolved_links if link.name == "missing_sink")
+    assert missing.target is None
+    assert missing.binding is not None and missing.binding.status == "unresolved"
+
+
+def test_trace_requires_a_concrete_start_instead_of_inventing_one(tmp_path: Path) -> None:
+    index = _workflow_index(tmp_path)
+
+    with pytest.raises(ValueError, match="concrete start"):
+        trace_workflow(index, Judge(ScriptedJevClient()), "How are orders handled?", [])
+
+
+def _bulky_workflow_index(root: Path) -> CodeIndex:
+    """The same real workflow with bodies long enough to force several Judge batches."""
+    _workflow_index(root)
+    bulk = "x" * 30_000
+    for path in sorted(root.glob("*.py")):
+        path.write_text(path.read_text().replace("):\n", f"):\n    bulk = '{bulk}'\n"))
+    return CodeIndex.from_directory(root)
+
+
+def test_budget_stop_keeps_answered_batches_and_never_marks_the_rest_a_gap(tmp_path: Path) -> None:
+    index = _bulky_workflow_index(tmp_path)
+    root = index.find_definition("handle_order")[0]
+    provider = _evidence_client()
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+    judge = Judge(provider, max_calls=2, store=store)
+
+    # Act
+    result = trace_workflow(index, judge, "How does an order request become an HTTP result?", [root])
+
+    # Assert: the cap stops a later batch, yet the answered batches survive with their evidence.
+    assert result.budget_stopped
+    assert judge.calls == 2
+    assert len(provider.requests) == 2
+    assert {len(obligation.checked) for obligation in result.obligations} == {2}
+    for obligation in result.obligations:
+        assert not obligation.examined
+        if obligation.evidence:
+            assert obligation.status == EvidenceStatus.EVIDENCE_BACKED
+        else:
+            # Unexamined spans stay unresolved; their silence is never reported as a gap.
+            assert obligation.status == EvidenceStatus.UNRESOLVED
+        assert obligation.status != EvidenceStatus.GAP_TO_INVESTIGATE
+    # The static graph and its links are untouched by the budget stop.
+    complete = trace_workflow(
+        index, Judge(_evidence_client()), "How does an order request become an HTTP result?", [root]
+    )
+    assert result.unresolved_links == complete.unresolved_links
+
+    # Cached answers replay the preserved evidence without a single live call.
+    replay_judge = Judge(
+        ScriptedJevClient(default_noul=0.05),
+        max_calls=0,
+        store=store,
+        served_model=provider.model,
+    )
+    replayed = trace_workflow(index, replay_judge, "How does an order request become an HTTP result?", [root])
+    assert replay_judge.calls == 0
+    assert replayed.budget_stopped
+    for obligation, original in zip(replayed.obligations, result.obligations, strict=True):
+        assert [answer.item["span_key"] for answer in obligation.checked] == [
+            answer.item["span_key"] for answer in original.checked
+        ]
+        assert all(answer.from_store for answer in obligation.checked)
+        assert obligation.status == original.status
+
+
+def test_cancelled_walk_builds_no_trace_items_or_slices_before_its_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = _workflow_index(tmp_path)
+    client = ScriptedJevClient(default_noul=0.95)
+    root = index.find_definition("handle_order")[0]
+    slices: list[Span] = []
+    original = index.read_slice
+
+    def counting(span: Span, origin: str = "") -> CodeSlice:
+        slices.append(span)
+        return original(span, origin=origin)
+
+    monkeypatch.setattr(index, "read_slice", counting)
+
+    # Act
+    result = trace_workflow(index, Judge(client), "How are orders handled?", [root], cancelled=lambda: True)
+
+    # Assert: the stop is checked before any parser slice or item is built.
+    assert result.graph.stop == "cancelled"
+    assert not slices
+    assert not client.requests
+    assert {obligation.status for obligation in result.obligations} == {EvidenceStatus.UNRESOLVED}
+
+
+def test_cancelled_static_walk_does_not_start_external_judgments(tmp_path: Path) -> None:
+    index = _workflow_index(tmp_path)
+    client = ScriptedJevClient(default_noul=0.95)
+    root = index.find_definition("handle_order")[0]
+
+    # Act
+    result = trace_workflow(
+        index,
+        Judge(client),
+        "How are orders handled?",
+        [root],
+        cancelled=lambda: True,
+    )
+
+    # Assert
+    assert result.graph.stop == "cancelled"
+    assert not client.requests
+    assert {obligation.status for obligation in result.obligations} == {EvidenceStatus.UNRESOLVED}

@@ -14,7 +14,7 @@ import inspect
 import json
 import logging
 import threading
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from .answers import JevResponse, NoulAnswer, response_to_raw
@@ -224,15 +224,45 @@ class Judge:
         Uses the same packing and cache as ``check_each``. Results arrive in completion order,
         not input order. A call-cap or provider failure still raises after earlier results yield.
         """
-        plan = self._check_plan([check], items, shared, list_name, thresholds)
-        for (position, _), answer in sorted(plan.answered.items()):
-            yield plan.result(position, answer)
+        for _name, result in self.iter_check_every(
+            [check], items, shared, list_name=list_name, thresholds=thresholds
+        ):
+            yield result
+
+    def iter_check_every(
+        self,
+        checks: Sequence[Check],
+        items: Sequence[Mapping],
+        shared: Mapping | None = None,
+        *,
+        list_name: str = "items",
+        thresholds: Thresholds | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> Iterator[tuple[str, CheckResult]]:
+        """Every check asked about every item, yielded per answered question as batches complete.
+
+        The streaming form of ``check_every``: it uses the same packing and cache, yields each
+        result under the name of the check that asked for it, and yields cached answers before the
+        first batch so store hits consume no live call. A call-cap or provider failure still raises
+        after earlier results yield, so a caller keeps every answered batch.
+        Cancellation is checked before each live batch; cached and already answered results still
+        yield in full. It does not cancel a request already in flight.
+        """
+        plan = self._check_plan(checks, items, shared, list_name, thresholds)
+        names = {check.question_id: check.name for check in checks}
+        for (position, question_id), answer in sorted(plan.answered.items()):
+            yield names[question_id], plan.result(position, answer)
         for batch in plan.batches:
+            if cancelled is not None and cancelled():
+                return
             plan.answer(
                 batch, self.ask(batch.state, batch.questions, thresholds=plan.thresholds, **batch.extras)
             )
-            for question_id, position in batch.slots.items():
-                yield plan.result(position, plan.answered[(position, question_id)])
+            for question_id, position in sorted(batch.slots.items(), key=lambda slot: slot[1]):
+                yield (
+                    names[question_id.split("#", 1)[0]],
+                    plan.result(position, plan.answered[(position, question_id)]),
+                )
 
     async def check_each_async(
         self,
