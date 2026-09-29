@@ -117,8 +117,8 @@ numeric options are numbers, and `verbose` is a boolean:
 ```
 
 JSON and flags use the same defaults, option validation and search workflow. Unknown fields and
-wrong value types are errors. Omit options you do not need; `null` is accepted only for options
-whose default is unset. Paths are relative to the invocation directory, including when the JSON
+wrong value types are errors. Omit options you do not need; `null` also lifts the `max_calls` default.
+Paths are relative to the invocation directory, including when the JSON
 file lives elsewhere. Use `--json` on its own; put any search options inside the request.
 
 ### Optional search controls
@@ -127,8 +127,12 @@ Use `--prefix app/` to narrow the scope, `--start app/orders.py:42` to supply a 
 point, and `--out /path/to/new-pack` to select the result directory. Prefixes and starts are repeatable.
 Without a start, `jvn` uses typed Jev judgments to select entry candidates from the source inventory.
 
-Depth, step and call limits are unset by default. If you want an explicit allowance for a particular
-search, you can supply one:
+Every live call is a paid request, so `--max-calls` defaults to 24 for the whole run, choosing an entry
+point included; a search that reaches it ends with outcome `budget` and a resumable `not_inspected`
+frontier (or a saved entry-selection stage if the cap arrives earlier). Resume with another `jvn find`
+invocation using `--resume /path/to/previous-pack`; it gets a fresh call allowance and writes a new pack
+while keeping the earlier evidence. `--max-calls none` lifts the cap. Depth and step limits are unset by default. If you want an
+explicit allowance for a particular search, you can supply one:
 
 ```sh
 jvn find "the check that limits how many items an order may have" \

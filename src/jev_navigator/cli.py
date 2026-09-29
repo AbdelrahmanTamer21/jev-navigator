@@ -7,6 +7,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import MutableMapping, Sequence
@@ -16,13 +17,14 @@ from pathlib import Path
 from time import monotonic
 
 from .adapters.typesafe import TypeSafeJevClient
+from .cli_resume import load_resume, save_resume
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import FindAllResult, find_all
-from .directives.find_code import FindResult, SearchBudget, Visit, find_code
+from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
 from .directives.places import Place, place_for_line
 from .index.code_index import CodeIndex
 from .judgments.client import JevClient
-from .judgments.judge import Judge
+from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import JsonlAnswerStore
 from .judgments.thresholds import Thresholds
 from .progress import ProgressJournal, TerminalProgress
@@ -30,6 +32,8 @@ from .progress import ProgressJournal, TerminalProgress
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
 POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
+# Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
+DEFAULT_MAX_CALLS = 24
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -74,6 +78,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             thresholds=Thresholds.from_env(),
             verbose=args.verbose,
             workflow=args.command,
+            resume_from=Path(args.resume).expanduser() if getattr(args, "resume", None) else None,
         )
     except Exception as error:
         print(f"jvn {args.command}: {error}", file=sys.stderr)
@@ -85,6 +90,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if client is not None:
             client.close()
     search_outcome = manifest["search"]["outcome"]
+    resume_directory = (
+        str(output.resolve())
+        if args.command == "find" and search_outcome in ("budget", "cancelled")
+        else None
+    )
     if args.json:
         print(
             json.dumps(
@@ -94,12 +104,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "report": str(output.resolve() / "report.md"),
                     "search": manifest["search"],
                     "provider": manifest["provider"],
+                    "resume": resume_directory,
                 }
             )
         )
     else:
         print(f"evidence pack: {output.resolve()}")
         print(f"outcome: {search_outcome} ({manifest['search']['calls']} live calls)")
+        if resume_directory is not None:
+            print(f"resume: use --resume {output.resolve()} with the same target and repository")
     return 130 if search_outcome == "cancelled" else 0
 
 
@@ -116,14 +129,24 @@ def create_evidence_pack(
     verbose: bool = False,
     fact_cache_dir: Path | None = None,
     workflow: str = "find",
+    resume_from: Path | None = None,
 ) -> dict:
     """Run the real index/search owners and persist their reviewable evidence."""
     if workflow not in ("find", "findall"):
         raise ValueError(f"unknown search workflow: {workflow}")
+    if resume_from is not None and workflow != "find":
+        raise ValueError("saved-frontier resume currently belongs to the find workflow")
     repository = repository.resolve()
     output = output.resolve()
     _validate_budget(budget)
+    thresholds = thresholds or Thresholds()
+    previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client)
     _prepare_output(output)
+    if resume_from is not None:
+        for name in ("answers.jsonl", "journal.jsonl"):
+            source = resume_from.resolve() / name
+            if source.is_file():
+                shutil.copyfile(source, output / name)
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
@@ -132,57 +155,87 @@ def create_evidence_pack(
     outcome = "failed"
     try:
         progress.phase("indexing files")
+        excluded = (output, Path.cwd() / "jvn-results")
+        if resume_from is not None:
+            excluded += (resume_from.resolve(),)
         index = CodeIndex.from_directory(
             repository,
             prefixes=prefixes,
-            exclude_paths=(output, Path.cwd() / "jvn-results"),
+            exclude_paths=excluded,
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )
         if warning := _scope_warning(len(index.files)):
             print(warning, file=sys.stderr)
-        thresholds = thresholds or Thresholds()
+        resume = None
+        if previous is not None:
+            if previous["source"]["revision"] != index.commit:
+                raise ValueError("repository revision changed since the evidence pack")
+            resume = load_resume(resume_from.resolve() / "resume.json", index)
         judge = Judge(
             client,
             thresholds=thresholds,
             max_calls=budget.max_calls,
+            served_model=previous["provider"]["served_model"] if previous else None,
             journal=journal,
             store=JsonlAnswerStore(output / "answers.jsonl"),
         )
         selection: EntrySelection | None = None
         started = monotonic()
-        if starts:
+        entry_pending = False
+        if resume is not None:
+            start_places = []
+            initial_candidates = ()
+        elif starts:
             start_places = [_parse_start(index, start) for start in starts]
             initial_candidates: tuple[tuple[Place, float], ...] = ()
         else:
             progress.phase("choosing an entry point")
             start_places = []
-            selection = choose_initial_candidates(index, judge, target)
-            initial_candidates = tuple(
-                (
-                    candidate.place,
-                    candidate.selection_probability if candidate.selection_probability is not None else 0.0,
+            try:
+                selection = choose_initial_candidates(index, judge, target)
+            except CallCapReachedError:
+                entry_pending = True
+            initial_candidates = (
+                tuple(
+                    (
+                        candidate.place,
+                        candidate.selection_probability
+                        if candidate.selection_probability is not None
+                        else 0.0,
+                    )
+                    for candidate in selection.candidates
                 )
-                for candidate in selection.candidates
+                if selection
+                else ()
             )
-        progress.phase("navigating code")
-        result = find_code(
-            index,
-            judge,
-            target,
-            start_places,
-            budget=budget,
-            commit=None,
-            initial_candidates=initial_candidates,
-        )
+        if entry_pending:
+            result = FindResult(Outcome.BUDGET, (), (), (), (), 0, 0)
+        else:
+            progress.phase("navigating code")
+            result = find_code(
+                index,
+                judge,
+                target,
+                start_places,
+                budget=budget,
+                commit=None,
+                initial_candidates=initial_candidates,
+                resume=resume,
+            )
         seed_calls = judge.calls
         seed_duration_seconds = monotonic() - started
         enumeration = None
-        if workflow == "findall" and result.outcome != "cancelled":
+        if workflow == "findall" and result.outcome != Outcome.CANCELLED:
             progress.phase("expanding seed and checking remaining functions")
             enumeration = find_all(index, judge, target, [visit.code.span for visit in result.found])
         duration_seconds = monotonic() - started
         progress.phase("writing evidence pack")
+        scope_unavailable: dict[str, str] = {}
+        if workflow == "find" and result.outcome in (Outcome.BUDGET, Outcome.CANCELLED):
+            scope_unavailable = save_resume(
+                output / "resume.json", index, result, entry_pending=entry_pending
+            )
         manifest = _manifest(
             repository,
             prefixes,
@@ -198,6 +251,10 @@ def create_evidence_pack(
             duration_seconds=seed_duration_seconds,
             total_calls=seed_calls,
             entry_selection=selection,
+            previous=previous,
+            resume_from=resume_from,
+            entry_pending=entry_pending,
+            scope_unavailable=scope_unavailable,
         )
         if enumeration is not None:
             manifest["workflow"] = "findall"
@@ -254,7 +311,8 @@ A completed search can have a non-found outcome; inspect search.outcome in JSON 
   jvn find "the order limit" --preview-lines 8 --max-slice-chars 12000 --max-line-chars 240
   jvn find "the order limit" --verbose
 
-All flags are optional. No default depth, step, call or neighbour-count cap.
+All flags are optional. Live calls stop at 24 unless --max-calls sets another cap ('none' lifts it);
+there is no default depth, step or neighbour-count cap.
 Explicit limits may leave work unexplored; inspect the result's outcome and not_inspected entries.
 Find stops on a match; it is not an exhaustive find-all or an end-to-end trace.
 For JSON field names, types and defaults: jvn schema find. Full examples: docs/cli.md.""",
@@ -264,6 +322,10 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     help_command = commands.add_parser("help", help="show general or command-specific help")
     help_command.add_argument("topic", nargs="?", choices=("find", "findall", "schema"))
     _add_search_arguments(find)
+    find.add_argument(
+        "--resume",
+        help="Prior budget-stopped evidence pack; continue its saved frontier into a new output pack",
+    )
     findall = commands.add_parser(
         "findall",
         help="find matching function bodies, including disconnected implementations",
@@ -318,9 +380,13 @@ def _add_search_arguments(find: argparse.ArgumentParser) -> None:
     )
     limits.add_argument(
         "--max-calls",
-        type=int,
-        default=defaults.max_calls,
-        help="Maximum model requests, including entry selection (default: unlimited; not a token cap)",
+        type=_count_or_none,
+        default=DEFAULT_MAX_CALLS,
+        metavar="N|none",
+        help=(
+            f"Maximum model requests, including entry selection (default: {DEFAULT_MAX_CALLS}; "
+            "'none' for no cap; not a token cap)"
+        ),
     )
     evidence.add_argument(
         "--beam-width",
@@ -392,6 +458,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action = actions.get(name)
         if action is None:
             parser.error(f"unknown JSON field: {name}")
+        if value is None and action.type is _count_or_none:
+            arguments.append(f"{action.option_strings[0]}=none")
+            continue
         if value is None and action.default is None and action.option_strings:
             continue
         if isinstance(action, argparse._StoreTrueAction):
@@ -403,7 +472,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         values = value if isinstance(action, argparse._AppendAction) else [value]
         if not isinstance(values, list):
             parser.error(f"JSON field {name} must be an array")
-        expected_type = action.type or str
+        expected_type = int if action.type is _count_or_none else action.type or str
         for item in values:
             if expected_type is int and isinstance(item, float) and item.is_integer():
                 item = int(item)
@@ -433,14 +502,15 @@ def _request_schema(parser: argparse.ArgumentParser) -> dict:
     properties = {"command": {"type": "string", "const": command, "default": command}}
     required = []
     for name, action in _request_actions(parser).items():
-        field = {"description": action.help, "type": "integer" if action.type is int else "string"}
+        numeric = action.type in (int, _count_or_none)
+        field = {"description": action.help, "type": "integer" if numeric else "string"}
         if isinstance(action, argparse._StoreTrueAction):
             field["type"] = "boolean"
         elif isinstance(action, argparse._AppendAction):
             field.update(type="array", items={"type": field["type"]})
         if action.option_strings:
             field["default"] = action.default
-            if action.default is None:
+            if action.default is None or action.type is _count_or_none:
                 field["type"] = [field["type"], "null"]
         else:
             required.append(name)
@@ -460,6 +530,16 @@ def _request_schema(parser: argparse.ArgumentParser) -> dict:
     }
 
 
+def _count_or_none(value: str) -> int | None:
+    """A ``--max-calls`` value: a number, or ``none`` for no cap."""
+    if value == "none":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number or 'none', got {value!r}") from None
+
+
 def _validate_budget(budget: SearchBudget) -> None:
     invalid = [
         name
@@ -475,6 +555,35 @@ def _prepare_output(output: Path) -> None:
     if output.exists() and any(output.iterdir()):
         raise ValueError(f"output directory is not empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
+
+
+def _previous_pack(
+    resume_from: Path | None,
+    repository: Path,
+    prefixes: tuple[str, ...],
+    target: str,
+    starts: tuple[str, ...],
+    thresholds: Thresholds,
+    client: JevClient,
+) -> dict | None:
+    if resume_from is None:
+        return None
+    source = resume_from.resolve()
+    previous = json.loads((source / "manifest.json").read_text())
+    if not (source / "resume.json").is_file():
+        raise ValueError(f"no saved find frontier in {source}")
+    if previous["search"]["outcome"] not in ("budget", "cancelled"):
+        raise ValueError("only a budget-stopped or cancelled find can resume")
+    if (
+        previous["source"]["repository"] != str(repository)
+        or previous["source"]["prefixes"] != list(prefixes)
+        or previous["target"] != target
+        or previous["requested_starts"] != list(starts)
+        or previous["thresholds"] != thresholds.as_dict()
+        or previous["provider"]["requested_model"] != getattr(client, "model", "unknown")
+    ):
+        raise ValueError("resume must use the same repository, scope, target, starts, thresholds and model")
+    return previous
 
 
 def _default_output(repository: Path) -> Path:
@@ -528,7 +637,15 @@ def _manifest(
     duration_seconds: float,
     total_calls: int,
     entry_selection: EntrySelection | None,
+    previous: dict | None = None,
+    resume_from: Path | None = None,
+    entry_pending: bool = False,
+    scope_unavailable: dict[str, str] | None = None,
 ) -> dict:
+    old_search = previous["search"] if previous else {}
+    entry_receipt = entry_selection.to_json() if entry_selection else None
+    if entry_receipt is None and previous:
+        entry_receipt = previous.get("entry_selection")
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -541,21 +658,23 @@ def _manifest(
         },
         "target": target,
         "requested_starts": list(starts),
-        "entry_selection": entry_selection.to_json() if entry_selection else None,
+        "entry_selection": entry_receipt,
+        "resume_from": str(resume_from.resolve()) if resume_from else None,
         "budget": asdict(budget),
         "thresholds": thresholds.as_dict(),
         "provider": {
             "requested_model": requested_model,
             "served_model": served_model,
-            "input_tokens": input_tokens,
+            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_tokens,
         },
         "search": {
             "outcome": result.outcome,
-            "steps": result.steps,
-            "calls": total_calls,
-            "entry_calls": total_calls - result.calls,
-            "navigation_calls": result.calls,
-            "duration_seconds": round(duration_seconds, 3),
+            "entry_selection_pending": entry_pending,
+            "steps": old_search.get("steps", 0) + result.steps,
+            "calls": old_search.get("calls", 0) + total_calls,
+            "entry_calls": old_search.get("entry_calls", 0) + total_calls - result.calls,
+            "navigation_calls": old_search.get("navigation_calls", 0) + result.calls,
+            "duration_seconds": round(old_search.get("duration_seconds", 0) + duration_seconds, 3),
             "moves": list(result.moves),
             "found": [_visit(visit) for visit in result.found],
             "starts": [_visit(visit) for visit in result.starts],
@@ -579,8 +698,11 @@ def _manifest(
                 "completed": list(result.parser_scans_completed),
                 "pending": list(result.parser_scans_pending),
             },
-            "unavailable_files": dict(result.unavailable_files),
-            "history": [step.to_json() for step in result.history.steps] if result.history else [],
+            "unavailable_files": {**result.unavailable_files, **(scope_unavailable or {})},
+            "history": [
+                *old_search.get("history", []),
+                *([step.to_json() for step in result.history.steps] if result.history else []),
+            ],
         },
     }
 
@@ -732,6 +854,7 @@ def _report(manifest: dict) -> str:
         f"- Scope: {', '.join(f'`{prefix}`' for prefix in source['prefixes']) or 'whole directory'}",
         f"- Target: {manifest['target']}",
         f"- Outcome: **{search['outcome']}**",
+        *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
         f"`{manifest['provider']['served_model']}`",
