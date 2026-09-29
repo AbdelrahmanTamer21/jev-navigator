@@ -531,8 +531,9 @@ class Judge:
         budget = MAX_STATE_CHARS if batch_budget is None else batch_budget
         plan = _CheckPlan(list_name, checks, items, shared, thresholds or self.thresholds, budget)
         for position, item in enumerate(items):
+            masked_item, masked_shared = self._masked_together([item, shared])
             for check in checks:
-                stored = self._stored_item(check, *self._masked_together([item, shared]))
+                stored = self._stored_item(check, masked_item, masked_shared)
                 if stored is None:
                     plan.open.setdefault(position, {})[check.question_id] = check
                 else:

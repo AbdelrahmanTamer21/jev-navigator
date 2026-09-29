@@ -10,6 +10,34 @@ from jev_navigator.index.code_index import CodeIndex, ScopeTooWideError, UnsafeP
 from jev_navigator.index.spans import Span, TextHit
 
 
+def test_parsed_fact_lookups_do_not_launch_repeated_text_searches(tmp_path, monkeypatch):
+    from jev_navigator.index import tools
+
+    (tmp_path / "owner.py").write_text("def target(value):\n    return value\n")
+    (tmp_path / "caller.py").write_text(
+        "from owner import target\ndef caller(value):\n    callback = target\n    return target(value)\n"
+    )
+    cache = tmp_path / "cache"
+    for _ in range(2):  # The same contract holds for fresh parser facts and persisted facts.
+        index = CodeIndex(tmp_path, ("owner.py", "caller.py"), fact_cache_dir=cache)
+        index.functions_in_files(index.files)
+        searches = []
+        run = tools.run_command
+
+        def observe(arguments, *args, searches=searches, run=run, **kwargs):
+            if arguments[0] == tools.RIPGREP:
+                searches.append(arguments)
+            return run(arguments, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(tools, "run_command", observe)
+            assert [span.file for span in index.find_definition("target")] == ["owner.py"]
+            assert [(site.file, site.line) for site in index.find_callers("target")] == [("caller.py", 4)]
+            assert any(ref.file == "caller.py" for ref in index.find_references("target"))
+            assert index.find_definition("absent") == ()
+        assert searches == [], "Already parsed names must not spawn new repository searches"
+
+
 def test_functions_in_lists_python_and_typescript_functions_with_names(sample_index: CodeIndex) -> None:
     # Act
     python_names = [span.name for span in sample_index.functions_in("app/validation.py")]

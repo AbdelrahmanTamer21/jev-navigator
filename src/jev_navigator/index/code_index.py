@@ -92,6 +92,7 @@ class CodeIndex:
         self._unparsed = Unparsed()
         self._unavailable: dict[str, str] = {}
         self._facts: dict[str, FileFacts] = {}
+        self._fact_files_by_name: dict[str, set[str]] = {}
         self._facts_lock = threading.RLock()
         self._fact_cache = FactCache(fact_cache_dir)
         self._files_for_name = cache(self._candidate_files)
@@ -402,7 +403,27 @@ class CodeIndex:
         )
 
     def _candidate_files(self, name: str) -> tuple[str, ...]:
-        return tools.ripgrep_files(name, self._available_files(self._code_files), self.root)
+        # Parsed facts already answer name membership. Only unparsed inventory needs text discovery.
+        with self._facts_lock:
+            known = set(self._fact_files_by_name.get(name, ()))
+            remaining = tuple(file for file in self._code_files if file not in self._facts)
+        discovered = tools.ripgrep_files(name, self._available_files(remaining), self.root)
+        candidates = known.union(discovered)
+        return tuple(file for file in self._code_files if file in candidates)
+
+    def _remember_facts(self, file: str, facts: FileFacts) -> None:
+        self._facts[file] = facts
+        names = {
+            item.name
+            for item in (
+                *facts.structure.symbols,
+                *facts.structure.declarations,
+                *facts.calls,
+                *facts.references,
+            )
+        }
+        for name in names:
+            self._fact_files_by_name.setdefault(name, set()).add(file)
 
     def _facts_in(self, file: str) -> FileFacts:
         self._require_in_scope(file)
@@ -431,7 +452,7 @@ class CodeIndex:
                 if cached is None:
                     to_scan.append(file)
                 else:
-                    self._facts[file] = cached
+                    self._remember_facts(file, cached)
                     if cached.incomplete:
                         self._unparsed.add("facts", (file,))
             if not to_scan:
@@ -441,8 +462,8 @@ class CodeIndex:
                 lambda: self._scan_available_facts(to_scan),
                 len(to_scan),
             )
-            self._facts.update(scanned)
             for file, facts in scanned.items():
+                self._remember_facts(file, facts)
                 self._fact_cache.save(file, contents[file], facts)
 
     def _scan_available_facts(self, files: Sequence[str]) -> dict[str, FileFacts]:
