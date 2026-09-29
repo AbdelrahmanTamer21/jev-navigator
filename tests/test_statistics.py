@@ -228,8 +228,7 @@ def test_per_file_counts_add_up_to_the_scope_total(tmp_path: Path) -> None:
         "function": sum(measured.counts["function"] for measured in counts.per_file.values()),
         "class": sum(measured.counts["class"] for measured in counts.per_file.values()),
     }
-    assert all(counts.count_of(name).counts == counts.per_file[name].counts for name in counts.per_file)
-    assert stats.count_symbols(index, ()).count_of("web/cart.ts").counts == {"function": 0, "class": 0}
+    assert stats.count_symbols(index, ()).count_of("web/cart.ts") is None
 
 
 def test_nested_lines_are_covered_once_when_counting_covered_lines(tmp_path: Path) -> None:

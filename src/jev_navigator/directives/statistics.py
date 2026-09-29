@@ -241,9 +241,9 @@ class SymbolCount:
         """Why these counts are not the whole scope, or nothing when they are."""
         return self.coverage.statement
 
-    def count_of(self, file: str) -> FileSymbols:
-        """What the index found in one file of the scope, or an empty record naming the file."""
-        return self.per_file.get(file, FileSymbols(file, kinds=self.kinds))
+    def count_of(self, file: str) -> FileSymbols | None:
+        """The measured file, or None when this result did not measure that file."""
+        return self.per_file.get(file)
 
 
 def scope_of(index: CodeIndex, scope: Sequence[str] | None = None) -> tuple[str, ...]:
