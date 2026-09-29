@@ -254,3 +254,38 @@ all source parsed successfully. An unrequested symbol kind is omitted, not repre
 `None` when that file was not measured; only a measured empty file has zero counts.
 Same-line nesting can have no known holder because the current index records line spans rather
 than AST parent identities. The structural CLI adapter is not part of this library contract.
+
+## Trace a workflow and retain its evidence
+
+`directives.trace.trace_workflow` composes the existing static graph walk with five independent
+checks: input origin, transformation, handoff, observable outcome and relevant branch. All checks
+share batches through `Judge.iter_check_every`; graph connectivity remains a static fact and a
+positive model answer never promotes a candidate binding to a proved connection.
+
+```python
+from jev_navigator.directives.trace import trace_workflow
+
+result = trace_workflow(
+    index,
+    judge,
+    "How does an order request become an HTTP result?",
+    index.find_definition("handle_order"),
+)
+for obligation in result.obligations:
+    print(obligation.name, obligation.status, obligation.examined)
+```
+
+An evidence-backed obligation has at least one positive judgment; it does not prove the whole path
+or every relevant branch is present. Negative judgments mean no evidence in the supplied component.
+Uncertain and unexamined items remain unresolved. `result.graph` retains every walked function and
+link, including uncertain bindings; `included` is only a presentation backbone, not a deletion of
+the remaining component.
+
+The callable `cli_trace.create_trace_evidence_pack` takes repository, question, `PATH:LINE` starts,
+output directory and client. It writes JSON, Markdown, the request journal and stored answers.
+The manifest retains the full static graph so resolved connections can be inspected after exit.
+Outcomes distinguish completion, an explicit depth boundary, call budget and cancellation.
+Cancellation is cooperative between static steps and live model batches; already answered batches
+are retained in full, and a request already in flight is not aborted by the callback.
+`answers_from` with the prior served-model identity reuses identical stored answers without calls.
+This is a library/pack API; the `jvn trace` command is not registered yet.
