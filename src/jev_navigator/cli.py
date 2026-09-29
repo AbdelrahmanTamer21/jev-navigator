@@ -30,7 +30,7 @@ SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    args = _parse_args(argv)
     if args.command != "find":
         raise AssertionError(f"unhandled command: {args.command}")
     budget = SearchBudget(
@@ -69,9 +69,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         if client is not None:
             client.close()
-    print(f"evidence pack: {output.resolve()}")
     search_outcome = manifest["search"]["outcome"]
-    print(f"outcome: {search_outcome} ({manifest['search']['calls']} live calls)")
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "output_directory": str(output.resolve()),
+                    "manifest": str(output.resolve() / "manifest.json"),
+                    "report": str(output.resolve() / "report.md"),
+                    "search": manifest["search"],
+                    "provider": manifest["provider"],
+                }
+            )
+        )
+    else:
+        print(f"evidence pack: {output.resolve()}")
+        print(f"outcome: {search_outcome} ({manifest['search']['calls']} live calls)")
     return 130 if search_outcome == "cancelled" else 0
 
 
@@ -179,16 +192,21 @@ def _parser() -> argparse.ArgumentParser:
         prog="jvn",
         description="Navigate code with reviewable Jev judgments.",
     )
-    commands = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument(
+        "--json", metavar="FILE", help="read a JSON request from FILE or - for stdin; emit JSON"
+    )
+    commands = parser.add_subparsers(dest="command")
     find = commands.add_parser(
         "find",
         help="find semantically described code and write a versioned evidence pack",
         description="Run one live find_code search and write a versioned evidence pack.",
     )
     find.add_argument("target", help="Semantic description of the code to find")
-    find.add_argument("--repo", default=".", help="Git repository to inspect (default: current directory)")
     find.add_argument(
-        "--prefix", action="append", default=[], help="Optional tracked file or directory scope; repeatable"
+        "--repo", default=".", help="Directory to inspect (default: current directory; Git optional)"
+    )
+    find.add_argument(
+        "--prefix", action="append", default=[], help="Optional file or directory scope; repeatable"
     )
     find.add_argument(
         "--start",
@@ -216,6 +234,63 @@ def _parser() -> argparse.ArgumentParser:
         help="print expanded masked requests as they are sent",
     )
     return parser
+
+
+def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.json is None:
+        if args.command is None:
+            parser.error("a command or --json FILE is required")
+        return args
+    if args.command is not None:
+        parser.error("use --json FILE on its own; put command options in the JSON request")
+    try:
+        if args.json == "-":
+            payload = json.load(sys.stdin)
+        else:
+            with Path(args.json).expanduser().open(encoding="utf-8") as source:
+                payload = json.load(source)
+    except (OSError, ValueError) as error:
+        parser.error(f"cannot read JSON request: {error}")
+    if not isinstance(payload, dict):
+        parser.error("JSON request must be an object")
+    command = payload.get("command", "find")
+    # The command parser is the option schema for both input formats.
+    commands = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+    if not isinstance(command, str) or command not in commands.choices:
+        parser.error(f"unknown JSON command: {command!r}")
+    actions = {action.dest: action for action in commands.choices[command]._actions if action.dest != "help"}
+    arguments = [command]
+    for name, value in payload.items():
+        if name == "command":
+            continue
+        action = actions.get(name)
+        if action is None:
+            parser.error(f"unknown JSON field: {name}")
+        if value is None and action.default is None and action.option_strings:
+            continue
+        if isinstance(action, argparse._StoreTrueAction):
+            if not isinstance(value, bool):
+                parser.error(f"JSON field {name} must be a boolean")
+            if value:
+                arguments.append(action.option_strings[0])
+            continue
+        values = value if isinstance(action, argparse._AppendAction) else [value]
+        if not isinstance(values, list):
+            parser.error(f"JSON field {name} must be an array")
+        expected_type = action.type or str
+        for item in values:
+            if type(item) is not expected_type:
+                parser.error(f"JSON field {name} must contain {expected_type.__name__} values")
+            if action.option_strings:
+                arguments.append(f"{action.option_strings[0]}={item}")
+    if "target" in payload:
+        # A target beginning with '--' is still text, never another option.
+        arguments.extend(["--", payload["target"]])
+    parsed = parser.parse_args(arguments)
+    parsed.json = args.json
+    return parsed
 
 
 def _validate_budget(budget: SearchBudget) -> None:

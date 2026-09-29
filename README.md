@@ -32,24 +32,21 @@ offline.
 
 ## Live evidence-pack command
 
-`jvn find` runs the existing `CodeIndex`, `Judge`, and `find_code` owners and writes
-one reviewable directory. Load the TypeSafe key into the environment without putting its value on
-the command line, choose a narrow tracked scope, and state the complete search budget:
+Start in the directory you want to search:
 
 ```sh
-jvn find "the check that limits how many items an order may have" \
-  --repo /path/to/repository \
-  --prefix app/ \
-  --start app/orders.py:42 \
-  --out ~/.local/share/jev-navigator/evidence-packs/order-limit-01 \
-  --max-depth 3 \
-  --max-steps 8 \
-  --max-calls 8 \
-  --beam-width 1 \
-  --neighbours-per-kind 8 \
-  --preview-lines 8 \
-  --max-slice-chars 12000 \
-  --max-line-chars 240
+jvn find "the check that limits how many items an order may have"
+```
+
+That is enough. `jvn` chooses an entry point and creates a unique evidence pack under
+`./jvn-results/`. It works with uncommitted changes and ordinary directories outside Git.
+`find` follows code relationships to locate a match; it does not promise every matching function
+or a complete end-to-end trace.
+
+To search another directory, add just `--repo`:
+
+```sh
+jvn find "where do we reject evidence quotes that are absent from the source?" --repo /path/to/repository
 ```
 
 Explicit `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` process values win independently. Otherwise
@@ -57,11 +54,73 @@ Explicit `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` process values win independe
 file or print the values. `TYPESAFE_BASE_URL` is the API root before `/v1/systemone`, such as
 `http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
 
-`--start PATH:LINE` is repeatable and optional. A useful start is an entry point or caller, rather
-than the target function itself. Without one, the first code span in every scoped file is queued as
-a start; the budget and `not_inspected` output keep the unfinished scope visible.
+### JSON input for agents and pipelines
 
-The output directory must be new or empty. It contains:
+Put a request in `request.json`:
+
+```json
+{
+  "target": "the check that limits how many items an order may have"
+}
+```
+
+Then run:
+
+```sh
+jvn --json request.json
+```
+
+Or send the same request on stdin:
+
+```sh
+printf '%s\n' '{"target":"the check that limits how many items an order may have"}' | jvn --json -
+```
+
+`command` defaults to `find`, `repo` defaults to the current directory, and output goes to
+`./jvn-results/` unless you supply `out`. JSON mode prints one result object on stdout with
+`output_directory`, `manifest`, `report`, `search` and `provider`. Progress and errors stay on stderr.
+For example, pipe the command's output to `jq '.search.found'` to read the matching source spans.
+The report and manifest paths refer to the saved evidence pack. Failed invocations return a nonzero
+exit status; check it before consuming stdout. Ctrl-C cancels the search.
+
+Optional fields use CLI names with underscores instead of hyphens. Repeatable options are arrays,
+numeric options are numbers, and `verbose` is a boolean:
+
+```json
+{
+  "command": "find",
+  "target": "the check that limits how many items an order may have",
+  "repo": "/path/to/repository",
+  "prefix": ["app/"],
+  "start": ["app/orders.py:42"],
+  "verbose": false
+}
+```
+
+JSON and flags use the same defaults, option validation and search workflow. Unknown fields and
+wrong value types are errors. Omit options you do not need; `null` is accepted only for options
+whose default is unset. Paths are relative to the invocation directory, including when the JSON
+file lives elsewhere. Use `--json` on its own; put any search options inside the request.
+
+### Optional search controls
+
+Use `--prefix app/` to narrow the scope, `--start app/orders.py:42` to supply a known caller or entry
+point, and `--out /path/to/new-pack` to select the result directory. Prefixes and starts are repeatable.
+Without a start, `jvn` uses typed Jev judgments to select entry candidates from the source inventory.
+
+Depth, step and call limits are unset by default. If you want an explicit allowance for a particular
+search, you can supply one:
+
+```sh
+jvn find "the check that limits how many items an order may have" \
+  --repo /path/to/repository \
+  --prefix app/ \
+  --max-calls 8
+```
+
+`jvn find --help` lists the remaining controls. They are optional tuning, not prerequisites.
+
+An explicitly selected output directory must be new or empty. Each evidence pack contains:
 
 - `manifest.json`: schema version, navigator build fingerprint and source revision, inspected
   repository revision, explicit budget and thresholds, requested and served model, elapsed time,

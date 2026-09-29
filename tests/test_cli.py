@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 import os
+import subprocess
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -296,7 +299,10 @@ def test_large_scope_warning_starts_above_twenty_thousand_files() -> None:
 
 
 @pytest.mark.parametrize("search_here", [False, True])
-def test_find_defaults_to_unique_results_under_invocation_directory(tmp_path, monkeypatch, search_here):
+@pytest.mark.parametrize("input_mode", ["flags", "json-file", "json-stdin"])
+def test_find_defaults_to_unique_results_under_invocation_directory(
+    tmp_path, monkeypatch, capsys, search_here, input_mode
+):
     from jev_navigator import cli
 
     repository = tmp_path if search_here else tmp_path / "repo"
@@ -318,8 +324,29 @@ def test_find_defaults_to_unique_results_under_invocation_directory(tmp_path, mo
         ),
     )
     for _ in range(2):
-        assert main(["find", "the policy", "--repo", str(repository)]) == 0
-    packs = list((tmp_path / "jvn-results").iterdir())
+        request = {"target": "the policy"}
+        if not search_here:
+            request["repo"] = str(repository)
+        if input_mode == "flags":
+            arguments = ["find", "the policy", "--repo", str(repository)]
+        elif input_mode == "json-file":
+            request_file = tmp_path / "jvn-results" / "request.json"
+            request_file.parent.mkdir(exist_ok=True)
+            request_file.write_text(json.dumps(request))
+            arguments = ["--json", str(request_file)]
+        else:
+            monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(request)))
+            arguments = ["--json", "-"]
+        assert main(arguments) == 0
+        captured = capsys.readouterr()
+        if input_mode != "flags":
+            response = json.loads(captured.out)
+            assert response["search"]["outcome"] == "found"
+            pack = Path(response["output_directory"])
+            assert response["manifest"] == str(pack / "manifest.json")
+            assert response["report"] == str(pack / "report.md")
+            assert "jvn" in captured.err
+    packs = [path for path in (tmp_path / "jvn-results").iterdir() if path.is_dir()]
     assert len(packs) == 2
     for pack in packs:
         manifest = json.loads((pack / "manifest.json").read_text())
@@ -356,3 +383,122 @@ def test_report_distinguishes_included_lines_from_an_unopened_candidate(tmp_path
     assert "Lines included in opened span" in report
     assert "Candidates not independently opened" in report
     assert "Search stopped after finding a match" in report
+
+
+@pytest.mark.parametrize(
+    "request_text, message",
+    [
+        ("[]", "object"),
+        ("{", "JSON"),
+        ('{"target": "policy", "typo": 2}', "typo"),
+        ('{"target": "policy", "max_steps": "two"}', "max_steps"),
+        ('{"target": "policy", "max_steps": true}', "max_steps"),
+        ('{"target": "policy", "prefix": "app/"}', "prefix"),
+        ('{"target": "policy", "verbose": "yes"}', "verbose"),
+        ('{"target": "policy", "repo": null}', "repo"),
+        ('{"target": 42}', "target"),
+        ('{"command": "missing", "target": "policy"}', "command"),
+        ("{}", "target"),
+    ],
+)
+def test_json_request_errors_fail_before_search(monkeypatch, capsys, request_text, message):
+    from jev_navigator import cli
+
+    def unexpected_client():
+        pytest.fail("invalid input reached the model client")
+
+    monkeypatch.setattr(cli, "TypeSafeJevClient", unexpected_client)
+    monkeypatch.setattr("sys.stdin", io.StringIO(request_text))
+    with pytest.raises(SystemExit) as error:
+        main(["--json", "-"])
+    assert error.value.code == 2
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert message in captured.err
+
+
+def test_json_pipeline_reaches_sdk_and_preserves_explicit_options(tmp_path):
+    pytest.importorskip("typesafe_sdk")
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    for name in ("first.py", "second.py"):
+        (repository / name).write_text(
+            "def entry(items):\n    return admit(items)\n\ndef admit(items):\n    return len(items) <= 3\n"
+        )
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
+            payload = json.loads(self.rfile.read(int(self.headers["content-length"])))
+            received.append(payload)
+            answers = {}
+            for name, question in payload["questions"].items():
+                if question["type"] == "noul":
+                    answers[name] = {"type": "noul", "noul": 0.95}
+                else:
+                    labels = list(question["criteria"])
+                    answers[name] = {
+                        "type": "choice",
+                        "choice": labels[0],
+                        "confidence": 1.0,
+                        "probabilities": {label: float(label == labels[0]) for label in labels},
+                    }
+            body = json.dumps(
+                {"model": "jev-test", "answers": answers, "usage": {"input_tokens": 10, "output_tokens": 10}}
+            ).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever)
+    thread.start()
+    payload = {
+        "command": "find",
+        "target": "--the item-count check",
+        "repo": str(repository),
+        "prefix": ["first.py", "second.py"],
+        "start": ["first.py:1", "second.py:1"],
+        "max_calls": None,
+        "beam_width": 2,
+        "verbose": True,
+        "out": str(tmp_path / "pack"),
+    }
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from jev_navigator.cli import main; raise SystemExit(main())",
+                "--json",
+                "-",
+            ],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            env={
+                **os.environ,
+                "TYPESAFE_API_KEY": "local-test-key",
+                "TYPESAFE_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+            },
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert result.returncode == 0, result.stderr
+    response = json.loads(result.stdout)
+    manifest = json.loads(Path(response["manifest"]).read_text())
+    assert received
+    assert manifest["target"] == "--the item-count check"
+    assert manifest["source"]["prefixes"] == ["first.py", "second.py"]
+    assert manifest["requested_starts"] == ["first.py:1", "second.py:1"]
+    assert manifest["budget"]["max_calls"] is None
+    assert manifest["budget"]["beam_width"] == 2
+    assert response["search"]["outcome"] == "found"
+    assert "request" in result.stderr
