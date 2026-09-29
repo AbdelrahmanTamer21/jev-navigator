@@ -34,6 +34,7 @@ NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours
 POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
+DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -332,16 +333,16 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
         description="Find a seed, expand code relationships, then judge remaining function bodies.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='jvn findall "functions that reject an order exceeding the item limit"\n'
-        "No default file or call cap. Coverage describes functions examined, not proof of absence.\n"
+        "Default: 48 live model calls; --max-calls none lifts it. No file cap.\n"
+        "Coverage describes functions examined, not proof of absence.\n"
         "All existing scope, output and request-display options are available.\n"
         'JSON: {"command":"findall","target":"functions checking the order item limit"}',
     )
-    _add_search_arguments(findall)
-    findall.set_defaults(max_calls=None)
+    _add_search_arguments(findall, max_calls=DEFAULT_FIND_ALL_MAX_CALLS)
     return parser
 
 
-def _add_search_arguments(find: argparse.ArgumentParser) -> None:
+def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEFAULT_MAX_CALLS) -> None:
     find.add_argument(
         "target", help="Behavior to locate; name the concrete check, decision or transformation"
     )
@@ -381,10 +382,10 @@ def _add_search_arguments(find: argparse.ArgumentParser) -> None:
     limits.add_argument(
         "--max-calls",
         type=_count_or_none,
-        default=DEFAULT_MAX_CALLS,
+        default=max_calls,
         metavar="N|none",
         help=(
-            f"Maximum model requests, including entry selection (default: {DEFAULT_MAX_CALLS}; "
+            f"Maximum model requests, including entry selection (default: {max_calls}; "
             "'none' for no cap; not a token cap)"
         ),
     )

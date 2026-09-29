@@ -126,3 +126,32 @@ def test_fallback_batches_real_parser_work_and_keeps_every_function(tmp_path):
     assert {r.item["name"] for r in result.matched} == {f"check_{number}" for number in range(12)}
     assert [count for event, count in scans if event == "started"] == [12]
     assert result.calls == 1
+
+
+def test_budget_stop_retains_completed_batches_and_cache_only_replay(tmp_path):
+    for name in ("alpha", "beta", "gamma"):
+        (tmp_path / f"{name}.py").write_text(
+            f"def {name}(item):\n    note = {('x' * 40000)!r}\n    return len(item) <= 3\n"
+        )
+    index = CodeIndex(tmp_path, ["alpha.py", "beta.py", "gamma.py"])
+    provider = ScriptedJevClient(default_noul=0.96)
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+    stopped = find_all(index, Judge(provider, max_calls=1, store=store), "item limit", [])
+    assert stopped.stopped_by == "budget"
+    assert stopped.coverage == "partial"
+    assert stopped.calls == 1
+    assert len(stopped.judged) == 1
+    assert set(stopped.remaining_files) == {"beta.py", "gamma.py"}
+    cached = find_all(
+        index, Judge(provider, max_calls=0, store=store, served_model=provider.model), "item limit", []
+    )
+    assert cached.calls == 0
+    assert len(cached.judged) == 1
+    assert cached.judged[0].from_store
+    assert cached.stopped_by == "budget"
+    completed = find_all(
+        index, Judge(provider, max_calls=2, store=store, served_model=provider.model), "item limit", []
+    )
+    assert completed.coverage == "functions_examined"
+    assert len(completed.judged) == 3
+    assert completed.calls == 2

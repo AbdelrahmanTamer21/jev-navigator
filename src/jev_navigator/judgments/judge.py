@@ -210,6 +210,30 @@ class Judge:
             )
         return plan.answers()
 
+    def iter_check_each(
+        self,
+        check: Check,
+        items: Sequence[Mapping],
+        shared: Mapping | None = None,
+        *,
+        list_name: str = "items",
+        thresholds: Thresholds | None = None,
+    ) -> Iterator[CheckResult]:
+        """Yield cached answers, then completed batches, preserving work before a later stop.
+
+        Uses the same packing and cache as ``check_each``. Results arrive in completion order,
+        not input order. A call-cap or provider failure still raises after earlier results yield.
+        """
+        plan = self._check_plan([check], items, shared, list_name, thresholds)
+        for (position, _), answer in sorted(plan.answered.items()):
+            yield plan.result(position, answer)
+        for batch in plan.batches:
+            plan.answer(
+                batch, self.ask(batch.state, batch.questions, thresholds=plan.thresholds, **batch.extras)
+            )
+            for question_id, position in batch.slots.items():
+                yield plan.result(position, plan.answered[(position, question_id)])
+
     async def check_each_async(
         self,
         check: Check,
@@ -703,16 +727,19 @@ class _CheckPlan:
     def answers_for(self, check: Check) -> list[CheckResult]:
         asked = f"{check.name}@"
         return [
-            CheckResult(
-                self.items[position],
-                answer.probability,
-                self.thresholds.noul_verdict(answer.probability),
-                answer.from_store,
-                answer.request_sha256,
-            )
+            self.result(position, answer)
             for (position, question_id), answer in sorted(self.answered.items())
             if question_id.startswith(asked)
         ]
+
+    def result(self, position: int, answer: _ItemAnswer) -> CheckResult:
+        return CheckResult(
+            self.items[position],
+            answer.probability,
+            self.thresholds.noul_verdict(answer.probability),
+            answer.from_store,
+            answer.request_sha256,
+        )
 
 
 @dataclass(frozen=True)

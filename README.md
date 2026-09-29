@@ -24,7 +24,7 @@ jvn schema findall
 
 `find` locates an implementation; `findall` finds a seed, examines related functions, then checks
 remaining function bodies for disconnected implementations. It uses batched Jev judgments and
-has no default file or call cap. Reports, source provenance and request journals go to a unique
+defaults to 48 live model calls (twice `find`); `--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
 `./jvn-results/` directory. `functions_examined` describes coverage of function bodies, not a proof
 of semantic equivalence or completeness across arbitrary code fragments. Uncertain answers and
 unreadable or unsupported source stay visible.

@@ -188,9 +188,11 @@ The Python library remains the interface for composing a custom planner or a bro
 ## Find All function search
 
 Use `jvn findall "functions enforcing the order item limit"` with the same scope, output and
-request-display options as `find`. `jvn schema findall` describes the JSON input. No default live-call
-cap applies to Find All. Depth/step/neighbour and preview options affect seed discovery only; the
-function enumeration reads complete bodies. An explicit `--max-calls` applies across both phases.
+request-display options as `find`. `jvn schema findall` describes the JSON input. Find All defaults
+to 48 live model calls, twice the 24-call `find` default. Use `--max-calls N` to change it or
+`--max-calls none` (JSON `null`) to remove it. Parsing, graph traversal and cached answers are free. Depth/step/neighbour and preview options affect seed discovery only; the
+function enumeration reads complete bodies. The call allowance is shared across seed discovery and enumeration. A budget stop writes completed
+judgments and remaining coverage to a partial evidence pack.
 
 The result includes `seed_search`, and `search` records `found`, `unsure`, `searched`, source hashes,
 request identities, the static graph and coverage gaps. `functions_examined` means every enumerated

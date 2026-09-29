@@ -13,7 +13,7 @@ from .. import operations
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.spans import Span
-from ..judgments.judge import CheckResult, Judge
+from ..judgments.judge import CallCapReachedError, CheckResult, Judge
 from ..judgments.questions import Check
 from ..judgments.thresholds import NoulVerdict
 from .find_code import FOUND
@@ -86,6 +86,7 @@ def find_all(
     seen: set[str] = set()
     remaining_files = list(index.files)
     stop = "connected_component"
+    inventoried: dict[str, set[str]] = {}
 
     def stopped() -> bool:
         return cancelled is not None and cancelled()
@@ -96,25 +97,40 @@ def find_all(
         for span in fresh.values():
             code = index.read_slice(span, origin="findall")
             items.append({**code.source(), "span_key": span.key, "name": span.name, "code": code.text})
-        if items:
-            judged.extend(judge.check_each(check, items, {"target": {"description": target}}))
-        seen.update(fresh)
+        for answer in judge.iter_check_each(check, items, {"target": {"description": target}}):
+            judged.append(answer)
+            seen.add(answer.item["span_key"])
+
+    def inventory(files: Sequence[str]) -> tuple[Span, ...]:
+        spans = tuple(index.functions_in_files(files))
+        for file in files:
+            inventoried[file] = set()
+        for span in spans:
+            inventoried[span.file].add(span.key)
+        return spans
 
     if graph.stop == "cancelled" or stopped():
         stop = "cancelled"
     else:
         # Graphs may reach classes/declarations too. They remain in the graph; the answer unit is
         # a function body, so only function candidates are judged here.
-        functions = set(index.functions_in_files(tuple(dict.fromkeys(span.file for span in graph.functions))))
-        assess([span for span in graph.functions if span in functions])
-        if include_disconnected and not stopped():
-            pending = index.functions_in_files(index.available_files)
-            if not stopped():
-                assess(pending)
-                remaining_files.clear()
-                stop = "scope_examined"
+        try:
+            functions = set(inventory(tuple(dict.fromkeys(span.file for span in graph.functions))))
+            assess([span for span in graph.functions if span in functions])
+            if include_disconnected and not stopped():
+                pending = inventory(index.available_files)
+                if not stopped():
+                    assess(pending)
+                    stop = "scope_examined"
+        except CallCapReachedError:
+            stop = "budget"
         if stopped():
             stop = "cancelled"
+
+    # Only facts already collected may establish that a file is finished. No final parser sweep.
+    remaining_files = [
+        file for file in remaining_files if file not in inventoried or not inventoried[file] <= seen
+    ]
 
     return FindAllResult(
         target,

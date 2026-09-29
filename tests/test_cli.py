@@ -268,12 +268,12 @@ def test_findall_schema_and_json_use_the_shared_cli_contract(capsys):
     assert main(["schema", "findall"]) == 0
     schema = json.loads(capsys.readouterr().out)
     assert schema["properties"]["command"]["const"] == "findall"
-    assert schema["properties"]["max_calls"]["default"] is None
+    assert schema["properties"]["max_calls"]["default"] == 48
     assert "resume" not in schema["properties"]
     args = _parse_args(["--json", '{"command":"findall","target":"the item limit check"}'])
     assert args.command == "findall"
     assert args.target == "the item limit check"
-    assert args.max_calls is None
+    assert args.max_calls == 48
 
 
 def test_evidence_pack_chooses_a_real_entry_when_no_start_is_supplied(tmp_path: Path) -> None:
@@ -793,3 +793,37 @@ def test_schema_discovery_needs_no_credentials_or_model(monkeypatch, capsys):
     assert fields["max_calls"]["type"] == ["integer", "null"]
     assert fields["repo"]["default"] == "."
     assert fields["verbose"]["type"] == "boolean"
+
+
+@pytest.mark.parametrize("cap", [0, 2, 3])
+def test_findall_budget_stop_writes_partial_pack_with_completed_results(tmp_path, cap):
+    repo = tmp_path / "repo"
+    commit_files(
+        repo,
+        {
+            "policy.py": "def admit(item):\n    return len(item) <= 3\n",
+            "other.py": "def fits(item):\n    return len(item) <= 3\n",
+        },
+    )
+    provider = ScriptedJevClient(default_noul=0.96)
+    out = tmp_path / "pack"
+    result = create_evidence_pack(
+        repo,
+        (),
+        "item limit",
+        ("policy.py:1",),
+        out,
+        SearchBudget(max_calls=cap),
+        provider,
+        workflow="findall",
+    )
+    saved = json.loads((out / "manifest.json").read_text())
+    assert saved["search"]["outcome"] == result["search"]["outcome"]
+    assert saved["search"]["calls"] <= cap
+    if cap < 3:
+        assert saved["search"]["outcome"] == "budget"
+        assert saved["search"]["coverage"] == "partial"
+        assert saved["search"]["remaining_files"]
+    else:
+        assert saved["search"]["found"]
+    assert (out / "report.md").is_file()
