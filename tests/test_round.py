@@ -93,12 +93,26 @@ def test_incomplete_registrations_are_refused():
         RoundRegistration(case_ids=CASES, questions={}, rule=RULE)
 
 
-def test_the_registered_request_hash_is_the_store_request_hash(tmp_path):
-    from jev_navigator.judgments.questions import request_sha256
+def test_registered_hash_selects_real_stored_answers_and_rejects_reworded_questions(tmp_path):
+    from dataclasses import replace
+
+    from jev_navigator.judgments.judge import Judge
+    from jev_navigator.judgments.store import JsonlAnswerStore
+    from jev_navigator.judgments.thresholds import Thresholds
+    from jev_navigator.testing import ScriptedJevClient
 
     reg = registration()
     state = {"case_id": "case-01", "code": "x = 1"}
-    assert registered_request_sha256(reg, state) == request_sha256(state, QUESTIONS)
+    path = tmp_path / "answers.jsonl"
+    Judge(ScriptedJevClient(nouls={"keep": 0.9}), store=JsonlAnswerStore(path)).ask(
+        state, reg.questions, thresholds=Thresholds()
+    )
+    stored = JsonlAnswerStore(path)
+    record = stored.by_request(registered_request_sha256(reg, state))
+    assert record is not None
+    assert record.answers["keep"]["noul"] == 0.9
+    changed = replace(reg, questions={"keep": {"type": "noul", "instructions": "Does it fail?"}})
+    assert stored.by_request(registered_request_sha256(changed, state)) is None
 
 
 def test_unspecified_library_commit_does_not_use_the_callers_repository():
