@@ -113,8 +113,8 @@ is omitted. Each run retains its report, manifest and request journal. Generated
 are excluded from the CLI's source inventory so repeated searches do not search their own evidence.
 Library callers can similarly pass `exclude_paths` to `CodeIndex.from_directory`.
 
-Agents can pass the same CLI request as JSON with `jvn --json request.json` or `jvn --json -`
-for stdin. The CLI parser remains the single owner of options, types and defaults. `target` is
+Agents can pass the same CLI request as JSON with `jvn --json request.json`, an inline JSON object,
+or `jvn --json -` for stdin. `jvn schema find` emits its JSON Schema without model calls. The CLI parser remains the single owner of options, types and defaults. `target` is
 required; `command` defaults to `find`. JSON mode emits the result and evidence-pack paths on
 stdout while progress stays on stderr. See the README for the request and result fields.
 

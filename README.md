@@ -118,7 +118,10 @@ jvn find "the check that limits how many items an order may have" \
   --max-calls 8
 ```
 
-`jvn find --help` lists the remaining controls. They are optional tuning, not prerequisites.
+Every option has its default, purpose and a complete example in the [CLI guide](docs/cli.md#every-find-option).
+Use `jvn help find` for grouped help and examples, or `jvn schema find` for a machine-readable request
+schema. Agents can also pass an inline JSON object: `jvn --json '{"target":"the order limit"}'`.
+These controls are optional tuning, not prerequisites.
 
 An explicitly selected output directory must be new or empty. Each evidence pack contains:
 

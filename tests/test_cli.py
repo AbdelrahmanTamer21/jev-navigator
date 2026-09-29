@@ -299,7 +299,7 @@ def test_large_scope_warning_starts_above_twenty_thousand_files() -> None:
 
 
 @pytest.mark.parametrize("search_here", [False, True])
-@pytest.mark.parametrize("input_mode", ["flags", "json-file", "json-stdin"])
+@pytest.mark.parametrize("input_mode", ["flags", "json-file", "json-stdin", "json-inline"])
 def test_find_defaults_to_unique_results_under_invocation_directory(
     tmp_path, monkeypatch, capsys, search_here, input_mode
 ):
@@ -334,6 +334,8 @@ def test_find_defaults_to_unique_results_under_invocation_directory(
             request_file.parent.mkdir(exist_ok=True)
             request_file.write_text(json.dumps(request))
             arguments = ["--json", str(request_file)]
+        elif input_mode == "json-inline":
+            arguments = ["--json", json.dumps(request)]
         else:
             monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(request)))
             arguments = ["--json", "-"]
@@ -393,6 +395,8 @@ def test_report_distinguishes_included_lines_from_an_unopened_candidate(tmp_path
         ('{"target": "policy", "typo": 2}', "typo"),
         ('{"target": "policy", "max_steps": "two"}', "max_steps"),
         ('{"target": "policy", "max_steps": true}', "max_steps"),
+        ('{"target": "policy", "max_steps": -1}', "max_steps"),
+        ('{"target": "policy", "beam_width": 0}', "beam_width"),
         ('{"target": "policy", "prefix": "app/"}', "prefix"),
         ('{"target": "policy", "verbose": "yes"}', "verbose"),
         ('{"target": "policy", "repo": null}', "repo"),
@@ -502,3 +506,40 @@ def test_json_pipeline_reaches_sdk_and_preserves_explicit_options(tmp_path):
     assert manifest["budget"]["beam_width"] == 2
     assert response["search"]["outcome"] == "found"
     assert "request" in result.stderr
+
+
+@pytest.mark.parametrize("arguments", [["--help"], ["help"], ["find", "--help"], ["help", "find"]])
+def test_help_teaches_the_minimal_and_structured_invocations(arguments, capsys):
+    try:
+        assert main(arguments) == 0
+    except SystemExit as exit_status:
+        assert exit_status.code == 0
+    output = capsys.readouterr()
+    assert not output.err
+    assert "Examples:" in output.out
+    assert "jvn schema find" in output.out
+    assert "jvn find" in output.out
+
+
+def test_schema_discovery_needs_no_credentials_or_model(monkeypatch, capsys):
+    from jev_navigator import cli
+
+    def unexpected_client():
+        pytest.fail("schema discovery reached the model client")
+
+    monkeypatch.setattr(cli, "TypeSafeJevClient", unexpected_client)
+    assert main(["schema", "find"]) == 0
+    output = capsys.readouterr()
+    assert not output.err
+    schema = json.loads(output.out)
+    assert schema["required"] == ["target"]
+    assert schema["additionalProperties"] is False
+    fields = schema["properties"]
+    assert fields["prefix"]["type"] == "array"
+    assert fields["start"]["items"] == {"type": "string"}
+    assert fields["beam_width"]["default"] == 3
+    assert fields["beam_width"]["minimum"] == 1
+    assert fields["max_calls"]["default"] is None
+    assert fields["max_calls"]["type"] == ["integer", "null"]
+    assert fields["repo"]["default"] == "."
+    assert fields["verbose"]["type"] == "boolean"
