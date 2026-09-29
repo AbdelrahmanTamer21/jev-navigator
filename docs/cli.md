@@ -13,6 +13,7 @@ that are absent from the source?” rather than “find everything important”.
 - [JSON requests](#json-requests)
 - [Results, progress and exit status](#results-progress-and-exit-status)
 - [Agent workflow](#agent-workflow)
+- [Find All function search](#find-all-function-search)
 
 ## Start with one command
 
@@ -160,3 +161,15 @@ records preserve request/response evidence; inspect their exact-capture flags wh
 Schema discovery and structured calls take inspiration from the
 [Google Workspace CLI's agent guidance](https://github.com/googleworkspace/cli/blob/main/CONTEXT.md).
 The Python library remains the interface for composing a custom planner or a broader workflow.
+
+## Find All function search
+
+Use `jvn findall "functions enforcing the order item limit"` with the same scope, output and
+request-display options as `find`. `jvn schema findall` describes the JSON input. No default live-call
+cap applies to Find All. Depth/step/neighbour and preview options affect seed discovery only; the
+function enumeration reads complete bodies. An explicit `--max-calls` applies across both phases.
+
+The result includes `seed_search`, and `search` records `found`, `unsure`, `searched`, source hashes,
+request identities, the static graph and coverage gaps. `functions_examined` means every enumerated
+function was judged; it does not prove the model found every behavior. `scope_incomplete` retains
+unsupported, unparsed or unavailable files. See the library composition in [extending.md](extending.md#compose-a-seed-first-find-all-search).

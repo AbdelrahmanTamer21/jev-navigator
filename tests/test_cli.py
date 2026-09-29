@@ -69,6 +69,62 @@ def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -
     assert (output / "journal.jsonl").read_text()
 
 
+def test_findall_pack_composes_seed_search_with_disconnected_enumeration(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "entry.py": "from policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "policy.py": "def admit(item):\n    return len(item) <= 3\n",
+            "independent.py": "def fits(values):\n    return not len(values) > 3\n",
+        },
+    )
+
+    def answer(question_id, question, state):
+        code = (
+            state["items"][int(question_id.rsplit("#", 1)[1])]["code"]
+            if "items" in state
+            else state["slice"]["code"]
+        )
+        return 0.96 if "len(" in code else 0.04
+
+    output = tmp_path / "all-evidence"
+    manifest = create_evidence_pack(
+        repository,
+        (),
+        "the item count limit check",
+        ("entry.py:4",),
+        output,
+        SearchBudget(beam_width=1),
+        ScriptedJevClient(nouls=answer),
+        workflow="findall",
+        fact_cache_dir=tmp_path / "facts",
+    )
+
+    saved = json.loads((output / "manifest.json").read_text())
+    assert manifest["search"]["outcome"] == "scope_examined"
+    assert saved["workflow"] == "findall"
+    assert saved["search"]["coverage"] == "functions_examined"
+    assert {item["name"] for item in saved["search"]["found"]} == {"admit", "fits"}
+    assert saved["seed_search"]["outcome"] == "found"
+    assert all(item["request_sha256"] for item in saved["search"]["found"])
+    assert "independent.py" in (output / "report.md").read_text()
+    assert (output / "journal.jsonl").read_text()
+
+
+def test_findall_schema_and_json_use_the_shared_cli_contract(capsys):
+    from jev_navigator.cli import _parse_args
+
+    assert main(["schema", "findall"]) == 0
+    schema = json.loads(capsys.readouterr().out)
+    assert schema["properties"]["command"]["const"] == "findall"
+    assert schema["properties"]["max_calls"]["default"] is None
+    args = _parse_args(["--json", '{"command":"findall","target":"the item limit check"}'])
+    assert args.command == "findall"
+    assert args.target == "the item limit check"
+    assert args.max_calls is None
+
+
 def test_evidence_pack_chooses_a_real_entry_when_no_start_is_supplied(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     commit_files(

@@ -118,6 +118,51 @@ def test_items_judged_before_are_answered_from_the_store(tmp_path: Path) -> None
     assert len(second_client.requests) == 1
 
 
+def test_independent_checks_share_a_request_and_reuse_only_the_matching_cached_answers(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "answers.jsonl"
+    shared = {"doc": {"sentence": "sets a value"}}
+    items = [{"code": "x = 1"}, {"code": "y = 2"}]
+    changes = Check(
+        "changes",
+        "Does `{item}.code` change a value?",
+        Criterion("It changes a value."),
+        Criterion("It does not change a value."),
+    )
+    Judge(ScriptedJevClient(nouls={"describes": 0.9}), store=JsonlAnswerStore(path)).check_each(
+        DESCRIBES, items[:1], shared
+    )
+    client = ScriptedJevClient(nouls={"describes": 0.1, "changes#0": 0.5, "changes#1": 0.95})
+    judge = Judge(client, store=JsonlAnswerStore(path), served_model="jev-scripted")
+
+    results = judge.check_every([DESCRIBES, changes], items, shared)
+
+    assert len(client.requests) == 1
+    state, questions = client.requests[0]
+    assert state["items"] == items
+    assert set(questions) == {
+        f"{DESCRIBES.question_id}#1",
+        f"{changes.question_id}#0",
+        f"{changes.question_id}#1",
+    }
+    assert [(r.item, r.probability, r.from_store) for r in results["describes"]] == [
+        (items[0], 0.9, True),
+        (items[1], 0.1, False),
+    ]
+    assert [r.verdict for r in results["changes"]] == [NoulVerdict.UNSURE, NoulVerdict.YES]
+
+    replay_client = ScriptedJevClient(default_noul=0.01)
+    replay = Judge(replay_client, store=JsonlAnswerStore(path), served_model="jev-scripted")
+    reordered = replay.check_every([changes, DESCRIBES], items[::-1], shared)
+    assert replay_client.requests == []
+    for check in (changes, DESCRIBES):
+        assert [(r.item, r.probability, r.request_sha256) for r in reordered[check.name]] == [
+            (r.item, r.probability, r.request_sha256) for r in reversed(results[check.name])
+        ]
+        assert all(r.from_store for r in reordered[check.name])
+
+
 def test_the_same_item_against_different_shared_state_is_judged_again(tmp_path: Path) -> None:
     # Arrange
     path = tmp_path / "answers.jsonl"

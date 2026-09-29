@@ -255,6 +255,15 @@ class CodeIndex:
     def functions_in(self, file: str) -> tuple[Span, ...]:
         return self._file_structure(file).functions
 
+    def functions_in_files(self, files: Sequence[str]) -> tuple[Span, ...]:
+        """Enumerate functions with one batched fact scan for the not-yet-cached source files."""
+        files = tuple(dict.fromkeys(files))
+        for file in files:
+            self._require_in_scope(file)
+        available = self._available_files(files)
+        self._ensure_facts(tuple(file for file in available if language_of(file)))
+        return tuple(span for file in available for span in self.functions_in(file))
+
     def symbols_in(self, file: str) -> tuple[Span, ...]:
         """Functions and classes."""
         return self._file_structure(file).symbols

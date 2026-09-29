@@ -183,12 +183,32 @@ class Judge:
     ) -> list[CheckResult]:
         """One yes/no answer per item, batched into as few requests as the state size allows.
         Items already judged by the same question and model come from the store."""
-        plan = self._check_plan(check, items, shared, list_name, thresholds)
+        return self.check_every([check], items, shared, list_name=list_name, thresholds=thresholds)[
+            check.name
+        ]
+
+    def check_every(
+        self,
+        checks: Sequence[Check],
+        items: Sequence[Mapping],
+        shared: Mapping | None = None,
+        *,
+        list_name: str = "items",
+        thresholds: Thresholds | None = None,
+        batch_budget: int | None = None,
+    ) -> Mapping[str, list[CheckResult]]:
+        """Every check asked about every item, in as few requests as the size budget allows.
+
+        Independent checks about the same items travel together: one request per batch that fits,
+        each carrying every check for every item in it, instead of one round trip per check over the
+        whole list. Items already judged by the same question and model come from the store.
+        """
+        plan = self._check_plan(checks, items, shared, list_name, thresholds, batch_budget)
         for batch in plan.batches:
             plan.answer(
                 batch, self.ask(batch.state, batch.questions, thresholds=plan.thresholds, **batch.extras)
             )
-        return plan.results()
+        return plan.answers()
 
     async def check_each_async(
         self,
@@ -199,10 +219,26 @@ class Judge:
         list_name: str = "items",
         thresholds: Thresholds | None = None,
     ) -> list[CheckResult]:
-        """``check_each`` with its batches sent concurrently; when the served model is still
+        """``check_each`` with its batches sent concurrently."""
+        answers = await self.check_every_async(
+            [check], items, shared, list_name=list_name, thresholds=thresholds
+        )
+        return answers[check.name]
+
+    async def check_every_async(
+        self,
+        checks: Sequence[Check],
+        items: Sequence[Mapping],
+        shared: Mapping | None = None,
+        *,
+        list_name: str = "items",
+        thresholds: Thresholds | None = None,
+        batch_budget: int | None = None,
+    ) -> Mapping[str, list[CheckResult]]:
+        """``check_every`` with its batches sent concurrently; when the served model is still
         unknown and an answer store is present, the first batch pins the model before the remaining
         batches look in the store, exactly as the sequential path does."""
-        plan = self._check_plan(check, items, shared, list_name, thresholds)
+        plan = self._check_plan(checks, items, shared, list_name, thresholds, batch_budget)
         batches = plan.batches
         if batches and self.store is not None and not self._knows_model():
             # Without a served model the store cannot prove model-version identity, so every lookup
@@ -220,7 +256,7 @@ class Judge:
         )
         for batch, response in zip(batches, responses, strict=True):
             plan.answer(batch, response)
-        return plan.results()
+        return plan.answers()
 
     def ask_all(
         self,
@@ -423,24 +459,32 @@ class Judge:
 
     def _check_plan(
         self,
-        check: Check,
+        checks: Sequence[Check],
         items: Sequence[Mapping],
         shared: Mapping | None,
         list_name: str,
         thresholds: Thresholds | None,
+        batch_budget: int | None = None,
     ) -> _CheckPlan:
-        """Each item is looked up masked together with the shared state alone; a batch masks its
-        items and the shared state together, as the request that carries them will be."""
+        """One request per batch of items that fit, each asking every still open check of the items
+        it carries. Each item is first looked up masked together with the shared state alone, as the
+        per-item store key is made from that pair; a batch masks its items, their question wording
+        and the shared state together, as the request that carries them will be.
+        """
         shared = shared or {}
-        plan = _CheckPlan(items, thresholds or self.thresholds)
+        budget = MAX_STATE_CHARS if batch_budget is None else batch_budget
+        plan = _CheckPlan(list_name, checks, items, shared, thresholds or self.thresholds, budget)
         for position, item in enumerate(items):
-            stored = self._stored_item(check, *self._masked_together([item, shared]))
-            if stored is not None:
-                plan.answered[position] = stored
-        pending = [position for position in range(len(items)) if position not in plan.answered]
+            for check in checks:
+                stored = self._stored_item(check, *self._masked_together([item, shared]))
+                if stored is None:
+                    plan.open.setdefault(position, {})[check.question_id] = check
+                else:
+                    plan.answered[(position, check.question_id)] = stored
         plan.batches = [
-            self._batch(check, positions, items, shared, list_name)
-            for positions in _batches(pending, items, shared)
+            batch
+            for batch in (self._batch(plan, positions) for positions in _batches(plan))
+            if batch is not None
         ]
         return plan
 
@@ -451,31 +495,36 @@ class Judge:
         hidden = masked_values(values, self.masker)
         return [mask_everywhere(value, self.masker, hidden) for value in values]
 
-    def _batch(
-        self, check: Check, positions: list[int], items: Sequence[Mapping], shared: Mapping, list_name: str
-    ) -> _Batch:
+    def _batch(self, plan: _CheckPlan, positions: list[int]) -> _Batch | None:
+        """The request that carries one batch: every still open check of every item in it, asked at
+        that item's place in the list. An item whose questions were all answered before the call is
+        in no batch, and an item that still needs one answer keeps its own key and its own source.
+        """
         *batch_items, batch_shared = self._masked_together(
-            [*(items[position] for position in positions), shared]
+            [*(plan.items[position] for position in positions), plan.shared]
         )
-        question_ids = {position: f"{check.question_id}#{slot}" for slot, position in enumerate(positions)}
-        questions = {
-            question_ids[position]: check.to_question(item_path(list_name, slot))
-            for slot, position in enumerate(positions)
-        }
         by_position = dict(zip(positions, batch_items, strict=True))
+        questions: dict[str, dict] = {}
+        slots: dict[str, int] = {}
+        item_keys: dict[str, str] = {}
+        sources: dict[str, dict] = {}
+        for slot, position in enumerate(positions):
+            item = by_position[position]
+            for check in plan.open_at(position).values():
+                asked = f"{check.question_id}#{slot}"
+                questions[asked] = check.to_question(item_path(plan.list_name, slot))
+                slots[asked] = position
+                item_keys[self._item_key(check, item, batch_shared)] = asked
+                if _source_of(item):
+                    sources[asked] = _source_of(item)
+        if not questions:
+            return None
         extras = {
-            "item_keys": {
-                self._item_key(check, item, batch_shared): question_ids[position]
-                for position, item in by_position.items()
-            },
-            "sources": {
-                question_ids[position]: _source_of(item)
-                for position, item in by_position.items()
-                if _source_of(item)
-            },
-            "skeleton": _skeleton(list_name, questions, batch_items, batch_shared),
+            "item_keys": item_keys,
+            "sources": sources,
+            "skeleton": _skeleton(plan.list_name, questions, batch_items, batch_shared),
         }
-        return _Batch({**batch_shared, list_name: batch_items}, questions, question_ids, extras)
+        return _Batch({**batch_shared, plan.list_name: batch_items}, questions, slots, extras)
 
     def _all_request(
         self,
@@ -602,25 +651,55 @@ class _Dispatched:
 
 @dataclass(frozen=True)
 class _Batch:
+    """One request: the code it carries, the questions asked about that code, and, for each of those
+    questions, the item in the batch whose code the answer is about."""
+
     state: Mapping
     questions: Mapping
-    question_ids: Mapping[int, str]
+    slots: Mapping[str, int]
     extras: Mapping[str, Mapping]
 
 
 @dataclass
 class _CheckPlan:
+    """The requests one judging call sends: each carries a batch of items and the questions still
+    open for them, so independent questions about the same code share a request.
+
+    ``answered`` and ``open`` are keyed by item position and question id, so a question answered
+    before the call, or answered by an earlier batch, is never asked for again.
+    """
+
+    list_name: str
+    checks: Sequence[Check]
     items: Sequence[Mapping]
+    shared: Mapping
     thresholds: Thresholds
-    answered: dict[int, _ItemAnswer] = field(default_factory=dict)
+    budget: int
+    answered: dict[tuple[int, str], _ItemAnswer] = field(default_factory=dict)
+    open: dict[int, dict[str, Check]] = field(default_factory=dict)
     batches: list[_Batch] = field(default_factory=list)
 
-    def answer(self, batch: _Batch, response: JevResponse) -> None:
-        for position, question_id in batch.question_ids.items():
-            probability = response.noul(question_id).probability
-            self.answered[position] = _ItemAnswer(probability, response.from_store, response.request_sha256)
+    def open_at(self, position: int) -> Mapping[str, Check]:
+        """The questions still open for one item, keyed by the question id without its slot."""
+        return self.open.get(position, {})
 
-    def results(self) -> list[CheckResult]:
+    def pending(self) -> list[int]:
+        """The items with a question still open for them, in the order they were given."""
+        return sorted(self.open)
+
+    def answer(self, batch: _Batch, response: JevResponse) -> None:
+        for question_id, position in batch.slots.items():
+            answer = response.noul(question_id)
+            self.answered[(position, question_id)] = _ItemAnswer(
+                answer.probability, response.from_store, response.request_sha256
+            )
+
+    def answers(self) -> dict[str, list[CheckResult]]:
+        """The answers of this call, kept under the obligation that asked for them."""
+        return {check.name: self.answers_for(check) for check in self.checks}
+
+    def answers_for(self, check: Check) -> list[CheckResult]:
+        asked = f"{check.name}@"
         return [
             CheckResult(
                 self.items[position],
@@ -629,7 +708,8 @@ class _CheckPlan:
                 answer.from_store,
                 answer.request_sha256,
             )
-            for position, answer in sorted(self.answered.items())
+            for (position, question_id), answer in sorted(self.answered.items())
+            if question_id.startswith(asked)
         ]
 
 
@@ -718,16 +798,26 @@ def _argument_id(operation: str, offer: CallOffer) -> str:
     return f"{operation}.{offer.argument.question_id}"
 
 
-def _batches(pending: list[int], items: list[Mapping], shared: Mapping) -> list[list[int]]:
-    budget = MAX_STATE_CHARS - len(json.dumps(shared))
+def _batches(plan: _CheckPlan) -> list[list[int]]:
+    """Fills a batch until the request that would carry it would be larger than the budget allows.
+    An item is measured together with the question wording asked about it, because that is what one
+    request has to fit, and a single question is measured exactly as the batch around it is.
+    """
+    budget = plan.budget - len(json.dumps(plan.shared))
     batches: list[list[int]] = []
     current: list[int] = []
     used = 0
-    for position in pending:
-        size = len(json.dumps(items[position]))
+    for position in plan.pending():
+        size = _open_size(plan, position)
         if current and used + size > budget:
             batches.append(current)
             current, used = [], 0
         current.append(position)
         used += size
     return [*batches, current] if current else batches
+
+
+def _open_size(plan: _CheckPlan, position: int) -> int:
+    """What one item and the wording of the questions still open about it would cost on their own."""
+    wording = [check.to_question(item_path(plan.list_name, 0)) for check in plan.open_at(position).values()]
+    return len(json.dumps(plan.items[position])) + sum(len(json.dumps(question)) for question in wording)
