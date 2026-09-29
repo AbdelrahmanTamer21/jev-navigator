@@ -157,18 +157,33 @@ def _resolve_script(
     if specifier.startswith("#"):
         manifest = packages.scope_of(importer)
         targets = manifest.import_targets(specifier) if manifest else []
+        certain = True
     else:
         name, subpath = package_name(specifier)
         manifest = packages.named(name, importer)
         targets = manifest.export_targets(subpath) if manifest else []
+        certain = packages.links(name, importer)
+    if manifest is None:
+        return None
+    mapping = f"repository package.json mapping for {specifier}"
+    uncertain = "" if certain else ", a package the importer does not link by workspace: or self-reference"
+    # Every declared target before any source inferred from build output.
     for target in targets:
         if target.startswith("."):
-            path = _scope_file(packages.target_bases(manifest.directory, target), scope)
-        else:
-            redirected = _resolve_script(target, importer, scope, script_paths, packages, seen)
-            path = redirected.path if redirected else None
-        if path is not None:
-            return ImportFact(path, False, f"repository package.json mapping for {specifier}")
+            path = _scope_file(packages.target_bases(manifest.directory, target)[:1], scope)
+            if path is not None:
+                return ImportFact(path, certain, mapping + uncertain)
+            continue
+        redirected = _resolve_script(target, importer, scope, script_paths, packages, seen)
+        if redirected is not None:
+            # Node follows a target naming another package, never one naming a `#` import.
+            proven = certain and redirected.proven and not target.startswith("#")
+            return ImportFact(redirected.path, proven, redirected.reason if proven else mapping + uncertain)
+    for target in targets:
+        if target.startswith(".") and (
+            path := _scope_file(packages.target_bases(manifest.directory, target)[1:], scope)
+        ):
+            return ImportFact(path, False, f"{mapping}, source inferred from build output")
     return None
 
 

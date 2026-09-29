@@ -22,6 +22,7 @@ from .tsconfig import best_pattern, build_layout, normalised
 # subpath at one bundle. Other conditions follow in written order.
 CONDITIONS = ("source", "types", "import", "module", "development", "browser", "node", "default", "require")
 ENTRY_FIELDS = ("source", "types", "typings", "module", "main")
+DEPENDENCY_FIELDS = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
 _SCRIPT_EXTENSION = re.compile(r"(\.d)?\.[cm]?[jt]sx?$")
 
 
@@ -77,6 +78,19 @@ class Packages:
         closest = max(closeness, default=None)
         best = [manifest for manifest, c in zip(claimants, closeness, strict=True) if c == closest]
         return best[0] if len(best) == 1 else None
+
+    def links(self, name: str, importer: str) -> bool:
+        """Whether ``name`` certainly means the repository's package for ``importer``: its own
+        package through ``exports`` (Node's self-reference), or the only package of that name,
+        which the importer's package.json depends on through the ``workspace:`` protocol."""
+        own = self.scope_of(importer)
+        if own is None:
+            return False
+        if own.fields.get("name") == name:
+            return "exports" in own.fields
+        ranges = [own.fields.get(field) for field in DEPENDENCY_FIELDS]
+        linked = any(isinstance(r, dict) and str(r.get(name, "")).startswith("workspace:") for r in ranges)
+        return linked and len(self._named.get(name, [])) == 1
 
     def target_bases(self, directory: str, target: str) -> list[str]:
         """Root-relative bases for a target the package in ``directory`` declares: the target, then,
