@@ -495,7 +495,9 @@ Neither a question hash nor a frozen manifest proves model quality or dataset co
 ## Tests
 
 `uv run pytest --basetemp=<scratch dir>`. Tests run offline against small real git repositories and
-`ScriptedJevClient`. The TypeSafe adapter's test runs only with the extra installed:
+`ScriptedJevClient`. The suite retains the ten Express/Next.js and FastAPI/GraphQL graph
+capability regressions and verifies request/response capture through a real local HTTP socket.
+The TypeSafe adapter's tests run only with the extra installed:
 `uv run --extra typesafe pytest`. Run `uv run ruff check src tests` and
 `uv run ruff format --check src tests` before pushing. Local checks are the normal validation
 path for this small library; pushes and pull requests do not launch hosted CI. The `tests`

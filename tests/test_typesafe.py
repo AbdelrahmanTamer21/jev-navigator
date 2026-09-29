@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import concurrent.futures
+import json
 import os
 import signal
 import threading
@@ -12,7 +14,51 @@ import pytest
 from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code
 from jev_navigator.directives.places import range_place
 from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.store import JsonlAnswerStore
+from jev_navigator.judgments.thresholds import Thresholds
+
+STATE = {"slice": {"file": "counter.py", "code": "def add_one(x):\n    return x + 1"}}
+QUESTIONS = {"adds_one": {"type": "noul", "instructions": "Does `slice.code` add one?"}}
+
+
+def _jev_server(exchanges: list[tuple[bytes, bytes]]) -> ThreadingHTTPServer:
+    """A local Jev endpoint recording the exact bytes of every request it answers, and its answer.
+
+    Those pairs are ground truth for what crossed the wire, so a journal or store entry is checked
+    against them rather than against another copy of what the library thinks it sent.
+    """
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            sent = self.rfile.read(int(self.headers["content-length"]))
+            answers = {id_: {"type": "noul", "noul": 0.9} for id_ in json.loads(sent)["questions"]}
+            served = json.dumps(
+                {
+                    "model": "jev-1.13.0",
+                    "usage": {"input_tokens": 12, "output_tokens": 1},
+                    "answers": answers,
+                }
+            ).encode()
+            exchanges.append((sent, served))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(served)))
+            self.end_headers()
+            self.wfile.write(served)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, name="jev-local-server", daemon=True).start()
+    return server
+
+
+def _stop(server: ThreadingHTTPServer) -> None:
+    server.shutdown()
+    server.server_close()
 
 
 def test_cancel_aborts_an_active_official_sdk_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,3 +192,85 @@ def test_sigint_returns_the_active_http_place_as_resumable(
         server.shutdown()
         server.server_close()
         server_thread.join()
+
+
+def test_the_production_transport_journals_the_exact_bytes_it_sent_and_received(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`exact` in the journal means "these are the wire bytes", so prove it over a real socket.
+
+    The journal's `exact` flag and the answer store's `sent_exact` flag describe different things: the
+    first is the response as received, the second is a kept copy of the request. This pins the first.
+    """
+    pytest.importorskip("typesafe_sdk")
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    exchanges: list[tuple[bytes, bytes]] = []
+    server = _jev_server(exchanges)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    client = TypeSafeJevClient()
+    journal_path = tmp_path / "journal.jsonl"
+    judge = Judge(client, journal=JsonlJournal(journal_path, keep_request_text=True))
+
+    try:
+        answer = judge.ask(STATE, QUESTIONS, thresholds=Thresholds())
+    finally:
+        client.close()
+        _stop(server)
+
+    # Assert
+    assert answer.noul("adds_one").probability == 0.9
+    sent, served = exchanges[0]
+    journaled = json.loads(journal_path.read_text().splitlines()[1])
+    assert (journaled["status"], journaled["content_type"], journaled["exact"]) == (
+        200,
+        "application/json",
+        True,
+    )
+    assert base64.b64decode(journaled["body_base64"]) == served
+    captured = base64.b64decode(journaled["sent_body_base64"])
+    assert captured == sent
+    assert b'"model"' in captured  # the wire body names the model; the library's handover does not
+
+
+def test_the_answer_store_keeps_no_request_bytes_by_default_even_after_a_real_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `sent_exact: false` answer record is the privacy default, not evidence of a lost capture."""
+    pytest.importorskip("typesafe_sdk")
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    exchanges: list[tuple[bytes, bytes]] = []
+    server = _jev_server(exchanges)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    silent_journal = JsonlJournal(tmp_path / "silent-journal.jsonl", keep_request_text=True)
+    keeping_journal = JsonlJournal(tmp_path / "keeping-journal.jsonl", keep_request_text=True)
+    silent = JsonlAnswerStore(tmp_path / "silent-answers.jsonl")
+    keeping = JsonlAnswerStore(tmp_path / "keeping-answers.jsonl", keep_requests=True)
+    client = TypeSafeJevClient()
+
+    try:
+        Judge(client, store=silent, journal=silent_journal).ask(STATE, QUESTIONS, thresholds=Thresholds())
+        Judge(client, store=keeping, journal=keeping_journal).ask(STATE, QUESTIONS, thresholds=Thresholds())
+    finally:
+        client.close()
+        _stop(server)
+
+    # Assert: the journal kept the wire bytes of the request and the answer of the response either
+    # way, so the answer store's own flag below cannot be read as "the transport captured nothing".
+    for journal in (silent_journal, keeping_journal):
+        line = json.loads(journal.path.read_text().splitlines()[1])
+        assert (line["exact"], line["status"]) == (True, 200)
+        assert base64.b64decode(line["sent_body_base64"]) == exchanges[0][0]
+
+    dropped = silent.records()[0]
+    assert (dropped.sent_exact, dropped.sent_body_base64, dropped.request) == (False, None, None)
+    with pytest.raises(ValueError, match="keep_requests"):
+        dropped.sent_request()
+
+    kept = keeping.records()[0]
+    assert kept.sent_exact is True
+    assert base64.b64decode(kept.sent_body_base64) == exchanges[1][0]
+    assert kept.sent_request() == (STATE, QUESTIONS)
