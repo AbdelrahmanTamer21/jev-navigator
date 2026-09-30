@@ -17,6 +17,10 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `StopRule`, `History` | your own stop check over a search's history, reading only the sections you select |
 | `LlmStep` | an opt-in LLM call for the cases where Jev's answer is not clear enough |
 
+Request masking reuses identical text within each masking operation. Its temporary memoization ends
+with that operation: discovered secret values never carry over into a later request. Cross-field
+masking and the final pre-send secret scan still apply to the complete request.
+
 ## The rule for questions
 
 Code holds the goal, the loop and the stopping. Jev gets concrete state and one closed judgment:
