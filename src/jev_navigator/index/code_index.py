@@ -26,6 +26,7 @@ from .imports import (
 )
 from .languages import (
     declares_type,
+    declares_value,
     language_of,
 )
 from .packages import Packages
@@ -335,9 +336,11 @@ class CodeIndex:
         self, file: str, line: int, name: str, receiver: str | None, role: str | None = None
     ) -> Binding:
         """Computed once per site and cached for the life of the index. ``role`` is a reference's
-        role, None for a call: a type counts the classes and declarations a type can name, a call or
-        any other use the functions and classes."""
-        return self._binding(file, line, name, receiver, role == "type")
+        role, None for a call, and decides which definitions count: a call names a function or class,
+        a type a class or a declaration a type can name, an export any definition, and any other use
+        (an argument, receiver, condition, decorator...) a function, class or declaration a value can
+        name."""
+        return self._binding(file, line, name, receiver, role)
 
     def _references(self, matches: Iterable[ReferenceMatch]) -> tuple[Reference, ...]:
         return tuple(
@@ -353,14 +356,13 @@ class CodeIndex:
         )
 
     def _compute_binding(
-        self, file: str, line: int, name: str, receiver: str | None, names_type: bool
+        self, file: str, line: int, name: str, receiver: str | None, role: str | None
     ) -> Binding:
         if self.binding_resolver is not None:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
                 return injected
-        satisfies = self._names_a_type if names_type else self._is_callable
-        definitions = tuple(span for span in self.find_definition(name) if satisfies(span))
+        definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
         facts = CallFacts(
             file,
             name,
@@ -392,14 +394,17 @@ class CodeIndex:
         }
         return tuple(definitions)
 
-    def _is_callable(self, span: Span) -> bool:
-        return span in self._facts_in(span.file).structure.symbols
-
-    def _names_a_type(self, span: Span) -> bool:
+    def _can_name(self, role: str | None, span: Span) -> bool:
+        """Whether a use in ``role`` can name the definition ``span``; ``binding_of`` gives the rule."""
+        if role == "export":
+            return True
         structure = self._facts_in(span.file).structure
-        if span in structure.declarations:
-            return declares_type(self.read_slice(Span(span.file, span.start, span.start)).text)
-        return span in structure.symbols and span not in structure.functions
+        if span in structure.symbols:
+            return role != "type" or span not in structure.functions
+        if role is None:
+            return False
+        first_line = self.read_slice(Span(span.file, span.start, span.start)).text
+        return declares_type(first_line) if role == "type" else declares_value(first_line)
 
     def _calls_with_name(self, name: str):
         files = self._files_for_name(name)

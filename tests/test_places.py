@@ -458,7 +458,7 @@ def test_a_constant_used_as_a_method_receiver_is_passed_on(tmp_path: Path) -> No
     offered = neighbour_signatures(index, "redact")
 
     # Assert
-    assert "passed on by redact as receiver" in offered["redaction.py:3-3"]
+    assert offered["redaction.py:3-3"].endswith("(passed on by redact as receiver)")
 
 
 def numbered_functions(count: int) -> str:

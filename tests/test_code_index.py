@@ -502,6 +502,75 @@ def test_a_type_reference_binds_to_the_declaration_it_names(
     ]
 
 
+@pytest.mark.parametrize(
+    ("files", "name", "expected"),
+    [
+        pytest.param(
+            {
+                "redaction.py": 'import re\n\nSECRET_PATTERN = re.compile(r"key=\\w+")\n\n\n'
+                'def redact(text):\n    return SECRET_PATTERN.sub("key=[hidden]", text)\n'
+            },
+            "SECRET_PATTERN",
+            [(7, "receiver", Span("redaction.py", 3, 3, "SECRET_PATTERN"))],
+            id="receiver",
+        ),
+        pytest.param(
+            {
+                "limits.ts": "export const MAX_ITEMS = 50;\n\n"
+                "export function clamp(items: string[]) {\n"
+                "  if (items.length > MAX_ITEMS) {\n    return items.slice(0, MAX_ITEMS);\n  }\n"
+                "  return items;\n}\n"
+            },
+            "MAX_ITEMS",
+            [
+                (4, "condition", Span("limits.ts", 1, 1, "MAX_ITEMS")),
+                (5, "argument", Span("limits.ts", 1, 1, "MAX_ITEMS")),
+            ],
+            id="condition-and-argument",
+        ),
+        pytest.param(
+            {
+                "modes.ts": 'export const Mode = { Full: "full" } as const;\n'
+                "export type Mode = (typeof Mode)[keyof typeof Mode];\n\n"
+                "export function isFull(mode: Mode) {\n  return mode === Mode.Full;\n}\n"
+            },
+            "Mode",
+            [(4, "type", Span("modes.ts", 2, 2, "Mode")), (5, "receiver", Span("modes.ts", 1, 1, "Mode"))],
+            id="value-and-type-named-alike",
+        ),
+        pytest.param(
+            {
+                "cache.py": "import functools\n\ncached = functools.lru_cache(maxsize=None)\n\n\n"
+                "@cached\ndef load(path):\n    return path\n"
+            },
+            "cached",
+            [(6, "decorator", Span("cache.py", 3, 3, "cached"))],
+            id="decorator",
+        ),
+        pytest.param(
+            {"options.ts": "interface Options {\n  strict: boolean\n}\n\nexport { Options };\n"},
+            "Options",
+            [(5, "export", Span("options.ts", 1, 3, "Options"))],
+            id="export-of-an-interface",
+        ),
+    ],
+)
+def test_a_non_call_reference_binds_to_the_declaration_it_names(
+    tmp_path: Path, files: dict[str, str], name: str, expected: list[tuple[int, str, Span]]
+) -> None:
+    # Arrange
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files))
+
+    # Act
+    references = index.find_references(name)
+
+    # Assert
+    assert [(ref.line, ref.role, ref.binding.status, ref.binding.target) for ref in references] == [
+        (line, role, "resolved", declaration) for line, role, declaration in expected
+    ]
+
+
 def test_a_one_line_function_calls_what_its_first_line_calls(sample_index: CodeIndex) -> None:
     # Arrange
     parse_order = sample_index.find_definition("parseOrder")[0]
