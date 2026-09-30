@@ -571,6 +571,72 @@ def test_a_non_call_reference_binds_to_the_declaration_it_names(
     ]
 
 
+@pytest.mark.parametrize(
+    ("files", "name", "site", "declaration"),
+    [
+        pytest.param(
+            {
+                "dispatch.py": 'from handlers import make_handler\n\nhandle = make_handler("orders")\n\n\n'
+                "def dispatch(event):\n    return handle(event)\n"
+            },
+            "handle",
+            ("dispatch.py", 7),
+            Span("dispatch.py", 3, 3, "handle"),
+            id="same-file",
+        ),
+        pytest.param(
+            {
+                "client.ts": "export const request = createClient({ retries: 3 });\n",
+                "orders.ts": 'import { request } from "./client";\n\n'
+                'export function loadOrders() {\n  return request("/orders");\n}\n',
+            },
+            "request",
+            ("orders.ts", 4),
+            Span("client.ts", 1, 1, "request"),
+            id="imported",
+        ),
+        pytest.param(
+            {
+                "css.ts": "function createCssContext() {\n"
+                '  const Style = () => "style";\n  return { Style };\n}\n\n'
+                "export const Style = createCssContext().Style;\n",
+                "page.ts": 'import { Style } from "./css";\n\n'
+                "export function page() {\n  return Style();\n}\n",
+            },
+            "Style",
+            ("page.ts", 4),
+            Span("css.ts", 6, 6, "Style"),
+            id="imported-past-a-nested-function",
+        ),
+        pytest.param(
+            {
+                "compose.ts": "export const compose = <T>(value: T): T => {\n  return value;\n};\n",
+                "app.ts": 'import { compose } from "./compose";\n\n'
+                "export function run() {\n  return compose(1);\n}\n",
+            },
+            "compose",
+            ("app.ts", 4),
+            Span("compose.ts", 1, 3, "compose"),
+            id="imported-generic-arrow",
+        ),
+    ],
+)
+def test_a_call_binds_to_the_module_constant_it_names(
+    tmp_path: Path, files: dict[str, str], name: str, site: tuple[str, int], declaration: Span
+) -> None:
+    # Arrange
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files))
+
+    # Act
+    callers = index.find_callers(name)
+
+    # Assert
+    assert [(call.file, call.line, call.binding.status, call.binding.target) for call in callers] == [
+        (*site, "resolved", declaration)
+    ]
+
+
 def test_a_one_line_function_calls_what_its_first_line_calls(sample_index: CodeIndex) -> None:
     # Arrange
     parse_order = sample_index.find_definition("parseOrder")[0]

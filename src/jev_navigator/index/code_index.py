@@ -336,10 +336,10 @@ class CodeIndex:
         self, file: str, line: int, name: str, receiver: str | None, role: str | None = None
     ) -> Binding:
         """Computed once per site and cached for the life of the index. ``role`` is a reference's
-        role, None for a call, and decides which definitions count: a call names a function or class,
-        a type a class or a declaration a type can name, an export any definition, and any other use
-        (an argument, receiver, condition, decorator...) a function, class or declaration a value can
-        name."""
+        role, None for a call, and decides which definitions count: a type names a class or a
+        declaration a type can name, an export any definition, and a call or any other use (an
+        argument, receiver, condition, decorator...) a function, class or declaration a value can
+        name, such as a module constant holding a callable."""
         return self._binding(file, line, name, receiver, role)
 
     def _references(self, matches: Iterable[ReferenceMatch]) -> tuple[Reference, ...]:
@@ -368,7 +368,7 @@ class CodeIndex:
             name,
             receiver,
             definitions,
-            tuple(span for span in definitions if span in self._top_level_in(file)),
+            tuple(span for span in definitions if span in self._top_level_in(span.file)),
             self._imported_from(file, name),
             self.observed_unparsed_files | self.unavailable_files.keys(),
         )
@@ -401,8 +401,6 @@ class CodeIndex:
         structure = self._facts_in(span.file).structure
         if span in structure.symbols:
             return role != "type" or span not in structure.functions
-        if role is None:
-            return False
         first_line = self.read_slice(Span(span.file, span.start, span.start)).text
         return declares_type(first_line) if role == "type" else declares_value(first_line)
 
@@ -498,13 +496,20 @@ class CodeIndex:
         return {}
 
     def _top_level_spans(self, file: str) -> frozenset[Span]:
-        """Symbols and declarations of ``file`` that no class or other function contains."""
+        """Symbols and declarations of ``file`` that no class or other function contains. A function
+        starting on a declaration's first line is the value it declares, not its container."""
         symbols = self.symbols_in(file)
-        return frozenset(
+        top_symbols = (
             span
-            for span in (*symbols, *self.declarations_in(file))
+            for span in symbols
             if not any(other != span and other.contains(span.start) for other in symbols)
         )
+        top_declarations = (
+            span
+            for span in self.declarations_in(file)
+            if not any(other.start < span.start <= other.end for other in symbols)
+        )
+        return frozenset((*top_symbols, *top_declarations))
 
     def _imported_from(self, file: str, name: str) -> tuple[ImportFact, ...]:
         specifier = self._names_imported(file).get(name)
