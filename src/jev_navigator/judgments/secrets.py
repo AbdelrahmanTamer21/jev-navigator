@@ -13,6 +13,7 @@ import re
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import cache
 from typing import Protocol
 
 MASK = "[MASKED]"
@@ -108,7 +109,7 @@ def mask_by_content(value: object, masker: Masker) -> object:
 
 def masked_values(value: object, masker: Masker) -> frozenset[str]:
     """Every value the masker hides anywhere inside nested JSON-like data, keys included."""
-    return frozenset(found for text in _strings(value) for found in masker.masked_values(text))
+    return frozenset(found for text in dict.fromkeys(_strings(value)) for found in masker.masked_values(text))
 
 
 def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> object:
@@ -116,6 +117,7 @@ def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> ob
     appears. Keys are left as they are; ``refuse_if_secret`` refuses a request with one in a key."""
     longest_first = sorted(values - {MASK}, key=len, reverse=True)
 
+    @cache
     def hide(text: str) -> str:
         text = masker.mask(text)
         for secret in longest_first:
