@@ -416,9 +416,12 @@ contain the code described in `target.description`?" and, per neighbour code lis
 callers in test files after the others; callees, proven production targets first and then the ones
 called from fewest places; code that
 refers to it or that it passes on without a call, as an argument, collection entry, assignment,
-decorator, export, return, method receiver or type; the other functions of its file, nearest
-first; lines anywhere in scope (docs and config too) that mention its environment variables or its
-quoted keys (six characters or more with a dot, underscore, colon, slash or dash), the
+decorator, export, return, method receiver or type; the modules it imports, re-exports or requires
+(module-level code takes its whole file's imports): the definitions of the names it takes from each,
+and the start of a module it takes whole or takes names from that it does not define itself; the
+other functions of its file, nearest first; lines anywhere in scope (docs and config too) that
+mention its environment variables or its quoted keys (six characters or more with a dot,
+underscore, colon, slash or dash), the
 rarest key first, skipping a key found on more than 30 lines; co-changed files; and the lines before and
 after it), whether the target could be inside it. Places that open the same lines of the same file are
 listed once, whatever move found them, and a place wholly inside the opened code is not listed;
@@ -441,8 +444,9 @@ above the no bar (0.20 by default). A start place is judged but never ends the s
 the caller already had it; `FindResult.starts` keeps each start with its verdict. Each neighbour's
 signature names its file and lines: a function quotes its first line; a window around a call, reference
 or key outside any function gives its line range and quotes that line; a stretch chosen by position (the
-lines before or after, the start of a co-changed file) gives its range and quotes its first line of
-code. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
+lines before or after, the start of a co-changed or imported file) gives its range and quotes its first
+line of code, past blank lines, comments, a license banner, a `'use strict'` directive or a module
+docstring. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
 `scope_incomplete`, and the result keeps three sets: `found`; `searched` and `unsure` (bodies actually
 judged, start places apart in `starts`); and `not_inspected`, each entry with its reason (`budget`,
 `deprioritized`, `capped` or `depth`) and its `QueueTier`: `START`, `PICK` or `MOVE`. Resume
@@ -461,10 +465,10 @@ note, and `Visit.code` ends at the last shown line). If the first line cannot fi
 `not_inspected` with reason `budget`; Resume with a larger slice budget inspects that same source.
 `questions=SearchQuestions(found=...,
 could_contain=..., open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
-`places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `same_file`,
-`keys_mentioned`, `co_changed`, `lines_before`, `rest_of_file`) to a function of the index and the
-opened code that returns places. Pass a subset, or add a function of your own; `MOVES` itself is
-read-only. `FindResult.moves` and the final `stop` step name the moves a search used, and
+`places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `imported`,
+`same_file`, `keys_mentioned`, `co_changed`, `lines_before`, `rest_of_file`) to a function of the
+index and the opened code that returns places. Pass a subset, or add a function of your own; `MOVES`
+itself is read-only. `FindResult.moves` and the final `stop` step name the moves a search used, and
 `context_for_comment` takes `moves=` too. The directives take their check (`check=`) as a parameter too.
 
 Directives on top: `context_for_comment` and `find_similar_code`. The library finds code; answering

@@ -180,9 +180,10 @@ wire captures or re-encoded SDK data.
 ## Choosing how the search moves
 
 A move is a plain function of the index and the opened code that returns places. `places.MOVES` maps
-each built-in move's name to its function (callers, callees, references, code passed on, the same
-file, quoted keys and environment variables, co-changed files, the lines before and after) and is
-read-only. Pass `moves=` to `find_code`, `find_code_async` or `context_for_comment` to use a subset,
+each built-in move's name to its function (callers, callees, references, code passed on, imported
+modules, the same file, quoted keys and environment variables, co-changed files, the lines before
+and after) and is read-only. Pass `moves=` to `find_code`, `find_code_async` or
+`context_for_comment` to use a subset,
 for example `{name: MOVES[name] for name in ("callers", "callees")}`, or add a function of your own.
 `FindResult.moves` and the final `stop` step of the history name the moves the search used, so every
 result says how it was found. Your move's places go through the same filter as the built-in ones:

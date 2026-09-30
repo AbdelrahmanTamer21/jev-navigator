@@ -21,6 +21,7 @@ from .imports import (
     ImportFact,
     imported_modules,
     imported_names,
+    module_imports,
     reexported_names,
     resolve_import,
 )
@@ -561,6 +562,23 @@ class CodeIndex:
             for specifier in imported_modules(source, file)
         )
         return tuple(dict.fromkeys(fact.path for fact in resolved if fact))
+
+    def imports_in(self, file: str, text: str) -> tuple[tuple[ImportFact, frozenset[str] | None], ...]:
+        """The scope files ``text``, lines of ``file``, imports from, in source order, each with the
+        names it takes by name or None for the whole module."""
+        script_paths = self._script_paths(file)
+        packages = self._packages()
+        found: dict[str, tuple[ImportFact, frozenset[str] | None]] = {}
+        for specifier, names in module_imports(text, file):
+            fact = resolve_import(specifier, file, self._scope, script_paths, packages)
+            if fact is None or fact.path == file:
+                continue
+            if fact.path in found:
+                prior = found[fact.path][1]
+                names = None if prior is None or names is None else prior | names
+                fact = found[fact.path][0]
+            found[fact.path] = (fact, names)
+        return tuple(found.values())
 
     def dependents(self, file: str) -> tuple[str, ...]:
         self._require_in_scope(file)

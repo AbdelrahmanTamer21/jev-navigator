@@ -17,6 +17,7 @@ from ..index.spans import CallEdge, CodeSlice, Span, TextHit
 MAX_DEFINITION_LINES = 120
 REST_OF_FILE_LINES = 40
 CO_CHANGE_HEAD_LINES = 40
+IMPORTED_HEAD_LINES = 40
 _ENVIRONMENT_READ = re.compile(
     r"""(?:environ(?:\.get)?\(?\[?|getenv\(|process\.env\.)\s*["']?([A-Z][A-Z0-9_]{2,})"""
 )
@@ -69,11 +70,36 @@ def range_place(index: CodeIndex, file: str, start: int, end: int, relation: str
     """Lines chosen by their position (before or after a place, the start of a file); no single line
     made them a neighbour, so the signature quotes their first line of code."""
     span = Span(file, start, end)
-    first_code_line = next(
-        (line.strip() for line in index.read_slice(span).text.split("\n") if line.strip()), ""
+    lines = index.read_slice(span).text.split("\n")
+    code_line = first_code_line(lines, file)
+    quoted = (
+        next((line.strip() for line in lines if line.strip()), "") if code_line is None else lines[code_line]
     )
-    signature = f"{span.key} `{first_code_line}` ({relation})"
+    signature = f"{span.key} `{quoted.strip()}` ({relation})"
     return Place(span.key, "window", signature, lambda: index.read_slice(span, origin=relation))
+
+
+def first_code_line(lines: Sequence[str], file: str) -> int | None:
+    """The index of the first line of code, past blank lines, comments, a shebang, a Python
+    docstring and a "use strict" directive; None when there is none."""
+    python = file.endswith(".py")
+    openers = ('"""', "'''") if python else ("/*",)
+    closing = None
+    for number, line in enumerate(lines):
+        text = line.strip()
+        if closing is not None:
+            closing = None if closing in text else closing
+            continue
+        if not text or text.startswith(("#!", "//")) or (python and text.startswith("#")):
+            continue
+        if text.strip("'\"; ") == "use strict":
+            continue
+        opener = next((mark for mark in openers if text.startswith(mark)), None)
+        if opener is None:
+            return number
+        closing = "*/" if opener == "/*" else opener
+        closing = None if closing in text[len(opener) :] else closing
+    return None
 
 
 def place_for_line(index: CodeIndex, file: str, line: int, relation: str) -> Place:
@@ -211,6 +237,37 @@ def _passed_on(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     return places
 
 
+def _imported(index: CodeIndex, opened: CodeSlice) -> list[Place]:
+    """What the opened code imports, re-exports or requires from files in scope. Code outside every
+    function and class stands for its module, so all of its file's import statements count; a
+    function or class counts only its own lines, as callees already follow the calls it makes. A name
+    taken by name opens its definition in the module the import resolves to; a whole module, or a
+    name that module only passes on from elsewhere, opens the start of that module."""
+    span = opened.span
+    module_level = not any(symbol.contains(span.start) for symbol in index.symbols_in(span.file))
+    text = "\n".join(index.lines(span.file)) if module_level else opened.text
+    source = span.file if module_level else _span_label(span)
+    places = []
+    for fact, names in index.imports_in(span.file, text):
+        relation = (
+            f"imported by {source}" if fact.proven else f"imported by {source}, candidate: {fact.reason}"
+        )
+        definitions = sorted(
+            (
+                found
+                for name in names or ()
+                for found in index.find_definition(name)
+                if found.file == fact.path
+            ),
+            key=lambda found: found.start,
+        )
+        places += [function_place(index, definition, relation) for definition in definitions]
+        if names is None or not names <= {definition.name for definition in definitions}:
+            end = min(len(index.lines(fact.path)), IMPORTED_HEAD_LINES)
+            places.append(range_place(index, fact.path, 1, end, f"start of a module {relation}"))
+    return places
+
+
 def _with_binding(relation: str, binding) -> str:
     """A name-match link is marked, so neither Jev nor the result treats it as a proven call."""
     if binding is None or binding.proven:
@@ -334,6 +391,7 @@ MOVES: Mapping[str, Move] = MappingProxyType(
         "callees": _callees,
         "referenced_by": _referenced_by,
         "passed_on": _passed_on,
+        "imported": _imported,
         "same_file": _same_file,
         "keys_mentioned": _keys_mentioned,
         "co_changed": _co_changed,
