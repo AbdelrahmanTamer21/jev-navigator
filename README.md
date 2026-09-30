@@ -78,6 +78,9 @@ Start in the directory you want to search:
 jvn find "the check that limits how many items an order may have"
 ```
 
+In a terminal, reaching the call budget offers another allowance without losing the saved search.
+JSON and piped commands return partial results without prompting; continue them with `--resume`.
+
 That is enough. `jvn` chooses an entry point and creates a unique evidence pack under
 `./jvn-results/`. It works with uncommitted changes and ordinary directories outside Git.
 `find` follows code relationships to locate a match; it does not promise every matching function

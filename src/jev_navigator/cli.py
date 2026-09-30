@@ -83,19 +83,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 verbose=args.verbose,
             )
         else:
-            manifest = create_evidence_pack(
-                repository,
-                tuple(args.prefix),
-                args.target,
-                tuple(args.start),
-                output,
-                budget,
-                client,
-                thresholds=Thresholds.from_env(),
-                verbose=args.verbose,
-                workflow=args.command,
-                resume_from=Path(args.resume).expanduser() if getattr(args, "resume", None) else None,
-            )
+            resume_from = Path(args.resume).expanduser() if getattr(args, "resume", None) else None
+            while True:
+                manifest = create_evidence_pack(
+                    repository,
+                    tuple(args.prefix),
+                    args.target,
+                    tuple(args.start),
+                    output,
+                    budget,
+                    client,
+                    thresholds=Thresholds.from_env(),
+                    verbose=args.verbose,
+                    workflow=args.command,
+                    resume_from=resume_from,
+                )
+                if not _continue_find(args, budget, manifest, output):
+                    break
+                resume_from = output
+                output = output.parent / _default_output(repository).name
     except Exception as error:
         print(f"jvn {args.command}: {error}", file=sys.stderr)
         return 1
@@ -133,6 +139,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         if resume_directory is not None:
             print(f"resume: use --resume {output.resolve()} with the same target and repository")
     return 130 if search_outcome == "cancelled" else 0
+
+
+def _continue_find(args: argparse.Namespace, budget: SearchBudget, manifest: dict, output: Path) -> bool:
+    """Offer another paid-call allowance only after find has saved its resumable frontier."""
+    if (
+        args.command != "find"
+        or args.json
+        or not all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr))
+        or not budget.max_calls
+        or manifest["search"]["outcome"] != "budget"
+        or manifest["search"]["calls_this_invocation"] < budget.max_calls
+    ):
+        return False
+    print(f"Partial results saved: {output.resolve()}", file=sys.stderr, flush=True)
+    print(
+        f"Continue the saved search with up to {budget.max_calls} more live model calls? [y/N] ",
+        end="",
+        file=sys.stderr,
+        flush=True,
+    )
+    return sys.stdin.readline().strip().casefold() in ("y", "yes")
 
 
 def _run_statistics(args: argparse.Namespace) -> int:
@@ -378,6 +405,8 @@ A completed search can have a non-found outcome; inspect search.outcome in JSON 
 
 All flags are optional. Live calls stop at 24 unless --max-calls sets another cap ('none' lifts it);
 there is no default depth, step or neighbour-count cap.
+In an interactive terminal, a call-budget stop saves the frontier and offers another allowance.
+JSON and piped invocations never prompt; use --resume for a follow-up invocation.
 Explicit limits may leave work unexplored; inspect the result's outcome and not_inspected entries.
 Find stops on a match; it is not an exhaustive find-all or an end-to-end trace.
 For JSON field names, types and defaults: jvn schema find. Full examples: docs/cli.md.""",
@@ -801,6 +830,7 @@ def _manifest(
             "entry_selection_pending": entry_pending,
             "steps": old_search.get("steps", 0) + result.steps,
             "calls": old_search.get("calls", 0) + total_calls,
+            "calls_this_invocation": total_calls,
             "entry_calls": old_search.get("entry_calls", 0) + total_calls - result.calls,
             "navigation_calls": old_search.get("navigation_calls", 0) + result.calls,
             "duration_seconds": round(old_search.get("duration_seconds", 0) + duration_seconds, 3),
