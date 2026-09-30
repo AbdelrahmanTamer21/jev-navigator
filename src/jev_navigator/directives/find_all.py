@@ -67,6 +67,7 @@ def find_all(
     seeds: Sequence[Span],
     *,
     include_disconnected: bool = True,
+    completed: Sequence[CheckResult] = (),
     check: Check = CONTAINS_IMPLEMENTATION,
     cancelled: Callable[[], bool] | None = None,
 ) -> FindAllResult:
@@ -76,14 +77,18 @@ def find_all(
     remain unchanged. The fallback includes disconnected and differently named functions. An
     empty seed list runs just that fallback; include_disconnected=False reports partial coverage.
 
+    ``completed`` retains answers from an interrupted enumeration of the same source, target,
+    check and thresholds. The caller owns that identity check (the CLI validates its saved scope).
+    Completed functions are not re-judged, including when remaining batches regroup on resume.
+
     Judge owns packing, caching, secrets and caller-selected live-call budgets. This composition
     has no file/function/call cap and does not truncate bodies. Provider errors propagate with
     their cause; the Judge journal retains the requests and responses actually made.
     """
     judge = judge.scope()
     graph = operations.trace_graph(index, seeds, cancelled=cancelled)
-    judged: list[CheckResult] = []
-    seen: set[str] = set()
+    judged = list(completed)
+    seen = {answer.item["span_key"] for answer in completed}
     remaining_files = list(index.files)
     stop = "connected_component"
     inventoried: dict[str, set[str]] = {}

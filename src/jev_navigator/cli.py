@@ -17,18 +17,20 @@ from pathlib import Path
 from time import monotonic
 
 from .adapters.typesafe import TypeSafeJevClient
-from .cli_resume import load_resume, save_resume
+from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
 from .cli_trace import create_trace_evidence_pack
 from .directives.entry import EntrySelection, choose_initial_candidates
-from .directives.find_all import FindAllResult, find_all
+from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
 from .directives.places import Place, place_for_line
 from .index.code_index import CodeIndex
+from .index.languages import language_of
 from .judgments.client import JevClient
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import JsonlAnswerStore
 from .judgments.thresholds import Thresholds
+from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
@@ -98,7 +100,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     workflow=args.command,
                     resume_from=resume_from,
                 )
-                if not _continue_find(args, budget, manifest, output):
+                if not _continue_search(args, budget, manifest, output):
                     break
                 resume_from = output
                 output = output.parent / _default_output(repository).name
@@ -117,7 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     calls = manifest["provider"]["calls"] if args.command == "trace" else result["calls"]
     resume_directory = (
         str(output.resolve())
-        if args.command == "find" and search_outcome in ("budget", "cancelled")
+        if args.command in ("find", "findall") and search_outcome in ("budget", "cancelled")
         else None
     )
     if args.json:
@@ -141,10 +143,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 130 if search_outcome == "cancelled" else 0
 
 
-def _continue_find(args: argparse.Namespace, budget: SearchBudget, manifest: dict, output: Path) -> bool:
-    """Offer another paid-call allowance only after find has saved its resumable frontier."""
+def _continue_search(args: argparse.Namespace, budget: SearchBudget, manifest: dict, output: Path) -> bool:
+    """Offer another paid-call allowance only after the search has saved its resumable state."""
     if (
-        args.command != "find"
+        args.command not in ("find", "findall")
         or args.json
         or not all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr))
         or not budget.max_calls
@@ -171,30 +173,45 @@ def _run_statistics(args: argparse.Namespace) -> int:
     try:
         progress.phase("indexing files for structural measurements")
         index = CodeIndex.from_directory(
-            repository, prefixes=tuple(args.prefix),
-            exclude_paths=(output, Path.cwd() / "jvn-results"), scan_observer=progress.scan,
+            repository,
+            prefixes=tuple(args.prefix),
+            exclude_paths=(output, Path.cwd() / "jvn-results"),
+            scan_observer=progress.scan,
         )
         pack = create_statistics_pack(
-            repository, tuple(args.prefix), output, args.operation or STATISTICS_OPERATIONS,
-            kinds=args.kind or STATISTICS_KINDS, held=not args.top_level,
-            limit=args.limit, min_lines=args.min_lines, max_lines=args.max_lines, index=index,
+            repository,
+            tuple(args.prefix),
+            output,
+            args.operation or STATISTICS_OPERATIONS,
+            kinds=args.kind or STATISTICS_KINDS,
+            held=not args.top_level,
+            limit=args.limit,
+            min_lines=args.min_lines,
+            max_lines=args.max_lines,
+            index=index,
         )
         outcome = "completed" if pack["coverage"]["complete"] else "partial"
         if args.json:
-            print(json.dumps({
-                "output_directory": str(output.resolve()),
-                "manifest": str(output.resolve() / "statistics.json"),
-                "report": str(output.resolve() / "statistics.md"),
-                "statistics": pack,
-            }))
+            print(
+                json.dumps(
+                    {
+                        "output_directory": str(output.resolve()),
+                        "manifest": str(output.resolve() / "statistics.json"),
+                        "report": str(output.resolve() / "statistics.md"),
+                        "statistics": pack,
+                    }
+                )
+            )
         else:
             print(f"statistics pack: {output.resolve()}")
             if "counts" in pack:
                 print("counts: " + ", ".join(f"{k}={v}" for k, v in pack["counts"]["totals"].items()))
             if "largest" in pack:
                 for symbol in pack["largest"]["biggest"]:
-                    print(f"largest: {symbol['name']} ({symbol['size']} lines) "
-                          f"{symbol['file']}:{symbol['lines'][0]}-{symbol['lines'][1]}")
+                    print(
+                        f"largest: {symbol['name']} ({symbol['size']} lines) "
+                        f"{symbol['file']}:{symbol['lines'][0]}-{symbol['lines'][1]}"
+                    )
             print(f"coverage: {outcome}; 0 model calls")
         return 0
     except KeyboardInterrupt:
@@ -226,13 +243,11 @@ def create_evidence_pack(
     """Run the real index/search owners and persist their reviewable evidence."""
     if workflow not in ("find", "findall"):
         raise ValueError(f"unknown search workflow: {workflow}")
-    if resume_from is not None and workflow != "find":
-        raise ValueError("saved-frontier resume currently belongs to the find workflow")
     repository = repository.resolve()
     output = output.resolve()
     _validate_budget(budget)
     thresholds = thresholds or Thresholds()
-    previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client)
+    previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client, workflow)
     _prepare_output(output)
     if resume_from is not None:
         for name in ("answers.jsonl", "journal.jsonl"):
@@ -259,11 +274,15 @@ def create_evidence_pack(
         )
         if warning := _scope_warning(len(index.files)):
             print(warning, file=sys.stderr)
-        resume = None
+        checkpoint = SavedSearch(None)
         if previous is not None:
             if previous["source"]["revision"] != index.commit:
                 raise ValueError("repository revision changed since the evidence pack")
-            resume = load_resume(resume_from.resolve() / "resume.json", index)
+            checkpoint = load_resume(resume_from.resolve() / "resume.json", index)
+        resume = checkpoint.result
+        resuming_enumeration = checkpoint.completed is not None
+        if resuming_enumeration and checkpoint.check_id != CONTAINS_IMPLEMENTATION.question_id:
+            raise ValueError("Find All question changed since the evidence pack; start a new search")
         judge = Judge(
             client,
             thresholds=thresholds,
@@ -301,7 +320,10 @@ def create_evidence_pack(
                 if selection
                 else ()
             )
-        if entry_pending:
+        if resuming_enumeration:
+            assert resume is not None
+            result = resume
+        elif entry_pending:
             result = FindResult(Outcome.BUDGET, (), (), (), (), 0, 0)
         else:
             progress.phase("navigating code")
@@ -318,15 +340,32 @@ def create_evidence_pack(
         seed_calls = judge.calls
         seed_duration_seconds = monotonic() - started
         enumeration = None
-        if workflow == "findall" and result.outcome != Outcome.CANCELLED:
+        if workflow == "findall" and result.outcome not in (Outcome.BUDGET, Outcome.CANCELLED):
             progress.phase("expanding seed and checking remaining functions")
-            enumeration = find_all(index, judge, target, [visit.code.span for visit in result.found])
+            enumeration = find_all(
+                index,
+                judge,
+                target,
+                [visit.code.span for visit in result.found],
+                completed=checkpoint.completed or (),
+                check=CONTAINS_IMPLEMENTATION,
+            )
         duration_seconds = monotonic() - started
         progress.phase("writing evidence pack")
         scope_unavailable: dict[str, str] = {}
-        if workflow == "find" and result.outcome in (Outcome.BUDGET, Outcome.CANCELLED):
+        needs_resume = (
+            enumeration.stopped_by in ("budget", "cancelled")
+            if enumeration is not None
+            else result.outcome in (Outcome.BUDGET, Outcome.CANCELLED)
+        )
+        if needs_resume:
             scope_unavailable = save_resume(
-                output / "resume.json", index, result, entry_pending=entry_pending
+                output / "resume.json",
+                index,
+                result,
+                entry_pending=entry_pending,
+                completed=enumeration.judged if enumeration is not None else None,
+                check_id=CONTAINS_IMPLEMENTATION.question_id if enumeration is not None else None,
             )
         manifest = _manifest(
             repository,
@@ -348,10 +387,23 @@ def create_evidence_pack(
             entry_pending=entry_pending,
             scope_unavailable=scope_unavailable,
         )
+        manifest["workflow"] = workflow
+        if workflow == "findall" and enumeration is None:
+            enumeration = FindAllResult(
+                target,
+                TraceGraph((), (), (), "not_started"),
+                (),
+                tuple(index.files),
+                index.observed_unparsed_files,
+                tuple(file for file in index.files if not language_of(file)),
+                index.unavailable_files,
+                str(result.outcome),
+                0,
+            )
         if enumeration is not None:
-            manifest["workflow"] = "findall"
-            manifest["seed_search"] = manifest["search"]
-            manifest["search"] = _find_all_summary(enumeration, judge.calls, duration_seconds)
+            manifest["seed_search"] = previous["seed_search"] if resuming_enumeration else manifest["search"]
+            manifest["search"] = _find_all_summary(enumeration, judge.calls, duration_seconds, previous)
+
         _write_json(output / "manifest.json", manifest)
         (output / "report.md").write_text(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
@@ -434,6 +486,7 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
         'JSON: {"command":"findall","target":"functions checking the order item limit"}',
     )
     _add_search_arguments(findall, max_calls=DEFAULT_FIND_ALL_MAX_CALLS)
+    findall.add_argument("--resume", help="Prior partial Find All pack; continue without repeating judgments")
     trace = commands.add_parser(
         "trace",
         help="trace a known entry point and judge source evidence in batches",
@@ -443,7 +496,8 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
         'JSON: {"command":"trace","target":"order to HTTP result","start":["app/orders.py:42"]}\n'
         "Start paths are relative to --repo. Unknown bindings remain visible.\n"
         "No default depth or model-call cap; --max-calls sets an optional request allowance.\n"
-        "A completed trace is not proof of semantic completeness. Saved-frontier resume belongs to find.",
+        "A completed trace is not proof of semantic completeness. "
+        "Saved continuation belongs to find and findall.",
     )
     trace.add_argument("target", help="Concrete workflow, transformation or outcome to trace")
     trace.add_argument(
@@ -462,23 +516,32 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     )
     trace.add_argument("--verbose", action="store_true", help="Print expanded masked model requests")
     stats = commands.add_parser(
-        "stats", help="count and rank parsed functions/classes without model calls",
+        "stats",
+        help="count and rank parsed functions/classes without model calls",
         description="Measure parser facts locally; no model or API key is used.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='jvn stats\njvn stats --kind function --limit 1\n'
-        'jvn stats --operation range --kind function --min-lines 20 --max-lines 80\n'
-        'jvn stats --operation count --prefix src/\n'
+        epilog="jvn stats\njvn stats --kind function --limit 1\n"
+        "jvn stats --operation range --kind function --min-lines 20 --max-lines 80\n"
+        "jvn stats --operation count --prefix src/\n"
         'JSON: {"command":"stats","kind":["function"],"limit":1}\n'
-        'Counts cover all parsed symbols. --limit changes only the displayed ranking.\n'
-        'Methods and nested functions are included unless --top-level is supplied.',
+        "Counts cover all parsed symbols. --limit changes only the displayed ranking.\n"
+        "Methods and nested functions are included unless --top-level is supplied.",
     )
     stats.add_argument("--repo", default=".", help="Source directory (default: current directory)")
     stats.add_argument("--prefix", action="append", default=[], help="Source scope; repeatable")
     stats.add_argument("--out", help="New or empty output directory (default: ./jvn-results/<run>)")
-    stats.add_argument("--operation", action="append", choices=STATISTICS_OPERATIONS,
-                       help="Sections to produce; repeatable, default: all")
-    stats.add_argument("--kind", action="append", choices=STATISTICS_KINDS,
-                       help="Symbol kind; repeatable, default: functions and classes")
+    stats.add_argument(
+        "--operation",
+        action="append",
+        choices=STATISTICS_OPERATIONS,
+        help="Sections to produce; repeatable, default: all",
+    )
+    stats.add_argument(
+        "--kind",
+        action="append",
+        choices=STATISTICS_KINDS,
+        help="Symbol kind; repeatable, default: functions and classes",
+    )
     stats.add_argument("--limit", type=int, help="Number of ranked symbols to display; counts stay complete")
     stats.add_argument("--min-lines", type=int, help="Inclusive minimum symbol size in the range listing")
     stats.add_argument("--max-lines", type=int, help="Inclusive maximum symbol size in the range listing")
@@ -723,24 +786,28 @@ def _previous_pack(
     starts: tuple[str, ...],
     thresholds: Thresholds,
     client: JevClient,
+    workflow: str,
 ) -> dict | None:
     if resume_from is None:
         return None
     source = resume_from.resolve()
     previous = json.loads((source / "manifest.json").read_text())
     if not (source / "resume.json").is_file():
-        raise ValueError(f"no saved find frontier in {source}")
+        raise ValueError(f"no saved search frontier in {source}")
     if previous["search"]["outcome"] not in ("budget", "cancelled"):
-        raise ValueError("only a budget-stopped or cancelled find can resume")
+        raise ValueError("only a budget-stopped or cancelled search can resume")
     if (
-        previous["source"]["repository"] != str(repository)
+        previous.get("workflow", "find") != workflow
+        or previous["source"]["repository"] != str(repository)
         or previous["source"]["prefixes"] != list(prefixes)
         or previous["target"] != target
         or previous["requested_starts"] != list(starts)
         or previous["thresholds"] != thresholds.as_dict()
         or previous["provider"]["requested_model"] != getattr(client, "model", "unknown")
     ):
-        raise ValueError("resume must use the same repository, scope, target, starts, thresholds and model")
+        raise ValueError(
+            "resume must use the same workflow, repository, scope, target, starts, thresholds and model"
+        )
     return previous
 
 
@@ -800,7 +867,7 @@ def _manifest(
     entry_pending: bool = False,
     scope_unavailable: dict[str, str] | None = None,
 ) -> dict:
-    old_search = previous["search"] if previous else {}
+    old_search = previous.get("seed_search", previous["search"]) if previous else {}
     entry_receipt = entry_selection.to_json() if entry_selection else None
     if entry_receipt is None and previous:
         entry_receipt = previous.get("entry_selection")
@@ -866,7 +933,9 @@ def _manifest(
     }
 
 
-def _find_all_summary(result: FindAllResult, calls: int, elapsed: float) -> dict:
+def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previous: dict | None) -> dict:
+    old_search = previous["search"] if previous else {}
+
     def answer(value):
         return {
             "source": {key: value.item[key] for key in ("file", "lines", "commit", "file_sha256")},
@@ -882,9 +951,10 @@ def _find_all_summary(result: FindAllResult, calls: int, elapsed: float) -> dict
         "outcome": result.stopped_by,
         "coverage": result.coverage,
         "unit": "function",
-        "calls": calls,
-        "enumeration_calls": result.calls,
-        "duration_seconds": round(elapsed, 3),
+        "calls": old_search.get("calls", 0) + calls,
+        "calls_this_invocation": calls,
+        "enumeration_calls": old_search.get("enumeration_calls", 0) + result.calls,
+        "duration_seconds": round(old_search.get("duration_seconds", 0) + elapsed, 3),
         "found": [answer(value) for value in result.matched],
         "unsure": [answer(value) for value in result.uncertain],
         "searched": [answer(value) for value in result.negative],

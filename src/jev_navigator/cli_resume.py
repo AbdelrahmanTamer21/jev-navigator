@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .directives.find_code import FindResult, NotInspected, Outcome, QueueTier, Visit
 from .directives.places import Place
 from .index.code_index import CodeIndex
 from .index.spans import CodeSlice, Span
+from .judgments.judge import CheckResult
 from .judgments.thresholds import NoulVerdict
 
 STATE_VERSION = 1
+
+
+@dataclass(frozen=True)
+class SavedSearch:
+    result: FindResult | None
+    completed: tuple[CheckResult, ...] | None = None
+    check_id: str | None = None
 
 
 def scope_identity(index: CodeIndex) -> tuple[str, dict[str, str]]:
@@ -45,14 +53,24 @@ def scope_identity(index: CodeIndex) -> tuple[str, dict[str, str]]:
     return digest.hexdigest(), unavailable
 
 
-def save_resume(path: Path, index: CodeIndex, result: FindResult, *, entry_pending: bool) -> dict[str, str]:
+def save_resume(
+    path: Path,
+    index: CodeIndex,
+    result: FindResult,
+    *,
+    entry_pending: bool,
+    completed: tuple[CheckResult, ...] | None = None,
+    check_id: str | None = None,
+) -> dict[str, str]:
     """Save only the state find_code needs to reopen its frontier; manifest owns past evidence."""
     digest, unavailable = scope_identity(index)
     state = {
         "version": STATE_VERSION,
         "scope_digest": digest,
         "unavailable_files": unavailable,
-        "stage": "entry" if entry_pending else "navigation",
+        "stage": "enumeration" if completed is not None else "entry" if entry_pending else "navigation",
+        "check_id": check_id,
+        "completed": [asdict(answer) for answer in completed] if completed is not None else None,
         "result": None if entry_pending else _result_record(result),
     }
     temporary = path.with_suffix(".tmp")
@@ -61,7 +79,7 @@ def save_resume(path: Path, index: CodeIndex, result: FindResult, *, entry_pendi
     return unavailable
 
 
-def load_resume(path: Path, index: CodeIndex) -> FindResult | None:
+def load_resume(path: Path, index: CodeIndex) -> SavedSearch:
     """Return a fresh-index frontier, or None when entry selection must be replayed."""
     state = json.loads(path.read_text())
     if state.get("version") != STATE_VERSION:
@@ -69,13 +87,13 @@ def load_resume(path: Path, index: CodeIndex) -> FindResult | None:
     if state.get("scope_digest") != scope_identity(index)[0]:
         raise ValueError("repository source or scope changed since the evidence pack")
     if state.get("stage") == "entry":
-        return None
-    if state.get("stage") != "navigation":
+        return SavedSearch(None)
+    if state.get("stage") not in ("navigation", "enumeration"):
         raise ValueError("invalid find resume stage")
     record = state["result"]
-    return FindResult(
-        outcome=Outcome.BUDGET,
-        found=(),
+    result = FindResult(
+        outcome=Outcome(record.get("outcome", Outcome.BUDGET)),
+        found=tuple(_read_visit(item) for item in record.get("found", [])),
         searched=tuple(_read_visit(item) for item in record["searched"]),
         unsure=tuple(_read_visit(item) for item in record["unsure"]),
         not_inspected=tuple(_read_frontier(item, index) for item in record["not_inspected"]),
@@ -85,10 +103,18 @@ def load_resume(path: Path, index: CodeIndex) -> FindResult | None:
         judged_code=frozenset(record["judged_code"]),
         starts=tuple(_read_visit(item) for item in record["starts"]),
     )
+    completed = None
+    if state["stage"] == "enumeration":
+        completed = tuple(
+            CheckResult(**{**item, "verdict": NoulVerdict(item["verdict"])}) for item in state["completed"]
+        )
+    return SavedSearch(result, completed, state.get("check_id"))
 
 
 def _result_record(result: FindResult) -> dict:
     return {
+        "outcome": result.outcome,
+        "found": [_visit_record(item) for item in result.found],
         "steps": result.steps,
         "calls": result.calls,
         "visited": sorted(result.visited),
