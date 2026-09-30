@@ -69,10 +69,14 @@ class CallMatch:
 
 @dataclass(frozen=True, order=True)
 class ReferenceMatch:
+    """One per file, line, role and name. ``receiver`` is what a qualified argument such as
+    ``self.handler`` is read from, None for a bare name."""
+
     file: str
     line: int
     role: str
     name: str
+    receiver: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,23 +174,25 @@ def _calls_from_matches(matches) -> tuple[CallMatch, ...]:
 
 
 def _references_from_matches(matches) -> tuple[ReferenceMatch, ...]:
+    """When one line passes both ``x.name`` and ``name`` in the same role, the plain name stands for
+    that line, as a plain call does for callers."""
+    receivers: dict[tuple[str, int, str, str], set[str | None]] = {}
+    for match in matches:
+        role, text = match["ruleId"], match["text"]
+        key = (match["file"], _line_of(match), role, _reference_name(role, text))
+        receivers.setdefault(key, set()).add(_reference_receiver(role, text))
     return tuple(
-        sorted(
-            {
-                ReferenceMatch(
-                    match["file"],
-                    _line_of(match),
-                    match["ruleId"],
-                    _reference_name(match["ruleId"], match["text"]),
-                )
-                for match in matches
-            }
-        )
+        ReferenceMatch(*key, None if None in found else min(found))
+        for key, found in sorted(receivers.items())
     )
 
 
 def _reference_name(role: str, text: str) -> str:
     return last_identifier(text) if role == "argument" else text
+
+
+def _reference_receiver(role: str, text: str) -> str | None:
+    return receiver_of(text) if role == "argument" else None
 
 
 def receiver_of(expression: str) -> str | None:

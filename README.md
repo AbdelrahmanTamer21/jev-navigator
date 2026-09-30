@@ -292,8 +292,10 @@ the definition may sit in a file the index could not parse. A host with a
 real resolver (a code-intelligence service, a TypeScript alias resolver, an LSP) passes it as
 `binding_resolver=`; its answer wins. Trace steps and search neighbours carry the binding, so a
 candidate edge is never presented as a proven call. Script constructor expressions such as `new
-MemoryAdapter()` are calls too. A bound method passed as an argument is indexed under its member name,
-so navigation can offer the method definition while keeping its name-only binding honest.
+MemoryAdapter()` are calls too. A bound method passed as an argument (`bus.on(self.handler)`) is
+indexed under its member name, so navigation can offer the method definition, and is bound like a
+method call on an unknown receiver: a function of that name in the same file or an import never
+proves it.
 
 Every `CodeSlice` records its source: `slice.source()` gives the file, line range, commit (with
 `+worktree` when the file had uncommitted changes) and how it was reached.
