@@ -16,6 +16,7 @@ that are absent from the source?” rather than “find everything important”.
 - [Agent workflow](#agent-workflow)
 - [Find All function search](#find-all-function-search)
 - [Workflow trace](#workflow-trace)
+- [Structural measurements](#structural-measurements)
 
 ## Start with one command
 
@@ -236,3 +237,32 @@ JSON stdout contains `output_directory`, `manifest`, `report`, `trace`, `provide
 interruption can leave the journal and answer store without a final manifest. The library also
 offers cooperative cancellation between traversal steps and model batches that writes a partial
 pack.
+
+## Structural measurements
+
+Use parser facts for counting and physical line sizes. No model, API key, or natural-language
+judgment is needed:
+
+```sh
+jvn stats                                      # counts, largest symbols and line ranges
+jvn stats --kind function --limit 1             # largest function, including methods
+jvn stats --operation count --kind class        # class totals and counts per file
+jvn stats --operation range --kind function --min-lines 20 --max-lines 80
+jvn --json '{"command":"stats","kind":["function"],"limit":1}'
+jvn schema stats
+```
+
+The command writes `statistics.json` and `statistics.md` under a unique `./jvn-results/` directory.
+`--repo`, repeatable `--prefix`, and `--out` work as for search. Repeat `--operation` to choose
+`count`, `largest`, or `range` sections; repeat `--kind` for `function` and `class`. Both kinds and
+all sections are included by default. `--top-level` excludes methods/nested symbols from rankings
+and ranges; counts still cover all parsed symbols of the requested kinds.
+
+`--limit` restricts the displayed ranking, never the measured inventory. All tied largest symbols
+remain identified in `largest.biggest`. `--min-lines` and `--max-lines` filter only the range listing,
+inclusively; they do not change counts or the largest-symbol ranking. Sizes include both boundary
+lines. Reports retain skipped, unreadable and partially parsed files; recovered counts are not a
+claim that unsupported or malformed code was completely understood. Inspect `coverage` in JSON.
+
+These are explicit structural commands. `find` still accepts a semantic target; it does not yet
+route arbitrary natural-language arithmetic questions into `stats` automatically.

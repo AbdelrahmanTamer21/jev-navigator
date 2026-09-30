@@ -15,7 +15,7 @@ _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 class TerminalProgress:
-    def __init__(self, journal_path: Path, *, verbose: bool = False) -> None:
+    def __init__(self, journal_path: Path | None, *, verbose: bool = False) -> None:
         self.journal_path = journal_path
         self.verbose = verbose
         self.started = monotonic()
@@ -31,7 +31,7 @@ class TerminalProgress:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
-        self._event(f"journal {self.journal_path}")
+        self._event(f"journal {self.journal_path}" if self.journal_path else "local analysis")
         if self._tty:
             self._thread = threading.Thread(target=self._spin, name="jvn-progress", daemon=True)
             self._thread.start()

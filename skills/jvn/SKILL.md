@@ -9,6 +9,7 @@ Choose the operation by the evidence needed:
 
 | Need | Tool |
 |---|---|
+| Function/class counts, largest functions, physical line-size ranges | `jvn stats` (parser facts, no model) |
 | Exact identifier, literal or filename | `rg` / `rg --files` |
 | Exact callers or references of a resolved symbol | Compiler/reference tooling or JVN's `CodeIndex`; model judgment is unnecessary |
 | Locate an implementation described by behavior | `jvn find` |
@@ -21,6 +22,7 @@ Ask a concrete question: “where is a quote rejected when absent from the sourc
 several judgments. Jev judges; parser facts and code perform counting and arithmetic.
 
 ```sh
+jvn stats --kind function --limit 1
 jvn find 'where an evidence quote is rejected as absent from the source'
 jvn findall 'functions that implement rejection of unsupported evidence quotes'
 jvn trace 'how the source quote becomes an accepted or rejected claim' --start app/evidence.py:42

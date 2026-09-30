@@ -18,6 +18,7 @@ from time import monotonic
 
 from .adapters.typesafe import TypeSafeJevClient
 from .cli_resume import load_resume, save_resume
+from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
 from .cli_trace import create_trace_evidence_pack
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import FindAllResult, find_all
@@ -47,6 +48,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser = _parser()
         (_command_parser(parser, args.topic) if args.topic else parser).print_help()
         return 0
+    if args.command == "stats":
+        return _run_statistics(args)
     if args.command not in ("find", "findall", "trace"):
         raise AssertionError(f"unhandled command: {args.command}")
     budget = SearchBudget(
@@ -130,6 +133,52 @@ def main(argv: Sequence[str] | None = None) -> int:
         if resume_directory is not None:
             print(f"resume: use --resume {output.resolve()} with the same target and repository")
     return 130 if search_outcome == "cancelled" else 0
+
+
+def _run_statistics(args: argparse.Namespace) -> int:
+    repository = Path(args.repo).resolve()
+    output = Path(args.out).expanduser() if args.out else _default_output(repository)
+    progress = TerminalProgress(None)
+    progress.start()
+    outcome = "failed"
+    try:
+        progress.phase("indexing files for structural measurements")
+        index = CodeIndex.from_directory(
+            repository, prefixes=tuple(args.prefix),
+            exclude_paths=(output, Path.cwd() / "jvn-results"), scan_observer=progress.scan,
+        )
+        pack = create_statistics_pack(
+            repository, tuple(args.prefix), output, args.operation or STATISTICS_OPERATIONS,
+            kinds=args.kind or STATISTICS_KINDS, held=not args.top_level,
+            limit=args.limit, min_lines=args.min_lines, max_lines=args.max_lines, index=index,
+        )
+        outcome = "completed" if pack["coverage"]["complete"] else "partial"
+        if args.json:
+            print(json.dumps({
+                "output_directory": str(output.resolve()),
+                "manifest": str(output.resolve() / "statistics.json"),
+                "report": str(output.resolve() / "statistics.md"),
+                "statistics": pack,
+            }))
+        else:
+            print(f"statistics pack: {output.resolve()}")
+            if "counts" in pack:
+                print("counts: " + ", ".join(f"{k}={v}" for k, v in pack["counts"]["totals"].items()))
+            if "largest" in pack:
+                for symbol in pack["largest"]["biggest"]:
+                    print(f"largest: {symbol['name']} ({symbol['size']} lines) "
+                          f"{symbol['file']}:{symbol['lines'][0]}-{symbol['lines'][1]}")
+            print(f"coverage: {outcome}; 0 model calls")
+        return 0
+    except KeyboardInterrupt:
+        outcome = "cancelled"
+        print("jvn stats: cancelled", file=sys.stderr)
+        return 130
+    except Exception as error:
+        print(f"jvn stats: {error}", file=sys.stderr)
+        return 1
+    finally:
+        progress.close(outcome)
 
 
 def create_evidence_pack(
@@ -335,10 +384,10 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     )
     schema = commands.add_parser("schema", help="print a command's JSON request schema (no model calls)")
     schema.add_argument(
-        "topic", choices=("find", "findall", "trace"), help="command whose request schema to show"
+        "topic", choices=("find", "findall", "trace", "stats"), help="command whose request schema to show"
     )
     help_command = commands.add_parser("help", help="show general or command-specific help")
-    help_command.add_argument("topic", nargs="?", choices=("find", "findall", "trace", "schema"))
+    help_command.add_argument("topic", nargs="?", choices=("find", "findall", "trace", "stats", "schema"))
     _add_search_arguments(find)
     find.add_argument(
         "--resume",
@@ -383,6 +432,30 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
         "--max-calls", type=_count_or_none, help="Optional model-request cap; none is unlimited"
     )
     trace.add_argument("--verbose", action="store_true", help="Print expanded masked model requests")
+    stats = commands.add_parser(
+        "stats", help="count and rank parsed functions/classes without model calls",
+        description="Measure parser facts locally; no model or API key is used.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='jvn stats\njvn stats --kind function --limit 1\n'
+        'jvn stats --operation range --kind function --min-lines 20 --max-lines 80\n'
+        'jvn stats --operation count --prefix src/\n'
+        'JSON: {"command":"stats","kind":["function"],"limit":1}\n'
+        'Counts cover all parsed symbols. --limit changes only the displayed ranking.\n'
+        'Methods and nested functions are included unless --top-level is supplied.',
+    )
+    stats.add_argument("--repo", default=".", help="Source directory (default: current directory)")
+    stats.add_argument("--prefix", action="append", default=[], help="Source scope; repeatable")
+    stats.add_argument("--out", help="New or empty output directory (default: ./jvn-results/<run>)")
+    stats.add_argument("--operation", action="append", choices=STATISTICS_OPERATIONS,
+                       help="Sections to produce; repeatable, default: all")
+    stats.add_argument("--kind", action="append", choices=STATISTICS_KINDS,
+                       help="Symbol kind; repeatable, default: functions and classes")
+    stats.add_argument("--limit", type=int, help="Number of ranked symbols to display; counts stay complete")
+    stats.add_argument("--min-lines", type=int, help="Inclusive minimum symbol size in the range listing")
+    stats.add_argument("--max-lines", type=int, help="Inclusive maximum symbol size in the range listing")
+    stats.add_argument(
+        "--top-level", action="store_true", help="Exclude nested symbols from ranking and ranges"
+    )
     return parser
 
 
@@ -493,8 +566,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         parser.error("JSON request must be an object")
     command = payload.get("command", "find")
     # The command parser is the option schema for both input formats.
-    if command not in ("find", "findall", "trace"):
-        parser.error(f"unknown JSON command: {command!r}; expected find, findall or trace")
+    if command not in ("find", "findall", "trace", "stats"):
+        parser.error(f"unknown JSON command: {command!r}; expected find, findall, trace or stats")
     actions = _request_actions(_command_parser(parser, command))
     arguments = [command]
     for name, value in payload.items():
@@ -555,6 +628,9 @@ def _request_schema(parser: argparse.ArgumentParser) -> dict:
             field.update(type="array", items={"type": field["type"]})
             if action.required:
                 field["minItems"] = 1
+        if action.choices is not None:
+            choice_field = field["items"] if isinstance(action, argparse._AppendAction) else field
+            choice_field["enum"] = list(action.choices)
         if action.option_strings:
             field["default"] = action.default
             if not action.required and (action.default is None or action.type is _count_or_none):
@@ -563,7 +639,7 @@ def _request_schema(parser: argparse.ArgumentParser) -> dict:
             required.append(name)
         if name in NON_NEGATIVE_BUDGET_FIELDS:
             field["minimum"] = 0
-        elif name in POSITIVE_BUDGET_FIELDS:
+        elif name in (*POSITIVE_BUDGET_FIELDS, "limit", "min_lines", "max_lines"):
             field["minimum"] = 1
         properties[name] = field
     return {
@@ -576,7 +652,7 @@ def _request_schema(parser: argparse.ArgumentParser) -> dict:
         "examples": [
             {
                 "command": command,
-                "target": "the check that limits how many items an order may have",
+                **({"target": "the order item limit"} if command != "stats" else {}),
                 **({"start": ["app/orders.py:42"]} if command == "trace" else {}),
             }
         ],
