@@ -14,6 +14,7 @@ from jev_navigator.adapters.routes import (
     SystemOneClient,
     routes_from_env,
 )
+from jev_navigator.judgments.client import InputBudgetExceededError
 
 
 def test_no_routes_variable_resolves_to_no_routes():
@@ -136,3 +137,45 @@ def _dead_server() -> SystemOneClient:
     _requires_typesafe()
     client = SystemOneClient(model="test", api_key="test-key", base_url="http://127.0.0.1:1")
     return client
+
+
+def test_a_route_client_translates_an_input_budget_refusal():
+    """Drex and every other route speak the same wire: a 400 naming max_tokens_exceeded reaches
+    the batching owner typed, so it can split instead of dying on an untyped SDK error."""
+    _requires_typesafe()
+    refused: list[bytes] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            sent = self.rfile.read(int(self.headers["content-length"]))
+            if len(sent) > 40_000:
+                refused.append(sent)
+                body = b'{"detail":{"error_type":"max_tokens_exceeded"}}'
+                self.send_response(400)
+            else:
+                body = json.dumps(
+                    {
+                        "model": "drex-latest",
+                        "usage": {"input_tokens": 12, "output_tokens": 1},
+                        "answers": {"adds_one": {"type": "noul", "noul": 0.9}},
+                    }
+                ).encode()
+                self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args) -> None:  # noqa: A002 - stdlib signature
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = httpd.server_address[1]
+    __import__("threading").Thread(target=httpd.serve_forever, daemon=True).start()
+    client = SystemOneClient(model="drex-latest", api_key="test-key", base_url=f"http://127.0.0.1:{port}")
+    questions = {"adds_one": {"type": "noul", "instructions": "Does the code add one? " + "z" * 45_000}}
+
+    with pytest.raises(InputBudgetExceededError, match="max_tokens_exceeded"):
+        client.ask({"case": "x"}, questions)
+
+    assert len(refused) == 1

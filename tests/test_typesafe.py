@@ -16,8 +16,16 @@ from jev_navigator.directives.places import range_place
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.store import JsonlAnswerStore
-from jev_navigator.judgments.thresholds import Thresholds
+from jev_navigator.judgments.thresholds import NoulVerdict, Thresholds
+
+DESCRIBES = Check(
+    name="describes",
+    instructions="Is `{item}.code` the implementation that `doc.sentence` describes?",
+    yes=Criterion("The code performs what the sentence says."),
+    no=Criterion("The code does something else, or only calls it."),
+)
 
 STATE = {"slice": {"file": "counter.py", "code": "def add_one(x):\n    return x + 1"}}
 QUESTIONS = {"adds_one": {"type": "noul", "instructions": "Does `slice.code` add one?"}}
@@ -274,3 +282,67 @@ def test_the_answer_store_keeps_no_request_bytes_by_default_even_after_a_real_ca
     assert kept.sent_exact is True
     assert base64.b64decode(kept.sent_body_base64) == exchanges[1][0]
     assert kept.sent_request() == (STATE, QUESTIONS)
+
+
+def test_a_max_tokens_exceeded_response_is_typed_and_the_batch_splits_at_the_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The saved trace run's request 5 died on an untyped 400 max_tokens_exceeded. The transport
+    owns the provider contract: it translates the refusal, and the batching owner splits the batch
+    so the same questions travel in requests the provider accepts. Sanitized fixture, real socket."""
+    pytest.importorskip("typesafe_sdk")
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    refusals: list[bytes] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            sent = self.rfile.read(int(self.headers["content-length"]))
+            if len(sent) > 40_000:
+                refusals.append(sent)
+                body = b'{"detail":{"error_type":"max_tokens_exceeded"}}'
+                self.send_response(400)
+            else:
+                answers = {id_: {"type": "noul", "noul": 0.9} for id_ in json.loads(sent)["questions"]}
+                body = json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "usage": {"input_tokens": 12, "output_tokens": 1},
+                        "answers": answers,
+                    }
+                ).encode()
+                self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, name="jev-local-server", daemon=True).start()
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    client = TypeSafeJevClient()
+    journal_path = tmp_path / "journal.jsonl"
+    judge = Judge(client, journal=JsonlJournal(journal_path, keep_request_text=True))
+    items = [
+        {"file": f"part{index}.py", "lines": [1, 2], "code": "x = " + "y" * 24_000} for index in range(2)
+    ]
+
+    try:
+        results = judge.check_every([DESCRIBES], items, {}, list_name="parts")
+    finally:
+        client.close()
+        _stop(server)
+
+    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES, NoulVerdict.YES]
+    assert len(refusals) == 1, "the provider's own refusal stays the evidence of the oversized batch"
+    records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    failures = [record for record in records if record["kind"] == "failure"]
+    responses = [record for record in records if record["kind"] == "response"]
+    assert len(failures) == 1 and "max_tokens_exceeded" in failures[0]["error"]
+    assert len(responses) == 2 and all(record["status"] == 200 for record in responses)
+    for record in responses:
+        assert len(base64.b64decode(record["sent_body_base64"])) <= 40_000
