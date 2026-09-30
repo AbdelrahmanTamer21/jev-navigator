@@ -329,6 +329,32 @@ def test_moves_start_from_a_window_inside_a_long_class(tmp_path: Path) -> None:
     assert "refers to CreateOrder as collection" in offered["schema.py:3-3"]
 
 
+def test_uses_proven_to_reach_another_definition_of_the_name_are_not_offered(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(
+        tmp_path,
+        {
+            "archive.py": "def handler(event):\n    return event\n",
+            "jobs.py": "def handler(event):\n    return None\n",
+            "wiring.py": "from jobs import handler\n\n\ndef run(event):\n    return handler(event)\n\n\n"
+            "def wire(bus):\n    bus.on(handler)\n",
+        },
+    )
+    handlers = {span.file: span for span in index.find_definition("handler")}
+    moves = {name: MOVES[name] for name in ("callers", "referenced_by")}
+
+    # Act
+    from_archive = neighbours(index, index.read_slice(handlers["archive.py"]), moves=moves)
+    from_jobs = neighbours(index, index.read_slice(handlers["jobs.py"]), moves=moves)
+
+    # Assert
+    assert from_archive == []
+    assert [place.signature.split("` ")[1] for place in from_jobs] == [
+        "(calls handler)",
+        "(refers to handler as argument)",
+    ]
+
+
 def test_callees_called_from_few_places_come_first(tmp_path: Path) -> None:
     # Arrange
     helpers = "".join(f"def helper_{number}(value):\n    return value\n\n\n" for number in range(9))

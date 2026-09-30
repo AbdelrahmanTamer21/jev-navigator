@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
+from ..index.bindings import Binding
 from ..index.code_index import CodeIndex
 from ..index.spans import CallEdge, CodeSlice, Span, TextHit
 
@@ -162,7 +163,10 @@ def _within(inner: Span, outer: Span) -> bool:
 def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     if not _is_named(opened.span):
         return []
-    sites = sorted(index.find_callers(opened.span.name), key=lambda site: _is_test_file(site.file))
+    sites = sorted(
+        (site for site in index.find_callers(opened.span.name) if _may_reach(site.binding, opened.span)),
+        key=lambda site: _is_test_file(site.file),
+    )
     return [
         place_for_line(index, site.file, site.line, _with_binding(f"calls {opened.span.name}", site.binding))
         for site in sites
@@ -196,6 +200,7 @@ def _referenced_by(index: CodeIndex, opened: CodeSlice) -> list[Place]:
             index, ref.file, ref.line, _with_binding(f"refers to {name} as {ref.role}", ref.binding)
         )
         for ref in index.find_references(name)
+        if _may_reach(ref.binding, opened.span)
     ]
 
 
@@ -209,6 +214,13 @@ def _passed_on(index: CodeIndex, opened: CodeSlice) -> list[Place]:
         relation = _with_binding(f"passed on by {source} as {ref.role}", ref.binding)
         places += [function_place(index, span, relation) for span in targets]
     return places
+
+
+def _may_reach(binding: Binding | None, span: Span) -> bool:
+    """False when ``binding`` names a definition other than ``span``. ``span`` may be a window inside
+    the class or declaration it is named after, so a target overlapping it still counts."""
+    target = None if binding is None else binding.target
+    return target is None or (target.file == span.file and _overlaps(target, span))
 
 
 def _with_binding(relation: str, binding) -> str:
