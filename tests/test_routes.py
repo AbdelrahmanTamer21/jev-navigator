@@ -14,7 +14,8 @@ from jev_navigator.adapters.routes import (
     SystemOneClient,
     routes_from_env,
 )
-from jev_navigator.judgments.client import InputBudgetExceededError
+from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.questions import Check, Criterion
 
 
 def test_no_routes_variable_resolves_to_no_routes():
@@ -139,11 +140,11 @@ def _dead_server() -> SystemOneClient:
     return client
 
 
-def test_a_route_client_translates_an_input_budget_refusal():
-    """Drex and every other route speak the same wire: a 400 naming max_tokens_exceeded reaches
-    the batching owner typed, so it can split instead of dying on an untyped SDK error."""
+def test_a_routed_budget_refusal_reaches_the_judge_and_splits_without_failover():
+    """The real route transport preserves a size refusal for the batching owner to split."""
     _requires_typesafe()
     refused: list[bytes] = []
+    accepted: list[bytes] = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
@@ -153,11 +154,14 @@ def test_a_route_client_translates_an_input_budget_refusal():
                 body = b'{"detail":{"error_type":"max_tokens_exceeded"}}'
                 self.send_response(400)
             else:
+                accepted.append(sent)
                 body = json.dumps(
                     {
                         "model": "drex-latest",
                         "usage": {"input_tokens": 12, "output_tokens": 1},
-                        "answers": {"adds_one": {"type": "noul", "noul": 0.9}},
+                        "answers": {
+                            key: {"type": "noul", "noul": 0.9} for key in json.loads(sent)["questions"]
+                        },
                     }
                 ).encode()
                 self.send_response(200)
@@ -173,9 +177,19 @@ def test_a_route_client_translates_an_input_budget_refusal():
     port = httpd.server_address[1]
     __import__("threading").Thread(target=httpd.serve_forever, daemon=True).start()
     client = SystemOneClient(model="drex-latest", api_key="test-key", base_url=f"http://127.0.0.1:{port}")
-    questions = {"adds_one": {"type": "noul", "instructions": "Does the code add one? " + "z" * 45_000}}
+    backup_exchanges: list[tuple[bytes, bytes]] = []
+    routed = RoutedJevClient((Route("drex", client), Route("backup", _server(backup_exchanges))))
+    check = Check(
+        "has_code",
+        "Does `{item}.code` contain code?",
+        yes=Criterion("Code is present."),
+        no=Criterion("Code is absent."),
+    )
+    results = Judge(routed).check_every(
+        [check], [{"code": "x" * 24_000}, {"code": "y" * 24_000}], list_name="items"
+    )
 
-    with pytest.raises(InputBudgetExceededError, match="max_tokens_exceeded"):
-        client.ask({"case": "x"}, questions)
-
+    assert len(results["has_code"]) == 2
     assert len(refused) == 1
+    assert len(accepted) == 2
+    assert backup_exchanges == []

@@ -23,7 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ..judgments.answers import JevResponse, response_from_raw
-from ..judgments.client import LATEST_JEV, input_budget_error
+from ..judgments.client import LATEST_JEV, InputBudgetExceededError, input_budget_error
 from ..judgments.journal import RawResponse
 
 ROUTES_ENV = "SYSTEM_ONE_ROUTES"
@@ -190,6 +190,11 @@ class RoutedJevClient:
         for route in self.routes:
             try:
                 return route.client.ask(state, questions)
+            except InputBudgetExceededError:
+                # A size refusal is about this request's input, which failover would resend
+                # unchanged, and the typed error is the batching owner's signal to split the batch.
+                # It passes through untouched, exactly as `SystemOneClient.send` raises it.
+                raise
             except Exception as error:  # noqa: BLE001 - failover is the point
                 failures.append(f"{route.name}: {error}")
         if not failures:

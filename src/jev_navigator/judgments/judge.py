@@ -311,8 +311,11 @@ class Judge:
         if batches and self.store is not None and not self._knows_model():
             # Without a served model the store cannot prove model-version identity, so every lookup
             # misses; the first live response pins ``served_model`` and the rest may then replay.
+            # ``slots`` maps one entry per open question to its item position, so the positions are
+            # deduplicated exactly like the sibling batch senders: two checks over two items are two
+            # item slots and four questions, never four copies of two items and eight questions.
             for sub_batch, response in await self._send_positions_async(
-                plan, sorted(batches[0].slots.values())
+                plan, sorted(set(batches[0].slots.values()))
             ):
                 plan.answer(sub_batch, response)
             batches = batches[1:]
