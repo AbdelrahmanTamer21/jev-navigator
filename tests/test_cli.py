@@ -827,3 +827,61 @@ def test_findall_budget_stop_writes_partial_pack_with_completed_results(tmp_path
     else:
         assert saved["search"]["found"]
     assert (out / "report.md").is_file()
+
+
+def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from jev_navigator import cli
+
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "example.py").write_text(
+        "class Box:\n"
+        "    def larger(self):\n"
+        "        value = 1\n"
+        "        value += 2\n"
+        "        return value\n\n"
+        "def small():\n"
+        "    return 1\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    def forbidden_provider():
+        raise AssertionError("structural analysis must not construct a model client")
+
+    monkeypatch.setattr(cli, "TypeSafeJevClient", forbidden_provider)
+    assert main(["--json", json.dumps({
+        "command": "stats", "repo": str(root), "kind": ["function"],
+        "limit": 1, "min_lines": 4, "max_lines": 4,
+    })]) == 0
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    output = Path(result["output_directory"])
+    assert output.parent == tmp_path / "jvn-results"
+    pack = json.loads((output / "statistics.json").read_text())
+    assert pack["counts"]["totals"] == {"function": 2}
+    assert pack["largest"]["ranking"][0]["name"] == "larger"
+    assert pack["largest"]["ranking"][0]["size"] == 4
+    assert pack["ranges"]["measured"] == 2
+    assert pack["ranges"]["listed"] == 1
+    assert pack["ranges"]["per_file"]["example.py"][0]["lines"] == [2, 5]
+    assert "example.py:2-5" in (output / "statistics.md").read_text()
+    assert "whole files" not in (output / "statistics.md").read_text()
+    assert "0 requests" in captured.err
+
+
+def test_stats_schema_and_validation_share_the_cli_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert main(["schema", "stats"]) == 0
+    schema = json.loads(capsys.readouterr().out)
+    assert "target" not in schema["properties"]
+    assert schema["properties"]["operation"]["items"]["enum"] == ["count", "largest", "range"]
+    with pytest.raises(SystemExit) as exc:
+        main(["--json", '{"command":"stats","operation":["guess"]}'])
+    assert exc.value.code == 2
+    assert not (tmp_path / "jvn-results").exists()
+    assert main(["stats", "--min-lines", "10", "--max-lines", "2"]) == 1
+    assert not (tmp_path / "jvn-results").exists()

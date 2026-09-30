@@ -17,6 +17,10 @@ the `skills/jvn` directory into your agent harness's skills directory.
 The library finds code. Judging that code (is a comment accurate, does a rule hold everywhere) is a
 layer you build on top; [docs/extending.md](docs/extending.md) shows how to compose one.
 
+For structural questions, use code directly: `jvn stats --kind function --limit 1` finds the largest
+function without model calls. `jvn stats` reports counts and line ranges; see the
+[structural command examples](docs/cli.md#structural-measurements).
+
 ## Trace a known workflow
 
 ```sh

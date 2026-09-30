@@ -257,7 +257,7 @@ for unreadable, unsupported and partially parsed files; recovered symbol counts 
 all source parsed successfully. An unrequested symbol kind is omitted, not represented as zero. `counts.count_of(path)` returns
 `None` when that file was not measured; only a measured empty file has zero counts.
 Same-line nesting can have no known holder because the current index records line spans rather
-than AST parent identities. The structural CLI adapter is not part of this library contract.
+than AST parent identities. The `jvn stats` CLI writes these measurements as JSON and Markdown; see [the CLI guide](cli.md#structural-measurements).
 
 ## Trace a workflow and retain its evidence
 
