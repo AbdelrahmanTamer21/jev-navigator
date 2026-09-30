@@ -5,7 +5,8 @@ pool without reparsing arbitrary fixed-size batches. The structure rules also ma
 ERROR nodes: a file the parser could only recover
 partially (Flow types in a JavaScript file, say) is reported as unparsed too. Its matched symbols and
 calls still count — recovery keeps what it could — but whatever the ERROR nodes swallowed is unknown,
-not absent.
+not absent. ``FileFacts.unparsed_lines`` keeps the lines those nodes span, so a lookup can tell which
+names they may hide.
 """
 
 from __future__ import annotations
@@ -82,6 +83,8 @@ class FileFacts:
     references: tuple[ReferenceMatch, ...]
     incomplete: bool = False
     export_names: tuple[str, ...] = ()
+    # The first and last line of each stretch the grammar's ERROR nodes span, in file order.
+    unparsed_lines: tuple[tuple[int, int], ...] = ()
 
 
 def scan_facts(
@@ -117,6 +120,7 @@ def scan_facts(
         if match["ruleId"] not in {"function", "class", "declaration", _ERROR_RULE, "call", *_EXPORT_RULE_IDS}
     )
     surface = _export_names_from_matches(match for match in matches if match["ruleId"] in _EXPORT_RULE_IDS)
+    unread = _unparsed_lines_from_matches(match for match in matches if match["ruleId"] == _ERROR_RULE)
     return {
         file: FileFacts(
             structure[file],
@@ -124,9 +128,27 @@ def scan_facts(
             tuple(reference for reference in references if reference.file == file),
             file in unparsed.files,
             surface.get(file, ()),
+            unread.get(file, ()),
         )
         for file in files
     }
+
+
+def _unparsed_lines_from_matches(matches) -> dict[str, tuple[tuple[int, int], ...]]:
+    """Each file's ERROR node lines, with nested and overlapping nodes merged into one stretch."""
+    ranges: dict[str, list[tuple[int, int]]] = {}
+    for match in matches:
+        ranges.setdefault(match["file"], []).append((_line_of(match), match["range"]["end"]["line"] + 1))
+    merged: dict[str, tuple[tuple[int, int], ...]] = {}
+    for file, found in ranges.items():
+        stretches: list[tuple[int, int]] = []
+        for start, end in sorted(found):
+            if stretches and start <= stretches[-1][1]:
+                stretches[-1] = (stretches[-1][0], max(end, stretches[-1][1]))
+            else:
+                stretches.append((start, end))
+        merged[file] = tuple(stretches)
+    return merged
 
 
 def _structure_from_matches(files, lines_of, unparsed, matches):
