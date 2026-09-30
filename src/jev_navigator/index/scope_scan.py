@@ -19,12 +19,14 @@ from .imports import _local
 from .languages import (
     CLASS_KINDS,
     DECLARATION_RULES,
+    EXPRESSION_KINDS,
     FLOW_LANGUAGE,
     FLOW_SGCONFIG,
     FUNCTION_KINDS,
+    NAME_HOLDERS,
+    NAME_WRAPPERS,
     declared_name,
     export_rules,
-    function_name,
     grammar_of,
     language_for,
     language_of,
@@ -140,15 +142,14 @@ def _structure_from_matches(files, lines_of, unparsed, matches):
             # symbols it did keep are still matched below.
             unparsed.add("facts", [file])
             continue
-        first_line = lines_of(file)[start - 1]
         if match["ruleId"] == "declaration":
-            declarations[file].add(Span(file, start, end, declared_name(first_line)))
+            declarations[file].add(Span(file, start, end, declared_name(lines_of(file)[start - 1])))
         else:
             target = functions if match["ruleId"] == "function" else classes
-            # The matched node's own text names the symbol even when the physical line opens with
-            # another declaration's head: a method on a one-line class shares the line `class Box`
-            # opens, and naming it from that line would collapse it into the class's span.
-            target[file].add(Span(file, start, end, function_name(match["text"], first_line)))
+            # The syntax tree names the symbol, never a physical line: a method on a one-line class
+            # shares the line `class Box` opens, and naming it from that line would collapse it into
+            # the class's span.
+            target[file].add(Span(file, start, end, symbol_name(_captured_name(match))))
     return {
         file: FileStructure(
             _ordered(functions[file]),
@@ -199,6 +200,19 @@ def last_identifier(expression: str) -> str:
     return tail if tail.isidentifier() else ""
 
 
+def symbol_name(captured: str) -> str:
+    """The name a captured name node gives a symbol: ``save`` for ``save``, ``this.save``,
+    ``exports.save``, ``#save`` and the key ``"save"``. A computed key, a string key that is no
+    identifier (``"risk.triage"``) and a missing name leave it anonymous."""
+    quoted = captured[:1] in ("'", '"')
+    name = captured[1:-1] if quoted else last_identifier(captured.replace("#", ""))
+    return name if name.isidentifier() else "<anonymous>"
+
+
+def _captured_name(match: dict) -> str:
+    return match.get("metaVariables", {}).get("single", {}).get("NAME", {}).get("text", "")
+
+
 _ERROR_RULE = "parse_error"
 _EXPORT_STATEMENT_RULE = "export_surface"
 _EXPORT_SPECIFIER_RULE = "export_specifier"
@@ -206,29 +220,13 @@ _EXPORT_RULE_IDS = (_EXPORT_STATEMENT_RULE, _EXPORT_SPECIFIER_RULE)
 
 
 def _export_names_from_matches(matches) -> dict[str, tuple[str, ...]]:
-    """The names each file's parser says it exports, from real statement and specifier nodes."""
+    """The names each file's parser says it exports: exported declarations' name nodes, and the
+    specifier nodes of ``{ ... }`` lists."""
     names: dict[str, set[str]] = {}
     for match in matches:
         found = names.setdefault(match["file"], set())
-        if match["ruleId"] == _EXPORT_SPECIFIER_RULE:
-            found.add(_local(match["text"]))
-        elif name := _export_statement_name(match["text"]):
-            found.add(name)
+        found.add(_local(match["text"]) if match["ruleId"] == _EXPORT_SPECIFIER_RULE else match["text"])
     return {file: tuple(sorted(found)) for file, found in names.items()}
-
-
-def _export_statement_name(text: str) -> str:
-    """The name an ``export`` statement declares. Default, wildcard, namespace and ``{ ... }``
-    list statements contribute nothing here (lists name themselves through specifier nodes);
-    declarations are named by the same helpers the spans use."""
-    statement = " ".join(text.split())
-    body = statement.removeprefix("export").lstrip()
-    if body.startswith(("default", "*", "as ", "{", "=")):
-        return ""
-    name = function_name(statement)
-    if name == "<anonymous>":
-        name = declared_name(statement)
-    return name if name.isidentifier() else ""
 
 
 def _structure_rules(languages: Sequence[str]) -> str:
@@ -254,8 +252,34 @@ def _call_rules(languages: Sequence[str]) -> str:
 
 
 def _kind_rule(rule_id: str, language: str, kinds: Sequence[str]) -> str:
-    listed = "".join(f"\n    - kind: {kind}" for kind in kinds)
-    return f"id: {rule_id}\nlanguage: {grammar_of(language)}\nrule:\n  any:{listed}"
+    """Every node of ``kinds``, with the node that names it captured as ``$NAME``: a declaration's
+    own name; an expression's holder (see ``EXPRESSION_KINDS``), else its own name. ``any`` takes
+    the first alternative that matches, and a node with neither name still matches, unnamed."""
+    grammar = grammar_of(language)
+    declarations = [kind for kind in kinds if kind not in EXPRESSION_KINDS]
+    expressions = [kind for kind in kinds if kind in EXPRESSION_KINDS]
+    alternatives = [f"{{any: {_kinds(declarations)}, has: {_named_by('name')}}}"] if declarations else []
+    if expressions:
+        # The search stops at the first ancestor that is no wrapper, and that one must be the holder.
+        past_wrappers = f"{{not: {{any: {_kinds(NAME_WRAPPERS[grammar])}}}}}"
+        holders = ", ".join(
+            f"{{kind: {holder}, has: {_named_by(field)}}}" for holder, field in NAME_HOLDERS[grammar]
+        )
+        alternatives += [
+            f"{{any: {_kinds(expressions)}, inside: {{stopBy: {past_wrappers}, any: [{holders}]}}}}",
+            f"{{any: {_kinds(expressions)}, has: {_named_by('name')}}}",
+        ]
+    alternatives.append(f"{{any: {_kinds(kinds)}}}")
+    listed = "".join(f"\n    - {alternative}" for alternative in alternatives)
+    return f"id: {rule_id}\nlanguage: {grammar}\nrule:\n  any:{listed}"
+
+
+def _kinds(kinds: Sequence[str]) -> str:
+    return "[" + ", ".join(f"{{kind: {kind}}}" for kind in kinds) + "]"
+
+
+def _named_by(field: str) -> str:
+    return f"{{field: {field}, pattern: $NAME}}"
 
 
 def _scan_groups(files: Sequence[str], lines_of: LinesOf) -> list[tuple[str | None, list[str], list[str]]]:
@@ -283,7 +307,9 @@ def _languages(files: Sequence[str]) -> list[str]:
 
 
 def _ordered(spans: set[Span]) -> tuple[Span, ...]:
-    return tuple(sorted(spans, key=lambda span: (span.start, -span.end)))
+    """By position, outer first; symbols on the same lines by name, so the order never depends on
+    the process's string hashing."""
+    return tuple(sorted(spans, key=lambda span: (span.start, -span.end, span.name)))
 
 
 def _line_of(match: dict) -> int:

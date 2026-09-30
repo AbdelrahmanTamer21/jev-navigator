@@ -294,6 +294,65 @@ def test_a_method_on_a_one_line_class_is_named_and_counted_itself(tmp_path: Path
     assert {span.name for span in index.symbols_in("src/box.ts")} == {"Box", "v"}
 
 
+def test_a_symbol_is_named_by_the_syntax_tree_and_a_callback_stays_anonymous(tmp_path: Path) -> None:
+    """An expression is named by the declarator, field, key or assignment holding it, seen through
+    parentheses and casts, before its own name; a callback passed to a call has no name. Every
+    grammar is scanned together, so a node kind one grammar lacks would fail the whole scan."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/routes.ts": (
+                "export const load = (async () => fetchPage()) satisfies PageLoad;\n"
+                "export const GET = (() => respond()) as Handler;\n"
+                "const handler = function inner() { return 1; };\n"
+                'it("saves the order", () => { save(); });\n'
+                "orders.save = () => 1;\n"
+                'const routes = { "risk.triage": () => 1, plain: () => 2 };\n'
+                "abstract class Shape { #area() { return 0; } }\n"
+                "const Model = class {};\n"
+                "function* pages() {}\n"
+            ),
+            "src/view.tsx": (
+                'export const View = (() => <p />) satisfies Page;\ndescribe("view", () => {});\n'
+            ),
+            "src/legacy.js": (
+                "const run = (function () {});\n"
+                "class Job { start = () => 1; }\n"
+                "const each = function* () {};\n"
+            ),
+            "app/jobs.py": "class Job:\n    def run(self):\n        return 1\n",
+        },
+    )
+
+    # Act
+    named = {
+        file: [(span.start, span.name) for span in index.symbols_in(file)]
+        for file in ("src/routes.ts", "src/view.tsx", "src/legacy.js", "app/jobs.py")
+    }
+
+    # Assert
+    assert named == {
+        "src/routes.ts": [
+            (1, "load"),
+            (2, "GET"),
+            (3, "handler"),
+            (4, "<anonymous>"),
+            (5, "save"),
+            (6, "<anonymous>"),
+            (6, "plain"),
+            (7, "Shape"),
+            (7, "area"),
+            (8, "Model"),
+            (9, "pages"),
+        ],
+        "src/view.tsx": [(1, "View"), (2, "<anonymous>")],
+        "src/legacy.js": [(1, "run"), (2, "Job"), (2, "start"), (3, "each")],
+        "app/jobs.py": [(1, "Job"), (2, "run")],
+    }
+    assert index.unparsed_files == set()
+
+
 def test_a_flow_typed_class_keeps_its_methods(tmp_path: Path) -> None:
     """eval: `@flow` methods are recovered, not merely reported as omitted. The deciding spans the
     navigation needs (the class, its constructor and methods, module functions) resolve, the file
@@ -354,8 +413,9 @@ def test_plain_javascript_is_unchanged_whether_or_not_flow_files_share_the_scope
 
 
 def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> None:
-    """Statement and specifier nodes carry the surface: default, wildcard, a multi-line list and a
-    template-literal body are each handled by the parser, not by source-text scanning."""
+    """Declaration name nodes and specifier nodes carry the surface: default, wildcard, a multi-line
+    list, two constants in one statement and a template-literal body are each handled by the
+    parser, not by source-text scanning."""
     # Arrange
     index = committed(
         tmp_path,
@@ -369,6 +429,7 @@ def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> 
                 "  createOrder as placeOrder,\n"
                 "} from './commands';\n"
                 "const tpl = `export function inTemplate() {}`;\n"
+                "export const first = 1, second = 2;\n"
             ),
         },
     )
@@ -377,7 +438,7 @@ def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> 
     facts = index._facts_in("src/service.ts")
 
     # Assert
-    assert facts.export_names == ("placeOrder", "refund", "run")
+    assert facts.export_names == ("first", "placeOrder", "refund", "run", "second")
     assert facts.incomplete is False
 
 
