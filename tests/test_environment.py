@@ -69,6 +69,23 @@ def test_a_missing_key_everywhere_raises_with_every_source_named(tmp_path, monke
         load_typesafe_environment(root=tmp_path)
 
 
+def test_per_type_tables_that_cover_every_question_need_no_typesafe_key(tmp_path):
+    tables = {
+        "SYSTEM_ONE_ROUTES_CHECK": "mine",
+        "SYSTEM_ONE_ROUTES_PICK": "drex",
+        "SYSTEM_ONE_ROUTES_RATE": "drex",
+    }
+
+    load_typesafe_environment(tables, root=tmp_path, legacy=tmp_path / "absent")
+
+
+def test_a_question_type_left_to_jev_still_needs_the_typesafe_key(tmp_path):
+    with pytest.raises(RuntimeError, match="TYPESAFE_API_KEY is unset"):
+        load_typesafe_environment(
+            {"SYSTEM_ONE_ROUTES_CHECK": "mine"}, root=tmp_path, legacy=tmp_path / "absent"
+        )
+
+
 def test_env_file_parsing_is_tolerant(tmp_path):
     path = _written(
         tmp_path, {"A": "plain", "B": "quoted"}, extra=["", "# comment", "no equals sign", "=novalue"]

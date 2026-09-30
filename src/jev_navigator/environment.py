@@ -13,6 +13,8 @@ import os
 from collections.abc import MutableMapping
 from pathlib import Path
 
+from .adapters.routes import covers_every_question
+
 TYPESAFE_SETTINGS = ("TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_DEFAULT_MODEL")
 LEGACY_CONFIG = Path.home() / ".config/jvn/env"
 
@@ -33,7 +35,8 @@ def load_typesafe_environment(
     """Fill `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL` from the
     checkout-root `.env`, then the legacy `~/.config/jvn/env`; return what the files contributed.
 
-    Real environment variables win over both files. Raises when no source provides an API key.
+    Real environment variables win over both files. Raises when no source provides an API key,
+    unless the route tables leave no question type to Jev: each route resolves its own key.
     """
     environment = os.environ if environment is None else environment
     contributed: dict[str, str] = {}
@@ -42,7 +45,7 @@ def load_typesafe_environment(
             if not environment.get(name, "").strip() and value:
                 environment[name] = value
                 contributed[name] = value
-    if not environment.get("TYPESAFE_API_KEY", "").strip():
+    if not environment.get("TYPESAFE_API_KEY", "").strip() and not covers_every_question(environment):
         raise RuntimeError(
             "TYPESAFE_API_KEY is unset: export it, or set it in the checkout's .env "
             f"(see .env.example) or {LEGACY_CONFIG}"

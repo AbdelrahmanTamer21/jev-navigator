@@ -274,3 +274,34 @@ def test_the_answer_store_keeps_no_request_bytes_by_default_even_after_a_real_ca
     assert kept.sent_exact is True
     assert base64.b64decode(kept.sent_body_base64) == exchanges[1][0]
     assert kept.sent_request() == (STATE, QUESTIONS)
+
+
+def test_a_jev_route_asks_the_sdk_with_the_routes_own_timeout_and_retries() -> None:
+    pytest.importorskip("typesafe_sdk")
+    import httpx2
+    from typesafe_sdk import TypeSafeRateLimitError
+
+    from jev_navigator.adapters.routes import routes_from_env
+
+    timeouts: list[dict] = []
+
+    def busy(request: httpx2.Request) -> httpx2.Response:
+        timeouts.append(request.extensions["timeout"])
+        return httpx2.Response(429, headers={"retry-after-ms": "1"}, json={"error": {"message": "busy"}})
+
+    (route,) = routes_from_env(
+        {
+            "SYSTEM_ONE_ROUTES": "jev",
+            "TYPESAFE_API_KEY": "local-test-key",
+            "SYSTEM_ONE_JEV_TIMEOUT": "2.5",
+            "SYSTEM_ONE_JEV_RETRIES": "0",
+        },
+        transport=httpx2.MockTransport(busy),
+    )
+
+    try:
+        with pytest.raises(TypeSafeRateLimitError):
+            route.client.ask(STATE, QUESTIONS)
+    finally:
+        route.client.close()
+    assert [timeout["read"] for timeout in timeouts] == [2.5]
