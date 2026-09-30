@@ -84,6 +84,7 @@ def grammar_of(language: str) -> str:
 _DECLARED_NAME = re.compile(
     r"^\s*(?:export\s+)?(?:declare\s+)?(?:(?:type|interface|enum|const|let|var)\s+)?(\w+)"
 )
+_SCRIPT_VALUE_DECLARATION = re.compile(r"^\s*(?:export\s+)?(?:const|let)\s+(?!enum\b)[A-Za-z_$]")
 
 _NAME_PATTERNS = (
     re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+(\w+)"),
@@ -152,6 +153,12 @@ def declared_name(first_line: str) -> str:
     """The name a module-level assignment, constant, type, interface or enum declares."""
     match = _DECLARED_NAME.search(first_line)
     return match.group(1) if match else "<anonymous>"
+
+
+def declares_type(first_line: str) -> bool:
+    """Whether a type can name what a module-level declaration declares: a type alias, interface or
+    enum, or a Python assignment (which may be a type alias), but not a script constant or variable."""
+    return not _SCRIPT_VALUE_DECLARATION.match(first_line)
 
 
 def function_name(first_line: str, line_before: str = "") -> str:

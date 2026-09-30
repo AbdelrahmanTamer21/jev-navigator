@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
-from git_repos import commit_all, git
+from git_repos import commit_all, git, write_files
 
 from jev_navigator.index.code_index import CodeIndex, ScopeTooWideError, UnsafePathError
 from jev_navigator.index.spans import Span, TextHit
@@ -450,6 +450,56 @@ def test_a_function_passes_on_the_names_on_its_first_line(tmp_path: Path) -> Non
 
     # Assert
     assert [(ref.name, ref.line, ref.role) for ref in references] == [("Answer", 3, "type")]
+
+
+@pytest.mark.parametrize(
+    ("files", "holder", "declaration"),
+    [
+        pytest.param(
+            {
+                "hmr.ts": "interface PropagationBoundary {\n  boundary: string\n}\n\n"
+                "export function propagateUpdate(boundaries: PropagationBoundary[]): boolean {\n"
+                "  return boundaries.length > 0\n}\n"
+            },
+            "propagateUpdate",
+            Span("hmr.ts", 1, 3, "PropagationBoundary"),
+            id="interface",
+        ),
+        pytest.param(
+            {
+                "modes.ts": 'export const Mode = { Full: "full" } as const;\n'
+                "export type Mode = (typeof Mode)[keyof typeof Mode];\n\n"
+                "export function reload(mode: Mode) {\n  return mode;\n}\n"
+            },
+            "reload",
+            Span("modes.ts", 2, 2, "Mode"),
+            id="type-alias-named-like-a-constant",
+        ),
+        pytest.param(
+            {
+                "items.py": 'from typing import TypeVar\n\nItem = TypeVar("Item")\n\n\n'
+                "def first(items: list[Item]):\n    return items[0]\n"
+            },
+            "first",
+            Span("items.py", 3, 3, "Item"),
+            id="python-type-alias",
+        ),
+    ],
+)
+def test_a_type_reference_binds_to_the_declaration_it_names(
+    tmp_path: Path, files: dict[str, str], holder: str, declaration: Span
+) -> None:
+    # Arrange
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files))
+
+    # Act
+    references = index.references_in(index.find_definition(holder)[0])
+
+    # Assert
+    assert [(ref.name, ref.role, ref.binding.status, ref.binding.target) for ref in references] == [
+        (declaration.name, "type", "resolved", declaration)
+    ]
 
 
 def test_a_one_line_function_calls_what_its_first_line_calls(sample_index: CodeIndex) -> None:
