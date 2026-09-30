@@ -78,6 +78,16 @@ function you already believe is the answer. Automatic entry selection can find a
 
 ## Continue after a call limit
 
+In an interactive terminal, `find` saves its partial pack when the live-call allowance is used up,
+then asks whether to continue with another allowance of the same size. Answer `y` or `yes` to
+continue; any other answer or end of input leaves the saved pack intact. Each continuation creates
+a new pack beside the previous one and reuses its saved frontier and answers. The final printed path
+identifies the newest pack. No input is required until another paid call would need an allowance.
+
+JSON mode and redirected or piped input/output never prompt. An explicit `--max-calls 0` also
+returns immediately. This interactive continuation belongs to `find`; Find All and Trace still
+return their recorded partial results at a call stop.
+
 When `search.outcome` is `budget` or `cancelled`, the pack contains `resume.json`. Supply that pack to a follow-up
 invocation with the same target, repository, prefixes and starts:
 
@@ -89,6 +99,7 @@ jvn find "the order limit" --repo /path/to/repository --resume ./first-pack --ou
 The follow-up invocation gets a fresh 24-live-call allowance by default; `--max-calls N` or
 `--max-calls none` changes that allowance. Stored answers and the journal carry forward, so replayed
 answers cost no live calls. The new manifest combines earlier and new visits, history and call counts;
+`search.calls_this_invocation` records only the new requests, while `search.calls` is cumulative;
 the previous pack remains intact. A cap reached during automatic entry selection saves that stage,
 and the next invocation replays its stored decisions before continuing. Resume requires unchanged
 source and scope, the same thresholds and requested model. If the source changed, start a new search.

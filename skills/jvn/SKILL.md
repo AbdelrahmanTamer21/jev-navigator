@@ -49,7 +49,8 @@ cover input, transformation, handoff, outcome and relevant branches.
 
 Find defaults to 24 live model requests; Findall defaults to 48. Cache hits and local code work do not consume that
 allowance. `--max-calls none` removes it. Trace has no default request/depth cap. A budget-stopped
-Find can continue with the same target and `--resume /path/to/previous-pack`; do not advertise that
+Find offers another allowance in an interactive terminal after saving its frontier. JSON and piped
+commands never prompt. Continue those with the same target and `--resume /path/to/previous-pack`; do not advertise that
 saved-frontier continuation for Findall or Trace. Ctrl+C cancels; a cancelled Trace may have a
 journal without a finished manifest. Preserve the diagnostic and existing output.
 
