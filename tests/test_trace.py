@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from conftest import BudgetedClient
 
 from jev_navigator.directives.trace import (
     TRACE_EVIDENCE_CHECKS,
@@ -12,7 +13,7 @@ from jev_navigator.directives.trace import (
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
-from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.judge import MAX_REQUEST_CHARS, Judge
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
@@ -348,3 +349,40 @@ def test_cancelled_static_walk_does_not_start_external_judgments(tmp_path: Path)
     assert result.graph.stop == "cancelled"
     assert not client.requests
     assert {obligation.status for obligation in result.obligations} == {EvidenceStatus.UNRESOLVED}
+
+
+def _hub_index(root: Path, callers: int, line_chars: int) -> CodeIndex:
+    """A hub span referenced from `callers` long call sites: the sanitized failing shape."""
+    (root / "hub.py").write_text("def hub(request):\n    return request.body\n")
+    lines = []
+    for index in range(callers):
+        pad = "x" * line_chars
+        lines.append(f"def caller_{index}(request):\n    hub('{pad}')\n")
+    (root / "callers.py").write_text("\n".join(lines))
+    return CodeIndex.from_directory(root)
+
+
+def test_a_hub_item_keeps_every_link_fact_without_the_repeated_identity_boilerplate(tmp_path: Path) -> None:
+    """The saved trace run's request 5 was one 227-char span whose 165 links carried 138,002
+    characters of per-link identity boilerplate; no input budget could carry it."""
+    index = _hub_index(tmp_path, callers=150, line_chars=200)
+    root = index.find_definition("hub")[0]
+    client = BudgetedClient(MAX_REQUEST_CHARS)
+
+    result = trace_workflow(index, Judge(client), "How does a request become a result?", [root])
+
+    assert result.budget_stopped is False
+    assert client.refusals == 0, "no request over the measured input budget is ever sent"
+    hub_item = next(
+        item
+        for state, _ in client.requests
+        for item in state["trace"]
+        if item.get("span_key") == "hub.py:1-2"
+    )
+    assert len(hub_item["links"]) == 150
+    assert all(isinstance(link, str) for link in hub_item["links"])
+    dense = "\n".join(hub_item["links"])
+    for fact in ("self", "self#hub", "caller_7", "call", "at callers.py:", "binding"):
+        assert fact in dense
+    for obligation in result.obligations:
+        assert obligation.status is EvidenceStatus.EVIDENCE_BACKED
