@@ -157,7 +157,7 @@ def _resolve_script(
     if specifier.startswith("#"):
         manifest = packages.scope_of(importer)
         targets = manifest.import_targets(specifier) if manifest else []
-        certain = True
+        certain = manifest is not None and packages.nearest_on_disk(importer, manifest)
     else:
         name, subpath = package_name(specifier)
         manifest = packages.named(name, importer)
@@ -167,24 +167,47 @@ def _resolve_script(
         return None
     mapping = f"repository package.json mapping for {specifier}"
     uncertain = "" if certain else ", a package the importer does not link by workspace: or self-reference"
-    # Every declared target before any source inferred from build output.
+    # Discovery keeps main's order: each target, then the source it is built from.
+    chosen: ImportFact | None = None
     for target in targets:
         if target.startswith("."):
-            path = _scope_file(packages.target_bases(manifest.directory, target)[:1], scope)
+            path = _scope_file(packages.target_bases(manifest.directory, target), scope)
             if path is not None:
-                return ImportFact(path, certain, mapping + uncertain)
+                chosen = ImportFact(path, False, mapping)
+                break
             continue
         redirected = _resolve_script(target, importer, scope, script_paths, packages, seen)
         if redirected is not None:
-            # Node follows a target naming another package, never one naming a `#` import.
-            proven = certain and redirected.proven and not target.startswith("#")
-            return ImportFact(redirected.path, proven, redirected.reason if proven else mapping + uncertain)
+            chosen = ImportFact(redirected.path, redirected.proven and not target.startswith("#"), mapping)
+            break
+    if chosen is None:
+        return None
+    # Proof: every declared target that exists names the same file, and it is not a declaration file.
+    declared = set()
     for target in targets:
-        if target.startswith(".") and (
-            path := _scope_file(packages.target_bases(manifest.directory, target)[1:], scope)
-        ):
-            return ImportFact(path, False, f"{mapping}, source inferred from build output")
-    return None
+        if target.startswith("."):
+            if (
+                path := _scope_file(packages.target_bases(manifest.directory, target)[:1], scope)
+            ) is not None:
+                declared.add(path)
+        elif (
+            redirected := _resolve_script(target, importer, scope, script_paths, packages, seen)
+        ) is not None:
+            declared.add(
+                redirected.path if redirected.proven and not target.startswith("#") else "<unproven>"
+            )
+    agreed = declared == {chosen.path}
+    proven = certain and agreed and not chosen.path.endswith((".d.ts", ".d.mts", ".d.cts"))
+    if proven:
+        return ImportFact(chosen.path, True, mapping)
+    why = uncertain or (
+        ", declared targets differ by condition"
+        if len(declared) > 1
+        else ", a declaration file"
+        if agreed
+        else ", source inferred from build output"
+    )
+    return ImportFact(chosen.path, False, mapping + why)
 
 
 def _scope_file(bases: list[str], scope: frozenset[str]) -> str | None:

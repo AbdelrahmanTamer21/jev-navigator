@@ -249,11 +249,14 @@ package.json files are found in the folders that hold scope files. `CodeIndex.at
 commit's tsconfig, jsconfig and package.json files along, outside the scope.
 `CodeIndex.imports()` and `dependents()` include suggested repository package paths for navigation,
 including source paths inferred from build output. A package.json mapping proves a call only when both
-the package and the file are certain: a `#` import, a package's own name through its `exports`, or the
-only package of a name the importer depends on through `workspace:`, with a declared target that exists.
-Any other package mapping (a version range that could install a published copy, a name several packages
-claim, a source inferred from build output, a `#` target naming another `#` import) makes the call
-`candidate`, with the mapping named as its reason. Relative imports, Python imports and declared
+the package and the file are certain. The package is certain for a `#` import, a package's own name
+through its `exports`, or the only package of a name the importer depends on through a `workspace:`
+range; a `#` import or a dependency counts only when the importer's package.json is the nearest one on
+disk. The file is certain when every declared target that exists names it and it is not a declaration
+file. Any other package mapping (a version range that could install a published copy, a `workspace:`
+alias, a name several packages claim, targets that differ by condition, a `.d.ts` file, a source
+inferred from build output, a `#` target naming another `#` import) makes the call `candidate`, with
+the mapping named as its reason. Relative imports, Python imports and declared
 script-config paths keep their resolved bindings. Package redirects follow acyclic chains of any length
 and stop when a specifier repeats.
 File lists come from git with NUL separators, so

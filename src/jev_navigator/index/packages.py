@@ -87,10 +87,27 @@ class Packages:
         if own is None:
             return False
         if own.fields.get("name") == name:
-            return "exports" in own.fields
+            return own.fields.get("exports") is not None
+        if not self.nearest_on_disk(importer, own):
+            return False
         ranges = [own.fields.get(field) for field in DEPENDENCY_FIELDS]
-        linked = any(isinstance(r, dict) and str(r.get(name, "")).startswith("workspace:") for r in ranges)
+        # `workspace:<range>` links the workspace package; `workspace:<other-name>@<range>` is an alias.
+        linked = any(
+            isinstance(r, dict)
+            and re.fullmatch(r"workspace:(\*|[~^]|[~^<>=]*\d[\w.\-+ |<>=~^]*)", str(r.get(name, "")))
+            for r in ranges
+        )
         return linked and len(self._named.get(name, [])) == 1
+
+    def nearest_on_disk(self, file: str, manifest: Manifest) -> bool:
+        """Whether ``manifest`` is the nearest package.json that exists above ``file``, readable or not."""
+        for parent in PurePosixPath(file).parents:
+            folder = _folder(str(parent))
+            if folder == manifest.directory:
+                return True
+            if (self.root / folder / "package.json").exists():
+                return False
+        return False
 
     def target_bases(self, directory: str, target: str) -> list[str]:
         """Root-relative bases for a target the package in ``directory`` declares: the target, then,
