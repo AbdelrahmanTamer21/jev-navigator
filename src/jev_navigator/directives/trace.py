@@ -174,10 +174,17 @@ def trace_workflow(
 
     if not stopped:
         links_by_function: dict[str, list[operations.TraceLink]] = {}
+        function_keys = {
+            span.key for file in {span.file for span in graph.functions} for span in index.functions_in(file)
+        }
         for link in graph.links:
-            endpoints = {span.key for span in (link.source, link.target) if span is not None}
-            for key in endpoints:
-                links_by_function.setdefault(key, []).append(link)
+            endpoints = {span for span in (link.source, link.target) if span is not None}
+            for span in endpoints:
+                # A class's method sites are judged with their methods. Repeating every incoming
+                # method/caller link on the class makes one class item exceed the request budget.
+                if span == link.target and link.source is not None and span.key not in function_keys:
+                    continue
+                links_by_function.setdefault(span.key, []).append(link)
         items = tuple(
             _trace_item(index, span, links_by_function.get(span.key, ())) for span in graph.functions
         )

@@ -10,7 +10,7 @@ import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
-from .index.bindings import Binding
+from .index.bindings import Binding, BindingStatus
 from .index.code_index import CodeIndex
 from .index.languages import language_of
 from .index.spans import CallSite, CodeSlice, Span
@@ -256,7 +256,35 @@ def _require_depth(depth: int | None) -> None:
 
 def _links_at(index: CodeIndex, function: Span, hop: int) -> tuple[TraceLink, ...]:
     links: list[TraceLink] = []
+    members = (
+        tuple(
+            member
+            for member in index.functions_in(function.file)
+            if function.start < member.start and member.end <= function.end
+        )
+        if function not in index.functions_in(function.file)
+        else ()
+    )
+    for member in members:
+        links.append(
+            TraceLink(
+                hop,
+                function,
+                member,
+                "contains",
+                member.name,
+                member.file,
+                member.start,
+                Binding(BindingStatus.RESOLVED, "lexical containment, not invocation", member),
+            )
+        )
+
+    def inside_member(line: int) -> bool:
+        return any(member.contains(line) for member in members)
+
     for edge in index.callee_edges(function):
+        if inside_member(edge.line):
+            continue
         targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
         if not targets:
             links.append(
@@ -283,6 +311,8 @@ def _links_at(index: CodeIndex, function: Span, hop: int) -> tuple[TraceLink, ..
             )
         )
     for reference in index.references_in(function):
+        if inside_member(reference.line):
+            continue
         targets = (
             [reference.binding.target]
             if reference.binding is not None and reference.binding.target is not None

@@ -386,3 +386,30 @@ def test_a_hub_item_keeps_every_link_fact_without_the_repeated_identity_boilerpl
         assert fact in dense
     for obligation in result.obligations:
         assert obligation.status is EvidenceStatus.EVIDENCE_BACKED
+
+
+def test_class_trace_assigns_method_evidence_to_its_lexical_owner(tmp_path: Path) -> None:
+    """A class with many methods must not repeat every method reference in one giant class item."""
+    names = [f"target_{number}" for number in range(12)]
+    (tmp_path / "targets.py").write_text(
+        "\n".join(f"def {name}(): return {number}" for number, name in enumerate(names))
+    )
+    methods = [
+        f"    def method_{number}(self):\n        return ({', '.join(names)})  # {'x' * 180}\n"
+        for number in range(50)
+    ]
+    (tmp_path / "hub.py").write_text("class Hub:\n" + "\n".join(methods))
+    index = CodeIndex.from_directory(tmp_path)
+    hub = index.find_definition("Hub")[0]
+    client = BudgetedClient(MAX_REQUEST_CHARS)
+
+    result = trace_workflow(index, Judge(client), "Which methods use the targets?", [hub])
+
+    assert client.refusals == 0
+    assert all(obligation.examined for obligation in result.obligations)
+    assert {link.target.name for link in result.graph.links if link.source == hub} >= {
+        "method_0",
+        "method_49",
+    }
+    assert not any(link.source == hub and link.name in names for link in result.graph.links)
+    assert sum(link.name in names for link in result.graph.links) >= 50 * len(names)
