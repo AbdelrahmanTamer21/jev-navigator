@@ -131,6 +131,10 @@ Checks in one batch need distinct names because each name identifies its returne
 correct. Module-level statements, declarations and multi-function behaviors require a different
 unit/composition. `uncertain`, parser failures, unavailable files and unsupported grammars remain
 visible. A graph link marked candidate never becomes a proven call because its body matched.
+Pass `completed=previous.judged` to continue enumeration with a fresh Judge allowance. Reuse is valid
+only for the same source bytes, scope, target, Check and thresholds; the CLI verifies those identities
+in its saved pack. Completed positive, negative and uncertain judgments retain their original
+request hashes and are not sent again. Static graph reconstruction does not consume model calls.
 Cancellation keeps coverage partial and reporting does not trigger scans of untouched files.
 Provider errors propagate; retained journal receipts describe the work actually performed.
 

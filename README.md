@@ -48,7 +48,10 @@ remaining function bodies for disconnected implementations. It uses batched Jev 
 defaults to 48 live model calls (twice `find`); `--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
 `./jvn-results/` directory. `functions_examined` describes coverage of function bodies, not a proof
 of semantic equivalence or completeness across arbitrary code fragments. Uncertain answers and
-unreadable or unsupported source stay visible.
+unreadable or unsupported source stay visible. At a call stop, the terminal offers another allowance.
+For a later invocation or an agent pipeline, pass `--resume ./jvn-results/previous-pack` with the same
+Find All query and scope. Completed judgments and the seed are retained; only unfinished work spends
+new model calls.
 
 For an engineer-authored library composition and its limits, see
 [Extending: seed-first Find All](docs/extending.md#compose-a-seed-first-find-all-search).

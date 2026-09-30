@@ -78,15 +78,14 @@ function you already believe is the answer. Automatic entry selection can find a
 
 ## Continue after a call limit
 
-In an interactive terminal, `find` saves its partial pack when the live-call allowance is used up,
+In an interactive terminal, `find` and `findall` save a partial pack when the live-call allowance is used up,
 then asks whether to continue with another allowance of the same size. Answer `y` or `yes` to
 continue; any other answer or end of input leaves the saved pack intact. Each continuation creates
 a new pack beside the previous one and reuses its saved frontier and answers. The final printed path
 identifies the newest pack. No input is required until another paid call would need an allowance.
 
 JSON mode and redirected or piped input/output never prompt. An explicit `--max-calls 0` also
-returns immediately. This interactive continuation belongs to `find`; Find All and Trace still
-return their recorded partial results at a call stop.
+returns immediately. Trace returns its recorded partial results at a call stop without prompting.
 
 When `search.outcome` is `budget` or `cancelled`, the pack contains `resume.json`. Supply that pack to a follow-up
 invocation with the same target, repository, prefixes and starts:
@@ -96,7 +95,7 @@ jvn find "the order limit" --repo /path/to/repository --out ./first-pack
 jvn find "the order limit" --repo /path/to/repository --resume ./first-pack --out ./continued-pack
 ```
 
-The follow-up invocation gets a fresh 24-live-call allowance by default; `--max-calls N` or
+The follow-up invocation gets a fresh allowance by default (24 live calls for Find, 48 for Find All); `--max-calls N` or
 `--max-calls none` changes that allowance. Stored answers and the journal carry forward, so replayed
 answers cost no live calls. The new manifest combines earlier and new visits, history and call counts;
 `search.calls_this_invocation` records only the new requests, while `search.calls` is cumulative;
@@ -214,7 +213,18 @@ unsupported, unparsed or unavailable files. See the library composition in [exte
 
 `seed_search.calls` counts seed discovery; `search.enumeration_calls` counts the following enumeration.
 Their sum is `search.calls`, the whole workflow's actual model-request count.
-Saved-frontier `--resume` currently applies to `find`; Find All does not advertise that option.
+Continue a budget-stopped pack with the same query and scope:
+
+```sh
+jvn findall "functions enforcing the order item limit" --resume ./jvn-results/previous-pack
+jvn --json '{"command":"findall","target":"functions enforcing the order item limit","resume":"./jvn-results/previous-pack"}'
+```
+
+A stop during seed selection resumes that stage first. Once enumeration has begun, continuation
+restores the seed and all completed judgments, including negative and uncertain answers, and
+examines only the outstanding functions. Static graph reconstruction reuses parser caches; it is
+not a paid call. `calls_this_invocation` shows new calls; `calls` and `enumeration_calls` are cumulative.
+Source, scope, target, thresholds, model and containment-question identity must still match.
 
 ## Workflow trace
 
@@ -240,7 +250,7 @@ end-to-end path or model accuracy.
 There is no default depth or model-call limit for trace. Set `--max-depth N` or `--max-calls N`
 explicitly when needed; `--max-calls none` is unlimited. Outcomes preserve `depth`, `budget`,
 `cancelled` and `completed` separately. A budget stop retains completed answer batches and leaves
-unexamined evidence unresolved. Saved-frontier `--resume` currently belongs to `find`.
+unexamined evidence unresolved. Saved continuation is available for Find and Find All, not Trace.
 
 JSON stdout contains `output_directory`, `manifest`, `report`, `trace`, `provider` and `resume`
 (`null` for trace). Progress and requests stay on stderr. See `trace.outcome`, its obligations and

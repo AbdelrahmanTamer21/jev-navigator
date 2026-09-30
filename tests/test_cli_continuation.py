@@ -17,8 +17,9 @@ from git_repos import commit_files
 from jev_navigator.testing import ScriptedJevClient
 
 
+@pytest.mark.parametrize("workflow", ["find", "findall"])
 @pytest.mark.parametrize("answer", ["yes", "no", "eof", "json", "pipe", "zero"])
-def test_find_continues_only_with_terminal_consent(tmp_path: Path, answer: str) -> None:
+def test_search_continues_only_with_terminal_consent(tmp_path: Path, answer: str, workflow: str) -> None:
     pytest.importorskip("typesafe_sdk")
     repository = tmp_path / "repository"
     commit_files(
@@ -29,7 +30,16 @@ def test_find_continues_only_with_terminal_consent(tmp_path: Path, answer: str) 
         },
     )
     client = ScriptedJevClient(
-        nouls=lambda _id, _question, state: 0.96 if "len(item) <= 3" in state["slice"]["code"] else 0.04,
+        nouls=lambda _id, _question, state: (
+            0.96
+            if "len(item) <= 3"
+            in (
+                state["items"][int(_id.rsplit("#", 1)[1])]["code"]
+                if "items" in state
+                else state["slice"]["code"]
+            )
+            else 0.04
+        ),
         choices={"open_first": {"0": 1.0}},
     )
 
@@ -49,19 +59,19 @@ def test_find_continues_only_with_terminal_consent(tmp_path: Path, answer: str) 
 
     output = tmp_path / "packs" / "first"
     request = {
-        "command": "find",
+        "command": workflow,
         "target": "the item limit",
         "repo": str(repository),
         "start": ["app/entry.py:4"],
         "out": str(output),
-        "max_calls": 0 if answer == "zero" else 1,
+        "max_calls": 0 if answer == "zero" else 2 if workflow == "findall" else 1,
         "beam_width": 1,
     }
     arguments = (
         ["--json", json.dumps(request)]
         if answer == "json"
         else [
-            "find",
+            workflow,
             request["target"],
             "--repo",
             str(repository),
@@ -111,15 +121,18 @@ def test_find_continues_only_with_terminal_consent(tmp_path: Path, answer: str) 
     assert first["search"]["calls_this_invocation"] == request["max_calls"]
     packs = list(output.parent.glob("*/manifest.json"))
     if answer == "yes":
-        assert len(client.requests) == 2
+        assert len(client.requests) == (3 if workflow == "findall" else 2)
         assert len(packs) == 2
         resumed = json.loads(next(p for p in packs if p.parent != output).read_text())
         assert resumed["resume_from"] == str(output)
-        assert resumed["search"]["outcome"] == "found"
-        assert resumed["search"]["calls"] == 2
+        assert resumed["search"]["outcome"] == ("scope_examined" if workflow == "findall" else "found")
+        assert resumed["search"]["calls"] == len(client.requests)
         assert resumed["search"]["calls_this_invocation"] == 1
         assert resumed["search"]["found"][0]["source"]["file"] == "app/policy.py"
-        assert resumed["search"]["starts"] == first["search"]["starts"]
+        if workflow == "find":
+            assert resumed["search"]["starts"] == first["search"]["starts"]
+        else:
+            assert resumed["seed_search"] == first["seed_search"]
     else:
         assert len(client.requests) == request["max_calls"]
         assert len(packs) == 1

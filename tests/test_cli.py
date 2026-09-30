@@ -269,7 +269,7 @@ def test_findall_schema_and_json_use_the_shared_cli_contract(capsys):
     schema = json.loads(capsys.readouterr().out)
     assert schema["properties"]["command"]["const"] == "findall"
     assert schema["properties"]["max_calls"]["default"] == 48
-    assert "resume" not in schema["properties"]
+    assert "resume" in schema["properties"]
     args = _parse_args(["--json", '{"command":"findall","target":"the item limit check"}'])
     assert args.command == "findall"
     assert args.target == "the item limit check"
