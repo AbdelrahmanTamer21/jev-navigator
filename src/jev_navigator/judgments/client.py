@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Protocol
 
 from .answers import JevResponse
 
 LATEST_JEV = "jev-latest"
+
+MAX_TOKENS_MARKER = "max_tokens_exceeded"
+"""The provider's error_type when a request's input exceeds the model's input budget
+(docs.typesafe.ai/models: 64k tokens per request, 32k for state plus the longest question)."""
 
 
 class JevClient(Protocol):
@@ -31,6 +36,36 @@ class AsyncJevClient(Protocol):
 
 class MissingAnswerError(LookupError):
     """Replay found no stored answer for a request."""
+
+
+class InputBudgetExceededError(RuntimeError):
+    """The provider refused a request whose input exceeded the model's input budget."""
+
+
+def input_budget_error(error: BaseException) -> InputBudgetExceededError | None:
+    """The typed input-budget error for a provider rejection that names an exceeded input budget,
+    or None when the error is anything else.
+
+    The official SDK reports the breach as a bad request (400) whose body carries
+    ``{"detail": {"error_type": "max_tokens_exceeded"}}``. The classifier reads the status and
+    body off the error without importing the optional SDK, so any client that surfaces them —
+    the TypeSafe adapter, a routed System-One client, a host's own runtime — translates the same
+    way, and a gateway between the library and the provider does not hide the contract.
+    """
+    if getattr(error, "status", None) != 400:
+        return None
+    body = getattr(error, "body", None)
+    if isinstance(body, (str, bytes, bytearray)):
+        try:
+            body = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+    if not isinstance(body, Mapping):
+        return None
+    detail = body.get("detail")
+    if not isinstance(detail, Mapping) or detail.get("error_type") != MAX_TOKENS_MARKER:
+        return None
+    return InputBudgetExceededError(str(error))
 
 
 class ReplayOnlyClient:

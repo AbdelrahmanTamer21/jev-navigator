@@ -21,7 +21,7 @@ from collections.abc import Coroutine, Mapping
 from typing import Any
 
 from ..judgments.answers import JevResponse, response_from_raw
-from ..judgments.client import LATEST_JEV
+from ..judgments.client import LATEST_JEV, input_budget_error
 from ..judgments.journal import RawResponse
 
 
@@ -200,15 +200,37 @@ class TypeSafeJevClient:
         return self.parse(self.send(state, questions))
 
     def send(self, state: Mapping, questions: Mapping) -> RawResponse:
-        """The response as received, with the SDK's decoded form attached."""
+        """The response as received, with the SDK's decoded form attached.
+
+        A provider refusal that names an exceeded input budget is translated to the typed
+        ``InputBudgetExceededError`` so the batching owner can split the batch instead of the run
+        dying on an untyped 400."""
         if self._async_sdk:
             assert self._runner is not None
-            return self._runner.call(self._send_async(state, questions))
-        response = self._sdk.system_one(dict(state), dict(questions))
+            try:
+                return self._runner.call(self._send_async(state, questions))
+            except Exception as error:
+                typed = input_budget_error(error)
+                if typed is not None:
+                    raise typed from error
+                raise
+        try:
+            response = self._sdk.system_one(dict(state), dict(questions))
+        except Exception as error:
+            typed = input_budget_error(error)
+            if typed is not None:
+                raise typed from error
+            raise
         return self._raw_response(response)
 
     async def _send_async(self, state: Mapping, questions: Mapping) -> RawResponse:
-        response = await self._sdk.system_one(dict(state), dict(questions))
+        try:
+            response = await self._sdk.system_one(dict(state), dict(questions))
+        except Exception as error:
+            typed = input_budget_error(error)
+            if typed is not None:
+                raise typed from error
+            raise
         return self._raw_response(response)
 
     def _raw_response(self, response) -> RawResponse:

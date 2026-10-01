@@ -45,6 +45,7 @@ from concurrent.futures import CancelledError, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 
 from ..judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer, response_from_raw, response_to_raw
+from ..judgments.client import InputBudgetExceededError
 from ..judgments.journal import RawResponse
 from ..judgments.thresholds import ENVIRONMENT_NAMES, Calibration, Thresholds
 from .registry import ADAPTERS
@@ -354,6 +355,11 @@ class RoutedJevClient:
                 raw = route.client.send(state, questions)
                 received = route.client.parse(raw)
             except CancelledError:
+                raise
+            except InputBudgetExceededError:
+                # A size refusal is about this request's input, which failover would resend
+                # unchanged, and the typed error is the batching owner's signal to split the batch.
+                # It passes through untouched, exactly as `SystemOneClient.send` raises it.
                 raise
             except Exception as error:  # noqa: BLE001 - failover is the point
                 failures.append(f"{route.name}: {error}")

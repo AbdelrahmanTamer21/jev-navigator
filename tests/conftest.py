@@ -3,7 +3,9 @@ and every test's isolation from the developer's own decision-model settings."""
 
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,8 @@ from isolated_jvn import NO_SETTINGS
 
 from jev_navigator.adapters.registry import ADAPTERS
 from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.judgments.answers import JevResponse, NoulAnswer
+from jev_navigator.judgments.client import InputBudgetExceededError
 
 # Variables that can point `jvn` at a live service with a real key.
 SERVICE_SETTINGS = ("SYSTEM_ONE_", "TYPESAFE_", *(adapter.api_key_env for adapter in ADAPTERS.values()))
@@ -152,3 +156,33 @@ def sample_repo(tmp_path: Path) -> Path:
 @pytest.fixture
 def sample_index(sample_repo: Path) -> CodeIndex:
     return CodeIndex.from_git(sample_repo, fact_cache_dir=sample_repo.parent / "fact-cache")
+
+
+class BudgetedClient:
+    """A Jev client that refuses any request over a measured input budget, the way the real
+    endpoint answered request 5 of the saved trace run: HTTP 400 ``max_tokens_exceeded``.
+
+    It records the requests it accepted, so a test can prove no request over the budget was ever
+    sent, and how many times the provider had to refuse one.
+    """
+
+    model = "jev-scripted"
+
+    def __init__(self, budget: int, default_noul: float = 0.9) -> None:
+        self.budget = budget
+        self.default_noul = default_noul
+        self.requests: list[tuple[Mapping, Mapping]] = []
+        self.refusals = 0
+
+    def ask(self, state: Mapping, questions: Mapping) -> JevResponse:
+        body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
+        if body > self.budget:
+            self.refusals += 1
+            raise InputBudgetExceededError(
+                "TypeSafeBadRequestError: 400 "
+                '{"detail":{"error_type":"max_tokens_exceeded"}} '
+                f"(input of {body} bytes over the {self.budget}-byte budget)"
+            )
+        self.requests.append((state, questions))
+        answers = {question_id: NoulAnswer(self.default_noul) for question_id in questions}
+        return JevResponse(answers, self.model, 100)

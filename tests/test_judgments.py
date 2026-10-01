@@ -6,10 +6,16 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from conftest import BudgetedClient
 
 from jev_navigator.judgments.answers import ChoiceAnswer
-from jev_navigator.judgments.client import MissingAnswerError, ReplayOnlyClient
-from jev_navigator.judgments.judge import CallCapReachedError, CallOffer, Judge
+from jev_navigator.judgments.client import (
+    InputBudgetExceededError,
+    MissingAnswerError,
+    ReplayOnlyClient,
+)
+from jev_navigator.judgments.journal import JsonlJournal
+from jev_navigator.judgments.judge import MAX_REQUEST_CHARS, CallCapReachedError, CallOffer, Judge
 from jev_navigator.judgments.questions import Check, Criterion, Pick
 from jev_navigator.judgments.secrets import SecretInRequestError, SecretMasker
 from jev_navigator.judgments.store import JsonlAnswerStore
@@ -596,3 +602,130 @@ def test_independent_checks_cannot_silently_share_a_result_name() -> None:
         judge.check_every([DESCRIBES, other], [{"code": "return 1"}])
 
     assert client.requests == []
+
+
+def _hub_item(chars: int, links: int = 0) -> dict:
+    """The sanitized shape of the failing trace item: a tiny span whose link context dominates."""
+    item = {
+        "file": "src/hub.py",
+        "lines": [45, 47],
+        "commit": "53bc622413712cb0f63ac0f9954bf1971b69f485",
+        "span_key": "src/hub.py:45-47",
+        "code": "answers = {question_id: answer_from_json(raw) for question_id, raw in self.answers.items()}",
+    }
+    if links:
+        item["links"] = [
+            f"call answer_from_json: self#response -> src/other.py:{index}#answer_from_json | "
+            f"at src/hub.py:46 {'x' * chars}"
+            for index in range(links)
+        ]
+    return item
+
+
+def _padding_item(label: str, chars: int) -> dict:
+    return {"file": f"{label}.py", "lines": [1, 2], "code": f"def {label}():\n    {'y' * chars}"}
+
+
+def test_oversized_batch_is_split_before_sending_so_no_request_exceeds_the_input_budget() -> None:
+    client = BudgetedClient(MAX_REQUEST_CHARS)
+    judge = Judge(client)
+    items = [_padding_item(f"part{index}", 28_000) for index in range(4)]
+
+    results = judge.check_every(
+        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=200_000
+    )
+
+    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 4
+    assert client.refusals == 0, "a request the measurement already rejects must not be paid for"
+    assert len(client.requests) == 2
+    judged_files: list[str] = []
+    for state, questions in client.requests:
+        body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
+        assert body <= MAX_REQUEST_CHARS
+        assert len(questions) == len(state["parts"]), "one atomic question per item and slot"
+        judged_files.extend(item["file"] for item in state["parts"])
+    assert sorted(judged_files) == [f"part{index}.py" for index in range(4)]
+
+
+def test_provider_max_tokens_error_splits_the_batch_and_keeps_every_question_identity() -> None:
+    client = BudgetedClient(34_000)  # stricter than the measured packing budget
+    judge = Judge(client)
+    items = [_padding_item(f"part{index}", 12_000) for index in range(4)]
+
+    results = judge.check_every([DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts")
+
+    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 4
+    assert client.refusals == 1, "the first over-budget request is the provider's own evidence"
+    assert len(client.requests) == 2
+    for state, questions in client.requests:
+        body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
+        assert body <= 34_000
+    # Each item keeps its own store identity across the split: every item is judged exactly once.
+    keys = [result.item["file"] for result in results["describes"]]
+    assert keys == ["part0.py", "part1.py", "part2.py", "part3.py"]
+
+
+def test_unsplittable_single_question_is_reported_honestly_after_a_real_attempt(tmp_path: Path) -> None:
+    client = BudgetedClient(34_000)
+    journal = JsonlJournal(tmp_path / "journal.jsonl")
+    judge = Judge(client, journal=journal)
+    item = _hub_item(16_000, links=40)
+
+    with pytest.raises(InputBudgetExceededError):
+        judge.check_every([DESCRIBES], [item], {"doc": {"sentence": "s"}}, list_name="parts")
+
+    assert client.refusals == 1, "the provider, not the estimate, reports the unsplittable request"
+    failures = [
+        json.loads(line)
+        for line in journal.path.read_text().splitlines()
+        if json.loads(line)["kind"] == "failure"
+    ]
+    assert len(failures) == 1
+    assert "max_tokens_exceeded" in failures[0]["error"]
+
+
+def test_split_answers_replay_from_the_store_without_new_calls(tmp_path: Path) -> None:
+    path = tmp_path / "answers.jsonl"
+    first = BudgetedClient(34_000)
+    judge = Judge(first, store=JsonlAnswerStore(path), served_model="jev-scripted")
+    items = [_padding_item(f"part{index}", 12_000) for index in range(4)]
+    judge.check_every([DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts")
+
+    replay_client = BudgetedClient(34_000)
+    replay = Judge(replay_client, store=JsonlAnswerStore(path), served_model="jev-scripted")
+    results = replay.check_every([DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts")
+
+    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 4
+    assert replay_client.requests == [] and replay_client.refusals == 0
+
+
+def test_a_normal_small_batch_is_unchanged_by_the_input_budget_boundary() -> None:
+    client = BudgetedClient(MAX_REQUEST_CHARS)
+    judge = Judge(client)
+    items = [{"code": "def a(): ..."}, {"code": "def b(): ..."}, {"code": "def c(): ..."}]
+
+    results = judge.check_each(DESCRIBES, items, {"doc": {"sentence": "s"}})
+
+    assert [result.verdict for result in results] == [NoulVerdict.YES] * 3
+    assert len(client.requests) == 1
+    assert client.refusals == 0
+    state, questions = client.requests[0]
+    assert set(questions) == {f"{DESCRIBES.question_id}#{slot}" for slot in range(3)}
+
+
+def test_input_budget_error_is_typed_from_the_provider_report_without_the_sdk() -> None:
+    from jev_navigator.judgments.client import input_budget_error
+
+    class ProviderError(Exception):
+        def __init__(self) -> None:
+            super().__init__("POST https://gateway/v1/systemone: 400")
+            self.status = 400
+            self.body = {"detail": {"error_type": "max_tokens_exceeded"}}
+
+    class OtherProviderError(Exception):
+        status = 400
+        body = {"detail": {"error_type": "question_malformed"}}
+
+    assert isinstance(input_budget_error(ProviderError()), InputBudgetExceededError)
+    assert input_budget_error(OtherProviderError()) is None
+    assert input_budget_error(TypeError("no status at all")) is None

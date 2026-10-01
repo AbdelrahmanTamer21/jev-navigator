@@ -76,6 +76,13 @@ A supplied `--start` is navigation context: the library records its judgment in 
 continues looking for a target reached from it. Supply a caller or entry point rather than the
 function you already believe is the answer. Automatic entry selection can find a target directly.
 
+An opening with many neighbours uses separate requests when the provider input allowance requires
+it. Every neighbour keeps its preview and independent judgment; each actual request counts toward
+the call allowance. The global `open_first` Choice is a scheduling hint. If its complete request or
+option set exceeds provider capability, history records `open_first.unavailable` and the search
+orders the assessed neighbours by their individual probabilities. Completed answers remain in the
+store and journal when a call stop interrupts the opening, so continuation can reuse them.
+
 ## Continue after a call limit
 
 In an interactive terminal, `find` and `findall` save a partial pack when the live-call allowance is used up,
