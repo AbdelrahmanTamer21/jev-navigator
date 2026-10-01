@@ -52,6 +52,7 @@ from typing import ClassVar, Protocol
 from urllib.parse import urlsplit
 
 from ..judgments.answers import JevResponse, response_from_raw
+from ..judgments.client import input_budget_error
 from ..judgments.journal import RawResponse
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -120,11 +121,13 @@ Transport = Callable[[HttpRequest], HttpResponse]
 
 
 class AdapterError(RuntimeError):
-    """The service refused the request, or stayed unavailable through every retry."""
+    """The service refused the request, or stayed unavailable through every retry. ``body`` is the
+    response body as received, which `input_budget_error` reads to recognise a size refusal."""
 
-    def __init__(self, adapter: str, status: int, message: str) -> None:
+    def __init__(self, adapter: str, status: int, message: str, body: bytes = b"") -> None:
         super().__init__(f"{adapter} answered HTTP {status}: {message}")
         self.status = status
+        self.body = body
 
 
 class SystemOneClient:
@@ -195,7 +198,9 @@ class SystemOneClient:
     def send(self, state: Mapping, questions: Mapping) -> RawResponse:
         """The response as received. A status in `RETRY_STATUSES` or a connection failure is
         retried up to ``max_retries`` times, after the wait the service asks for or a backoff;
-        any other failure raises `AdapterError` at once."""
+        any other failure raises `AdapterError` at once, except a provider input-budget refusal,
+        which raises the typed ``InputBudgetExceededError`` so the batching owner can split the
+        batch."""
         body = json.dumps(self.wire_body(state, questions), ensure_ascii=False).encode()
         request = HttpRequest(self.url, body, self.headers(), self._timeout)
         for attempt in range(self._max_retries + 1):
@@ -215,7 +220,11 @@ class SystemOneClient:
                 content_type = response.headers.get("content-type", "")
                 return RawResponse(response.body, response.status, content_type, sent_body=body)
             if last or response.status not in RETRY_STATUSES:
-                raise AdapterError(self.name, response.status, _error_message(response.body))
+                error = AdapterError(self.name, response.status, _error_message(response.body), response.body)
+                typed = input_budget_error(error)
+                if typed is not None:
+                    raise typed from error
+                raise error
             self._wait(_retry_after(response.headers) or _backoff(attempt))
         raise AssertionError("the retry loop always returns or raises")
 

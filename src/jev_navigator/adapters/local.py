@@ -8,7 +8,9 @@ empty) and implements three hooks:
   nothing until the model is asked.
 - ``answer(state, questions)``: the System-One response body as a mapping, ``{"answers": ...}``
   with optional ``"usage"``. ``"model"`` defaults to ``self.model``; name the loaded checkpoint
-  there, never a moving alias, because the answer store reuses answers by it.
+  there, never a moving alias, because the answer store reuses answers by it. A model whose input
+  is too large for it raises `InputBudgetExceededError`, which reaches the judge unchanged so it
+  splits the batch instead of a route failing over.
 - ``unload()``: release the model; optional.
 
 The hooks run one call at a time on a worker thread the adapter owns, since many runtimes (one

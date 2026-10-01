@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from jev_navigator.adapters.system_one import AdapterError, HttpResponse, SystemOneClient
+from jev_navigator.judgments.client import InputBudgetExceededError
 
 QUESTIONS = {"adds_one": {"type": "noul", "instructions": "Does `code` add one?"}}
 ANSWER = b'{"model":"decider-1","answers":{"adds_one":{"type":"noul","noul":0.9}}}'
@@ -85,6 +86,36 @@ def test_a_refused_request_fails_at_once_with_the_services_message(status):
     assert refused.value.status == status
     assert "local-key" not in str(refused.value)
     assert len(sent) == 1
+
+
+@pytest.mark.parametrize(
+    ("refusal", "raised"),
+    [
+        (b'{"detail":{"error_type":"max_tokens_exceeded"}}', InputBudgetExceededError),
+        (b'{"detail":{"error_type":"invalid_questions"}}', AdapterError),
+    ],
+)
+def test_only_an_input_budget_refusal_is_typed_for_the_batching_owner_to_split(refusal, raised):
+    # Arrange
+    sent = []
+
+    def transport(request):
+        sent.append(request)
+        return HttpResponse(400, {"content-type": "application/json"}, refusal)
+
+    client = SystemOneClient(
+        "decider-1", api_key="local-key", endpoint="https://decider.example", transport=transport
+    )
+
+    # Act
+    with pytest.raises((InputBudgetExceededError, AdapterError)) as refused:
+        client.ask({}, QUESTIONS)
+
+    # Assert: the size refusal is sent once and typed; any other refusal keeps the body it came with
+    assert type(refused.value) is raised
+    assert len(sent) == 1
+    if raised is AdapterError:
+        assert refused.value.body == refusal
 
 
 def test_cancel_aborts_a_request_in_flight_and_refuses_later_ones():
