@@ -87,9 +87,10 @@ class FileFacts:
 def scan_facts(
     files: Sequence[str], root: Path, lines_of: LinesOf, unparsed: Unparsed
 ) -> dict[str, FileFacts]:
-    """Extract structure, calls, and references in one parser pass over each supplied file."""
+    """Parse supported source files once; return empty facts for unsupported paths."""
     matches: list[dict] = []
-    for config, group, languages in _scan_groups(files, lines_of):
+    supported_files = tuple(file for file in files if language_of(file) is not None)
+    for config, group, languages in _scan_groups(supported_files, lines_of):
         rules = "\n---\n".join(
             part
             for part in (
