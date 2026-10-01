@@ -13,6 +13,7 @@ only with ``keep_request_text=True``, which is meant for your own or open-source
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import threading
 import uuid
@@ -49,6 +50,7 @@ class RawResponse:
     decoded: Mapping | None = None
     exact: bool = True
     sent_body: bytes | None = None
+    attempts: tuple[RawAttempt, ...] = ()
 
     @classmethod
     def from_decoded(cls, decoded: Mapping) -> RawResponse:
@@ -59,12 +61,35 @@ class RawResponse:
         return self.decoded if self.decoded is not None else json.loads(self.body)
 
 
+@dataclass(frozen=True)
+class RawAttempt:
+    """One physical HTTP request made while the SDK executes a logical request."""
+
+    attempt_no: int
+    duration_ms: float
+    sent_body: bytes
+    response: RawResponse | None = None
+    error_type: str | None = None
+    error: str | None = None
+    route: str | None = None
+
+
+class AttemptJournalCallbackError(RuntimeError):
+    """Prevents the provider SDK from retrying after its attempt sink failed to persist."""
+
+    def __init__(self, original_error: Exception) -> None:
+        super().__init__("the HTTP attempt journal callback failed")
+        self.original_error = original_error
+
+
 class Journal(Protocol):
     def record_request(self, request: JournalRequest) -> str:
         """Returns the id later records refer to."""
         ...
 
     def record_response(self, request_id: str, response: RawResponse) -> None: ...
+
+    def record_attempt(self, request_id: str, attempt: RawAttempt) -> None: ...
 
     def record_failure(self, request_id: str, error: str, response: RawResponse | None = None) -> None: ...
 
@@ -83,6 +108,31 @@ class JsonlJournal:
 
     def record_response(self, request_id: str, response: RawResponse) -> None:
         self._append({"kind": "response", "request_id": request_id, **self._response_fields(response)})
+
+    def record_attempt(self, request_id: str, attempt: RawAttempt) -> None:
+        fields = {
+            "kind": "http_attempt",
+            "request_id": request_id,
+            "attempt_no": attempt.attempt_no,
+            "duration_ms": attempt.duration_ms,
+            "sent_body_sha256": hashlib.sha256(attempt.sent_body).hexdigest(),
+        }
+        if self.keep_request_text:
+            fields["sent_body_base64"] = _base64(attempt.sent_body)
+        if attempt.route is not None:
+            fields["route"] = attempt.route
+        if attempt.response is not None:
+            fields.update(_response_fields(attempt.response))
+            fields["outcome"] = "response"
+        else:
+            fields.update(
+                {
+                    "outcome": "failure",
+                    "error_type": attempt.error_type,
+                    "error": attempt.error,
+                }
+            )
+        self._append(fields)
 
     def record_step(self, step: Mapping) -> None:
         """Lets a ``History`` record every appended step in the same file."""

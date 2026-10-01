@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 from .answers import JevResponse, NoulAnswer, response_to_raw
 from .client import AsyncJevClient, InputBudgetExceededError, JevClient
-from .journal import Journal, JournalRequest, RawResponse
+from .journal import AttemptJournalCallbackError, Journal, JournalRequest, RawResponse
 from .questions import Check, Pick, Rate, content_hash, item_path, request_body, request_sha256
 from .secrets import (
     Masker,
@@ -487,13 +487,15 @@ class Judge:
         raw: RawResponse | None = None
         try:
             if hasattr(self.client, "send"):
-                raw = self.client.send(prepared.state, prepared.questions)
+                raw = self._send_with_attempt_callback(prepared, request_id)
                 self._journal_response(request_id, raw)
                 return _Dispatched.from_raw(self.client.parse(raw), raw, prepared)
             response = self.client.ask(prepared.state, prepared.questions)
             self._journal_response(request_id, RawResponse.from_decoded(response_to_raw(response)))
             return _Dispatched(response, prepared.body, sent_exact=False)
         except Exception as error:
+            if isinstance(error, AttemptJournalCallbackError):
+                self._propagate_attempt_journal_error(request_id, error, raw)
             self._journal_failure(request_id, error, raw)
             raise
 
@@ -503,13 +505,20 @@ class Judge:
         raw: RawResponse | None = None
         try:
             if hasattr(self.client, "send"):
-                raw = await _awaited(self.client.send, prepared.state, prepared.questions)
+                sender = getattr(self.client, "send_with_attempts", None)
+                callback = self._attempt_callback(request_id)
+                if callable(sender) and callback is not None:
+                    raw = await _awaited(sender, prepared.state, prepared.questions, on_attempt=callback)
+                else:
+                    raw = await _awaited(self.client.send, prepared.state, prepared.questions)
                 self._journal_response(request_id, raw)
                 return _Dispatched.from_raw(self.client.parse(raw), raw, prepared)
             response = await _awaited(self.client.ask, prepared.state, prepared.questions)
             self._journal_response(request_id, RawResponse.from_decoded(response_to_raw(response)))
             return _Dispatched(response, prepared.body, sent_exact=False)
         except Exception as error:
+            if isinstance(error, AttemptJournalCallbackError):
+                self._propagate_attempt_journal_error(request_id, error, raw)
             self._journal_failure(request_id, error, raw)
             raise
 
@@ -604,6 +613,34 @@ class Judge:
     def _journal_failure(self, request_id: str | None, error: Exception, raw: RawResponse | None) -> None:
         if self.journal is not None and request_id is not None:
             self.journal.record_failure(request_id, f"{type(error).__name__}: {error}", raw)
+
+    def _propagate_attempt_journal_error(
+        self, request_id: str | None, error: AttemptJournalCallbackError, raw: RawResponse | None
+    ) -> None:
+        original = error.original_error
+        try:
+            self._journal_failure(request_id, original, raw)
+        except Exception as failure_error:
+            original.add_note(
+                "The logical request failure could not be recorded either: "
+                f"{type(failure_error).__name__}: {failure_error}"
+            )
+        raise original from error
+
+    def _send_with_attempt_callback(self, prepared: _Prepared, request_id: str | None) -> RawResponse:
+        sender = getattr(self.client, "send_with_attempts", None)
+        callback = self._attempt_callback(request_id)
+        if callable(sender) and callback is not None:
+            return sender(prepared.state, prepared.questions, on_attempt=callback)
+        return self.client.send(prepared.state, prepared.questions)
+
+    def _attempt_callback(self, request_id: str | None):
+        if self.journal is None or request_id is None:
+            return None
+        record_attempt = getattr(self.journal, "record_attempt", None)
+        if not callable(record_attempt):
+            return None
+        return lambda attempt: record_attempt(request_id, attempt)
 
     def _check_plan(
         self,
@@ -900,10 +937,10 @@ def _is_async(client: object) -> bool:
     return inspect.iscoroutinefunction(method)
 
 
-async def _awaited(method, *arguments):
+async def _awaited(method, *arguments, **keywords):
     if inspect.iscoroutinefunction(method):
-        return await method(*arguments)
-    return await asyncio.to_thread(method, *arguments)
+        return await method(*arguments, **keywords)
+    return await asyncio.to_thread(method, *arguments, **keywords)
 
 
 def _check_result(response: JevResponse, check: Check, state: Mapping, thresholds: Thresholds) -> CheckResult:
