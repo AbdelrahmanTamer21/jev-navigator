@@ -532,7 +532,7 @@ Nothing in the library calls an LLM. `LlmStep` is a building block a user adds t
 directive, and the user defines all four parts:
 
 ```python
-from jev_navigator.llm_step import LlmGuard, LlmStep, PickFromOptions
+from jev_navigator.llm_step import LlmGuard, LlmStatus, LlmStep, PickFromOptions
 from jev_navigator import connectors
 
 phrase_step = LlmStep(
@@ -543,14 +543,22 @@ phrase_step = LlmStep(
     connector=connectors.pi("your-model"),  # any CLI or OpenAI-compatible endpoint
     guard=LlmGuard(store_path=path, max_calls=5),
 )
-call = phrase_step.run(judge.pick(phrase_pick, phrases, state))  # None when `when` said no
+call = phrase_step.run(judge.pick(phrase_pick, phrases, state))
+if call.status == LlmStatus.ANSWERED:
+    selected_phrase = call.answer
 ```
 
 `answer` can be `PickFromOptions`, `JsonContract(instructions, required={"accurate": bool})`, or any
 object with `render(context, parse_error)` and `parse(reply, context)`. A reply that does not parse
 is retried once with the error. Connectors: `hermes`, `pi`, `OpenAICompatibleConnector`,
-`CommandConnector`, and `claude`. The guard masks the context, refuses a prompt with a secret, keeps
-one JSON line per call (prompt hash, reply, parsed answer) and enforces an optional budget.
+`CommandConnector`, and `claude`. The result distinguishes `not_requested`, `budget_exhausted`,
+`answered`, and `parse_failed`; `attempts` counts actual provider calls. Provider exceptions propagate
+after their failure is recorded.
+
+The guard masks context, refuses a prompt with a secret, and enforces an optional budget. When a store
+is configured, it records the attempt identity, connector, model, and prompt hash before dispatch;
+the exact reply before parsing or retry; and each parse outcome or provider failure. A final summary
+records the result and attempt count. The first malformed reply survives a successful retry.
 
 > **Warning:** `connectors.claude()` runs Claude headless. Every run spends from your Claude plan or API
 > budget, and an automation can start many; enable it deliberately and set `LlmGuard(max_calls=...)`.
