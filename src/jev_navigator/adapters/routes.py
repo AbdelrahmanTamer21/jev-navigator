@@ -41,7 +41,7 @@ import math
 import os
 import threading
 from collections.abc import Mapping
-from concurrent.futures import CancelledError, ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 
 from ..judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer, response_from_raw, response_to_raw
@@ -262,8 +262,9 @@ class RoutedJevClient:
     answering route's exact bytes. A request that spans chains is split: each chain gets its own
     questions in one call, the calls run at once, and their answers merge into one response. A
     split request is one call to the judge's budget however many services it reaches, and it
-    fails if any part fails. The merged response is journaled decoded, and its model names each
-    type's model (``check=mine@1,pick=drex-v1.5``) unless one model answered every part.
+    fails if any part fails: its parts not yet sent are then never sent, and those in flight finish
+    before the failure is raised. The merged response is journaled decoded, and its model names
+    each type's model (``check=mine@1,pick=drex-v1.5``) unless one model answered every part.
 
     ``model`` names what is asked for, each type's primary model in the same form, so a resumed
     search must use the same routing; `served_model` on each response records what answered.
@@ -316,7 +317,20 @@ class RoutedJevClient:
             pool.submit(self._send_to_chain, kinds, chain, state, part) for kinds, chain, part in parts[1:]
         ]
         kinds, chain, part = parts[0]
-        answered = [self._send_to_chain(kinds, chain, state, part), *(future.result() for future in later)]
+        try:
+            answered = [
+                self._send_to_chain(kinds, chain, state, part),
+                *(future.result() for future in later),
+            ]
+        except BaseException as error:
+            # One failed part fails the request, so the parts not yet sent never are. A failure waits
+            # for the parts in flight, so none outlives its request; Ctrl-C does not, and the cancel
+            # that follows it aborts them.
+            for future in later:
+                future.cancel()
+            if isinstance(error, Exception):
+                wait(later)
+            raise
         pairs = list(zip((kinds for kinds, _, _ in parts), answered, strict=True))
         received = _merged(questions, [(kinds, received) for kinds, (_, received, _) in pairs])
         used = _merged(questions, [(kinds, used) for kinds, (_, _, used) in pairs])

@@ -14,6 +14,8 @@ import pytest
 from jev_navigator.adapters.local import LocalModelClient
 from jev_navigator.adapters.routes import Route, RoutedJevClient, client_from_env, routes_from_env
 from jev_navigator.adapters.system_one import AdapterError, HttpRequest, HttpResponse, SystemOneClient
+from jev_navigator.judgments.answers import JevResponse, response_from_raw
+from jev_navigator.judgments.journal import RawResponse
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.thresholds import NoulVerdict, Thresholds
@@ -323,6 +325,49 @@ def test_cancel_stops_a_split_request_waiting_on_any_route():
         routed.close()
 
 
+@pytest.mark.parametrize(
+    ("failure", "raised", "waits_for_the_part_in_flight"),
+    [
+        (ConnectionRefusedError("down"), ConnectionError, True),
+        (KeyboardInterrupt(), KeyboardInterrupt, False),
+    ],
+    ids=["a failure waits for the parts in flight", "ctrl-c does not, the cancel after it aborts them"],
+)
+def test_a_failed_split_part_leaves_no_other_part_to_send(
+    monkeypatch, failure, raised, waits_for_the_part_in_flight
+):
+    # Arrange: one worker, so when the check part fails on the caller's thread the pick part is in
+    # flight on that worker and the rate part is still waiting for it.
+    monkeypatch.setattr("jev_navigator.adapters.routes.MAX_SPLIT_WORKERS", 1)
+    picker = _PartClient("picker-1", hold=True)
+    rater = _PartClient("rater-1")
+    decider = _PartClient("decider-1", fails_with=failure, once_answering=picker)
+    routed = RoutedJevClient(
+        (),
+        {
+            "check": (Route("decider", decider),),
+            "pick": (Route("picker", picker),),
+            "rate": (Route("rater", rater),),
+        },
+    )
+    release = threading.Timer(0.2, picker.release.set)
+    release.start()
+
+    # Act
+    try:
+        with pytest.raises(raised):
+            routed.send({"code": "x + 1"}, {"adds_one": CHECK, "kind": PICK, "fit": RATE})
+        finished_when_raised = picker.finished.is_set()
+    finally:
+        release.cancel()
+        picker.release.set()
+        routed.close()
+
+    # Assert: the part not yet sent never is, and only a failure waits for the part in flight
+    assert rater.sent == []
+    assert finished_when_raised is waits_for_the_part_in_flight
+
+
 def test_a_routes_own_bars_calibrate_its_answers_while_the_journal_keeps_them_as_sent():
     routed = client_from_env(
         {
@@ -407,6 +452,37 @@ class _HeldModel(LocalModelClient):
         self.answering.set()
         self.release.wait()
         return {"answers": _answers(questions)}
+
+
+class _PartClient:
+    """A route client that records what it is sent: it answers, holds its answer until released, or
+    raises ``fails_with`` once ``once_answering`` is answering."""
+
+    def __init__(self, model: str, *, hold: bool = False, fails_with=None, once_answering=None) -> None:
+        self.model = model
+        self.sent: list[list[str]] = []
+        self.hold, self.fails_with, self.once_answering = hold, fails_with, once_answering
+        self.answering, self.release, self.finished = threading.Event(), threading.Event(), threading.Event()
+
+    def send(self, state, questions) -> RawResponse:
+        self.sent.append(list(questions))
+        if self.fails_with is not None:
+            self.once_answering.answering.wait(2)
+            raise self.fails_with
+        self.answering.set()
+        if self.hold:
+            self.release.wait(2)
+        self.finished.set()
+        return RawResponse.from_decoded({"model": self.model, "answers": _answers(questions)})
+
+    def parse(self, raw: RawResponse) -> JevResponse:
+        return response_from_raw(raw.json())
+
+    def cancel(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
 
 
 def _decider_settings() -> dict[str, str]:
