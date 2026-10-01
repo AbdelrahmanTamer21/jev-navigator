@@ -160,16 +160,32 @@ def _seed_index(root: Path, neighbours: int) -> tuple[CodeIndex, list[str]]:
 
 
 @pytest.mark.parametrize("async_search", [False, True])
-@pytest.mark.parametrize("neighbours,input_limit", [(159, 40_000), (2, 3_000)])
+@pytest.mark.parametrize(
+    "neighbours,input_limit,unavailable_fragment",
+    [
+        (159, 40_000, "request-size packing estimate"),
+        (2, 3_000, None),
+        (379, 40_000, "provider accepts 255"),
+    ],
+    ids=("request-size", "fits", "choice-limit"),
+)
 def test_seed_search_batches_every_neighbour_at_the_real_input_boundary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, async_search: bool, neighbours: int, input_limit: int
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    async_search: bool,
+    neighbours: int,
+    input_limit: int,
+    unavailable_fragment: str | None,
 ) -> None:
-    """The original Find All seed sent 159 previews in one 236KB request and died on HTTP 400."""
+    """Oversized openings keep every neighbour judgment while omitting only the optional Choice."""
     pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     index, previews = _seed_index(tmp_path, neighbours)
-    start = function_place(index, index.find_definition("entry")[0])
+    entry = index.find_definition("entry")[0]
+    candidate_ids = {span.key for span in index.functions_in(entry.file) if span.key != entry.key}
+    assert len(candidate_ids) == neighbours
+    start = function_place(index, entry)
     exchanges: list[tuple[bytes, bytes]] = []
     server = _jev_server(exchanges, input_limit=input_limit)
     monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
@@ -195,7 +211,7 @@ def test_seed_search_batches_every_neighbour_at_the_real_input_boundary(
     opened = next(step for step in result.history.steps if step.operation == "open")
     assessed = opened.judgments["could_contain"]
     assert len(assessed) == neighbours
-    assert len({candidate["place"] for candidate in assessed}) == neighbours
+    assert {candidate["place"] for candidate in assessed} == candidate_ids
     assert len(result.not_inspected) == neighbours
     accepted = [
         (json.loads(sent), json.loads(body)) for sent, body in exchanges if "answers" in json.loads(body)
@@ -210,9 +226,9 @@ def test_seed_search_batches_every_neighbour_at_the_real_input_boundary(
     ]
     assert sorted(delivered) == sorted(previews)
     assert judge.calls == result.calls == len(exchanges)
-    if neighbours > 2:
+    if unavailable_fragment is not None:
         assert opened.judgments["open_first"]["used"] is False
-        assert "request-size packing estimate" in opened.judgments["open_first"]["unavailable"]
+        assert unavailable_fragment in opened.judgments["open_first"]["unavailable"]
     else:
         assert opened.judgments["open_first"]["used"] is True
 
