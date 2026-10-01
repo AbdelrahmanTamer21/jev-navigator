@@ -798,6 +798,9 @@ def test_ctrl_c_while_an_in_process_model_answers_exits_without_waiting_for_it(t
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("SYSTEM_ONE_ROUTES", "held")
     monkeypatch.setenv("SYSTEM_ONE_HELD_ADAPTER", f"{__name__}:_InterruptedModel")
+    # The events live on the class the route imports by name, so a rerun must not find them set.
+    _InterruptedModel.answering.clear()
+    _InterruptedModel.release.clear()
     started = time.monotonic()
 
     # Act

@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import queue
 import threading
+import time
 from collections.abc import Mapping
 from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
@@ -34,6 +35,11 @@ from typing import ClassVar
 
 from ..judgments.answers import JevResponse, response_from_raw
 from ..judgments.journal import RawResponse
+
+# How long a caller blocks at a time while it waits for the model. Between slices the thread runs
+# Python again, which is where a Ctrl-C is handled: one untimed wait can block on through a signal
+# that lands just as it starts, and the search would then wait for the model to finish.
+WAIT_SLICE_SECONDS = 0.05
 
 
 class LocalModelClient:
@@ -106,7 +112,7 @@ class LocalModelClient:
                 self._worker.start()
             self._calls.put(call)
         try:
-            call.done.wait(self._timeout)
+            _wait_in_slices(call.done, self._timeout)
         finally:
             with self._lock:
                 self._waiting.discard(call)
@@ -161,6 +167,16 @@ class LocalModelClient:
         finally:
             if loaded:
                 self.unload()
+
+
+def _wait_in_slices(done: threading.Event, timeout: float | None) -> None:
+    """Wait until ``done`` is set or ``timeout`` seconds pass (None: no limit), in slices of at
+    most `WAIT_SLICE_SECONDS` so a Ctrl-C is handled as soon as it arrives."""
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        remaining = WAIT_SLICE_SECONDS if deadline is None else deadline - time.monotonic()
+        if remaining <= 0 or done.wait(min(remaining, WAIT_SLICE_SECONDS)):
+            return
 
 
 @dataclass(eq=False)
