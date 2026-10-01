@@ -460,8 +460,9 @@ one place can be wrong. When nothing reaches the yes bar, rank the opened places
 `contains_target` probability: the best-scored place is the likeliest one. Pass the result back as
 `resume=` to continue from that frontier with a fresh budget. Pass `commit=` to require that the index
 holds exactly that revision (use `CodeIndex.at_commit` for history); a mismatch raises
-`RevisionMismatchError`. Nothing escalates on its own. The default budget is 24 steps and 24 calls
-with a beam of 3 and depth 3. Everything is a parameter: `SearchBudget` also sets
+`RevisionMismatchError`. Nothing escalates on its own. Library depth, steps, and calls are unlimited
+by default, with a beam of 3. The CLI sets a default allowance of 24 model requests for Find and
+48 for Find All. Everything is a parameter: `SearchBudget` also sets
 `neighbours_per_kind`, `preview_lines`, `max_line_chars` (240: longer lines and signatures are cut and
 marked "[line cut]") and `max_slice_chars` (12,000: an opened place is cut on a line boundary with a
 note, and `Visit.code` ends at the last shown line). If the first line cannot fit, the place stays
