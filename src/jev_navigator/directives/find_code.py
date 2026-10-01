@@ -51,7 +51,7 @@ from ..judgments.judge import (
 )
 from ..judgments.questions import ITEM_PLACEHOLDER, MAX_CHOICE_OPTIONS, Check, Criterion, Pick, content_hash
 from ..judgments.thresholds import NoulVerdict, Thresholds
-from .places import MOVES, Move, Place, neighbours_and_omissions
+from .places import MOVES, Move, Place, neighbours_and_omissions, place_relationship
 from .shown import MAX_LINE_CHARS, MAX_SLICE_CHARS, cut_long_line, shown_slice
 
 FOUND = Check(
@@ -937,6 +937,7 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
                 "signature": cut_long_line(place.signature, search.budget.max_line_chars),
                 "probability": probability,
                 "verdict": verdict,
+                "relationship": place_relationship(place),
             }
         )
     not_opened = [*opening.capped, *search.set_aside[set_aside_before:]]
@@ -1031,7 +1032,12 @@ def _choice_reason(item: _Queued) -> str:
 
 
 def _frontier_entry(entry: NotInspected) -> dict:
-    return {"place": entry.place_key, "reason": entry.reason, "priority": entry.priority}
+    return {
+        "place": entry.place_key,
+        "reason": entry.reason,
+        "priority": entry.priority,
+        "relationship": place_relationship(entry.place),
+    }
 
 
 def _picked_slot(search: _Search, response) -> int | None:
@@ -1054,6 +1060,7 @@ def _candidate_state(place: Place, budget: SearchBudget) -> dict:
     return {
         "signature": cut_long_line(place.signature, budget.max_line_chars),
         "preview": "\n".join(cut_long_line(line, budget.max_line_chars) for line in lines),
+        "relationship": place_relationship(place),
     }
 
 
