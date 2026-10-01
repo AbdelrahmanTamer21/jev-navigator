@@ -12,10 +12,10 @@ Two rules keep an untrusted repository from configuring the tool through a `.env
   directory a search happens to run in. So a repository under analysis cannot point the API key at
   another host with its own `.env`, and an installed `jvn` that is not run from a checkout takes no
   `.env` at all — it uses the real environment and `~/.config/jvn/env`.
-- A file may set only the tool's own recognised settings (`TYPESAFE_*`, `SYSTEM_ONE_*`); every
-  other name is ignored. So a config file cannot inject an unrelated variable such as `PATH`,
-  `LD_PRELOAD` or `RIPGREP_CONFIG_PATH` into the tool or into the `rg`, `git` and `ast-grep`
-  subprocesses it runs.
+- A file may set only the tool's own recognised settings (`TYPESAFE_*`, `JEV_NAVIGATOR_*`,
+  `SYSTEM_ONE_*`); every other name is ignored. So a config file cannot inject an unrelated
+  variable such as `PATH`, `LD_PRELOAD` or `RIPGREP_CONFIG_PATH` into the tool or into the `rg`,
+  `git` and `ast-grep` subprocesses it runs.
 """
 
 from __future__ import annotations
@@ -26,9 +26,9 @@ from pathlib import Path
 
 TYPESAFE_SETTINGS = ("TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_DEFAULT_MODEL")
 # The tool's own settings namespace. Only names under these prefixes are honoured from a file, so a
-# file can never inject an operating-system or subprocess variable. `SYSTEM_ONE_*` names the
-# decision-model routes and their keys.
-SETTING_PREFIXES = ("TYPESAFE_", "SYSTEM_ONE_")
+# file can never inject an operating-system or subprocess variable. `JEV_NAVIGATOR_*` holds the
+# search thresholds and budget; `SYSTEM_ONE_*` names the decision-model routes and their keys.
+SETTING_PREFIXES = ("TYPESAFE_", "JEV_NAVIGATOR_", "SYSTEM_ONE_")
 LEGACY_CONFIG = Path.home() / ".config/jvn/env"
 
 

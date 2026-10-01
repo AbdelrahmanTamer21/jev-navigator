@@ -7,12 +7,14 @@ import os
 import pytest
 
 from jev_navigator import environment
+from jev_navigator.directives.find_code import SearchBudget
 from jev_navigator.environment import (
     TYPESAFE_SETTINGS,
     _env_file,
     _names_this_project,
     load_typesafe_environment,
 )
+from jev_navigator.judgments.thresholds import Thresholds
 
 # Names an untrusted file might try to inject; none is a `jvn` setting.
 INJECTED = ("RIPGREP_CONFIG_PATH", "LD_PRELOAD", "EVIL_MARKER")
@@ -132,6 +134,20 @@ def test_a_route_setting_is_still_honoured_from_a_file(tmp_path):
 
     assert contributed["SYSTEM_ONE_ROUTES"] == "decider"
     assert contributed["SYSTEM_ONE_DECIDER_API_KEY"] == "decider-key"
+
+
+def test_the_search_thresholds_and_budget_are_still_honoured_from_a_file(tmp_path):
+    # `JEV_NAVIGATOR_*` is the tool's own namespace too: the yes/no bars and the search budget
+    # keep loading from the checkout `.env`.
+    (tmp_path / ".env").write_text(
+        "TYPESAFE_API_KEY=k\nJEV_NAVIGATOR_NOUL_YES_AT=0.9\nJEV_NAVIGATOR_MAX_CALLS=40\n"
+    )
+    environment: dict[str, str] = {}
+
+    load_typesafe_environment(environment, root=tmp_path, legacy=tmp_path / "absent")
+
+    assert Thresholds.from_env(environment).noul_yes_at == 0.9
+    assert SearchBudget.from_env(environment).max_calls == 40
 
 
 def test_checkout_root_accepts_only_this_projects_pyproject(tmp_path):
