@@ -56,9 +56,12 @@ class CallCapReachedError(RuntimeError):
     """A call would exceed the ``max_calls`` cap of this judge or of a judge it was scoped from."""
 
 
-def _over_input_budget(batch: _Batch) -> bool:
-    """Whether the batch's serialized body already exceeds the measured input budget."""
-    return len(request_body(batch.state, batch.questions)) > MAX_REQUEST_CHARS
+def request_exceeds_input_budget(state: Mapping, questions: Mapping) -> bool:
+    """Whether a request exceeds the batching owner's measured input allowance.
+
+    This is a preflight estimate. A provider's typed refusal remains authoritative below it.
+    """
+    return len(request_body(state, questions)) > MAX_REQUEST_CHARS
 
 
 @dataclass(frozen=True)
@@ -533,7 +536,7 @@ class Judge:
         if batch is None:
             return
         splittable = len(positions) > 1
-        if splittable and _over_input_budget(batch):
+        if splittable and request_exceeds_input_budget(batch.state, batch.questions):
             yield from self._split_positions(plan, positions, cancelled)
             return
         try:
@@ -566,7 +569,7 @@ class Judge:
         if batch is None:
             return []
         splittable = len(positions) > 1
-        if splittable and _over_input_budget(batch):
+        if splittable and request_exceeds_input_budget(batch.state, batch.questions):
             return await self._split_positions_async(plan, positions)
         try:
             response = await self.ask_async(
@@ -611,20 +614,18 @@ class Judge:
         thresholds: Thresholds | None,
         batch_budget: int | None = None,
     ) -> _CheckPlan:
-        """One request per batch of items that fit, each asking every still open check of the items
-        it carries. Each item is first looked up masked together with the shared state alone, as the
-        per-item store key is made from that pair; a batch masks its items, their question wording
-        and the shared state together, as the request that carries them will be.
+        """Mask the whole candidate set before packing so copied secret values stay hidden across
+        batches. Each per-item store key includes its masked item and shared state; a batch also
+        masks its question wording with those values before sending.
         """
         if len({check.name for check in checks}) != len(checks):
             raise ValueError("independent checks require unique names for their result lists")
-        shared = shared or {}
+        *items, shared = self._masked_together([*items, shared or {}])
         budget = MAX_STATE_CHARS if batch_budget is None else batch_budget
         plan = _CheckPlan(list_name, checks, items, shared, thresholds or self.thresholds, budget)
         for position, item in enumerate(items):
-            masked_item, masked_shared = self._masked_together([item, shared])
             for check in checks:
-                stored = self._stored_item(check, masked_item, masked_shared)
+                stored = self._stored_item(check, item, shared)
                 if stored is None:
                     plan.open.setdefault(position, {})[check.question_id] = check
                 else:
