@@ -152,9 +152,10 @@ class SystemOneClient:
     ) -> None:
         """``transport`` sends one HTTP request; the default is `StdlibTransport`. ``timeout`` is
         per attempt, in seconds."""
-        endpoint = (endpoint or self.endpoint).rstrip("/")
+        endpoint = endpoint or self.endpoint
         if not endpoint:
             raise ValueError(f"{self.name} needs an endpoint")
+        endpoint = _checked_endpoint(self.name, endpoint)
         if self.pinned and endpoint != self.endpoint.rstrip("/"):
             raise ValueError(f"{self.name} is pinned to {self.endpoint}; {endpoint} is refused")
         self.model = model or self.default_model
@@ -300,6 +301,30 @@ class StdlibTransport:
     def _refuse_if_cancelled(self) -> None:
         if self._cancelled:
             raise CancelledError
+
+
+def _checked_endpoint(adapter: str, endpoint: str) -> str:
+    """``endpoint`` without its trailing slash, once it is an ``http``/``https`` URL with a host that
+    the wire path can follow. Refused here rather than on the first request, where a route would
+    take the failure for an outage and fail over."""
+    url = urlsplit(endpoint)
+    if url.username is not None or url.password is not None:
+        # Not repeated in the message: what sits before the `@` is a secret.
+        raise ValueError(f"{adapter} endpoint may not carry credentials; set its API key instead")
+    if url.scheme not in ("http", "https"):
+        problem = "needs http:// or https://"
+    elif not url.hostname:
+        problem = "names no host"
+    elif url.query or url.fragment:
+        problem = "may not carry a query or fragment, which the request path would follow"
+    else:
+        try:
+            url.port  # noqa: B018 - parsing the port is the check
+        except ValueError:
+            problem = "has a port that is no number"
+        else:
+            return endpoint.rstrip("/")
+    raise ValueError(f"{adapter} endpoint {endpoint!r} {problem}")
 
 
 def _backoff(attempt: int) -> float:

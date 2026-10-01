@@ -236,7 +236,9 @@ Pick the base by where the model runs:
 Your own server needs no code. A route names its endpoint and model, and a key only if the server
 checks one: `SYSTEM_ONE_ROUTES=mine` with `SYSTEM_ONE_MINE_ENDPOINT` and `SYSTEM_ONE_MINE_MODEL`.
 `SYSTEM_ONE_MINE_TIMEOUT` (seconds per attempt) and `SYSTEM_ONE_MINE_RETRIES` suit a slow or
-restarting server; see `.env.example`.
+restarting server; see `.env.example`. The endpoint must be an `http://` or `https://` URL with a
+host and no query, fragment or credentials; anything else is refused when the route is built, not
+on the first question, where routing would take it for an outage and fail over.
 
 Models can also split the work by question type. `SYSTEM_ONE_ROUTES_CHECK`,
 `SYSTEM_ONE_ROUTES_PICK` and `SYSTEM_ONE_ROUTES_RATE` each order the routes for one type and

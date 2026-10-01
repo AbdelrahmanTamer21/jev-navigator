@@ -28,6 +28,18 @@ def test_unknown_route_needs_endpoint_and_model():
         routes_from_env({"SYSTEM_ONE_ROUTES": "decider"})
 
 
+def test_a_route_whose_endpoint_no_request_can_reach_fails_at_startup_naming_the_route():
+    # Not on the first question, where routing would take the failure for an outage and fail over.
+    with pytest.raises(ValueError, match=r"route 'mine'.*needs http:// or https://"):
+        routes_from_env(
+            {
+                "SYSTEM_ONE_ROUTES": "mine",
+                "SYSTEM_ONE_MINE_ENDPOINT": "gpu-box:8000",
+                "SYSTEM_ONE_MINE_MODEL": "decider-1",
+            }
+        )
+
+
 def test_per_route_settings_beat_the_adapter_defaults():
     routes = routes_from_env(
         {"SYSTEM_ONE_ROUTES": "drex", "SYSTEM_ONE_DREX_MODEL": "drex-v1.1", "DREX_API_KEY": "nace_sk_route"}

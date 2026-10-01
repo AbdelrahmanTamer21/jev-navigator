@@ -170,14 +170,19 @@ def _route(environment: Mapping[str, str], name: str, transport=None) -> Route:
     api_key = next((setting(key) for key in key_names if setting(key)), "")
     if adapter.needs_key and not api_key:
         raise ValueError(f"route {name!r} has no API key: set {' or '.join(key_names)}")
-    client = adapter(
-        model=model or None,
-        api_key=api_key or None,
-        endpoint=endpoint or None,
-        transport=None if adapter.runs_locally else transport,
-        timeout=_seconds(f"{prefix}_TIMEOUT", setting(f"{prefix}_TIMEOUT")),
-        max_retries=_count(f"{prefix}_RETRIES", setting(f"{prefix}_RETRIES")),
-    )
+    timeout = _seconds(f"{prefix}_TIMEOUT", setting(f"{prefix}_TIMEOUT"))
+    max_retries = _count(f"{prefix}_RETRIES", setting(f"{prefix}_RETRIES"))
+    try:
+        client = adapter(
+            model=model or None,
+            api_key=api_key or None,
+            endpoint=endpoint or None,
+            transport=None if adapter.runs_locally else transport,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+    except ValueError as error:
+        raise ValueError(f"route {name!r} ({prefix}_*): {error}") from None
     return Route(name=name, client=client, calibration=_calibration(environment, name, prefix, setting))
 
 

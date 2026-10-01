@@ -118,6 +118,41 @@ def test_only_an_input_budget_refusal_is_typed_for_the_batching_owner_to_split(r
         assert refused.value.body == refusal
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "problem"),
+    [
+        ("ftp://decider.example", "needs http:// or https://"),
+        ("decider.example:8900", "needs http:// or https://"),
+        ("https://", "names no host"),
+        ("https://decider.example/?tenant=a", "query or fragment"),
+        ("https://decider.example/#v1", "query or fragment"),
+        ("https://decider.example:port", "port"),
+    ],
+)
+def test_an_endpoint_no_request_can_reach_is_refused_when_the_client_is_built(endpoint, problem):
+    # Each of these used to build, then fail on the first request: as plain HTTP with the key for
+    # ftp://, deep in http.client without a scheme, or with the request path after the query.
+    with pytest.raises(ValueError, match=problem):
+        SystemOneClient("decider-1", api_key="local-key", endpoint=endpoint)
+
+
+def test_an_endpoint_carrying_credentials_is_refused_without_repeating_them():
+    with pytest.raises(ValueError, match="credentials") as refused:
+        SystemOneClient("decider-1", endpoint="https://user:s3cret@decider.example")
+
+    assert "s3cret" not in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["http://127.0.0.1:8900", "http://[::1]:8900", "http://gpu-box:8000", "https://decider.example/gateway/"],
+)
+def test_an_http_endpoint_with_a_host_is_sent_to_at_the_wire_path(endpoint):
+    client = SystemOneClient("decider-1", endpoint=endpoint)
+
+    assert client.url == endpoint.rstrip("/") + "/v1/systemone"
+
+
 def test_cancel_aborts_a_request_in_flight_and_refuses_later_ones():
     # Arrange: a service that never answers.
     entered, release = threading.Event(), threading.Event()
