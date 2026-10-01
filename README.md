@@ -329,7 +329,7 @@ empty. An explicit `depth=2` limits traversal to two hops; cancellation is check
 There is no hidden depth, neighbour or frontier cap. Missing endpoints and uncertain bindings stay
 visible in `graph.links`. `fixed_point` means the available static graph is exhausted; it does not
 prove that runtime dispatch is resolved or that every stage relevant to your question is covered.
-This is a library operation; the higher-level Jev-backed trace CLI is still in development.
+For the Jev-backed trace CLI, see [Workflow trace](docs/cli.md#workflow-trace).
 
 ## Layer 2: judgments
 
@@ -374,8 +374,9 @@ on its own scope, so searches sharing one judge never use up each other's budget
   (`judge.effective(directive, call)`).
 - **Secrets.** `SecretMasker` masks private keys, token shapes, secret-named assignments and
   high-entropy assignments in every request, by content: a value hidden in one place is hidden
-  everywhere in the request, for example where a relation text or another item of the same batch
-  quotes it. `SecretScanner` refuses to send a request that still contains a secret, and a masked value
+  everywhere in the request, for example where a relation text or another candidate quotes it.
+  The complete candidate set is masked before packing, so copied values stay hidden across batches.
+  `SecretScanner` refuses to send a request that still contains a secret, and a masked value
   left in a key is refused too. Both are on by default; a host passes its own (a masker offers
   `mask(text)` and `masked_values(text)`), or turns one off explicitly with `None`.
 - **Answer store.** Every answer is stored with the served model and the thresholds in force. An
@@ -411,7 +412,7 @@ on its own scope, so searches sharing one judge never use up each other's budget
 
 `find_code(index, judge, target_description, start, *, budget=SearchBudget(), thresholds=None)` is
 the central search. Use it only when the target is described by meaning; anything code can decide
-(the callers of X) is an operation. For each opened place, one request asks "Does `slice.code`
+(the callers of X) is an operation. For each opened place, a request asks "Does `slice.code`
 contain the code described in `target.description`?" and, per neighbour code lists (callers, with
 callers in test files after the others; callees, proven production targets first and then the ones
 called from fewest places; code that
@@ -435,6 +436,10 @@ the order it picked them, then the other neighbours by falling `could_contain` p
 visited set and a content cache. An `open_first` Choice picks the neighbour to open next, with the
 option "None of the entries is likely to contain it."; every pick but "none" waits ahead of the scored
 neighbours, whatever its confidence and its own score, and the history's `used` says that it was queued.
+Large openings split independent neighbour questions through the same Judge batching owner without
+discarding candidates or previews. The global pick is optional: when its full request or option set
+exceeds provider capability, `open_first.unavailable` records why and individual neighbour scores
+still order the complete frontier. Every live sub-request counts toward the selected call allowance.
 A low neighbour score only lowers that neighbour's priority; it is never treated as proof that the code
 is not there. The search ends as `nothing_left` when no start or pick waits and no neighbour scores
 above the no bar (0.20 by default). A start place is judged but never ends the search as found, because

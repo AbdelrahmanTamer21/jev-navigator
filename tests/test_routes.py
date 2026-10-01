@@ -14,6 +14,8 @@ from jev_navigator.adapters.routes import (
     SystemOneClient,
     routes_from_env,
 )
+from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.questions import Check, Criterion
 
 
 def test_no_routes_variable_resolves_to_no_routes():
@@ -136,3 +138,58 @@ def _dead_server() -> SystemOneClient:
     _requires_typesafe()
     client = SystemOneClient(model="test", api_key="test-key", base_url="http://127.0.0.1:1")
     return client
+
+
+def test_a_routed_budget_refusal_reaches_the_judge_and_splits_without_failover():
+    """The real route transport preserves a size refusal for the batching owner to split."""
+    _requires_typesafe()
+    refused: list[bytes] = []
+    accepted: list[bytes] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            sent = self.rfile.read(int(self.headers["content-length"]))
+            if len(sent) > 40_000:
+                refused.append(sent)
+                body = b'{"detail":{"error_type":"max_tokens_exceeded"}}'
+                self.send_response(400)
+            else:
+                accepted.append(sent)
+                body = json.dumps(
+                    {
+                        "model": "drex-latest",
+                        "usage": {"input_tokens": 12, "output_tokens": 1},
+                        "answers": {
+                            key: {"type": "noul", "noul": 0.9} for key in json.loads(sent)["questions"]
+                        },
+                    }
+                ).encode()
+                self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args) -> None:  # noqa: A002 - stdlib signature
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = httpd.server_address[1]
+    __import__("threading").Thread(target=httpd.serve_forever, daemon=True).start()
+    client = SystemOneClient(model="drex-latest", api_key="test-key", base_url=f"http://127.0.0.1:{port}")
+    backup_exchanges: list[tuple[bytes, bytes]] = []
+    routed = RoutedJevClient((Route("drex", client), Route("backup", _server(backup_exchanges))))
+    check = Check(
+        "has_code",
+        "Does `{item}.code` contain code?",
+        yes=Criterion("Code is present."),
+        no=Criterion("Code is absent."),
+    )
+    results = Judge(routed).check_every(
+        [check], [{"code": "x" * 24_000}, {"code": "y" * 24_000}], list_name="items"
+    )
+
+    assert len(results["has_code"]) == 2
+    assert len(refused) == 1
+    assert len(accepted) == 2
+    assert backup_exchanges == []

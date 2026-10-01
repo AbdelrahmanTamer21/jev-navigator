@@ -23,7 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ..judgments.answers import JevResponse, response_from_raw
-from ..judgments.client import LATEST_JEV
+from ..judgments.client import LATEST_JEV, InputBudgetExceededError, input_budget_error
 from ..judgments.journal import RawResponse
 
 ROUTES_ENV = "SYSTEM_ONE_ROUTES"
@@ -153,7 +153,15 @@ class SystemOneClient:
         sdk_send(self._sdk._http_client, self._sdk._retry, request)  # noqa: SLF001
 
     def send(self, state: Mapping, questions: Mapping) -> RawResponse:
-        self._send_raw(state, questions)
+        """The captured response, with a provider input-budget refusal translated to the typed
+        ``InputBudgetExceededError`` so the batching owner can split the batch."""
+        try:
+            self._send_raw(state, questions)
+        except Exception as error:
+            typed = input_budget_error(error)
+            if typed is not None:
+                raise typed from error
+            raise
         captured = self._capture.take()
         if captured is None:
             raise RuntimeError("the SDK transport captured no response")
@@ -182,6 +190,11 @@ class RoutedJevClient:
         for route in self.routes:
             try:
                 return route.client.ask(state, questions)
+            except InputBudgetExceededError:
+                # A size refusal is about this request's input, which failover would resend
+                # unchanged, and the typed error is the batching owner's signal to split the batch.
+                # It passes through untouched, exactly as `SystemOneClient.send` raises it.
+                raise
             except Exception as error:  # noqa: BLE001 - failover is the point
                 failures.append(f"{route.name}: {error}")
         if not failures:
