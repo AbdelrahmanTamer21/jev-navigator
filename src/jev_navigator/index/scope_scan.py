@@ -150,6 +150,8 @@ def _structure_from_matches(files, lines_of, unparsed, matches):
             # shares the line `class Box` opens, and naming it from that line would collapse it into
             # the class's span.
             target[file].add(Span(file, start, end, symbol_name(_captured_name(match))))
+    for file in files:
+        functions[file] -= _same_lines_as_a_named_symbol(functions[file] | classes[file])
     return {
         file: FileStructure(
             _ordered(functions[file]),
@@ -158,6 +160,14 @@ def _structure_from_matches(files, lines_of, unparsed, matches):
         )
         for file in files
     }
+
+
+def _same_lines_as_a_named_symbol(symbols: set[Span]) -> set[Span]:
+    """Anonymous functions spanning exactly a named symbol's lines: ``xs.map((x) => x.id)`` on the
+    one line of ``ids``. A place is lines, so such a callback is that symbol; kept apart, it would
+    contain the symbol's first line and stop it being top level."""
+    named = {(span.start, span.end) for span in symbols if span.name != "<anonymous>"}
+    return {span for span in symbols if span.name == "<anonymous>" and (span.start, span.end) in named}
 
 
 def _calls_from_matches(matches) -> tuple[CallMatch, ...]:

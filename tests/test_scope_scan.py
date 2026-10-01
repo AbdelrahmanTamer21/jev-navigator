@@ -308,7 +308,7 @@ def test_a_symbol_is_named_by_the_syntax_tree_and_a_callback_stays_anonymous(tmp
                 "const handler = function inner() { return 1; };\n"
                 'it("saves the order", () => { save(); });\n'
                 "orders.save = () => 1;\n"
-                'const routes = { "risk.triage": () => 1, plain: () => 2 };\n'
+                'const routes = {\n  "risk.triage": () => 1,\n  plain: () => 2,\n};\n'
                 "abstract class Shape { #area() { return 0; } }\n"
                 "const Model = class {};\n"
                 "function* pages() {}\n"
@@ -339,18 +339,62 @@ def test_a_symbol_is_named_by_the_syntax_tree_and_a_callback_stays_anonymous(tmp
             (3, "handler"),
             (4, "<anonymous>"),
             (5, "save"),
-            (6, "<anonymous>"),
-            (6, "plain"),
-            (7, "Shape"),
-            (7, "area"),
-            (8, "Model"),
-            (9, "pages"),
+            (7, "<anonymous>"),
+            (8, "plain"),
+            (10, "Shape"),
+            (10, "area"),
+            (11, "Model"),
+            (12, "pages"),
         ],
         "src/view.tsx": [(1, "View"), (2, "<anonymous>")],
         "src/legacy.js": [(1, "run"), (2, "Job"), (2, "start"), (3, "each")],
         "app/jobs.py": [(1, "Job"), (2, "run")],
     }
     assert index.unparsed_files == set()
+
+
+def test_a_callback_on_exactly_a_named_functions_lines_is_that_function(tmp_path: Path) -> None:
+    """A callback spanning exactly a named function's lines is the same place at line granularity,
+    so it stays part of that function: the function stays top level, a same-file call to it stays
+    proven, and a call inside the callback is still that function's call."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/util.ts": (
+                "export const ids = (xs: { id: number }[]) => xs.map((x) => x.id);\n"
+                "export function total(xs: number[]) { return xs.reduce((a, b) => a + b, 0); }\n"
+                "export const loadUser = (id: string) => request(id).then((r) => r.json());\n"
+                "export const wait = (ms: number) => new Promise((done) => {\n"
+                "  setTimeout(done, ms);\n"
+                "});\n"
+                "function request(id: string) { return fetch(id); }\n"
+                "export function run() {\n"
+                "  return ids([]).length + total([]);\n"
+                "}\n"
+            ),
+        },
+    )
+
+    # Act
+    symbols = [(span.start, span.end, span.name) for span in index.symbols_in("src/util.ts")]
+    bindings = {name: index.find_callers(name)[0].binding for name in ("ids", "total")}
+    request_caller = index.find_callers("request")[0].caller
+
+    # Assert
+    assert symbols == [
+        (1, 1, "ids"),
+        (2, 2, "total"),
+        (3, 3, "loadUser"),
+        (4, 6, "wait"),
+        (7, 7, "request"),
+        (8, 10, "run"),
+    ]
+    assert {name: (binding.status.value, binding.reason) for name, binding in bindings.items()} == {
+        "ids": ("resolved", "defined in the same file"),
+        "total": ("resolved", "defined in the same file"),
+    }
+    assert request_caller is not None and request_caller.name == "loadUser"
 
 
 def test_a_flow_typed_class_keeps_its_methods(tmp_path: Path) -> None:

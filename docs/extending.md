@@ -234,7 +234,9 @@ object key or assignment that holds it, looking through parentheses and type cas
 (`export const load = (async () => ...) satisfies PageLoad` is `load`), and only then by its own
 name. A callback passed to a call (`it("works", () => ...)`) is held by no name and stays
 `<anonymous>`. This keeps a method on a one-line TypeScript class distinct from its enclosing class,
-and keeps test and framework callbacks from sharing the names `it`, `describe` or `expect`.
+and keeps test and framework callbacks from sharing the names `it`, `describe` or `expect`. A
+callback spanning exactly a named symbol's lines (`xs.map((x) => x.id)` on the one line of `ids`) is
+the same place, so it is left out rather than listed as a second, anonymous symbol.
 Persistent facts are keyed by source bytes, language, parser version and `FACT_RULE_VERSION`.
 A change to extracted facts must change that rule identity so existing cached results are reparsed.
 Name lookups reuse an in-memory index of parsed definitions, calls and references, including facts
