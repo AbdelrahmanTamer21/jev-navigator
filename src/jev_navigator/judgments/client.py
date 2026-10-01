@@ -55,10 +55,17 @@ def input_budget_error(error: BaseException) -> InputBudgetExceededError | None:
     if getattr(error, "status", None) != 400:
         return None
     body = getattr(error, "body", None)
-    texts = [str(body) if not isinstance(body, Mapping) else json.dumps(body), str(error)]
-    if any(MAX_TOKENS_MARKER in text for text in texts):
-        return InputBudgetExceededError(str(error))
-    return None
+    if isinstance(body, (str, bytes, bytearray)):
+        try:
+            body = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+    if not isinstance(body, Mapping):
+        return None
+    detail = body.get("detail")
+    if not isinstance(detail, Mapping) or detail.get("error_type") != MAX_TOKENS_MARKER:
+        return None
+    return InputBudgetExceededError(str(error))
 
 
 class ReplayOnlyClient:

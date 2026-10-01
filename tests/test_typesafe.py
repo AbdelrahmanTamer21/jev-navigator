@@ -37,6 +37,7 @@ def _jev_server(
     *,
     input_limit: int | None = None,
     priority_failure_status: int | None = None,
+    refusal_body: bytes | None = None,
 ) -> ThreadingHTTPServer:
     """A local Jev endpoint recording the exact bytes of every request it answers, and its answer.
 
@@ -49,7 +50,11 @@ def _jev_server(
             sent = self.rfile.read(int(self.headers["content-length"]))
             questions = json.loads(sent)["questions"]
             status = 200
-            if priority_failure_status is not None and all(q["type"] == "choice" for q in questions.values()):
+            if refusal_body is not None:
+                status, served = 400, refusal_body
+            elif priority_failure_status is not None and all(
+                q["type"] == "choice" for q in questions.values()
+            ):
                 status = priority_failure_status
                 detail = "max_tokens_exceeded" if status == 400 else "invalid_api_key"
                 served = json.dumps({"detail": {"error_type": detail}}).encode()
@@ -275,6 +280,50 @@ def test_optional_priority_keeps_size_failure_but_propagates_auth_failure(
     records = [json.loads(line) for line in journal_path.read_text().splitlines()]
     cause = "max_tokens_exceeded" if status == 400 else "invalid_api_key"
     assert any(cause in record.get("error", "") for record in records if record["kind"] == "failure")
+
+
+@pytest.mark.parametrize("async_checks", [False, True])
+@pytest.mark.parametrize(
+    "error_type,message",
+    [
+        ("invalid_question", "unknown question id max_tokens_exceeded"),
+        ("max_tokens_exceeded", None),
+        ("max_tokens_exceeded", "The model's input is too long."),
+    ],
+)
+def test_structured_error_type_controls_retry_at_the_sdk_boundary(
+    monkeypatch: pytest.MonkeyPatch, async_checks: bool, error_type: str, message: str | None
+) -> None:
+    pytest.importorskip("typesafe_sdk")
+    from typesafe_sdk import TypeSafeBadRequestError
+
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+    from jev_navigator.judgments.client import InputBudgetExceededError
+
+    detail = {"error_type": error_type}
+    if message is not None:
+        detail["message"] = message
+    exchanges: list[tuple[bytes, bytes]] = []
+    server = _jev_server(exchanges, refusal_body=json.dumps({"detail": detail}).encode())
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    client = TypeSafeJevClient()
+    judge = Judge(client)
+    expected = InputBudgetExceededError if error_type == "max_tokens_exceeded" else TypeSafeBadRequestError
+    try:
+        with pytest.raises(expected):
+            items = [{"code": "def one(): return 1"}, {"code": "def two(): return 2"}]
+            shared = {"doc": {"sentence": "returns a number"}}
+            if async_checks:
+                asyncio.run(judge.check_every_async([DESCRIBES], items, shared))
+            else:
+                judge.check_every([DESCRIBES], items, shared)
+    finally:
+        client.close()
+        _stop(server)
+
+    assert judge.calls == len(exchanges)
+    assert len(exchanges) == (2 if error_type == "max_tokens_exceeded" else 1)
 
 
 def test_input_batches_keep_values_masked_across_request_boundaries(
