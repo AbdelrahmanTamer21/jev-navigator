@@ -156,13 +156,16 @@ def test_seed_search_batches_every_neighbour_at_the_real_input_boundary(
     ]
     assert sum(len(body["answers"]) for _, body in accepted) >= neighbours + 1
     assert all(len(sent) <= input_limit for sent, body in exchanges if "answers" in json.loads(body))
-    delivered = [
-        candidate["code"]
+    batched = [
+        candidate
         for request, _ in accepted
         if any(key.startswith("could_contain_target@") for key in request["questions"])
         for candidate in request["state"]["candidates"]
     ]
-    assert sorted(delivered) == sorted(previews)
+    assert sorted(candidate["code"] for candidate in batched) == sorted(previews)
+    assert {frozenset(candidate) for candidate in batched} == {
+        frozenset({"file", "lines", "commit", "signature", "code"})
+    }
     assert judge.calls == result.calls == len(exchanges)
     if neighbours > 2:
         assert opened.judgments["open_first"]["used"] is False

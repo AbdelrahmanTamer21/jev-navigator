@@ -433,13 +433,24 @@ limits are `None`. A caller can set any of those fields on `SearchBudget` when i
 operational limit. Each round opens
 `beam_width` places concurrently: start places first, then the neighbours Jev picked to open next, in
 the order it picked them, then the other neighbours by falling `could_contain` probability, with a
-visited set and a content cache. An `open_first` Choice picks the neighbour to open next, with the
-option "None of the entries is likely to contain it."; every pick but "none" waits ahead of the scored
-neighbours, whatever its confidence and its own score, and the history's `used` says that it was queued.
+visited set and a content cache. The first `initial_candidates` place closes its round, so no less
+likely place is opened, or found, beside it; each later one waits by its supplied probability among
+the neighbours scored above the no bar, and ahead of the rest. An `open_first`
+Choice picks the neighbour to open next, with the option "None of the entries is likely to contain
+it."; every pick but "none" waits ahead of the scored neighbours, whatever its confidence and its own
+score, and the history's `used` says that it was queued.
 Large openings split independent neighbour questions through the same Judge batching owner without
-discarding candidates or previews. The global pick is optional: when its full request or option set
-exceeds provider capability, `open_first.unavailable` records why and individual neighbour scores
-still order the complete frontier. Every live sub-request counts toward the selected call allowance.
+discarding candidates or previews. Each place's own judgment goes first: when a place reached in that
+round holds the target, the search ends without sending the split neighbour batches, and those
+neighbours stay in `not_inspected` as `unscored`. Before a find with no function in it, such as an
+interface, is accepted, one more round opens up to `SearchBudget.confirmations` (default 2) of the
+functions defined elsewhere under the names its best-matching lines declare, asking only whether
+each holds the target. A yes there is listed first in `found`, before the find it confirms; `0`
+accepts the first find as it is. A find inside a function is accepted as it is: the code that calls
+a shared function often matches the description too, and would be listed before the function the
+description names. The global pick is optional: when its full request or option set exceeds
+provider capability, `open_first.unavailable` records why and individual neighbour scores still
+order the complete frontier. Every live sub-request counts toward the selected call allowance.
 Only HTTP 400 with `detail.error_type` equal to `max_tokens_exceeded` is a size refusal;
 mentions of that text in question IDs or unrelated error messages do not trigger splitting.
 A low neighbour score only lowers that neighbour's priority; it is never treated as proof that the code
@@ -452,7 +463,7 @@ lines before or after, the start of a co-changed file) gives its range and quote
 code. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
 `scope_incomplete`, and the result keeps three sets: `found`; `searched` and `unsure` (bodies actually
 judged, start places apart in `starts`); and `not_inspected`, each entry with its reason (`budget`,
-`deprioritized`, `capped` or `depth`) and its `QueueTier`: `START`, `PICK` or `MOVE`. Resume
+`deprioritized`, `capped`, `depth` or `unscored`) and its `QueueTier`: `START`, `PICK` or `MOVE`. Resume
 preserves that role, so waiting starts still open before picks and are never reported as new finds.
 `searched` means "opened and judged at or below the no bar, probability kept", and `nothing_left`
 means "nothing left worth opening"; neither proves that the code does not exist, because one "no" about
@@ -518,7 +529,8 @@ replays a recorded search with a growing history and reports the probability at 
 
 `find_code` always records its own history in `FindResult.history`, with or without a stop rule; it
 costs no calls. A `choose_next` step lists the places opened next, each with its priority and reason
-(`start`, `open_first` for a place Jev picked, or `queue_score`). An `open` step holds the
+(`start`, `open_first` for a place Jev picked, `confirms_find` for a function a found declaration
+names, or `queue_score`). An `open` step holds the
 code, the `contains_target` probability and verdict, every neighbour offered with its `could_contain`
 probability, the `open_first` pick, and places set aside (`capped` or `depth`). A final `stop` step
 names the outcome, the not-inspected frontier with reasons, and the last stop check, so the history

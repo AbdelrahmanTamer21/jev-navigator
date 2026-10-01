@@ -1,26 +1,40 @@
 """Choose concrete initial places for a semantic search from the tracked repository tree.
 
-Code owns the hierarchy and every option. Jev only chooses among the actual directories, files,
-and source spans code offers. Unchosen options remain in the receipt as an uninspected entry
-frontier; a Choice probability orders alternatives but is never treated as a Noul probability that
-the code contains the target.
+Code owns the ranking, the hierarchy and every option. Jev only chooses among the actual spans,
+directories and files code offers. The spans whose words best match the target are offered first,
+in one Choice; the directory walk runs only when no code shares a word with the target. When Jev
+picks none of the spans, the search starts from them in the order of Jev's probabilities: a none
+pick says only that no span stood out, the spans still share the target's words, and a walk from
+the root costs a Choice per directory level with nothing to steer it but path names. Unchosen
+options remain in the receipt as an uninspected entry frontier; a Choice probability orders
+alternatives but is never treated as a Noul probability that the code contains the target.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 
 from ..index.code_index import CodeIndex
+from ..index.keywords import Corpus, matching_lines, target_terms
 from ..index.languages import language_of
 from ..index.spans import Span
 from ..judgments.judge import Judge, PickResult
 from ..judgments.questions import Pick
-from .places import Place, function_place, range_place
+from .places import Place, function_place, range_place, window_place
+from .shown import shown_slice
 
 MAX_OPTIONS = 200
 DIRECTORY_EXAMPLES = 3
 PREVIEW_LINES = 3
+MATCHED_FILES = 8
+MATCHED_SPANS_PER_FILE = 3
+MATCHED_LINES = 2
+MATCHED_LINE_CHARS = 160
+MATCHED_WINDOW_RADIUS = 20
+KEYWORD_ENTRY = "keyword entry selection"
+NO_MATCH = "none"
 
 CHOOSE_PATH = Pick(
     name="automatic_entry_path",
@@ -35,6 +49,15 @@ CHOOSE_SPAN = Pick(
         "Which actual source span in `options` is most likely to contain the code described by "
         "`target.description`? Choose from the supplied spans only."
     ),
+)
+CHOOSE_MATCHED_SPAN = Pick(
+    name="keyword_entry_span",
+    instructions=(
+        "Which actual source span in `options` is most likely to contain the code described by "
+        "`target.description`? The options are the spans whose words best match the description; "
+        "choose from the supplied spans only."
+    ),
+    extra_options=((NO_MATCH, "None of these spans is likely to contain the described code."),),
 )
 
 
@@ -100,14 +123,136 @@ class _PathEntry:
 class _SpanEntry:
     span: Span
     description: str
+    focus: int | None = None
 
 
 def choose_initial_candidates(index: CodeIndex, judge: Judge, target: str) -> EntrySelection:
-    """Select one file and one span, retaining every closed-choice receipt and span alternative."""
+    """Select one file and one span, retaining every closed-choice receipt and span alternative.
+
+    Every matched span the pick did not select stays a candidate, so a wrong first guess leaves the
+    search other files to go to rather than only the rest of one file."""
     files = tuple(file for file in index.available_files if language_of(file))
     if not files:
         raise ValueError("the repository scope contains no supported code files")
-    decisions: list[EntryDecision] = []
+    matched = _matched_spans(index, files, target)
+    if not matched:
+        return _walk(index, judge, target, files, [])
+    chosen, decision, probabilities = _choose_matched(judge, target, matched)
+    alternatives = sorted(
+        (entry for entry in matched if entry != chosen),
+        key=lambda entry: -probabilities.get(entry.span.key, 0.0),
+    )  # stable: equal probabilities keep the keyword ranking's order
+    reserve = tuple(
+        EntryCandidate(_matched_place(index, entry), probabilities.get(entry.span.key))
+        for entry in alternatives
+    )
+    if chosen is None:
+        return EntrySelection(alternatives[0].span.file, reserve, (decision,))
+    first = EntryCandidate(_matched_place(index, chosen), probabilities.get(chosen.span.key))
+    return EntrySelection(chosen.span.file, (first, *reserve), (decision,))
+
+
+def _matched_spans(index: CodeIndex, files: tuple[str, ...], target: str) -> tuple[_SpanEntry, ...]:
+    """The best-matching spans of the files whose words best match the target, best first: at most
+    ``MATCHED_SPANS_PER_FILE`` of each of the ``MATCHED_FILES`` best files, weighed by how rare
+    each word is across every file. A file's path counts as part of its text. Each span is described
+    by its first lines and its best-matching later lines."""
+    terms = target_terms(target)
+    if not terms:
+        return ()
+    corpus = Corpus.of(terms, {file: "\n".join((file, *index.lines(file))) for file in files})
+    rarity = corpus.idf()
+    scored: list[tuple[float, _SpanEntry]] = []
+    for file, _score in corpus.ranked()[:MATCHED_FILES]:
+        spans = {entry.span.key: entry for entry in _source_spans(index, file)}
+        lines = index.lines(file)
+        texts = {
+            key: "\n".join((file, *lines[entry.span.start - 1 : entry.span.end]))
+            for key, entry in spans.items()
+        }
+        for key, score in Corpus.of(terms, texts).ranked(rarity)[:MATCHED_SPANS_PER_FILE]:
+            entry = spans[key]
+            best = _best_lines(index, entry.span, rarity)
+            matched = replace(
+                entry,
+                description=_matched_description(index, entry.span, best),
+                focus=_focus(index, entry.span, best),
+            )
+            scored.append((score, matched))
+    return tuple(entry for _score, entry in sorted(scored, key=lambda pair: (-pair[0], pair[1].span.key)))
+
+
+def _best_lines(index: CodeIndex, span: Span, rarity: Mapping[str, float]) -> list[int]:
+    """The lines after the span's opening that share target words, those sharing the rarest first."""
+    first = span.start + PREVIEW_LINES
+    return [
+        first + position for position in matching_lines(index.lines(span.file)[first - 1 : span.end], rarity)
+    ]
+
+
+def _matched_description(index: CodeIndex, span: Span, best: list[int]) -> str:
+    """The span's opening and, after it, its ``MATCHED_LINES`` best-matching lines with their line
+    numbers, so a long span is offered by what it shares with the target."""
+    lines = index.lines(span.file)
+    later = "; ".join(
+        f"line {number}: {lines[number - 1].strip()[:MATCHED_LINE_CHARS]}"
+        for number in sorted(best[:MATCHED_LINES])
+    )
+    opening = _span_description(index, span)
+    return f"{opening} ... {later}" if later else opening
+
+
+def _focus(index: CodeIndex, span: Span, best: list[int]) -> int | None:
+    """The best-matching line when the span, opened whole at the default slice size, would be cut
+    before it; None when opening the whole span shows that line."""
+    if not best:
+        return None
+    shown = shown_slice(index.read_slice(span))
+    return best[0] if shown is None or best[0] > shown.span.end else None
+
+
+def _matched_place(index: CodeIndex, entry: _SpanEntry) -> Place:
+    """The span whole or, when that would cut off its best-matching line, the window around that
+    line under the span's name, as a long declaration is opened from one of its lines."""
+    if entry.focus is None:
+        return function_place(index, entry.span, KEYWORD_ENTRY)
+    return window_place(
+        index, entry.span.file, entry.focus, KEYWORD_ENTRY, radius=MATCHED_WINDOW_RADIUS, name=entry.span.name
+    )
+
+
+def _choose_matched(
+    judge: Judge, target: str, matched: tuple[_SpanEntry, ...]
+) -> tuple[_SpanEntry | None, EntryDecision, dict[str, float]]:
+    """One Choice among the matched spans; ``None`` when Jev picks the no-match option."""
+    descriptions = [entry.description for entry in matched]
+    options = {str(position): description for position, description in enumerate(descriptions)}
+    result: PickResult | None = judge.pick(CHOOSE_MATCHED_SPAN, options, {"target": {"description": target}})
+    if result is None:
+        raise RuntimeError("automatic entry selection had no safe matched span options")
+    chosen = None if result.choice == NO_MATCH else matched[int(result.choice)]
+    by_span = {
+        entry.span.key: result.probabilities.get(str(position), 0.0) for position, entry in enumerate(matched)
+    }
+    decision = EntryDecision(
+        "matched_span",
+        "",
+        chosen.span.key if chosen is not None else NO_MATCH,
+        result.confidence,
+        dict(result.probabilities),
+        result.request_sha256,
+        tuple(
+            {"id": str(position), "entry": entry.span.key, "description": descriptions[position]}
+            for position, entry in enumerate(matched)
+        ),
+    )
+    return chosen, decision, by_span
+
+
+def _walk(
+    index: CodeIndex, judge: Judge, target: str, files: tuple[str, ...], decisions: list[EntryDecision]
+) -> EntrySelection:
+    """Choose a directory per level down to one file, then one of its spans."""
     parent = ""
     while True:
         entries = _path_entries(index, files, parent)

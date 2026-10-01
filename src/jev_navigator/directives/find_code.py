@@ -8,8 +8,13 @@ neighbour signatures; it never sees the search history, and code alone decides w
 Each round opens ``beam_width`` places at once: start places first, then the neighbours Jev picked
 to open next, in the order it picked them, whatever its confidence, then the other neighbours by
 falling could-contain probability. A start place is judged but never ends the search as found, since
-the caller already had it. A visited set removes overlapping paths, and an in-run cache skips code
-already judged. With ``beam_width=1`` this is a plain sequential best-first search.
+the caller already had it. The first initial candidate closes its round: every yes in a round is a
+find, so a less likely place opened beside it could only add a find it did not need. Before the
+search accepts a find with no function in it, one more round opens the places one step more
+specific (``specific``): the implementations a declaration names. A yes there is listed first, since
+a yes can land on a layer that only names the target. A visited set removes overlapping paths, and an
+in-run cache skips code already judged. With ``beam_width=1`` this is a plain sequential best-first
+search.
 """
 
 from __future__ import annotations
@@ -20,11 +25,12 @@ import itertools
 import os
 import signal
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import CancelledError, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import IntEnum, StrEnum
+from functools import partial
 
 from ..history import (
     DEFAULT_QUESTION_RESERVE,
@@ -53,6 +59,7 @@ from ..judgments.questions import ITEM_PLACEHOLDER, MAX_CHOICE_OPTIONS, Check, C
 from ..judgments.thresholds import NoulVerdict, Thresholds
 from .places import MOVES, Move, Place, neighbours_and_omissions
 from .shown import MAX_LINE_CHARS, MAX_SLICE_CHARS, cut_long_line, shown_slice
+from .specific import specific_places
 
 FOUND = Check(
     name="contains_target",
@@ -95,6 +102,9 @@ COULD_CONTAIN = Check(
     ),
 )
 NO_CLEAR_FIRST = "none"
+BATCH_SOURCE_FIELDS = ("file", "lines", "commit")
+NEIGHBOURS_UNSCORED = "neighbours_unscored"
+UNSCORED_PRIORITY = 0.5
 OPEN_FIRST = Pick(
     name="open_first",
     instructions=(
@@ -131,7 +141,8 @@ class Outcome(StrEnum):
 @dataclass(frozen=True)
 class SearchBudget:
     """Optional caller-selected search limits. ``None`` means the finite frontier, rather than an
-    arbitrary library default, decides when the search is complete."""
+    arbitrary library default, decides when the search is complete. ``confirmations`` is how many
+    more specific places are opened before a find is accepted; 0 accepts the first find as it is."""
 
     max_depth: int | None = None
     max_steps: int | None = None
@@ -141,6 +152,7 @@ class SearchBudget:
     preview_lines: int = 8
     max_slice_chars: int = MAX_SLICE_CHARS
     max_line_chars: int = MAX_LINE_CHARS
+    confirmations: int = 2
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> SearchBudget:
@@ -157,6 +169,7 @@ class SearchBudget:
                 "preview_lines",
                 "max_slice_chars",
                 "max_line_chars",
+                "confirmations",
             )
             if f"JEV_NAVIGATOR_{name.upper()}" in environment
         }
@@ -190,7 +203,9 @@ class NotInspected:
     """A place the search did not open. ``reason`` is ``budget`` (still worth opening when the budget
     ran out), ``cancelled`` (the caller interrupted before it was opened), ``deprioritized`` (its
     signature scored low; that only lowered its priority, it was never judged), ``capped`` (cut by
-    an explicit per-kind neighbour cap) or ``depth`` (beyond an explicit depth limit).
+    an explicit per-kind neighbour cap), ``depth`` (beyond an explicit depth limit) or ``unscored``
+    (a neighbour of a place too large for one request, left unscored because a place opened in the
+    same round held the target; its priority is the neutral ``UNSCORED_PRIORITY``).
     ``tier`` preserves starts, picked places and scored neighbours through Resume."""
 
     place_key: str
@@ -235,15 +250,20 @@ class FindResult:
 
 @dataclass(order=True)
 class _Queued:
-    """Starts come first, then picks in the order they were made, then moves by falling probability."""
+    """Starts come first, then picks in the order they were made, then discovered places and the
+    moves still worth opening together by falling probability, then the remaining moves. A
+    discovered entry alternative therefore waits behind a neighbour Jev scored higher, and a
+    neighbour Jev scored at or below the no bar waits behind every discovered place."""
 
-    tier: QueueTier
+    band: int
     rank: float
     order: int
     place: Place = field(compare=False)
     depth: int = field(compare=False)
     path: tuple[str, ...] = field(compare=False)
     probability: float = field(compare=False)
+    tier: QueueTier = field(compare=False)
+    confirms: str | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -267,6 +287,9 @@ class _Search:
     steps: int = 0
     cap_reached: bool = False
     counter: itertools.count = field(default_factory=itertools.count)
+    closes_round: str | None = None
+    confirming: list[_Queued] = field(default_factory=list)
+    confirmed: bool = False
 
     def push(
         self,
@@ -284,17 +307,27 @@ class _Search:
             )
             return
         rank = -probability if tier in (QueueTier.DISCOVERED, QueueTier.MOVE) else 0.0
-        heapq.heappush(self.queue, _Queued(tier, rank, next(self.counter), place, depth, path, probability))
+        band = tier
+        if tier == QueueTier.MOVE and probability > self.thresholds.noul_no_at:
+            band = QueueTier.DISCOVERED
+        heapq.heappush(
+            self.queue, _Queued(band, rank, next(self.counter), place, depth, path, probability, tier)
+        )
 
     def next_beam(self, calls_left: int | None) -> list[_Queued]:
+        """The next round: the places confirming a find while any wait, else the best-queued ones."""
         beam = []
         # A spent live-call budget still permits answers already in the store.
         width = self.budget.beam_width if calls_left in (None, 0) else min(self.budget.beam_width, calls_left)
-        while self.queue and len(beam) < width:
-            item = heapq.heappop(self.queue)
+        source = self.confirming if self.confirming else None
+        while (source if source is not None else self.queue) and len(beam) < width:
+            item = source.pop(0) if source is not None else heapq.heappop(self.queue)
             if item.place.key not in self.visited:
                 self.visited.add(item.place.key)
                 beam.append(item)
+                if item.place.key == self.closes_round:
+                    self.closes_round = None
+                    break
         return beam
 
     def worth_opening(self) -> bool:
@@ -326,11 +359,12 @@ def find_code(
     a stopped search from its frontier with a fresh budget. ``stop_rule`` (off by default): after each
     round the caller's check is asked over the history; a yes ends the search with outcome
     ``stop_rule``. ``initial_candidates`` are system-discovered places: the first is opened as a
-    picked place and may be found, while the rest keep their supplied probabilities in the ordinary
-    move frontier. Explicit ``start`` places retain their caller-known semantics and never count as
-    finds. ``moves`` chooses how neighbours are listed (default ``places.MOVES``); pass a
-    subset, or add a move of your own. Each round's places are asked concurrently in threads;
-    ``find_code_async`` is the same search for an async client."""
+    picked place, with nothing ranked after it in its round, and may be found, while the rest wait by
+    their supplied probabilities among the neighbours scored above the no bar, and ahead of the
+    others. Explicit ``start`` places retain their caller-known semantics and never count as finds.
+    ``moves`` chooses how neighbours are listed (default ``places.MOVES``); pass a subset, or add a
+    move of your own. Each round's places are asked concurrently in threads; ``find_code_async`` is
+    the same search for an async client."""
     options = _SearchOptions(
         budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
     )
@@ -347,6 +381,7 @@ def find_code(
             if cancelled:
                 stop = Outcome.CANCELLED
                 break
+            _confirm_finds(index, search)
             _apply_stop_rule(judge, search)
     except KeyboardInterrupt:
         stop = Outcome.CANCELLED
@@ -379,10 +414,15 @@ async def find_code_async(
         opened = _open_round(index, search, judge)
         if not opened:
             continue
-        responses = await asyncio.gather(
-            *(_ask_within_cap_async(judge, search, opening) for opening in opened)
+        answers = await asyncio.gather(
+            *(_ask_found_first_async(judge, search, opening) for opening in opened)
         )
+        if search.found or _round_found(search, opened, answers):
+            responses = [_without_neighbours(answer) for answer in answers]
+        else:
+            responses = await asyncio.gather(*(_ask_neighbours_async(search, answer) for answer in answers))
         _merge_round(search, opened, responses)
+        _confirm_finds(index, search)
         await _apply_stop_rule_async(judge, search)
     return _result(search, stop, judge, index)
 
@@ -427,6 +467,8 @@ def _begin(
     for position, (place, probability) in enumerate(options.initial_candidates):
         tier = QueueTier.PICK if position == 0 else QueueTier.DISCOVERED
         search.push(place, probability, 0, (place.key,), tier)
+    if options.initial_candidates:
+        search.closes_round = options.initial_candidates[0][0].key
     scoped_judge = judge.scope()
     scoped_judge.max_calls = search.budget.max_calls
     return search, scoped_judge
@@ -456,10 +498,31 @@ def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Openin
 
 
 def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[list, bool]:
-    """Ask one beam concurrently. A caller interrupt stops future rounds after the already-sent
-    requests settle; successful responses still count and interrupted places return to the frontier."""
-    with ThreadPoolExecutor(max_workers=len(opened)) as pool:
-        futures = [pool.submit(_ask_within_cap, judge, search, opening) for opening in opened]
+    """Ask one beam concurrently: each place's own judgment first, then the neighbour batches of the
+    places too large for one request, unless a place reached in this round holds the target, which
+    ends the search after the round, or the round confirms an earlier find. A caller interrupt stops
+    future rounds after the already-sent requests settle; successful responses still count and
+    interrupted places return to the frontier."""
+    answers, cancelled = _concurrently(judge, [partial(_ask_found_first, judge, search, o) for o in opened])
+    if cancelled:
+        return [_Unanswered.CANCELLED if isinstance(a, _SplitOpening) else a for a in answers], True
+    if search.found or _round_found(search, opened, answers):
+        return [_without_neighbours(answer) for answer in answers], False
+    split = [position for position, answer in enumerate(answers) if isinstance(answer, _SplitOpening)]
+    if not split:
+        return answers, False
+    finished, cancelled = _concurrently(
+        judge, [partial(_ask_neighbours, search, answers[position]) for position in split]
+    )
+    responses = list(answers)
+    for position, response in zip(split, finished, strict=True):
+        responses[position] = response
+    return responses, cancelled
+
+
+def _concurrently(judge: Judge, calls: list[Callable[[], object]]) -> tuple[list, bool]:
+    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+        futures = [pool.submit(call) for call in calls]
         try:
             return [future.result() for future in futures], False
         except KeyboardInterrupt:
@@ -567,6 +630,31 @@ async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:
         search.cap_reached = True
 
 
+def _confirm_finds(index: CodeIndex, search: _Search) -> None:
+    """Once, after the round that found the target, queue the places more specific than its finds,
+    so the next round opens them before the search ends."""
+    if not search.found or search.confirmed:
+        return
+    search.confirmed = True
+    description = search.target["description"]
+    for find in tuple(search.found):
+        for place in specific_places(index, description, find.code.span, search.budget.confirmations):
+            if place.key not in search.visited:
+                search.confirming.append(
+                    _Queued(
+                        QueueTier.PICK,
+                        0.0,
+                        next(search.counter),
+                        place,
+                        len(find.path),
+                        (*find.path, place.key),
+                        UNSCORED_PRIORITY,
+                        QueueTier.PICK,
+                        find.place_key,
+                    )
+                )
+
+
 def _restore(search: _Search, previous: FindResult) -> None:
     search.visited |= previous.visited
     search.judged_code |= previous.judged_code
@@ -578,11 +666,13 @@ def _restore(search: _Search, previous: FindResult) -> None:
 
 
 def _stop_reason(search: _Search, index: CodeIndex) -> Outcome | None:
-    if search.found:
+    steps_used = search.budget.max_steps is not None and search.steps >= search.budget.max_steps
+    if search.found and (not search.confirming or steps_used or search.cap_reached):
         return Outcome.FOUND
+    if search.found:
+        return None
     if search.stop_judgment is not None and search.stop_judgment.outcome == HistoryOutcome.FOUND:
         return Outcome.STOP_RULE
-    steps_used = search.budget.max_steps is not None and search.steps >= search.budget.max_steps
     if steps_used:
         return Outcome.BUDGET
     if not search.worth_opening():
@@ -707,11 +797,24 @@ def _opening_request(search: _Search, opening: _Opening) -> _OpeningRequest:
     return _OpeningRequest(state, questions, sources, priority_unavailable)
 
 
-def _ask_within_cap(judge: Judge, search: _Search, opening: _Opening):
-    """None when a judge's global cap, shared with other callers, ran out before this request."""
+@dataclass(frozen=True)
+class _SplitOpening:
+    """A place too large for one request after only its own judgment was asked; ``judge`` is the
+    scope its remaining requests count in."""
+
+    judge: Judge
+    request: _OpeningRequest
+    found: JevResponse
+
+
+def _ask_found_first(judge: Judge, search: _Search, opening: _Opening):
+    """The whole opening in one request when it fits; otherwise, or when the place confirms a find
+    and the search ends after its round, only whether the place holds the target, its neighbours
+    left to ``_ask_neighbours``. ``BUDGET`` when a judge's global cap, shared with other callers,
+    ran out before this request."""
     request = _opening_request(search, opening)
     try:
-        if not request_exceeds_input_budget(request.state, request.questions):
+        if not search.found and not request_exceeds_input_budget(request.state, request.questions):
             try:
                 response = judge.ask(
                     request.state, request.questions, thresholds=search.thresholds, sources=request.sources
@@ -719,16 +822,20 @@ def _ask_within_cap(judge: Judge, search: _Search, opening: _Opening):
                 return _priority_diagnostic(response, request.priority_unavailable)
             except InputBudgetExceededError:
                 pass
-        return _ask_split_opening(judge, search, request)
+        scoped = judge.scope()
+        state, questions, sources = _found_request(search, request)
+        return _SplitOpening(
+            scoped, request, scoped.ask(state, questions, thresholds=search.thresholds, sources=sources)
+        )
     except CallCapReachedError:
         search.cap_reached = True
         return _Unanswered.BUDGET
 
 
-async def _ask_within_cap_async(judge: Judge, search: _Search, opening: _Opening):
+async def _ask_found_first_async(judge: Judge, search: _Search, opening: _Opening):
     request = _opening_request(search, opening)
     try:
-        if not request_exceeds_input_budget(request.state, request.questions):
+        if not search.found and not request_exceeds_input_budget(request.state, request.questions):
             try:
                 response = await judge.ask_async(
                     request.state, request.questions, thresholds=search.thresholds, sources=request.sources
@@ -736,10 +843,48 @@ async def _ask_within_cap_async(judge: Judge, search: _Search, opening: _Opening
                 return _priority_diagnostic(response, request.priority_unavailable)
             except InputBudgetExceededError:
                 pass
-        return await _ask_split_opening_async(judge, search, request)
+        scoped = judge.scope()
+        state, questions, sources = _found_request(search, request)
+        found = await scoped.ask_async(state, questions, thresholds=search.thresholds, sources=sources)
+        return _SplitOpening(scoped, request, found)
     except CallCapReachedError:
         search.cap_reached = True
         return _Unanswered.BUDGET
+
+
+def _found_request(search: _Search, request: _OpeningRequest) -> tuple[Mapping, Mapping, Mapping]:
+    found_id = search.questions.found.question_id
+    return (
+        _split_opening_state(request),
+        {found_id: request.questions[found_id]},
+        {found_id: request.sources[found_id]},
+    )
+
+
+def _round_found(search: _Search, opened: list[_Opening], answers: Sequence) -> bool:
+    """Whether a place reached in this round holds the target. The search then ends after the round,
+    so no neighbour score of its places can change what it opens."""
+    found_id = search.questions.found.question_id
+    for opening, answer in zip(opened, answers, strict=True):
+        response = answer.found if isinstance(answer, _SplitOpening) else answer
+        if opening.item.tier == QueueTier.START or not isinstance(response, JevResponse):
+            continue
+        if search.thresholds.noul_verdict(response.noul(found_id).probability) == NoulVerdict.YES:
+            return True
+    return False
+
+
+def _without_neighbours(answer):
+    """A split place's own answer alone; its neighbours stay in the frontier as ``unscored``."""
+    if not isinstance(answer, _SplitOpening):
+        return answer
+    found, scoped = answer.found, answer.judge
+    return JevResponse(
+        found.answers,
+        scoped.served_model or found.model,
+        scoped.input_tokens,
+        extra={NEIGHBOURS_UNSCORED: True},
+    )
 
 
 def _split_opening_state(request: _OpeningRequest) -> Mapping:
@@ -750,6 +895,10 @@ def _neighbour_batch(search: _Search, request: _OpeningRequest) -> tuple[Check, 
     """Bind previews to Judge's code field, which its default store excludes from source metadata.
 
     Rebinding the field generates a new wording hash; executed question records stay unchanged.
+    Each item carries only the location the store records with its answer (``BATCH_SOURCE_FIELDS``)
+    beside what the unsplit request shows: the place key repeats the location, ``reached_by``
+    repeats the signature's note, and a file digest tells the model nothing, so leaving them out
+    fits more neighbours into each request.
     """
 
     def rebind(text: str) -> str:
@@ -769,7 +918,11 @@ def _neighbour_batch(search: _Search, request: _OpeningRequest) -> tuple[Check, 
     )
     items = [
         {
-            **request.sources[f"{check.question_id}#{slot}"],
+            **{
+                name: value
+                for name, value in request.sources[f"{check.question_id}#{slot}"].items()
+                if name in BATCH_SOURCE_FIELDS
+            },
             "signature": candidate["signature"],
             CODE_FIELD: candidate["preview"],
         }
@@ -797,61 +950,57 @@ def _opening_priority(judge: Judge, search: _Search, request: _OpeningRequest) -
     return questions, None
 
 
-def _ask_split_opening(judge: Judge, search: _Search, request: _OpeningRequest) -> JevResponse:
+def _ask_neighbours(search: _Search, answer):
     """Keep all independent evidence when one opened place cannot fit a single request."""
-    scoped = judge.scope()
-    shared = _split_opening_state(request)
-    found_id = search.questions.found.question_id
-    found = scoped.ask(
-        shared,
-        {found_id: request.questions[found_id]},
-        thresholds=search.thresholds,
-        sources={found_id: request.sources[found_id]},
-    )
-    check, items = _neighbour_batch(search, request)
-    neighbours = scoped.check_each(
-        check,
-        items,
-        shared,
-        list_name="candidates",
-        thresholds=search.thresholds,
-    )
-    questions, unavailable = _opening_priority(scoped, search, request)
-    priority = None
-    if questions:
-        try:
-            priority = scoped.ask(request.state, questions, thresholds=search.thresholds)
-        except InputBudgetExceededError as error:
-            unavailable = str(error)
-    return _combine_opening_answers(scoped, search, found, neighbours, priority, unavailable)
+    if not isinstance(answer, _SplitOpening):
+        return answer
+    scoped, request = answer.judge, answer.request
+    try:
+        check, items = _neighbour_batch(search, request)
+        neighbours = scoped.check_each(
+            check,
+            items,
+            _split_opening_state(request),
+            list_name="candidates",
+            thresholds=search.thresholds,
+        )
+        questions, unavailable = _opening_priority(scoped, search, request)
+        priority = None
+        if questions:
+            try:
+                priority = scoped.ask(request.state, questions, thresholds=search.thresholds)
+            except InputBudgetExceededError as error:
+                unavailable = str(error)
+    except CallCapReachedError:
+        search.cap_reached = True
+        return _Unanswered.BUDGET
+    return _combine_opening_answers(scoped, search, answer.found, neighbours, priority, unavailable)
 
 
-async def _ask_split_opening_async(judge: Judge, search: _Search, request: _OpeningRequest) -> JevResponse:
-    scoped = judge.scope()
-    shared = _split_opening_state(request)
-    found_id = search.questions.found.question_id
-    found = await scoped.ask_async(
-        shared,
-        {found_id: request.questions[found_id]},
-        thresholds=search.thresholds,
-        sources={found_id: request.sources[found_id]},
-    )
-    check, items = _neighbour_batch(search, request)
-    neighbours = await scoped.check_each_async(
-        check,
-        items,
-        shared,
-        list_name="candidates",
-        thresholds=search.thresholds,
-    )
-    questions, unavailable = _opening_priority(scoped, search, request)
-    priority = None
-    if questions:
-        try:
-            priority = await scoped.ask_async(request.state, questions, thresholds=search.thresholds)
-        except InputBudgetExceededError as error:
-            unavailable = str(error)
-    return _combine_opening_answers(scoped, search, found, neighbours, priority, unavailable)
+async def _ask_neighbours_async(search: _Search, answer):
+    if not isinstance(answer, _SplitOpening):
+        return answer
+    scoped, request = answer.judge, answer.request
+    try:
+        check, items = _neighbour_batch(search, request)
+        neighbours = await scoped.check_each_async(
+            check,
+            items,
+            _split_opening_state(request),
+            list_name="candidates",
+            thresholds=search.thresholds,
+        )
+        questions, unavailable = _opening_priority(scoped, search, request)
+        priority = None
+        if questions:
+            try:
+                priority = await scoped.ask_async(request.state, questions, thresholds=search.thresholds)
+            except InputBudgetExceededError as error:
+                unavailable = str(error)
+    except CallCapReachedError:
+        search.cap_reached = True
+        return _Unanswered.BUDGET
+    return _combine_opening_answers(scoped, search, answer.found, neighbours, priority, unavailable)
 
 
 def _combine_opening_answers(
@@ -920,14 +1069,22 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
     visit = Visit(
         item.place.key, code, item.path, found_probability, search.thresholds.noul_verdict(found_probability)
     )
-    _file_visit(search, visit, item.tier)
+    _file_visit(search, visit, item)
     picked = _picked_slot(search, response)
+    unscored = bool(response.extra.get(NEIGHBOURS_UNSCORED))
     set_aside_before = len(search.set_aside)
     offered = []
     for slot, place in enumerate(candidates):
+        path = (*item.path, place.key)
+        if unscored:
+            search.set_aside.append(
+                NotInspected(
+                    place.key, place.signature, "unscored", UNSCORED_PRIORITY, item.depth + 1, path, place
+                )
+            )
+            continue
         probability = _could_contain(search, response, slot)
         verdict = search.thresholds.noul_verdict(probability)
-        path = (*item.path, place.key)
         search.push(
             place, probability, item.depth + 1, path, QueueTier.PICK if slot == picked else QueueTier.MOVE
         )
@@ -943,12 +1100,16 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
     search.history.append(_open_step(search, opening, visit, offered, response, not_opened))
 
 
-def _file_visit(search: _Search, visit: Visit, tier: QueueTier) -> None:
-    """A start keeps its verdict in ``starts``; only a place the search reached can be found."""
-    if tier == QueueTier.START:
+def _file_visit(search: _Search, visit: Visit, item: _Queued) -> None:
+    """A start keeps its verdict in ``starts``; only a place the search reached can be found. A find
+    that confirms an earlier one is listed before it."""
+    if item.tier == QueueTier.START:
         search.starts.append(visit)
     elif visit.verdict == NoulVerdict.YES:
-        search.found.append(visit)
+        confirmed = [
+            position for position, find in enumerate(search.found) if find.place_key == item.confirms
+        ]
+        search.found.insert(confirmed[0] if confirmed else len(search.found), visit)
     elif visit.verdict == NoulVerdict.UNSURE:
         search.unsure.append(visit)
     else:
@@ -1020,8 +1181,11 @@ def _record_choice(search: _Search, beam: list[_Queued]) -> None:
 
 
 def _choice_reason(item: _Queued) -> str:
-    """``start`` for a caller's start place, ``open_first`` for a place Jev picked to open next, else
-    ``queue_score`` (its could_contain probability)."""
+    """``start`` for a caller's start place, ``open_first`` for a place Jev picked to open next,
+    ``confirms_find`` for a place more specific than a find, else ``queue_score`` (its could_contain
+    probability)."""
+    if item.confirms is not None:
+        return "confirms_find"
     return {
         QueueTier.START: "start",
         QueueTier.PICK: "open_first",
@@ -1058,7 +1222,7 @@ def _candidate_state(place: Place, budget: SearchBudget) -> dict:
 
 
 def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -> FindResult:
-    left = [item for item in search.queue if item.place.key not in search.visited]
+    left = [item for item in (*search.queue, *search.confirming) if item.place.key not in search.visited]
     frontier = [
         NotInspected(
             item.place.key,

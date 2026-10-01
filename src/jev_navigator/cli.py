@@ -34,7 +34,14 @@ from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
-NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
+NON_NEGATIVE_BUDGET_FIELDS = (
+    "max_depth",
+    "max_steps",
+    "max_calls",
+    "neighbours_per_kind",
+    "preview_lines",
+    "confirmations",
+)
 POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
@@ -610,6 +617,15 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         default=defaults.neighbours_per_kind,
         help="Candidates retained per relationship kind per opening (default: unlimited)",
     )
+    limits.add_argument(
+        "--confirmations",
+        type=int,
+        default=defaults.confirmations,
+        help=(
+            "Implementations opened before a found declaration with no function in it is accepted "
+            f"(default: {defaults.confirmations}; 0 accepts the first find as it is)"
+        ),
+    )
     evidence.add_argument(
         "--preview-lines",
         type=int,
@@ -1067,6 +1083,7 @@ _FRONTIER_REASONS = {
     "stop_rule": "Caller stop condition met",
     "scope_incomplete": "Source scope incomplete",
     "neighbours_per_kind": "Configured neighbour limit reached",
+    "unscored": "Search found a match before this neighbour was scored",
 }
 
 

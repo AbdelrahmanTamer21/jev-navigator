@@ -28,6 +28,21 @@ The current directory is the search root. Git is optional and uncommitted change
 The command chooses an entry point and creates `./jvn-results/<directory>-<timestamp>/` in the
 directory where you invoked it. You do not need to supply a scope, starting line or budget.
 
+To choose the entry point, code ranks the files and their functions by the words they share with
+the description, and Jev picks one of the best-matching spans in a single request. Each span is
+offered with its first lines and the later lines that share the description's rarest words; a
+span too long to show whole is opened around its best-matching line. The picked span is opened
+on its own first, and the other matches only if it does not hold the target.
+Words match as written, in any language or script, so a description in one language does not
+match code that uses another. When Jev picks none of the matches, the search starts from them in
+the order of Jev's probabilities; only when nothing shares a word does entry selection walk the
+directory tree instead.
+
+A find that is a declaration with no function in it, such as an interface, is checked once before
+it is accepted: the search opens the functions defined under the names its matching lines declare,
+and a yes there is listed first. `--confirmations` sets how many such functions are opened. A find
+inside a function is accepted as it is.
+
 Credentials come from `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` in the process environment, then
 from `~/.config/jvn/env`. The file uses dotenv syntax and is not executed. Help and schema discovery
 need no key and make no model calls.
@@ -59,6 +74,7 @@ unlimited unless you set a limit.
 | `--max-depth N` | Unlimited. Maximum relationship hops from the starting places; `0` opens only those places. | `jvn find "the order limit" --max-depth 3` |
 | `--max-steps N` | Unlimited. Maximum distinct code openings during navigation; entry selection is separate. | `jvn find "the order limit" --max-steps 8` |
 | `--max-calls N\|none` | `24`. Maximum model requests, including automatic entry selection; each is a paid request. `none` lifts the cap. One request may contain many questions. This is not a token or monetary cap. A search that reaches it ends with outcome `budget` and its unexplored places in `not_inspected`. | `jvn find "the order limit" --max-calls 8` |
+| `--confirmations N` | `2`. Functions opened before a found declaration with no function in it is accepted: the implementations its matching lines declare. Each is one request. `0` accepts the first find as it is. | `jvn find "the order limit" --confirmations 0` |
 | `--beam-width N` | `3`. Places opened together in a navigation round. `1` makes navigation sequential. A wider round may do more work before a match stops the search. | `jvn find "the order limit" --beam-width 1` |
 | `--neighbours-per-kind N` | Unlimited. Retain at most this many candidates per relationship kind from each opened place. Explicitly omitted candidates stay visible in the result. | `jvn find "the order limit" --neighbours-per-kind 8` |
 | `--preview-lines N` | `8`. Leading source lines shown with a neighbour candidate's signature; `0` omits its code preview. | `jvn find "the order limit" --preview-lines 12` |

@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import signal
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 from git_repos import commit_files
 
-from jev_navigator.directives.find_code import OPEN_FIRST, Outcome, SearchBudget, find_code
+from jev_navigator.directives.find_code import OPEN_FIRST, Outcome, SearchBudget, find_code, find_code_async
 from jev_navigator.directives.places import (
     MOVES,
     Place,
@@ -21,9 +22,10 @@ from jev_navigator.directives.places import (
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
+from jev_navigator.judgments.client import InputBudgetExceededError
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.store import JsonlAnswerStore
-from jev_navigator.testing import ScriptedJevClient
+from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 TARGET = "the check that limits how many items an order may have"
 _SLOT = re.compile(r"candidates\[(\d+)\]")
@@ -152,6 +154,27 @@ def test_a_low_choice_probability_does_not_discard_an_unjudged_entry_alternative
 
     assert result.outcome == Outcome.FOUND
     assert result.found[0].code.span.name == "check_limits"
+
+
+def test_the_entry_pick_opens_alone_so_no_alternative_adds_a_find_beside_it(sample_index: CodeIndex) -> None:
+    pick = function_place(sample_index, sample_index.find_definition("check_limits")[0])
+    alternative = function_place(sample_index, sample_index.find_definition("validate_order")[0])
+    client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.95, could_contain=lambda _: 0.05),
+        choices={"open_first": {"none": 1.0}},
+    )
+
+    result = find_code(
+        sample_index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=3),
+        initial_candidates=[(pick, 0.6), (alternative, 0.1)],
+    )
+
+    assert [visit.code.span.name for visit in result.found] == ["check_limits"]
+    assert result.calls == 1
 
 
 def test_an_unopened_entry_alternative_remains_visible_at_the_step_budget(
@@ -698,10 +721,9 @@ def test_interrupt_while_opening_a_beam_restores_every_popped_place(tmp_path: Pa
         index,
         Judge(ScriptedJevClient()),
         TARGET,
-        [],
+        places,
         budget=SearchBudget(beam_width=2),
         moves={"interrupt": interrupt_second_open},
-        initial_candidates=[(place, 1.0) for place in places],
     )
 
     # Assert
@@ -978,6 +1000,96 @@ def test_the_top_pick_opens_next_even_at_low_confidence_and_a_low_score(sample_i
     assert opened_first_lines(client)[1] == "def cancel(order_id):"
 
 
+@pytest.mark.parametrize(
+    ("neighbour_probability", "second_opening"),
+    [(0.9, "def validate_order(order):"), (0.1, "def check_limits(order):")],
+)
+def test_an_entry_alternative_waits_only_behind_a_neighbour_scored_above_the_no_bar(
+    sample_index: CodeIndex, neighbour_probability: float, second_opening: str
+) -> None:
+    # Arrange
+    first = function_place(sample_index, sample_index.find_definition("place")[0])
+    alternative = function_place(sample_index, sample_index.find_definition("check_limits")[0])
+    client = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.05,
+            could_contain=lambda signature: (
+                neighbour_probability if "def validate_order" in signature else 0.05
+            ),
+        ),
+        choices={"open_first": {"none": 1.0}},
+    )
+
+    # Act
+    find_code(
+        sample_index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(max_steps=2, beam_width=1),
+        initial_candidates=[(first, 0.99), (alternative, 0.01)],
+    )
+
+    # Assert
+    assert opened_first_lines(client)[1] == second_opening
+
+
+@dataclass
+class RefusesWholeOpenings(ScriptedJevClient):
+    """Refuses, as the provider does for an oversized input, any request about the opened code of a
+    ``too_large`` place that asks more than one question; the place's own question alone fits."""
+
+    too_large: tuple[str, ...] = ()
+
+    def _answer_all(self, state: Mapping, questions: Mapping):
+        code = state.get("slice", {}).get("code", "")
+        if len(questions) > 1 and any(line in code for line in self.too_large):
+            raise InputBudgetExceededError('400 {"detail":{"error_type":"max_tokens_exceeded"}}')
+        return super()._answer_all(state, questions)
+
+
+@pytest.mark.parametrize("async_search", [False, True])
+def test_a_find_leaves_the_neighbours_of_every_split_place_in_its_round_unscored(
+    sample_index: CodeIndex, async_search: bool
+) -> None:
+    # Arrange
+    target = function_place(sample_index, sample_index.find_definition("check_limits")[0])
+    other = function_place(sample_index, sample_index.find_definition("place")[0])
+    script = RefusesWholeOpenings(
+        nouls=scripted(
+            found=lambda code: 0.95 if "len(order.items) <= limit" in code else 0.05,
+            could_contain=lambda _: 0.05,
+        ),
+        too_large=("def check_limits(order):", "def place(self, order):"),
+    )
+    budget = SearchBudget(beam_width=2)
+    candidates = [(target, 0.9)]  # a start shares the pick's round and is never itself a find
+
+    # Act
+    if async_search:
+        pending = find_code_async(
+            sample_index,
+            Judge(AsyncScriptedJevClient(script)),
+            TARGET,
+            [other],
+            budget=budget,
+            initial_candidates=candidates,
+        )
+        result = asyncio.run(pending)
+    else:
+        result = find_code(
+            sample_index, Judge(script), TARGET, [other], budget=budget, initial_candidates=candidates
+        )
+
+    # Assert
+    assert result.outcome == Outcome.FOUND
+    assert result.found[0].code.span.name == "check_limits"
+    asked = sorted(key.split("@")[0] for _, questions in script.requests for key in questions)
+    assert asked == ["contains_target", "contains_target"]
+    unscored = [entry for entry in result.not_inspected if entry.reason == "unscored"]
+    assert {entry.path[0] for entry in unscored} == {target.key, other.key}
+
+
 def test_starts_open_before_any_pick_and_picks_open_in_the_order_made(sample_index: CodeIndex) -> None:
     # Arrange
     starts = [
@@ -1155,3 +1267,130 @@ def test_a_long_signature_is_cut_the_same_way_in_the_candidate_and_the_pick_opti
     configure = next(signature for signature in signatures if "def configure(" in signature)
     assert len(configure) == 240 + len(" [line cut]") and configure.endswith(" [line cut]")
     assert [pick["criteria"][str(slot)] for slot in range(len(signatures))] == signatures
+
+
+def search_from(
+    index: CodeIndex,
+    script: ScriptedJevClient,
+    target: str,
+    pick: Place,
+    budget: SearchBudget,
+    async_search: bool,
+):
+    if async_search:
+        pending = find_code_async(
+            index,
+            Judge(AsyncScriptedJevClient(script)),
+            target,
+            [],
+            budget=budget,
+            initial_candidates=[(pick, 0.6)],
+        )
+        return asyncio.run(pending)
+    return find_code(index, Judge(script), target, [], budget=budget, initial_candidates=[(pick, 0.6)])
+
+
+DECLARED_ELSEWHERE = {
+    "orders/port.ts": (
+        "export interface OrderStore {\n"
+        "  /** Place a new order for a customer. */\n"
+        "  place(customerId: string): Promise<string>;\n"
+        "  /** Every order of a customer, newest first. */\n"
+        "  historyOf(customerId: string): Promise<string[]>;\n"
+        "}\n"
+    ),
+    "orders/store.ts": (
+        "export const store = {\n"
+        "  async place(customerId) {\n"
+        "    return insertOrder(customerId);\n"
+        "  },\n"
+        "  async historyOf(customerId) {\n"
+        "    return selectOrders(customerId).orderBy(desc(placedAt));\n"
+        "  },\n"
+        "};\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("async_search", [False, True])
+@pytest.mark.parametrize(
+    ("limits", "found_files", "calls"),
+    [
+        ({}, ["orders/store.ts", "orders/port.ts"], 3),  # the pick, then both declared functions
+        ({"confirmations": 0}, ["orders/port.ts"], 1),
+    ],
+)
+def test_a_found_declaration_is_confirmed_by_the_function_its_matching_line_declares(
+    tmp_path: Path, limits: dict, found_files: list[str], calls: int, async_search: bool
+) -> None:
+    # Arrange
+    commit_files(tmp_path, DECLARED_ELSEWHERE)
+    index = CodeIndex(tmp_path, list(DECLARED_ELSEWHERE))
+    interface = function_place(index, index.declarations_in("orders/port.ts")[0])
+    script = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.95 if "newest first" in code or "orderBy" in code else 0.05,
+            could_contain=lambda _: 0.05,
+        )
+    )
+
+    # Act
+    result = search_from(
+        index,
+        script,
+        "the query that loads a customer's orders, newest first",
+        interface,
+        SearchBudget(**limits),
+        async_search,
+    )
+
+    # Assert
+    assert result.outcome == Outcome.FOUND
+    assert [visit.code.span.file for visit in result.found] == found_files
+    assert result.calls == calls
+
+
+SHARED_COMPONENT = {
+    "ui/notices.tsx": "export function LoadFailed() {\n  return <p>We could not load this.</p>;\n}\n",
+    "routes/settings.tsx": (
+        'import { LoadFailed } from "../ui/notices";\n'
+        "export function Settings({ user }) {\n"
+        "  if (!user.loaded) return <LoadFailed />;\n"
+        "  return <p>{user.name}</p>;\n"
+        "}\n"
+    ),
+    "routes/basket.tsx": (
+        'import { LoadFailed } from "../ui/notices";\n'
+        "export function Basket({ items }) {\n"
+        "  if (!items) return <LoadFailed />;\n"
+        "  return <p>{items.length}</p>;\n"
+        "}\n"
+    ),
+}
+
+
+def test_a_find_inside_a_shared_component_is_accepted_without_opening_its_calls(tmp_path: Path) -> None:
+    # Arrange
+    commit_files(tmp_path, SHARED_COMPONENT)
+    index = CodeIndex(tmp_path, list(SHARED_COMPONENT))
+    component = function_place(index, index.find_definition("LoadFailed")[0])
+    script = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.9 if "could not load" in code or "user.loaded" in code else 0.05,
+            could_contain=lambda _: 0.05,
+        )
+    )
+
+    # Act
+    result = search_from(
+        index,
+        script,
+        "the message a screen shows when its data could not be loaded",
+        component,
+        SearchBudget(),
+        async_search=False,
+    )
+
+    # Assert
+    assert [visit.code.span.file for visit in result.found] == ["ui/notices.tsx"]
+    assert result.calls == 1  # the settings screen's call shares "loaded" but is not opened

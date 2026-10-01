@@ -141,7 +141,8 @@ def test_entry_selection_replays_cached_calls_after_its_cap(tmp_path: Path) -> N
     second = tmp_path / "second"
     budget = SearchBudget(max_calls=1, beam_width=1)
     client1 = ScriptedJevClient()
-    cap = create_evidence_pack(repository, (), "find one", (), first, budget, client1)
+    target = "the first value"  # shares no word with the code, so entry walks the tree
+    cap = create_evidence_pack(repository, (), target, (), first, budget, client1)
 
     assert cap["search"]["outcome"] == "budget"
     assert cap["entry_selection"] is None
@@ -149,7 +150,7 @@ def test_entry_selection_replays_cached_calls_after_its_cap(tmp_path: Path) -> N
     assert len(client1.requests) == 1
 
     client2 = ScriptedJevClient()
-    resumed = create_evidence_pack(repository, (), "find one", (), second, budget, client2, resume_from=first)
+    resumed = create_evidence_pack(repository, (), target, (), second, budget, client2, resume_from=first)
     assert resumed["entry_selection"] is not None
     assert resumed["search"]["calls"] == 2
     assert resumed["search"]["entry_calls"] == 2
@@ -310,6 +311,110 @@ def test_evidence_pack_chooses_a_real_entry_when_no_start_is_supplied(tmp_path: 
     assert manifest["search"]["found"][0]["source"]["file"] == "app/policy.py"
 
 
+NOTICE_REPOSITORY = {
+    "apps/admin_cli/backfill.py": (
+        '"""Backfill missing order rows in the ledger."""\ndef backfill(rows):\n    return rows\n'
+    ),
+    "apps/admin_cli/export.py": (
+        '"""Export the ledger as CSV."""\ndef export(rows):\n    return ",".join(rows)\n'
+    ),
+    "apps/admin_cli/reindex.py": (
+        '"""Rebuild the search index."""\ndef reindex(index):\n    return sorted(index)\n'
+    ),
+    "apps/storefront/toast.py": (
+        "def show_toast(text, hide_after_seconds=4):\n"
+        '    """Show a short notice, then hide it after a timeout."""\n'
+        '    return {"text": text, "timeout": hide_after_seconds}\n'
+    ),
+    "prototype/app.py": (
+        '"""Clickable prototype of the storefront pages, with fake data."""\n'
+        "def render(page):\n"
+        '    return f"<main>{page}</main>"\n'
+    ),
+}
+
+
+def find_the_notice(tmp_path: Path, choices: dict) -> dict:
+    repository = tmp_path / "repository"
+    commit_files(repository, NOTICE_REPOSITORY)
+    client = ScriptedJevClient(
+        nouls=lambda question_id, question, state: 0.96 if "timeout" in state["slice"]["code"] else 0.04,
+        choices=choices,
+    )
+    return create_evidence_pack(
+        repository,
+        (),
+        "the notice that is hidden after a timeout",
+        (),
+        tmp_path / "evidence",
+        SearchBudget(max_steps=4, max_calls=8, beam_width=1),
+        client,
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+
+def test_keyword_entry_offers_the_best_matching_span_first_in_one_choice(tmp_path: Path) -> None:
+    manifest = find_the_notice(tmp_path, {"keyword_entry_span": {"0": 1.0}})
+
+    assert manifest["search"]["entry_calls"] == 1
+    assert manifest["entry_selection"]["selected_file"] == "apps/storefront/toast.py"
+    assert manifest["search"]["outcome"] == "found"
+    assert manifest["search"]["found"][0]["source"]["file"] == "apps/storefront/toast.py"
+    assert manifest["search"]["calls"] == 2
+
+
+def test_a_none_pick_starts_from_the_matched_spans_instead_of_walking_the_tree(tmp_path: Path) -> None:
+    manifest = find_the_notice(
+        tmp_path,
+        {"keyword_entry_span": {"none": 1.0}, "automatic_entry_path": {"1": 1.0}},
+    )
+
+    levels = [decision["level"] for decision in manifest["entry_selection"]["decisions"]]
+    assert levels == ["matched_span"]
+    assert manifest["entry_selection"]["selected_file"] == "apps/storefront/toast.py"
+    assert manifest["search"]["outcome"] == "found"
+    assert manifest["search"]["found"][0]["source"]["file"] == "apps/storefront/toast.py"
+    assert manifest["search"]["calls"] == 2
+
+
+def test_keyword_entry_shows_and_opens_the_matching_lines_of_a_span_too_long_to_show(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    rules = "".join(f'    "rule_{number}": "charge the standard fee {number}",\n' for number in range(400))
+    waiver = '    "late_fee_waiver": "waive the late fee within the grace period",\n'
+    commit_files(
+        repository,
+        {
+            "billing/rules.py": "RULES = {\n" + rules + waiver + "}\n",
+            "billing/invoice.py": "def total(lines):\n    return sum(lines)\n",
+        },
+    )
+    client = ScriptedJevClient(choices={"keyword_entry_span": {"0": 1.0}})
+
+    create_evidence_pack(
+        repository,
+        (),
+        "the rule that waives the late fee within the grace period",
+        (),
+        tmp_path / "evidence",
+        SearchBudget(max_calls=2, beam_width=1),
+        client,
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    _state, questions = client.requests[0]
+    (entry_question,) = (
+        question for key, question in questions.items() if key.startswith("keyword_entry_span")
+    )
+    rules_option = next(
+        text for text in entry_question["criteria"].values() if text.startswith("billing/rules.py")
+    )
+    assert "line 402:" in rules_option
+    assert "grace period" in rules_option
+    opened, _questions = client.requests[1]
+    assert opened["slice"]["file"] == "billing/rules.py"
+    assert "grace period" in opened["slice"]["code"]
+
+
 def test_zero_choice_probability_remains_zero_in_the_uninspected_frontier(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     commit_files(
@@ -330,10 +435,10 @@ def test_zero_choice_probability_remains_zero_in_the_uninspected_frontier(tmp_pa
     manifest = create_evidence_pack(
         repository,
         (),
-        "wanted",
+        "the sought result",  # shares no word with the code, so entry walks the tree
         (),
         tmp_path / "zero-probability",
-        SearchBudget(max_steps=1, max_calls=2, beam_width=1),
+        SearchBudget(max_steps=1, max_calls=3, beam_width=1),
         client,
         fact_cache_dir=tmp_path / "fact-cache",
     )

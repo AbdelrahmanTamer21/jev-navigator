@@ -162,7 +162,7 @@ def _within(inner: Span, outer: Span) -> bool:
 def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     if not _is_named(opened.span):
         return []
-    sites = sorted(index.find_callers(opened.span.name), key=lambda site: _is_test_file(site.file))
+    sites = sorted(index.find_callers(opened.span.name), key=lambda site: is_test_file(site.file))
     return [
         place_for_line(index, site.file, site.line, _with_binding(f"calls {opened.span.name}", site.binding))
         for site in sites
@@ -183,7 +183,7 @@ def _callees(index: CodeIndex, opened: CodeSlice) -> list[Place]:
 
 def _callee_rank(index: CodeIndex, edge: CallEdge) -> tuple[bool, bool, int]:
     targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
-    only_tests = bool(targets) and all(_is_test_file(target.file) for target in targets)
+    only_tests = bool(targets) and all(is_test_file(target.file) for target in targets)
     return not edge.binding.proven, only_tests, index.call_site_count(edge.name)
 
 
@@ -218,7 +218,7 @@ def _with_binding(relation: str, binding) -> str:
     return f"{relation}, {binding.status}: {binding.reason}"
 
 
-def _is_test_file(path: str) -> bool:
+def is_test_file(path: str) -> bool:
     directories, _, name = path.rpartition("/")
     in_test_directory = not _TEST_DIRECTORIES.isdisjoint(directories.split("/"))
     return in_test_directory or bool(_TEST_FILE_NAME.search(name))
