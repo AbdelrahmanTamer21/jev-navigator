@@ -261,6 +261,8 @@ def _cut(value: object, max_chars: int | None) -> object:
         )
     if isinstance(value, Mapping):
         return {key: _cut(entry, max_chars) for key, entry in value.items()}
+    if isinstance(value, list):
+        return [_cut(entry, max_chars) for entry in value]
     return value
 
 

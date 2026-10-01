@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -101,17 +102,25 @@ def test_a_check_gets_exactly_the_sections_it_selects() -> None:
 
 def test_section_limits_apply_before_any_code_is_evicted() -> None:
     # Arrange
-    limits = {"fetched": SectionLimit(max_chars=5), "decisions": SectionLimit(max_entries=2)}
+    limits = {
+        "fetched": SectionLimit(max_chars=5),
+        "history": SectionLimit(max_chars=5),
+        "decisions": SectionLimit(max_entries=2, max_chars=5),
+    }
     history = History(limits=limits)
     for number in range(3):
-        history.append(step(number, "y" * 20))
+        history.append(replace(step(number, "y" * 20), judgments={"candidates": [{"preview": "z" * 20}]}))
 
     # Act
-    state = history.state_for(["fetched", "decisions"])
+    state = history.state_for(["fetched", "history", "decisions"])
 
     # Assert
     assert [entry["arguments"]["n"] for entry in state["decisions"]] == [1, 2]
     assert state["fetched"][0]["code"] == "yyyyy[... 15 characters cut]"
+    assert state["history"]["steps"][0]["fetched"][0]["code"] == "yyyyy[... 15 characters cut]"
+    assert state["decisions"][0]["judgments"]["candidates"][0]["preview"] == "zzzzz[... 15 characters cut]"
+    assert history.steps[0].fetched[0].code == "y" * 20
+    assert history.steps[0].judgments["candidates"][0]["preview"] == "z" * 20
     assert history.evictions == []
 
 

@@ -498,6 +498,8 @@ The default is `fetched`, so a history check never leans on the search's own ver
 `history` section carries no verdicts either. A check that is meant to read them selects `decisions`
 explicitly. An unknown name raises `UnknownSectionError`. Each section has its own `SectionLimit(max_entries, max_chars)`
 (newest entries kept, long text cut; defaults in `DEFAULT_LIMITS`), applied before the token budget.
+Text limits also apply inside nested lists and mappings. Rendering a limited view preserves the
+complete code and judgments in the append-only record.
 The budget is capped at Jev's 32k-token limit for state plus the longest question (64k per request
 overall; TypeSafe Models page, read 28.09.2026). When the selected sections still do not fit, the
 pluggable `evict` policy trims them; the default `drop_oldest_code` replaces the oldest code bodies with
