@@ -427,7 +427,8 @@ identical code in two files stays two places. A line outside any function opens 
 module-level declaration when that has at most 120 lines; in a longer one it opens the window around the
 line under the definition's name. Either way the moves can follow that name. Callees and passed-on
 definitions are also offered from anonymous functions and windows. For an anonymous nested function,
-same-file navigation first offers the nearest named containing symbol. By default the finite,
+same-file navigation first offers the nearest named containing symbol, else the nearest containing
+one (a callback inside a test's callback offers that test). By default the finite,
 deduplicated frontier decides when the search is complete: depth, step, call and per-move neighbour
 limits are `None`. A caller can set any of those fields on `SearchBudget` when it has an explicit
 operational limit. Each round opens

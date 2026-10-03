@@ -285,20 +285,19 @@ def _is_test_file(path: str) -> bool:
 
 def _same_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     """The other functions of the file, nearest to the opened code first; a function nested in
-    another is part of that function."""
+    another is part of that function. An anonymous function first offers its nearest named
+    container, else its nearest container: a callback in a test's callback offers that test."""
     relation = f"in the same file as {_span_label(opened.span)}"
     functions = index.functions_in(opened.span.file)
     container = None
     if not _is_named(opened.span):
-        container = min(
-            (
-                span
-                for span in index.symbols_in(opened.span.file)
-                if span != opened.span and _is_named(span) and span.contains(opened.span.start)
-            ),
-            key=Span.size,
-            default=None,
-        )
+        containers = [
+            span
+            for span in index.symbols_in(opened.span.file)
+            if span != opened.span and span.contains(opened.span.start)
+        ]
+        named = [span for span in containers if _is_named(span)]
+        container = min(named or containers, key=Span.size, default=None)
     outermost = [span for span in functions if not any(_encloses(other, span) for other in functions)]
     others = [span for span in outermost if not _overlaps(span, opened.span)]
     nearest_first = sorted(others, key=lambda span: (_distance(span, opened.span), span.start))
