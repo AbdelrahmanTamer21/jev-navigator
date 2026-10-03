@@ -457,8 +457,8 @@ class Judge:
         """Masks, scans, hashes and looks up the store; only a miss sends, and every fresh answer is
         recorded. The async variant shares every step except the send. ``masked`` marks a request
         the caller already masked as one, with the values it hid: masking is skipped, the final
-        scan is not, so question wording must never quote customer text; a secret there is
-        refused, not masked."""
+        scan is not. Question wording must never quote customer text; a batch plan masks it anyway,
+        once per plan."""
         prepared = self._sendable(state, questions, masked)
         if prepared.stored is not None:
             self._count_replayed(len(prepared.stored.answers))
@@ -804,6 +804,7 @@ class Judge:
             hidden,
             thresholds or self.thresholds,
             self.items_per_request,
+            masker=self.masker,
         )
         groups = _batches(plan)
         for members in groups:
@@ -845,7 +846,7 @@ class Judge:
         for slot, (position, item) in enumerate(zip(members, batch_items, strict=True)):
             for check in plan.open_at(position).values():
                 asked = f"{check.question_id}#{slot}"
-                questions[asked] = check.to_question(item_path(plan.list_name, slot))
+                questions[asked] = plan.question(check, slot)
                 slots[asked] = position
                 item_keys[self._item_key(check, item, plan.shared, mates)] = asked
                 if _source_of(item):
@@ -1040,7 +1041,8 @@ class _CheckPlan:
     open: dict[int, dict[str, Check]] = field(default_factory=dict)
     batches: list[_Batch] = field(default_factory=list)
     item_ids: list[str] = field(init=False)
-    _slot_questions: dict[int, list[tuple[str, dict]]] = field(default_factory=dict, init=False)
+    masker: Masker | None = None
+    _questions: dict[tuple[str, int], dict] = field(default_factory=dict, init=False)
 
     def open_at(self, position: int) -> Mapping[str, Check]:
         """The questions still open for one item, keyed by the question id without its slot."""
@@ -1058,15 +1060,20 @@ class _CheckPlan:
             key=lambda position: (*_unit_place(self.items[position]), self.item_ids[position], position),
         )
 
+    def question(self, check: Check, slot: int) -> dict:
+        """The check's question about the item at ``slot``, masked with the plan's hidden values;
+        built and masked once per plan, since packing measures many candidate requests."""
+        key = (check.question_id, slot)
+        if key not in self._questions:
+            question = check.to_question(item_path(self.list_name, slot))
+            self._questions[key] = (
+                mask_everywhere(question, self.masker, self.hidden) if self.masker else question
+            )
+        return self._questions[key]
+
     def slot_questions(self, slot: int) -> list[tuple[str, dict]]:
-        """Every check's question about the item at ``slot``, keyed as a request asks it; built once
-        per slot, since packing measures many candidate requests."""
-        if slot not in self._slot_questions:
-            path = item_path(self.list_name, slot)
-            self._slot_questions[slot] = [
-                (f"{check.question_id}#{slot}", check.to_question(path)) for check in self.checks
-            ]
-        return self._slot_questions[slot]
+        """Every check's question about the item at ``slot``, keyed as a request asks it."""
+        return [(f"{check.question_id}#{slot}", self.question(check, slot)) for check in self.checks]
 
     def membership(self, members: Sequence[int]) -> str:
         """The identity of a batch: its members' content hashes in their order in the request."""

@@ -857,3 +857,23 @@ def test_input_budget_error_is_typed_from_the_provider_report_without_the_sdk() 
     assert isinstance(input_budget_error(ProviderError()), InputBudgetExceededError)
     assert input_budget_error(OtherProviderError()) is None
     assert input_budget_error(TypeError("no status at all")) is None
+
+
+def test_a_secret_in_check_wording_is_masked_once_per_plan_and_the_request_still_goes(tmp_path: Path) -> None:
+    # Arrange
+    token = f"ghp_{'d4' * 18}"
+    wording = f"Does `{{item}}.code` use the token {token}?"
+    leaky = Check("leaky", wording, Criterion("Yes."), Criterion("No."))
+    masker = CountingMasker()
+    client = ScriptedJevClient()
+    items = [{"file": f"f{index}.py", "code": f"v = {index}"} for index in range(3)]
+
+    # Act
+    Judge(client, masker=masker, items_per_request=1).check_each(leaky, items, {"doc": {"sentence": "s"}})
+
+    # Assert
+    sent = json.dumps(client.requests)
+    assert len(client.requests) == 3
+    assert token not in sent and "[MASKED]" in sent
+    wording_masks = sum(count for text, count in masker.masked.items() if token in text)
+    assert wording_masks == 1, "every request here asks at slot 0, so its wording is masked once"
