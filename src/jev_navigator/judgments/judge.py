@@ -18,8 +18,14 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from .answers import JevResponse, NoulAnswer, response_to_raw
-from .client import AsyncJevClient, JevClient
-from .journal import Journal, JournalRequest, RawResponse
+from .client import (
+    JEV_STATE_TOKEN_LIMIT,
+    AsyncJevClient,
+    InputBudgetExceededError,
+    JevClient,
+    estimate_tokens,
+)
+from .journal import AttemptJournalCallbackError, Journal, JournalRequest, RawResponse
 from .questions import Check, Pick, Rate, content_hash, item_path, request_body, request_sha256
 from .secrets import (
     Masker,
@@ -38,6 +44,14 @@ from .thresholds import NoulVerdict, Thresholds
 logger = logging.getLogger(__name__)
 
 MAX_STATE_CHARS = 60_000
+MAX_REQUEST_BYTES = 96_000
+"""The largest serialized request body the batching owner sends without splitting it.
+
+This is the whole-request guard. Jev accepts 64k input tokens per request (TypeSafe Models page,
+read 30.09.2026), and the saved trace run measured 0.43-0.60 provider tokens per body byte, so the
+boundary stays below 64k tokens even at the densest measured content. The binding limit is the
+other one, ``JEV_STATE_TOKEN_LIMIT``; see ``request_exceeds_input_budget``. Normal packing rarely
+reaches either: ``MAX_STATE_CHARS`` keeps a batch's state at 60k characters."""
 CODE_FIELD = "code"
 ROUTE_QUESTION = "route"
 _DEFAULT_MASKER = SecretMasker()
@@ -46,6 +60,30 @@ _DEFAULT_SCANNER = SecretScanner()
 
 class CallCapReachedError(RuntimeError):
     """A call would exceed the ``max_calls`` cap of this judge or of a judge it was scoped from."""
+
+
+def request_exceeds_input_budget(state: Mapping, questions: Mapping) -> bool:
+    """Whether a request exceeds either input limit the batching owner measured.
+
+    The whole body must stay within ``MAX_REQUEST_BYTES``, and the state plus the longest single
+    question must stay within ``JEV_STATE_TOKEN_LIMIT`` tokens. The Engine measured the second on
+    27.09.2026: 32,883 input tokens pass and about 33,200 are refused with ``max_tokens_exceeded``,
+    although a whole request of 48,951 tokens was accepted. Tokens are estimated with
+    ``estimate_tokens`` on the serialization the body uses. This is a preflight estimate; a
+    provider's typed refusal remains authoritative below it.
+    """
+    if len(request_body(state, questions)) > MAX_REQUEST_BYTES:
+        return True
+    return _state_and_longest_question_tokens(state, questions) > JEV_STATE_TOKEN_LIMIT
+
+
+def _state_and_longest_question_tokens(state: Mapping, questions: Mapping) -> int:
+    longest_question = max((_tokens_of(question) for question in questions.values()), default=0)
+    return _tokens_of(state) + longest_question
+
+
+def _tokens_of(value: object) -> int:
+    return estimate_tokens(json.dumps(value, ensure_ascii=False))
 
 
 @dataclass(frozen=True)
@@ -201,13 +239,14 @@ class Judge:
 
         Independent checks about the same items travel together: one request per batch that fits,
         each carrying every check for every item in it, instead of one round trip per check over the
-        whole list. Items already judged by the same question and model come from the store.
+        whole list. A batch the provider would refuse for its input size is split by item and the
+        halves measured again, so every request sent fits the measured input budget. Items already
+        judged by the same question and model come from the store.
         """
         plan = self._check_plan(checks, items, shared, list_name, thresholds, batch_budget)
         for batch in plan.batches:
-            plan.answer(
-                batch, self.ask(batch.state, batch.questions, thresholds=plan.thresholds, **batch.extras)
-            )
+            for sub_batch, response in self._send_positions(plan, sorted(set(batch.slots.values()))):
+                plan.answer(sub_batch, response)
         return plan.answers()
 
     def iter_check_each(
@@ -241,11 +280,13 @@ class Judge:
     ) -> Iterator[tuple[str, CheckResult]]:
         """Every check asked about every item, yielded per answered question as batches complete.
 
-        The streaming form of ``check_every``: it uses the same packing and cache, yields each
-        result under the name of the check that asked for it, and yields cached answers before the
-        first batch so store hits consume no live call. A call-cap or provider failure still raises
-        after earlier results yield, so a caller keeps every answered batch.
-        Cancellation is checked before each live batch; cached and already answered results still
+        The streaming form of ``check_every``: it uses the same packing, splitting and cache, yields
+        each result under the name of the check that asked for it, and yields cached answers before the
+        first batch so store hits consume no live call. A call-cap failure, or a provider input-budget
+        refusal that no split can answer, still raises after earlier results yield, so a caller keeps
+        every answered batch.
+        Cancellation is checked before each live request, including between split halves; cached and
+        already answered results still
         yield in full. It does not cancel a request already in flight.
         """
         plan = self._check_plan(checks, items, shared, list_name, thresholds)
@@ -253,16 +294,14 @@ class Judge:
         for (position, question_id), answer in sorted(plan.answered.items()):
             yield names[question_id], plan.result(position, answer)
         for batch in plan.batches:
-            if cancelled is not None and cancelled():
-                return
-            plan.answer(
-                batch, self.ask(batch.state, batch.questions, thresholds=plan.thresholds, **batch.extras)
-            )
-            for question_id, position in sorted(batch.slots.items(), key=lambda slot: slot[1]):
-                yield (
-                    names[question_id.split("#", 1)[0]],
-                    plan.result(position, plan.answered[(position, question_id)]),
-                )
+            sent = self._send_positions(plan, sorted(set(batch.slots.values())), cancelled=cancelled)
+            for sub_batch, response in sent:
+                plan.answer(sub_batch, response)
+                for question_id, position in sorted(sub_batch.slots.items(), key=lambda slot: slot[1]):
+                    yield (
+                        names[question_id.split("#", 1)[0]],
+                        plan.result(position, plan.answered[(position, question_id)]),
+                    )
 
     async def check_each_async(
         self,
@@ -297,20 +336,21 @@ class Judge:
         if batches and self.store is not None and not self._knows_model():
             # Without a served model the store cannot prove model-version identity, so every lookup
             # misses; the first live response pins ``served_model`` and the rest may then replay.
-            first = await self.ask_async(
-                batches[0].state, batches[0].questions, thresholds=plan.thresholds, **batches[0].extras
-            )
-            plan.answer(batches[0], first)
+            # ``slots`` maps one entry per open question to its item position, so the positions are
+            # deduplicated exactly like the sibling batch senders: two checks over two items are two
+            # item slots and four questions, never four copies of two items and eight questions.
+            for sub_batch, response in await self._send_positions_async(
+                plan, sorted(set(batches[0].slots.values()))
+            ):
+                plan.answer(sub_batch, response)
             batches = batches[1:]
-        responses = await asyncio.gather(
-            *(
-                self.ask_async(batch.state, batch.questions, thresholds=plan.thresholds, **batch.extras)
-                for batch in batches
-            )
-        )
-        for batch, response in zip(batches, responses, strict=True):
-            plan.answer(batch, response)
+        await asyncio.gather(*(self._answer_batch_async(plan, batch) for batch in batches))
         return plan.answers()
+
+    async def _answer_batch_async(self, plan: _CheckPlan, batch: _Batch) -> None:
+        """Send one packed batch concurrently, splitting it when the provider refuses its size."""
+        for sub_batch, response in await self._send_positions_async(plan, sorted(set(batch.slots.values()))):
+            plan.answer(sub_batch, response)
 
     def ask_all(
         self,
@@ -469,13 +509,15 @@ class Judge:
         raw: RawResponse | None = None
         try:
             if hasattr(self.client, "send"):
-                raw = self.client.send(prepared.state, prepared.questions)
+                raw = self._send_with_attempt_callback(prepared, request_id)
                 self._journal_response(request_id, raw)
                 return _Dispatched.from_raw(self.client.parse(raw), raw, prepared)
             response = self.client.ask(prepared.state, prepared.questions)
             self._journal_response(request_id, RawResponse.from_decoded(response_to_raw(response)))
             return _Dispatched(response, prepared.body, sent_exact=False)
         except Exception as error:
+            if isinstance(error, AttemptJournalCallbackError):
+                self._propagate_attempt_journal_error(request_id, error, raw)
             self._journal_failure(request_id, error, raw)
             raise
 
@@ -485,15 +527,98 @@ class Judge:
         raw: RawResponse | None = None
         try:
             if hasattr(self.client, "send"):
-                raw = await _awaited(self.client.send, prepared.state, prepared.questions)
+                sender = getattr(self.client, "send_with_attempts", None)
+                callback = self._attempt_callback(request_id)
+                if callable(sender) and callback is not None:
+                    raw = await _awaited(sender, prepared.state, prepared.questions, on_attempt=callback)
+                else:
+                    raw = await _awaited(self.client.send, prepared.state, prepared.questions)
                 self._journal_response(request_id, raw)
                 return _Dispatched.from_raw(self.client.parse(raw), raw, prepared)
             response = await _awaited(self.client.ask, prepared.state, prepared.questions)
             self._journal_response(request_id, RawResponse.from_decoded(response_to_raw(response)))
             return _Dispatched(response, prepared.body, sent_exact=False)
         except Exception as error:
+            if isinstance(error, AttemptJournalCallbackError):
+                self._propagate_attempt_journal_error(request_id, error, raw)
             self._journal_failure(request_id, error, raw)
             raise
+
+    def _send_positions(
+        self,
+        plan: _CheckPlan,
+        positions: Sequence[int],
+        cancelled: Callable[[], bool] | None = None,
+    ) -> Iterator[tuple[_Batch, JevResponse]]:
+        """Send one packed batch of item positions, splitting it when its request cannot fit the
+        provider's measured input budget.
+
+        The batch is measured before it is sent: a serialized body over ``MAX_REQUEST_BYTES`` is
+        split by item and each half is measured again, so no request the measurement already
+        rejects is ever paid for. A provider refusal that still names an exceeded input budget
+        (``max_tokens_exceeded``) splits the same way. One position whose own state cannot fit has
+        no smaller honest request - its questions name an item path that a partial state would
+        change - so its error propagates and the journal keeps the provider's report. Every
+        sub-batch keeps each item's store key, so replay and resume accounting stay exact.
+        """
+        if not positions:
+            return
+        batch = self._batch(plan, sorted(positions))
+        if batch is None:
+            return
+        splittable = len(positions) > 1
+        if splittable and request_exceeds_input_budget(batch.state, batch.questions):
+            yield from self._split_positions(plan, positions, cancelled)
+            return
+        try:
+            if cancelled is not None and cancelled():
+                return
+            yield batch, self.ask(batch.state, batch.questions, thresholds=plan.thresholds, **batch.extras)
+        except InputBudgetExceededError:
+            if not splittable:
+                raise
+            yield from self._split_positions(plan, positions, cancelled)
+
+    def _split_positions(
+        self,
+        plan: _CheckPlan,
+        positions: Sequence[int],
+        cancelled: Callable[[], bool] | None = None,
+    ) -> Iterator[tuple[_Batch, JevResponse]]:
+        middle = len(positions) // 2
+        yield from self._send_positions(plan, positions[:middle], cancelled)
+        yield from self._send_positions(plan, positions[middle:], cancelled)
+
+    async def _send_positions_async(
+        self, plan: _CheckPlan, positions: Sequence[int]
+    ) -> list[tuple[_Batch, JevResponse]]:
+        """The async form of ``_send_positions``; halves recurse sequentially so a refusal cannot
+        leave an orphaned half running inside a cancelled gather."""
+        if not positions:
+            return []
+        batch = self._batch(plan, sorted(positions))
+        if batch is None:
+            return []
+        splittable = len(positions) > 1
+        if splittable and request_exceeds_input_budget(batch.state, batch.questions):
+            return await self._split_positions_async(plan, positions)
+        try:
+            response = await self.ask_async(
+                batch.state, batch.questions, thresholds=plan.thresholds, **batch.extras
+            )
+        except InputBudgetExceededError:
+            if not splittable:
+                raise
+            return await self._split_positions_async(plan, positions)
+        return [(batch, response)]
+
+    async def _split_positions_async(
+        self, plan: _CheckPlan, positions: Sequence[int]
+    ) -> list[tuple[_Batch, JevResponse]]:
+        middle = len(positions) // 2
+        left = await self._send_positions_async(plan, positions[:middle])
+        right = await self._send_positions_async(plan, positions[middle:])
+        return [*left, *right]
 
     def _journal_request(self, prepared: _Prepared) -> str | None:
         if self.journal is None:
@@ -511,6 +636,34 @@ class Judge:
         if self.journal is not None and request_id is not None:
             self.journal.record_failure(request_id, f"{type(error).__name__}: {error}", raw)
 
+    def _propagate_attempt_journal_error(
+        self, request_id: str | None, error: AttemptJournalCallbackError, raw: RawResponse | None
+    ) -> None:
+        original = error.original_error
+        try:
+            self._journal_failure(request_id, original, raw)
+        except Exception as failure_error:
+            original.add_note(
+                "The logical request failure could not be recorded either: "
+                f"{type(failure_error).__name__}: {failure_error}"
+            )
+        raise original from error
+
+    def _send_with_attempt_callback(self, prepared: _Prepared, request_id: str | None) -> RawResponse:
+        sender = getattr(self.client, "send_with_attempts", None)
+        callback = self._attempt_callback(request_id)
+        if callable(sender) and callback is not None:
+            return sender(prepared.state, prepared.questions, on_attempt=callback)
+        return self.client.send(prepared.state, prepared.questions)
+
+    def _attempt_callback(self, request_id: str | None):
+        if self.journal is None or request_id is None:
+            return None
+        record_attempt = getattr(self.journal, "record_attempt", None)
+        if not callable(record_attempt):
+            return None
+        return lambda attempt: record_attempt(request_id, attempt)
+
     def _check_plan(
         self,
         checks: Sequence[Check],
@@ -520,20 +673,18 @@ class Judge:
         thresholds: Thresholds | None,
         batch_budget: int | None = None,
     ) -> _CheckPlan:
-        """One request per batch of items that fit, each asking every still open check of the items
-        it carries. Each item is first looked up masked together with the shared state alone, as the
-        per-item store key is made from that pair; a batch masks its items, their question wording
-        and the shared state together, as the request that carries them will be.
+        """Mask the whole candidate set before packing so copied secret values stay hidden across
+        batches. Each per-item store key includes its masked item and shared state; a batch also
+        masks its question wording with those values before sending.
         """
         if len({check.name for check in checks}) != len(checks):
             raise ValueError("independent checks require unique names for their result lists")
-        shared = shared or {}
+        *items, shared = self._masked_together([*items, shared or {}])
         budget = MAX_STATE_CHARS if batch_budget is None else batch_budget
         plan = _CheckPlan(list_name, checks, items, shared, thresholds or self.thresholds, budget)
         for position, item in enumerate(items):
-            masked_item, masked_shared = self._masked_together([item, shared])
             for check in checks:
-                stored = self._stored_item(check, masked_item, masked_shared)
+                stored = self._stored_item(check, item, shared)
                 if stored is None:
                     plan.open.setdefault(position, {})[check.question_id] = check
                 else:
@@ -808,10 +959,10 @@ def _is_async(client: object) -> bool:
     return inspect.iscoroutinefunction(method)
 
 
-async def _awaited(method, *arguments):
+async def _awaited(method, *arguments, **keywords):
     if inspect.iscoroutinefunction(method):
-        return await method(*arguments)
-    return await asyncio.to_thread(method, *arguments)
+        return await method(*arguments, **keywords)
+    return await asyncio.to_thread(method, *arguments, **keywords)
 
 
 def _check_result(response: JevResponse, check: Check, state: Mapping, thresholds: Thresholds) -> CheckResult:

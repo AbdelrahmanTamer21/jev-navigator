@@ -11,6 +11,7 @@ from jev_navigator.index import tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.languages import has_flow_pragma
+from jev_navigator.index.scope_scan import FileFacts, FileStructure, Unparsed, scan_facts
 from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
@@ -226,6 +227,23 @@ def test_an_external_parser_failure_is_not_relabelled_as_incomplete(
 
     with pytest.raises(tools.ToolFailedError, match="real tool reason"):
         index.functions_in("module.py")
+
+
+def test_scan_facts_skips_unsupported_files_and_still_parses_supported_files(tmp_path: Path) -> None:
+    (tmp_path / "notes.md").write_text("# notes\n")
+    (tmp_path / "module.py").write_text("def greet(): return 1\n")
+
+    def lines_of(path: str) -> list[str]:
+        return (tmp_path / path).read_text().splitlines()
+
+    empty = FileFacts(FileStructure((), (), ()), (), ())
+
+    unsupported = scan_facts(["notes.md"], tmp_path, lines_of, Unparsed())
+    mixed = scan_facts(["module.py", "notes.md"], tmp_path, lines_of, Unparsed())
+
+    assert unsupported == {"notes.md": empty}
+    assert mixed["module.py"].structure.functions == (Span("module.py", 1, 1, "greet"),)
+    assert mixed["notes.md"] == empty
 
 
 def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_path: Path) -> None:
