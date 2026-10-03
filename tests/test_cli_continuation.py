@@ -14,7 +14,53 @@ from threading import Thread
 import pytest
 from git_repos import commit_files
 
+from jev_navigator.cli_resume import load_resume, save_resume
+from jev_navigator.directives.find_code import SearchBudget, find_code
+from jev_navigator.directives.places import MOVES, function_place
+from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
+
+
+def test_saved_find_frontier_restores_relationship_binding(tmp_path: Path) -> None:
+    # Arrange
+    files = {
+        "app/target.py": "def check():\n    return True\n",
+        "app/entry.py": "from app.target import check\n\n\ndef handle():\n    return check()\n",
+    }
+    repository = tmp_path / "repository"
+    commit_files(repository, files)
+    index = CodeIndex(repository, list(files))
+    start = function_place(index, index.find_definition("handle")[0])
+    client = ScriptedJevClient(nouls=lambda _question_id, _question, _state: 0.1)
+    result = find_code(
+        index,
+        Judge(client),
+        "the check function",
+        [start],
+        moves={"callees": MOVES["callees"]},
+        budget=SearchBudget(max_steps=1, beam_width=1),
+    )
+    resume_file = tmp_path / "resume.json"
+
+    # Act
+    save_resume(resume_file, index, result, entry_pending=False)
+    saved = json.loads(resume_file.read_text())
+    restored = load_resume(resume_file, index)
+
+    # Assert
+    frontier_record = saved["result"]["not_inspected"][0]
+    assert frontier_record["relationship"]["move"] == "callees"
+    assert frontier_record["relationship"]["binding"] == {
+        "status": "resolved",
+        "reason": "imported from app/target.py",
+        "proven": True,
+        "target": {"file": "app/target.py", "start": 1, "end": 2, "name": "check"},
+    }
+    frontier = restored.result.not_inspected[0]
+    assert frontier.place.move == "callees"
+    assert frontier.place.binding.status == "resolved"
+    assert frontier.place.binding.target.file == "app/target.py"
 
 
 @pytest.mark.parametrize("workflow", ["find", "findall"])

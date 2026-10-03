@@ -331,7 +331,7 @@ empty. An explicit `depth=2` limits traversal to two hops; cancellation is check
 There is no hidden depth, neighbour or frontier cap. Missing endpoints and uncertain bindings stay
 visible in `graph.links`. `fixed_point` means the available static graph is exhausted; it does not
 prove that runtime dispatch is resolved or that every stage relevant to your question is covered.
-This is a library operation; the higher-level Jev-backed trace CLI is still in development.
+For the Jev-backed trace CLI, see [Workflow trace](docs/cli.md#workflow-trace).
 
 ## Layer 2: judgments
 
@@ -376,8 +376,9 @@ on its own scope, so searches sharing one judge never use up each other's budget
   (`judge.effective(directive, call)`).
 - **Secrets.** `SecretMasker` masks private keys, token shapes, secret-named assignments and
   high-entropy assignments in every request, by content: a value hidden in one place is hidden
-  everywhere in the request, for example where a relation text or another item of the same batch
-  quotes it. `SecretScanner` refuses to send a request that still contains a secret, and a masked value
+  everywhere in the request, for example where a relation text or another candidate quotes it.
+  The complete candidate set is masked before packing, so copied values stay hidden across batches.
+  `SecretScanner` refuses to send a request that still contains a secret, and a masked value
   left in a key is refused too. Both are on by default; a host passes its own (a masker offers
   `mask(text)` and `masked_values(text)`), or turns one off explicitly with `None`.
 - **Answer store.** Every answer is stored with the served model and the thresholds in force. An
@@ -413,7 +414,7 @@ on its own scope, so searches sharing one judge never use up each other's budget
 
 `find_code(index, judge, target_description, start, *, budget=SearchBudget(), thresholds=None)` is
 the central search. Use it only when the target is described by meaning; anything code can decide
-(the callers of X) is an operation. For each opened place, one request asks "Does `slice.code`
+(the callers of X) is an operation. For each opened place, a request asks "Does `slice.code`
 contain the code described in `target.description`?" and, per neighbour code lists (callers, with
 callers in test files after the others; callees, proven production targets first and then the ones
 called from fewest places; code that
@@ -428,7 +429,8 @@ identical code in two files stays two places. A line outside any function opens 
 module-level declaration when that has at most 120 lines; in a longer one it opens the window around the
 line under the definition's name. Either way the moves can follow that name. Callees and passed-on
 definitions are also offered from anonymous functions and windows. For an anonymous nested function,
-same-file navigation first offers the nearest named containing symbol. By default the finite,
+same-file navigation first offers the nearest named containing symbol, else the nearest containing
+one (a callback inside a test's callback offers that test). By default the finite,
 deduplicated frontier decides when the search is complete: depth, step, call and per-move neighbour
 limits are `None`. A caller can set any of those fields on `SearchBudget` when it has an explicit
 operational limit. Each round opens
@@ -437,6 +439,12 @@ the order it picked them, then the other neighbours by falling `could_contain` p
 visited set and a content cache. An `open_first` Choice picks the neighbour to open next, with the
 option "None of the entries is likely to contain it."; every pick but "none" waits ahead of the scored
 neighbours, whatever its confidence and its own score, and the history's `used` says that it was queued.
+Large openings split independent neighbour questions through the same Judge batching owner without
+discarding candidates or previews. The global pick is optional: when its full request or option set
+exceeds provider capability, `open_first.unavailable` records why and individual neighbour scores
+still order the complete frontier. Every live sub-request counts toward the selected call allowance.
+Only HTTP 400 with `detail.error_type` equal to `max_tokens_exceeded` is a size refusal;
+mentions of that text in question IDs or unrelated error messages do not trigger splitting.
 A low neighbour score only lowers that neighbour's priority; it is never treated as proof that the code
 is not there. The search ends as `nothing_left` when no start or pick waits and no neighbour scores
 above the no bar (0.20 by default). A start place is judged but never ends the search as found, because
@@ -455,8 +463,9 @@ one place can be wrong. When nothing reaches the yes bar, rank the opened places
 `contains_target` probability: the best-scored place is the likeliest one. Pass the result back as
 `resume=` to continue from that frontier with a fresh budget. Pass `commit=` to require that the index
 holds exactly that revision (use `CodeIndex.at_commit` for history); a mismatch raises
-`RevisionMismatchError`. Nothing escalates on its own. The default budget is 24 steps and 24 calls
-with a beam of 3 and depth 3. Everything is a parameter: `SearchBudget` also sets
+`RevisionMismatchError`. Nothing escalates on its own. Library depth, steps, and calls are unlimited
+by default, with a beam of 3. The CLI sets a default allowance of 24 model requests for Find and
+48 for Find All. Everything is a parameter: `SearchBudget` also sets
 `neighbours_per_kind`, `preview_lines`, `max_line_chars` (240: longer lines and signatures are cut and
 marked "[line cut]") and `max_slice_chars` (12,000: an opened place is cut on a line boundary with a
 note, and `Visit.code` ends at the last shown line). If the first line cannot fit, the place stays
@@ -492,8 +501,12 @@ The default is `fetched`, so a history check never leans on the search's own ver
 `history` section carries no verdicts either. A check that is meant to read them selects `decisions`
 explicitly. An unknown name raises `UnknownSectionError`. Each section has its own `SectionLimit(max_entries, max_chars)`
 (newest entries kept, long text cut; defaults in `DEFAULT_LIMITS`), applied before the token budget.
-The budget is capped at Jev's 32k-token limit for state plus the longest question (64k per request
-overall; TypeSafe Models page, read 28.09.2026). When the selected sections still do not fit, the
+Text limits also apply inside nested lists and mappings. Rendering a limited view preserves the
+complete code and judgments in the append-only record.
+The budget is capped at Jev's 32k-token limit for state plus the longest question, the binding limit
+(the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026; a whole request
+may reach the documented 64k). The judge applies the same limit before sending and splits a batch
+that would exceed it. When the selected sections still do not fit, the
 pluggable `evict` policy trims them; the default `drop_oldest_code` replaces the oldest code bodies with
 `[evicted]` and records each eviction in `history.evictions`. A check that reads no code never evicts.
 Pass `recorder=` (for example a `JsonlJournal`) to record every appended step; the recorder gets each
@@ -526,7 +539,7 @@ Nothing in the library calls an LLM. `LlmStep` is a building block a user adds t
 directive, and the user defines all four parts:
 
 ```python
-from jev_navigator.llm_step import LlmGuard, LlmStep, PickFromOptions
+from jev_navigator.llm_step import LlmGuard, LlmStatus, LlmStep, PickFromOptions
 from jev_navigator import connectors
 
 phrase_step = LlmStep(
@@ -537,14 +550,22 @@ phrase_step = LlmStep(
     connector=connectors.pi("your-model"),  # any CLI or OpenAI-compatible endpoint
     guard=LlmGuard(store_path=path, max_calls=5),
 )
-call = phrase_step.run(judge.pick(phrase_pick, phrases, state))  # None when `when` said no
+call = phrase_step.run(judge.pick(phrase_pick, phrases, state))
+if call.status == LlmStatus.ANSWERED:
+    selected_phrase = call.answer
 ```
 
 `answer` can be `PickFromOptions`, `JsonContract(instructions, required={"accurate": bool})`, or any
 object with `render(context, parse_error)` and `parse(reply, context)`. A reply that does not parse
 is retried once with the error. Connectors: `hermes`, `pi`, `OpenAICompatibleConnector`,
-`CommandConnector`, and `claude`. The guard masks the context, refuses a prompt with a secret, keeps
-one JSON line per call (prompt hash, reply, parsed answer) and enforces an optional budget.
+`CommandConnector`, and `claude`. The result distinguishes `not_requested`, `budget_exhausted`,
+`answered`, and `parse_failed`; `attempts` counts actual provider calls. Provider exceptions propagate
+after their failure is recorded.
+
+The guard masks context, refuses a prompt with a secret, and enforces an optional budget. When a store
+is configured, it records the attempt identity, connector, model, and prompt hash before dispatch;
+the exact reply before parsing or retry; and each parse outcome or provider failure. A final summary
+records the result and attempt count. The first malformed reply survives a successful retry.
 
 > **Warning:** `connectors.claude()` runs Claude headless. Every run spends from your Claude plan or API
 > budget, and an automation can start many; enable it deliberately and set `LlmGuard(max_calls=...)`.

@@ -11,6 +11,7 @@ from jev_navigator.index import tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.languages import has_flow_pragma
+from jev_navigator.index.scope_scan import FileFacts, FileStructure, Unparsed, scan_facts
 from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
@@ -228,6 +229,23 @@ def test_an_external_parser_failure_is_not_relabelled_as_incomplete(
         index.functions_in("module.py")
 
 
+def test_scan_facts_skips_unsupported_files_and_still_parses_supported_files(tmp_path: Path) -> None:
+    (tmp_path / "notes.md").write_text("# notes\n")
+    (tmp_path / "module.py").write_text("def greet(): return 1\n")
+
+    def lines_of(path: str) -> list[str]:
+        return (tmp_path / path).read_text().splitlines()
+
+    empty = FileFacts(FileStructure((), (), ()), (), ())
+
+    unsupported = scan_facts(["notes.md"], tmp_path, lines_of, Unparsed())
+    mixed = scan_facts(["module.py", "notes.md"], tmp_path, lines_of, Unparsed())
+
+    assert unsupported == {"notes.md": empty}
+    assert mixed["module.py"].structure.functions == (Span("module.py", 1, 1, "greet"),)
+    assert mixed["notes.md"] == empty
+
+
 def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_path: Path) -> None:
     # Arrange
     index = committed(
@@ -294,6 +312,109 @@ def test_a_method_on_a_one_line_class_is_named_and_counted_itself(tmp_path: Path
     assert {span.name for span in index.symbols_in("src/box.ts")} == {"Box", "v"}
 
 
+def test_a_symbol_is_named_by_the_syntax_tree_and_a_callback_stays_anonymous(tmp_path: Path) -> None:
+    """An expression is named by the declarator, field, key or assignment holding it, seen through
+    parentheses and casts, before its own name; a callback passed to a call has no name. Every
+    grammar is scanned together, so a node kind one grammar lacks would fail the whole scan."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/routes.ts": (
+                "export const load = (async () => fetchPage()) satisfies PageLoad;\n"
+                "export const GET = (() => respond()) as Handler;\n"
+                "const handler = function inner() { return 1; };\n"
+                'it("saves the order", () => { save(); });\n'
+                "orders.save = () => 1;\n"
+                'const routes = {\n  "risk.triage": () => 1,\n  plain: () => 2,\n};\n'
+                "abstract class Shape { #area() { return 0; } }\n"
+                "const Model = class {};\n"
+                "function* pages() {}\n"
+            ),
+            "src/view.tsx": (
+                'export const View = (() => <p />) satisfies Page;\ndescribe("view", () => {});\n'
+            ),
+            "src/legacy.js": (
+                "const run = (function () {});\n"
+                "class Job { start = () => 1; }\n"
+                "const each = function* () {};\n"
+            ),
+            "app/jobs.py": "class Job:\n    def run(self):\n        return 1\n",
+        },
+    )
+
+    # Act
+    named = {
+        file: [(span.start, span.name) for span in index.symbols_in(file)]
+        for file in ("src/routes.ts", "src/view.tsx", "src/legacy.js", "app/jobs.py")
+    }
+
+    # Assert
+    assert named == {
+        "src/routes.ts": [
+            (1, "load"),
+            (2, "GET"),
+            (3, "handler"),
+            (4, "<anonymous>"),
+            (5, "save"),
+            (7, "<anonymous>"),
+            (8, "plain"),
+            (10, "Shape"),
+            (10, "area"),
+            (11, "Model"),
+            (12, "pages"),
+        ],
+        "src/view.tsx": [(1, "View"), (2, "<anonymous>")],
+        "src/legacy.js": [(1, "run"), (2, "Job"), (2, "start"), (3, "each")],
+        "app/jobs.py": [(1, "Job"), (2, "run")],
+    }
+    assert index.unparsed_files == set()
+
+
+def test_a_callback_on_exactly_a_named_functions_lines_is_that_function(tmp_path: Path) -> None:
+    """A callback spanning exactly a named function's lines is the same place at line granularity,
+    so it stays part of that function: the function stays top level, a same-file call to it stays
+    proven, and a call inside the callback is still that function's call."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/util.ts": (
+                "export const ids = (xs: { id: number }[]) => xs.map((x) => x.id);\n"
+                "export function total(xs: number[]) { return xs.reduce((a, b) => a + b, 0); }\n"
+                "export const loadUser = (id: string) => request(id).then((r) => r.json());\n"
+                "export const wait = (ms: number) => new Promise((done) => {\n"
+                "  setTimeout(done, ms);\n"
+                "});\n"
+                "function request(id: string) { return fetch(id); }\n"
+                "export function run() {\n"
+                "  return ids([]).length + total([]);\n"
+                "}\n"
+            ),
+        },
+    )
+
+    # Act
+    symbols = [(span.start, span.end, span.name) for span in index.symbols_in("src/util.ts")]
+    bindings = {name: index.find_callers(name)[0].binding for name in ("ids", "total")}
+    request_caller = index.find_callers("request")[0].caller
+
+    # Assert
+    assert symbols == [
+        (1, 1, "ids"),
+        (2, 2, "total"),
+        (3, 3, "loadUser"),
+        (4, 6, "wait"),
+        (7, 7, "request"),
+        (8, 10, "run"),
+    ]
+    assert {name: (binding.status.value, binding.reason) for name, binding in bindings.items()} == {
+        "ids": ("resolved", "defined in the same file"),
+        "total": ("resolved", "defined in the same file"),
+    }
+    assert request_caller is not None and request_caller.name == "loadUser"
+
+
 def test_a_flow_typed_class_keeps_its_methods(tmp_path: Path) -> None:
     """eval: `@flow` methods are recovered, not merely reported as omitted. The deciding spans the
     navigation needs (the class, its constructor and methods, module functions) resolve, the file
@@ -354,8 +475,9 @@ def test_plain_javascript_is_unchanged_whether_or_not_flow_files_share_the_scope
 
 
 def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> None:
-    """Statement and specifier nodes carry the surface: default, wildcard, a multi-line list and a
-    template-literal body are each handled by the parser, not by source-text scanning."""
+    """Declaration name nodes and specifier nodes carry the surface: default, wildcard, a multi-line
+    list, two constants in one statement and a template-literal body are each handled by the
+    parser, not by source-text scanning."""
     # Arrange
     index = committed(
         tmp_path,
@@ -369,6 +491,7 @@ def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> 
                 "  createOrder as placeOrder,\n"
                 "} from './commands';\n"
                 "const tpl = `export function inTemplate() {}`;\n"
+                "export const first = 1, second = 2;\n"
             ),
         },
     )
@@ -377,7 +500,7 @@ def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> 
     facts = index._facts_in("src/service.ts")
 
     # Assert
-    assert facts.export_names == ("placeOrder", "refund", "run")
+    assert facts.export_names == ("first", "placeOrder", "refund", "run", "second")
     assert facts.incomplete is False
 
 

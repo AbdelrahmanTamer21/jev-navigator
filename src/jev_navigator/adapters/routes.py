@@ -20,11 +20,11 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..judgments.answers import JevResponse, response_from_raw
-from ..judgments.client import LATEST_JEV
-from ..judgments.journal import RawResponse
+from ..judgments.client import LATEST_JEV, InputBudgetExceededError, input_budget_error
+from ..judgments.journal import AttemptJournalCallbackError, RawResponse
 
 ROUTES_ENV = "SYSTEM_ONE_ROUTES"
 
@@ -153,11 +153,31 @@ class SystemOneClient:
         sdk_send(self._sdk._http_client, self._sdk._retry, request)  # noqa: SLF001
 
     def send(self, state: Mapping, questions: Mapping) -> RawResponse:
-        self._send_raw(state, questions)
-        captured = self._capture.take()
-        if captured is None:
-            raise RuntimeError("the SDK transport captured no response")
-        return captured
+        return self.send_with_attempts(state, questions)
+
+    def send_with_attempts(self, state: Mapping, questions: Mapping, on_attempt=None) -> RawResponse:
+        """The captured response, with a provider input-budget refusal translated to the typed
+        ``InputBudgetExceededError`` so the batching owner can split the batch."""
+        with self._capture.collecting(on_attempt) as collection:
+            try:
+                self._send_raw(state, questions)
+            except Exception as error:
+                typed = input_budget_error(error)
+                if typed is not None:
+                    raise typed from error
+                raise
+            captured = collection.attempts[-1].response if collection.attempts else None
+            if captured is None:
+                raise RuntimeError("the SDK transport captured no response")
+            return RawResponse(
+                captured.body,
+                captured.status,
+                captured.content_type,
+                captured.decoded,
+                exact=captured.exact,
+                sent_body=captured.sent_body,
+                attempts=tuple(collection.attempts),
+            )
 
     def parse(self, raw: RawResponse) -> JevResponse:
         # jev-navigator's parser, not the SDK's strict response schemas: the SDK builds and
@@ -178,12 +198,40 @@ class RoutedJevClient:
         self.model = routes[0].client.model
 
     def ask(self, state: Mapping, questions: Mapping) -> JevResponse:
+        return self.parse(self.send(state, questions))
+
+    def send(self, state: Mapping, questions: Mapping) -> RawResponse:
+        return self.send_with_attempts(state, questions)
+
+    def send_with_attempts(self, state: Mapping, questions: Mapping, on_attempt=None) -> RawResponse:
+        """Fail over across routes while retaining every route's HTTP attempts as one call."""
         failures: list[str] = []
+        attempts = []
+        attempt_no = 0
         for route in self.routes:
+
+            def report(attempt, *, route_name=route.name):
+                nonlocal attempt_no
+                attempt_no += 1
+                recorded = replace(attempt, attempt_no=attempt_no, route=route_name)
+                attempts.append(recorded)
+                if on_attempt is not None:
+                    on_attempt(recorded)
+
             try:
-                return route.client.ask(state, questions)
+                raw = route.client.send_with_attempts(state, questions, on_attempt=report)
+                route.client.parse(raw)  # Preserve the old rule that an unparsable answer triggers failover.
+                return replace(raw, attempts=tuple(attempts))
+            except AttemptJournalCallbackError as error:
+                raise error.original_error from error
+            except InputBudgetExceededError:
+                # A size refusal is about this request's input, which failover would resend unchanged.
+                raise
             except Exception as error:  # noqa: BLE001 - failover is the point
                 failures.append(f"{route.name}: {error}")
         if not failures:
             raise RuntimeError("no route answered")
         raise ConnectionError("every route failed: " + "; ".join(failures))
+
+    def parse(self, raw: RawResponse) -> JevResponse:
+        return response_from_raw(raw.json())
