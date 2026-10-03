@@ -291,6 +291,18 @@ BANNER = "/*!\n * library\n * MIT Licensed\n */\n\n'use strict';\n\n"
         ),
         pytest.param(
             {
+                "package.json": '{"imports": {"#money": "./src/money.js"}}',
+                "src/money.js": "export function cents() {\n  return 4;\n}\n",
+                "src/money.d.ts": "export declare function cents(): number;\n",
+                "src/index.js": 'export { cents } from "#money";\n',
+            },
+            ("src/index.js", 1),
+            "candidate: repository package.json mapping for #money, a declaration file",
+            None,
+            id="a-declaration-file-beside-its-javascript-is-only-a-candidate",
+        ),
+        pytest.param(
+            {
                 "app.js": "var helper = require('./helper');\n\nfunction handle() {\n  return 1;\n}\n",
                 "helper.js": "module.exports = function helper() {};\n",
             },
