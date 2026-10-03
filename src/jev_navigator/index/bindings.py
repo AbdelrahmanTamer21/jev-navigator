@@ -51,12 +51,14 @@ class CallFacts:
     definitions: Sequence[Span]
     top_level_in_file: Sequence[Span]
     imported_from: Sequence[ImportFact]
+    # Files that could hold a definition of ``name`` the index never saw.
     unparsed: frozenset[str] = frozenset()
 
 
 def binding_from_facts(facts: CallFacts) -> Binding:
-    """``unknown`` when the definition may sit in a file the index could not parse: no definition
-    was found, or the file the import names was not parsed. Missing evidence is never absence."""
+    """``unknown`` when the definition may sit where the index could not parse: no definition was
+    found, or the import or a definition names a file that could hold one unseen. Missing evidence is
+    never absence."""
     unparsed_import = [fact.path for fact in facts.imported_from if fact.path in facts.unparsed]
     unparsed_definitions = [span.file for span in facts.definitions if span.file in facts.unparsed]
     if facts.unparsed and (not facts.definitions or unparsed_import or unparsed_definitions):
