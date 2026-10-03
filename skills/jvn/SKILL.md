@@ -32,6 +32,8 @@ Run in the source directory, or add `--repo /path/to/repo`. Dirty trees and non-
 Output defaults to a unique `./jvn-results/` directory. Trace starts must be repository-relative
 `PATH:LINE` values inside a function or method, not a class declaration. Unknown entry? Find first,
 inspect the returned function, then trace it. Quote the entire natural-language argument once.
+Do not edit files in scope while a search runs: a file that changes is reported unavailable, and a
+search that finds nothing then ends `scope_incomplete` instead of `nothing_left`.
 
 For agents and pipelines, discover the current contract with `jvn schema find`, `jvn schema findall`
 or `jvn schema trace`; use `jvn help COMMAND` for examples. Pass inline/file/stdin JSON:
