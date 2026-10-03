@@ -13,7 +13,7 @@ from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch
 from .spans import Span
 from .tools import ast_grep_version
 
-FACT_RULE_VERSION = "combined-facts-v10-reference-receivers"
+FACT_RULE_VERSION = "combined-facts-v12-reference-receivers"
 
 
 class FactCache:
@@ -73,6 +73,7 @@ def _encode(facts: FileFacts) -> dict:
         "references": [asdict(reference) for reference in facts.references],
         "incomplete": facts.incomplete,
         "export_names": list(facts.export_names),
+        "unparsed_lines": [list(stretch) for stretch in facts.unparsed_lines],
     }
 
 
@@ -93,4 +94,5 @@ def _decode(file: str, raw: dict) -> FileFacts:
         ),
         bool(raw["incomplete"]),
         tuple(raw.get("export_names", ())),
+        tuple((int(start), int(end)) for start, end in raw["unparsed_lines"]),
     )
