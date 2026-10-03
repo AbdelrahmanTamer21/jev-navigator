@@ -14,7 +14,7 @@ import inspect
 import logging
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, field
 
 from .answers import JevResponse, NoulAnswer, TokenTotal, response_to_raw
@@ -211,6 +211,16 @@ class Judge:
         cancel = getattr(self.client, "cancel", None)
         if cancel is not None:
             cancel()
+
+    def abort_sends(self, futures: Sequence[Future]) -> None:
+        """What a caller interrupt does to one step's concurrent requests: the client aborts those in
+        flight, those not started never start, and this returns once every one has settled. Only an
+        interrupt calls it: a client's cancel is permanent, so an ordinary failure lets the requests
+        in flight settle instead and keeps their answers."""
+        self.cancel()
+        for future in futures:
+            future.cancel()
+        wait(futures)
 
     def effective(self, *overrides: Mapping[str, float] | None) -> Thresholds:
         thresholds = self.thresholds
@@ -605,12 +615,19 @@ class Judge:
             return
         stop = _BatchStop(cancelled)
         pool = ThreadPoolExecutor(max_workers=min(self.max_concurrency, len(batches)))
+        futures: list[Future] = []
         try:
             while batches and not stop.requested():
                 size = self._wave_size(len(batches))
                 wave, batches = batches[:size], batches[size:]
-                futures = [pool.submit(self._send_batch, plan, batch, stop) for batch in wave]
+                futures = []
+                for batch in wave:
+                    futures.append(pool.submit(self._send_batch, plan, batch, stop))
                 yield from _completed_batches(futures)
+        except KeyboardInterrupt:
+            stop.halted.set()
+            self.abort_sends(futures)
+            raise
         finally:
             stop.halted.set()
             pool.shutdown(wait=True, cancel_futures=True)

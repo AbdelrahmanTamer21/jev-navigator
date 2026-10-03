@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import _thread
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -180,3 +181,54 @@ def test_a_capped_call_always_answers_the_first_batches_in_their_stable_order() 
 
     # Assert
     assert len({tuple(run) for run in answered_runs}) == 1
+
+
+@dataclass
+class HangingClient:
+    """Stands in for the provider: every send hangs until the judge cancels it. The last request to
+    get in flight interrupts the main thread, the way Ctrl-C does."""
+
+    in_flight_before_interrupt: int
+    script: ScriptedJevClient = field(default_factory=ScriptedJevClient)
+    released: threading.Event = field(default_factory=threading.Event)
+    cancelled: bool = False
+
+    def __post_init__(self) -> None:
+        self.arrived = threading.Barrier(
+            self.in_flight_before_interrupt, action=_thread.interrupt_main, timeout=5
+        )
+
+    @property
+    def model(self) -> str:
+        return self.script.model
+
+    @property
+    def requests(self) -> list:
+        return self.script.requests
+
+    def send(self, state: Mapping, questions: Mapping) -> RawResponse:
+        self.script.requests.append((state, questions))
+        self.arrived.wait()
+        self.released.wait(timeout=5)
+        raise ConnectionError("cancelled by the judge" if self.cancelled else "never cancelled")
+
+    def parse(self, raw: RawResponse):
+        return self.script.parse(raw)
+
+    def cancel(self) -> None:
+        self.cancelled = True
+        self.released.set()
+
+
+def test_an_interrupt_with_requests_in_flight_cancels_them_and_sends_nothing_new() -> None:
+    # Arrange
+    client = HangingClient(in_flight_before_interrupt=2)
+    judge = Judge(client, max_concurrency=2)
+
+    # Act
+    with pytest.raises(KeyboardInterrupt):
+        list(judge.iter_check_each(DESCRIBES, _items(6), SHARED))
+
+    # Assert
+    assert client.cancelled
+    assert len(client.requests) == 2
