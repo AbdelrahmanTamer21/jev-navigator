@@ -548,11 +548,12 @@ class Judge:
         The batch is measured before it is sent: a request outside ``request_exceeds_input_budget``
         (state plus the longest question over ``JEV_INPUT_BOX_CHARS``, or the body over
         ``MAX_REQUEST_CHARS``) is split by item and each half is measured again, so no request the
-        measurement already rejects is ever paid for. A provider refusal that still names an exceeded
-        input budget (``max_tokens_exceeded``) splits the same way. One position whose own state cannot fit has
-        no smaller honest request - its questions name an item path that a partial state would
-        change - so its error propagates and the journal keeps the provider's report. Every
-        sub-batch keeps each item's store key, so replay and resume accounting stay exact.
+        measurement already rejects is ever paid for. A provider refusal that still names an
+        exceeded input budget (``max_tokens_exceeded``) splits the same way. One position whose own
+        state cannot fit has no smaller honest request - its questions name an item path that a
+        partial state would change - so its error propagates and the journal keeps the provider's
+        report. Every sub-batch keeps each item's store key, so replay and resume accounting stay
+        exact.
         """
         if not positions:
             return
