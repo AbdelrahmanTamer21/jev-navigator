@@ -1,4 +1,7 @@
-"""The one method the library needs from a Jev connection, so hosts can pass their own runtime."""
+"""The one method the library needs from a Jev connection, so hosts can pass their own runtime.
+
+It also owns the provider's size limits (the character boxes) and the typed refusal a client raises
+when a request is too large."""
 
 from __future__ import annotations
 
@@ -16,8 +19,8 @@ MAX_TOKENS_MARKER = "max_tokens_exceeded"
 REQUEST_CHARS_PER_TOKEN = 2.4
 """Serialized characters per input token, the same value and meaning as the Engine's
 ``REQUEST_CHARS_PER_TOKEN`` (analysis-engine ``enginepy/host/system_one.py``). Jev's input measured
-about 254 fixed tokens per request plus 0.23 to 0.30 tokens per body byte on 3,096 real requests
-(03.10.2026), so a limit in tokens becomes a box in characters without a tokenizer."""
+about 265 fixed tokens per request plus 0.23 tokens per state byte and 0.31 per question byte on 3,096
+real requests (03.10.2026), so a limit in tokens becomes a box in characters without a tokenizer."""
 
 
 def chars_for_tokens(tokens: int) -> int:
@@ -75,9 +78,9 @@ def input_budget_error(error: BaseException) -> InputBudgetExceededError | None:
 
     The official SDK reports the breach as a bad request (400) whose body carries
     ``{"detail": {"error_type": "max_tokens_exceeded"}}``. The classifier reads the status and
-    body off the error without importing the optional SDK, so any client that surfaces them —
-    the TypeSafe adapter, a routed System-One client, a host's own runtime — translates the same
-    way, and a gateway between the library and the provider does not hide the contract.
+    body off the error without importing the optional SDK, so any client that surfaces them
+    (the TypeSafe adapter, a routed System-One client, a host's own runtime) translates the
+    same way, and a gateway between the library and the provider does not hide the contract.
     """
     if getattr(error, "status", None) != 400:
         return None

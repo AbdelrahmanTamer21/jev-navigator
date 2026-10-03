@@ -26,6 +26,7 @@ from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find
 from .directives.places import Place, place_for_line
 from .index.code_index import CodeIndex
 from .index.languages import language_of
+from .judgments.answers import TokenTotal
 from .judgments.client import JevClient
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import JsonlAnswerStore
@@ -378,7 +379,7 @@ def create_evidence_pack(
             result,
             requested_model=getattr(client, "model", "unknown"),
             served_model=judge.served_model,
-            input_tokens=judge.input_tokens,
+            input_total=judge.input_total,
             duration_seconds=seed_duration_seconds,
             total_calls=seed_calls,
             entry_selection=selection,
@@ -858,7 +859,7 @@ def _manifest(
     *,
     requested_model: str,
     served_model: str | None,
-    input_tokens: int,
+    input_total: TokenTotal,
     duration_seconds: float,
     total_calls: int,
     entry_selection: EntrySelection | None,
@@ -890,7 +891,9 @@ def _manifest(
         "provider": {
             "requested_model": requested_model,
             "served_model": served_model,
-            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_tokens,
+            "input_tokens": _provider_total(previous, "input_tokens") + input_total.reported,
+            "responses_without_usage": _provider_total(previous, "responses_without_usage")
+            + input_total.not_reported,
         },
         "search": {
             "outcome": result.outcome,
@@ -998,6 +1001,10 @@ def _find_all_report(manifest: dict) -> str:
         source = value["source"]
         lines += [f"### {source['file']}:{source['lines'][0]}", "", "```", value["code"], "```", ""]
     return "\n".join(lines) + "\n"
+
+
+def _provider_total(previous: dict | None, key: str) -> int:
+    return previous["provider"].get(key, 0) if previous else 0
 
 
 def _navigator_provenance() -> dict:

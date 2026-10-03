@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+from .answers import reported_input_tokens
 from .questions import content_hash
 
 
@@ -172,14 +173,13 @@ NOT_REPORTED = "not reported"
 
 
 def _reported_input_tokens(body: bytes) -> int | str:
-    """The provider's ``usage.input_tokens``, or ``NOT_REPORTED`` when the body has none; a missing
-    value is never written as 0."""
+    """The provider's ``usage.input_tokens``, or ``NOT_REPORTED`` when the body has none."""
     try:
-        usage = json.loads(body).get("usage")
-    except (ValueError, AttributeError):
+        raw = json.loads(body)
+    except ValueError:
         return NOT_REPORTED
-    reported = usage.get("input_tokens") if isinstance(usage, dict) else None
-    return reported if isinstance(reported, int) and not isinstance(reported, bool) else NOT_REPORTED
+    reported = reported_input_tokens(raw) if isinstance(raw, Mapping) else None
+    return NOT_REPORTED if reported is None else reported
 
 
 def _request_with_text(request: JournalRequest) -> dict:

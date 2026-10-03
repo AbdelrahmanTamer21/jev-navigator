@@ -17,7 +17,7 @@ import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from .answers import JevResponse, NoulAnswer, response_to_raw
+from .answers import JevResponse, NoulAnswer, TokenTotal, response_to_raw
 from .client import (
     JEV_INPUT_BOX_CHARS,
     MAX_REQUEST_CHARS,
@@ -173,7 +173,7 @@ class Judge:
         self.journal = journal
         self.max_calls = max_calls
         self.calls = 0
-        self.input_tokens = 0
+        self.input_total = TokenTotal()
         self._parent: Judge | None = None
         self._bookkeeping = threading.Lock()
 
@@ -181,7 +181,7 @@ class Judge:
         child = copy.copy(self)
         child.max_calls = None
         child.calls = 0
-        child.input_tokens = 0
+        child.input_total = TokenTotal()
         child._parent = self
         return child
 
@@ -477,7 +477,7 @@ class Judge:
         with self._bookkeeping:
             for judge in self._chain():
                 judge.served_model = response.model
-                judge.input_tokens += response.input_tokens
+                judge.input_total.add(response.input_tokens)
             self._record(prepared, dispatched, thresholds, item_keys or {}, sources or {}, skeleton or {})
         return JevResponse(response.answers, response.model, response.input_tokens, prepared.request_hash)
 

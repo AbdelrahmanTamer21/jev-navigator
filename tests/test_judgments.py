@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from conftest import BudgetedClient
 
-from jev_navigator.judgments.answers import ChoiceAnswer
+from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer
 from jev_navigator.judgments.client import (
     JEV_INPUT_BOX_CHARS,
     MAX_REQUEST_CHARS,
@@ -536,7 +536,55 @@ def test_a_scoped_judge_counts_its_own_calls_and_adds_them_to_its_parent() -> No
 
     # Assert
     assert (first.calls, second.calls, judge.calls) == (1, 2, 3)
-    assert judge.input_tokens == 300
+    assert judge.input_total.reported == 300
+    assert judge.input_total.not_reported == 0
+
+
+class _UsageClient:
+    """Answers each call with the next scripted input-token value; None is a response without usage."""
+
+    model = "jev-scripted"
+
+    def __init__(self, *tokens: int | None) -> None:
+        self.tokens = list(tokens)
+
+    def ask(self, state, questions):
+        answers = {question_id: NoulAnswer(0.9) for question_id in questions}
+        return JevResponse(answers, self.model, self.tokens.pop(0))
+
+
+def test_a_response_without_usage_is_reported_as_not_reported_and_never_added_as_zero() -> None:
+    # Arrange
+    judge = Judge(_UsageClient(10, None, 0))
+
+    # Act
+    answered = [
+        judge.ask({"s": index}, {"q": {"type": "noul"}}, thresholds=Thresholds()) for index in range(3)
+    ]
+
+    # Assert
+    assert [response.input_tokens for response in answered] == [10, None, 0]
+    assert judge.input_total.reported == 10
+    assert judge.input_total.not_reported == 1
+    assert judge.input_total.complete_total() is None
+
+
+def test_a_total_with_every_response_reported_is_complete() -> None:
+    judge = Judge(_UsageClient(10, 0))
+
+    for index in range(2):
+        judge.ask({"s": index}, {"q": {"type": "noul"}}, thresholds=Thresholds())
+
+    assert judge.input_total.complete_total() == 10
+
+
+def test_a_scoped_judge_adds_unreported_responses_to_its_parent() -> None:
+    judge = Judge(_UsageClient(None))
+    scoped = judge.scope()
+
+    scoped.ask({"s": 1}, {"q": {"type": "noul"}}, thresholds=Thresholds())
+
+    assert (scoped.input_total.not_reported, judge.input_total.not_reported) == (1, 1)
 
 
 def test_every_result_carries_the_hash_of_the_masked_request_that_answered_it(tmp_path: Path) -> None:

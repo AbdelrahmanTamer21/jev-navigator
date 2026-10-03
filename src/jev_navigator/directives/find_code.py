@@ -872,7 +872,7 @@ def _combine_opening_answers(
         },
         **(priority.answers if priority is not None else {}),
     }
-    combined = JevResponse(answers, judge.served_model or found.model, judge.input_tokens)
+    combined = JevResponse(answers, judge.served_model or found.model, judge.input_total.complete_total())
     return _priority_diagnostic(combined, unavailable)
 
 

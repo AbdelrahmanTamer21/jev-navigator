@@ -4,6 +4,7 @@ import asyncio
 import base64
 import concurrent.futures
 import json
+import os
 import signal
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -480,8 +481,9 @@ def test_cancel_aborts_an_active_official_sdk_request(monkeypatch: pytest.Monkey
         server_thread.join()
 
 
+@pytest.mark.parametrize("deliver", ["any_thread", "main_thread"])
 def test_sigint_returns_the_active_http_place_as_resumable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deliver: str
 ) -> None:
     """The installed sync search and official SDK share one prompt cancellation boundary."""
     pytest.importorskip("typesafe_sdk")
@@ -524,7 +526,10 @@ def test_sigint_returns_the_active_http_place_as_resumable(
 
     def interrupt_when_sent() -> None:
         all_entered.wait()
-        signal.pthread_kill(main_thread, signal.SIGINT)
+        if deliver == "main_thread":
+            signal.pthread_kill(main_thread, signal.SIGINT)
+        else:
+            os.kill(os.getpid(), signal.SIGINT)
 
     interrupter = threading.Thread(target=interrupt_when_sent)
     interrupter.start()
