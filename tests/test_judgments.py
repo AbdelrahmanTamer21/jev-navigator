@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -342,6 +343,42 @@ def test_a_value_masked_in_one_item_is_masked_in_the_other_items_of_its_batch() 
     # Assert
     sent_items = client.requests[0][0]["items"]
     assert [item["code"] for item in sent_items] == ['WEBHOOK_TOKEN = "[MASKED]"', 'post("[MASKED]", order)']
+
+
+class CountingMasker(SecretMasker):
+    """The built-in masker, counting how often each text is masked."""
+
+    def __init__(self) -> None:
+        self.masked: Counter[str] = Counter()
+
+    def mask(self, text: str) -> str:
+        self.masked[text] += 1
+        return super().mask(text)
+
+
+def test_each_item_is_masked_once_per_judging_call_across_several_batches() -> None:
+    # Arrange
+    masker = CountingMasker()
+    client = ScriptedJevClient()
+    items = [{"code": f"def part{index}():\n    return {index}"} for index in range(4)]
+
+    # Act
+    Judge(client, masker=masker).check_every([DESCRIBES], items, {"doc": {"sentence": "s"}}, batch_budget=200)
+
+    # Assert
+    assert len(client.requests) > 1
+    assert [masker.masked[item["code"]] for item in items] == [1, 1, 1, 1]
+
+
+def test_the_final_scan_refuses_a_secret_that_masking_cannot_reach_on_the_batch_path() -> None:
+    # Arrange
+    client = ScriptedJevClient()
+    items = [{"code": "x = 1"}, {"code": "y = 2", f"ghp_{'c3' * 18}": "key text is never masked"}]
+
+    # Act and assert
+    with pytest.raises(SecretInRequestError):
+        Judge(client).check_each(DESCRIBES, items, {"doc": {"sentence": "s"}})
+    assert client.requests == []
 
 
 def test_the_final_scan_refuses_a_masked_value_that_is_also_a_state_key() -> None:

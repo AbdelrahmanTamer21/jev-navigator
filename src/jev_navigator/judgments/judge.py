@@ -15,6 +15,7 @@ import json
 import logging
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from .answers import JevResponse, NoulAnswer, TokenTotal, response_to_raw
@@ -53,6 +54,8 @@ from .thresholds import NoulVerdict, Thresholds
 logger = logging.getLogger(__name__)
 
 MAX_STATE_CHARS = 60_000
+DEFAULT_MAX_CONCURRENCY = 16
+"""How many batches of one synchronous judging call are in flight at once."""
 CODE_FIELD = "code"
 ROUTE_QUESTION = "route"
 _DEFAULT_MASKER = SecretMasker()
@@ -150,7 +153,8 @@ class CallDecision:
 class Judge:
     """``calls`` counts requests sent (store hits are free). ``scope()`` gives one caller, such as a
     single search, its own counter on the same client, store and journal; every scope adds its calls
-    to its parent, and ``max_calls`` caps a judge together with all of its scopes."""
+    to its parent, and ``max_calls`` caps a judge together with all of its scopes.
+    ``max_concurrency`` bounds how many batches of one synchronous judging call are in flight."""
 
     def __init__(
         self,
@@ -163,6 +167,7 @@ class Judge:
         served_model: str | None = None,
         journal: Journal | None = None,
         max_calls: int | None = None,
+        max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
     ) -> None:
         self.client = client
         self.masker = masker
@@ -172,6 +177,7 @@ class Judge:
         self.served_model = served_model
         self.journal = journal
         self.max_calls = max_calls
+        self.max_concurrency = max_concurrency
         self.calls = 0
         self.input_total = TokenTotal()
         self._parent: Judge | None = None
@@ -231,14 +237,14 @@ class Judge:
 
         Independent checks about the same items travel together: one request per batch that fits,
         each carrying every check for every item in it, instead of one round trip per check over the
-        whole list. A batch the provider would refuse for its input size is split by item and the
-        halves measured again, so every request sent fits the measured input budget. Items already
-        judged by the same question and model come from the store.
+        whole list. Batches are sent concurrently, up to ``max_concurrency`` at once. A batch the
+        provider would refuse for its input size is split by item and the halves measured again, so
+        every request sent fits the measured input budget. Items already judged by the same question
+        and model come from the store.
         """
         plan = self._check_plan(checks, items, shared, list_name, thresholds, batch_budget)
-        for batch in plan.batches:
-            for sub_batch, response in self._send_positions(plan, sorted(set(batch.slots.values()))):
-                plan.answer(sub_batch, response)
+        for sub_batch, response in self._answered_batches(plan):
+            plan.answer(sub_batch, response)
         return plan.answers()
 
     def iter_check_each(
@@ -272,28 +278,25 @@ class Judge:
     ) -> Iterator[tuple[str, CheckResult]]:
         """Every check asked about every item, yielded per answered question as batches complete.
 
-        The streaming form of ``check_every``: it uses the same packing, splitting and cache, yields
-        each result under the name of the check that asked for it, and yields cached answers before the
-        first batch so store hits consume no live call. A call-cap failure, or a provider input-budget
-        refusal that no split can answer, still raises after earlier results yield, so a caller keeps
-        every answered batch.
+        The streaming form of ``check_every``: it uses the same packing, splitting, concurrency and
+        cache, yields each result under the name of the check that asked for it as its batch
+        completes, and yields cached answers before the first batch so store hits consume no live
+        call. A call-cap failure, or a provider input-budget refusal that no split can answer, still
+        raises after every answered batch has yielded, so a caller keeps them all.
         Cancellation is checked before each live request, including between split halves; cached and
-        already answered results still
-        yield in full. It does not cancel a request already in flight.
+        already answered results still yield in full. It does not cancel a request already in flight.
         """
         plan = self._check_plan(checks, items, shared, list_name, thresholds)
         names = {check.question_id: check.name for check in checks}
         for (position, question_id), answer in sorted(plan.answered.items()):
             yield names[question_id], plan.result(position, answer)
-        for batch in plan.batches:
-            sent = self._send_positions(plan, sorted(set(batch.slots.values())), cancelled=cancelled)
-            for sub_batch, response in sent:
-                plan.answer(sub_batch, response)
-                for question_id, position in sorted(sub_batch.slots.items(), key=lambda slot: slot[1]):
-                    yield (
-                        names[question_id.split("#", 1)[0]],
-                        plan.result(position, plan.answered[(position, question_id)]),
-                    )
+        for sub_batch, response in self._answered_batches(plan, cancelled):
+            plan.answer(sub_batch, response)
+            for question_id, position in sorted(sub_batch.slots.items(), key=lambda slot: slot[1]):
+                yield (
+                    names[question_id.split("#", 1)[0]],
+                    plan.result(position, plan.answered[(position, question_id)]),
+                )
 
     async def check_each_async(
         self,
@@ -325,15 +328,8 @@ class Judge:
         batches look in the store, exactly as the sequential path does."""
         plan = self._check_plan(checks, items, shared, list_name, thresholds, batch_budget)
         batches = plan.batches
-        if batches and self.store is not None and not self._knows_model():
-            # Without a served model the store cannot prove model-version identity, so every lookup
-            # misses; the first live response pins ``served_model`` and the rest may then replay.
-            # ``slots`` maps one entry per open question to its item position, so the positions are
-            # deduplicated exactly like the sibling batch senders: two checks over two items are two
-            # item slots and four questions, never four copies of two items and eight questions.
-            for sub_batch, response in await self._send_positions_async(
-                plan, sorted(set(batches[0].slots.values()))
-            ):
+        if batches and self._must_learn_model_first():
+            for sub_batch, response in await self._send_positions_async(plan, _positions(batches[0])):
                 plan.answer(sub_batch, response)
             batches = batches[1:]
         await asyncio.gather(*(self._answer_batch_async(plan, batch) for batch in batches))
@@ -341,7 +337,7 @@ class Judge:
 
     async def _answer_batch_async(self, plan: _CheckPlan, batch: _Batch) -> None:
         """Send one packed batch concurrently, splitting it when the provider refuses its size."""
-        for sub_batch, response in await self._send_positions_async(plan, sorted(set(batch.slots.values()))):
+        for sub_batch, response in await self._send_positions_async(plan, _positions(batch)):
             plan.answer(sub_batch, response)
 
     def ask_all(
@@ -427,10 +423,13 @@ class Judge:
         item_keys: Mapping[str, str] | None = None,
         sources: Mapping[str, Mapping] | None = None,
         skeleton: Mapping | None = None,
+        masked: frozenset[str] | None = None,
     ) -> JevResponse:
         """Masks, scans, hashes and looks up the store; only a miss sends, and every fresh answer is
-        recorded. The async variant shares every step except the send."""
-        prepared = self._prepare(state, questions)
+        recorded. The async variant shares every step except the send. ``masked`` marks a request
+        the caller already masked as one, with the values it hid: masking is skipped, the final
+        scan is not."""
+        prepared = self._prepare(state, questions, masked)
         if prepared.stored is not None:
             return prepared.stored
         self._reserve_call()
@@ -446,23 +445,28 @@ class Judge:
         item_keys: Mapping[str, str] | None = None,
         sources: Mapping[str, Mapping] | None = None,
         skeleton: Mapping | None = None,
+        masked: frozenset[str] | None = None,
     ) -> JevResponse:
-        prepared = self._prepare(state, questions)
+        prepared = self._prepare(state, questions, masked)
         if prepared.stored is not None:
             return prepared.stored
         self._reserve_call()
         dispatched = await self._dispatch_async(prepared)
         return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton)
 
-    def _prepare(self, state: Mapping, questions: Mapping) -> _Prepared:
-        hidden: frozenset[str] = frozenset()
-        if self.masker:
-            state, questions, hidden = mask_request(state, questions, self.masker)
-        refuse_if_secret(state, questions, self.scanner, hidden)
+    def _prepare(self, state: Mapping, questions: Mapping, masked: frozenset[str] | None) -> _Prepared:
+        if masked is None:
+            state, questions, masked = self._masked_request(state, questions)
+        refuse_if_secret(state, questions, self.scanner, masked)
         request_hash = request_sha256(state, questions)
         stored = self.store.by_request(request_hash) if self.store else None
         accepted = stored.response() if stored is not None and self._accepts(stored.model) else None
         return _Prepared(state, questions, request_hash, request_body(state, questions), accepted)
+
+    def _masked_request(self, state: Mapping, questions: Mapping) -> tuple[Mapping, Mapping, frozenset[str]]:
+        if not self.masker:
+            return state, questions, frozenset()
+        return mask_request(state, questions, self.masker)
 
     def _finish(
         self,
@@ -536,6 +540,43 @@ class Judge:
             self._journal_failure(request_id, error, raw)
             raise
 
+    def _must_learn_model_first(self) -> bool:
+        """Without a served model the store cannot prove model-version identity, so every lookup
+        misses; one batch sent alone pins ``served_model`` and the rest may then replay."""
+        return self.store is not None and not self._knows_model()
+
+    def _answered_batches(
+        self, plan: _CheckPlan, cancelled: Callable[[], bool] | None = None
+    ) -> Iterator[tuple[_Batch, JevResponse]]:
+        """Every request of the plan's batches with its answer, a batch at a time as batches complete,
+        with at most ``max_concurrency`` batches in flight. Answers are applied by the caller, on its
+        own thread. The first failure stops every request not yet sent and raises after every
+        batch already sending has yielded what it answered."""
+        batches = list(plan.batches)
+        if batches and self._must_learn_model_first():
+            yield from self._send_positions(plan, _positions(batches.pop(0)), cancelled)
+        if not batches:
+            return
+        stop = _BatchStop(cancelled)
+        pool = ThreadPoolExecutor(max_workers=min(self.max_concurrency, len(batches)))
+        try:
+            futures = [pool.submit(self._send_batch, plan, batch, stop) for batch in batches]
+            yield from _completed_batches(futures)
+        finally:
+            stop.halted.set()
+            pool.shutdown(wait=True, cancel_futures=True)
+
+    def _send_batch(self, plan: _CheckPlan, batch: _Batch, stop: _BatchStop) -> _SentBatch:
+        """One batch's requests on a worker thread; a failure stops the other batches' unsent
+        requests and is kept with the requests answered before it, so the caller yields those first."""
+        answered: list[tuple[_Batch, JevResponse]] = []
+        try:
+            answered.extend(self._send_positions(plan, _positions(batch), stop.requested))
+        except Exception as error:
+            stop.halted.set()
+            return _SentBatch(answered, error)
+        return _SentBatch(answered, None)
+
     def _send_positions(
         self,
         plan: _CheckPlan,
@@ -567,7 +608,16 @@ class Judge:
         try:
             if cancelled is not None and cancelled():
                 return
-            yield batch, self.ask(batch.state, batch.questions, thresholds=plan.thresholds, **batch.extras)
+            yield (
+                batch,
+                self.ask(
+                    batch.state,
+                    batch.questions,
+                    thresholds=plan.thresholds,
+                    masked=plan.hidden,
+                    **batch.extras,
+                ),
+            )
         except InputBudgetExceededError:
             if not splittable:
                 raise
@@ -598,7 +648,7 @@ class Judge:
             return await self._split_positions_async(plan, positions)
         try:
             response = await self.ask_async(
-                batch.state, batch.questions, thresholds=plan.thresholds, **batch.extras
+                batch.state, batch.questions, thresholds=plan.thresholds, masked=plan.hidden, **batch.extras
             )
         except InputBudgetExceededError:
             if not splittable:
@@ -667,15 +717,16 @@ class Judge:
         thresholds: Thresholds | None,
         batch_budget: int | None = None,
     ) -> _CheckPlan:
-        """Mask the whole candidate set before packing so copied secret values stay hidden across
-        batches. Each per-item store key includes its masked item and shared state; a batch also
-        masks its question wording with those values before sending.
+        """Mask the whole candidate set once, before packing, so copied secret values stay hidden
+        across batches. Each per-item store key includes its masked item and shared state. Batches
+        carry the masked items as they are; the final scan before each send still runs.
         """
         if len({check.name for check in checks}) != len(checks):
             raise ValueError("independent checks require unique names for their result lists")
-        *items, shared = self._masked_together([*items, shared or {}])
+        hidden = masked_values([*items, shared or {}], self.masker) if self.masker else frozenset()
+        *items, shared = self._masked_together([*items, shared or {}], hidden)
         budget = MAX_STATE_CHARS if batch_budget is None else batch_budget
-        plan = _CheckPlan(list_name, checks, items, shared, thresholds or self.thresholds, budget)
+        plan = _CheckPlan(list_name, checks, items, shared, hidden, thresholds or self.thresholds, budget)
         for position, item in enumerate(items):
             for check in checks:
                 stored = self._stored_item(check, item, shared)
@@ -690,11 +741,10 @@ class Judge:
         ]
         return plan
 
-    def _masked_together(self, values: list[Mapping]) -> list[Mapping]:
-        """Masks the values as one request: a value hidden in one of them is hidden in all."""
+    def _masked_together(self, values: list[Mapping], hidden: frozenset[str]) -> list[Mapping]:
+        """Masks the values as one request: each of ``hidden`` is hidden in all of them."""
         if self.masker is None:
             return values
-        hidden = masked_values(values, self.masker)
         return [mask_everywhere(value, self.masker, hidden) for value in values]
 
     def _batch(self, plan: _CheckPlan, positions: list[int]) -> _Batch | None:
@@ -702,9 +752,7 @@ class Judge:
         that item's place in the list. An item whose questions were all answered before the call is
         in no batch, and an item that still needs one answer keeps its own key and its own source.
         """
-        *batch_items, batch_shared = self._masked_together(
-            [*(plan.items[position] for position in positions), plan.shared]
-        )
+        batch_items = [plan.items[position] for position in positions]
         by_position = dict(zip(positions, batch_items, strict=True))
         questions: dict[str, dict] = {}
         slots: dict[str, int] = {}
@@ -716,7 +764,7 @@ class Judge:
                 asked = f"{check.question_id}#{slot}"
                 questions[asked] = check.to_question(item_path(plan.list_name, slot))
                 slots[asked] = position
-                item_keys[self._item_key(check, item, batch_shared)] = asked
+                item_keys[self._item_key(check, item, plan.shared)] = asked
                 if _source_of(item):
                     sources[asked] = _source_of(item)
         if not questions:
@@ -724,9 +772,9 @@ class Judge:
         extras = {
             "item_keys": item_keys,
             "sources": sources,
-            "skeleton": _skeleton(plan.list_name, questions, batch_items, batch_shared),
+            "skeleton": _skeleton(plan.list_name, questions, batch_items, plan.shared),
         }
-        return _Batch({**batch_shared, plan.list_name: batch_items}, questions, slots, extras)
+        return _Batch({**plan.shared, plan.list_name: batch_items}, questions, slots, extras)
 
     def _all_request(
         self,
@@ -852,6 +900,24 @@ class _Dispatched:
 
 
 @dataclass(frozen=True)
+class _BatchStop:
+    """Why a concurrent batch must not send its next request: the caller cancelled, a sibling batch
+    failed, or the caller stopped consuming results."""
+
+    cancelled: Callable[[], bool] | None
+    halted: threading.Event = field(default_factory=threading.Event)
+
+    def requested(self) -> bool:
+        return self.halted.is_set() or (self.cancelled is not None and self.cancelled())
+
+
+@dataclass(frozen=True)
+class _SentBatch:
+    answered: list[tuple[_Batch, JevResponse]]
+    error: Exception | None
+
+
+@dataclass(frozen=True)
 class _Batch:
     """One request: the code it carries, the questions asked about that code, and, for each of those
     questions, the item in the batch whose code the answer is about."""
@@ -875,6 +941,7 @@ class _CheckPlan:
     checks: Sequence[Check]
     items: Sequence[Mapping]
     shared: Mapping
+    hidden: frozenset[str]
     thresholds: Thresholds
     budget: int
     answered: dict[tuple[int, str], _ItemAnswer] = field(default_factory=dict)
@@ -946,6 +1013,21 @@ class _CallRequest:
         chosen = self.usable[route_result.choice]
         argument_result = _pick_result(response, _argument_id(chosen.name, chosen), self.thresholds)
         return CallDecision(chosen.name, argument_result.choice, route_result, argument_result)
+
+
+def _positions(batch: _Batch) -> list[int]:
+    """The item positions a batch asks about; ``slots`` holds one entry per open question."""
+    return sorted(set(batch.slots.values()))
+
+
+def _completed_batches(futures: list[Future]) -> Iterator[tuple[_Batch, JevResponse]]:
+    failure: Exception | None = None
+    for future in as_completed(futures):
+        sent = future.result()
+        yield from sent.answered
+        failure = failure or sent.error
+    if failure is not None:
+        raise failure
 
 
 def _is_async(client: object) -> bool:

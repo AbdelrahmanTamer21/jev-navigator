@@ -371,8 +371,12 @@ budget, the journal and the recording are the same steps, and only the send diff
 or an awaited one). Batches of `check_each_async` and the places of each `find_code_async` round are
 sent with `asyncio.gather` — except that the first batch of a `check_each_async` whose served model
 is still unknown and which has an answer store goes out alone. Its live answer pins the served model,
-so the remaining batches can replay from the store exactly as the sequential path does. A sync method given an async client
-raises `TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
+so the remaining batches can replay from the store. The sync `check_each`, `check_every` and their
+`iter_` forms send their batches on a thread pool, at most `Judge(max_concurrency=N)` at once
+(default 16), with the same first-batch rule; the `iter_` forms yield each batch as it completes. The
+call cap stays exact under concurrency, and after a failure or cancellation no batch sends a new
+request, while answers already received still yield. A sync method given an async client raises
+`TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
 
 Budgets: `judge.calls` counts requests sent (store hits are free). `Judge(max_calls=N)` caps a judge
 together with every `judge.scope()` made from it, and a scope counts its own calls; `find_code` runs
@@ -390,7 +394,8 @@ on its own scope, so searches sharing one judge never use up each other's budget
 - **Secrets.** `SecretMasker` masks private keys, token shapes, secret-named assignments and
   high-entropy assignments in every request, by content: a value hidden in one place is hidden
   everywhere in the request, for example where a relation text or another candidate quotes it.
-  The complete candidate set is masked before packing, so copied values stay hidden across batches.
+  The complete candidate set is masked once, before packing, so copied values stay hidden across
+  batches; the final scan still runs on every request before it is sent.
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value
   left in a key is refused too. Both are on by default; a host passes its own (a masker offers
   `mask(text)` and `masked_values(text)`), or turns one off explicitly with `None`.

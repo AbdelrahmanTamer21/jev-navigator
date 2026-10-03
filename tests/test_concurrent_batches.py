@@ -1,0 +1,162 @@
+"""Batches of one judging call travel concurrently, within the call cap and cancellation."""
+
+from __future__ import annotations
+
+import threading
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+
+import pytest
+
+from jev_navigator.judgments.journal import RawResponse
+from jev_navigator.judgments.judge import CallCapReachedError, Judge
+from jev_navigator.judgments.questions import Check, Criterion
+from jev_navigator.testing import ScriptedJevClient
+
+DESCRIBES = Check(
+    name="describes",
+    instructions="Is `{item}.code` the implementation that `doc.sentence` describes?",
+    yes=Criterion("The code performs what the sentence says."),
+    no=Criterion("The code does something else, or only calls it."),
+)
+SHARED = {"doc": {"sentence": "s"}}
+ONE_ITEM_PER_BATCH_CHARS = 40_000
+
+
+@dataclass
+class OverlapClient:
+    """Stands in for the remote provider: records every request and how many were in flight."""
+
+    script: ScriptedJevClient = field(default_factory=lambda: ScriptedJevClient(default_noul=0.9))
+    hold: threading.Event = field(default_factory=threading.Event)
+    in_flight: int = 0
+    peak: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    @property
+    def model(self) -> str:
+        return self.script.model
+
+    @property
+    def requests(self) -> list:
+        return self.script.requests
+
+    def ask(self, state: Mapping, questions: Mapping):
+        return self.parse(self.send(state, questions))
+
+    def send(self, state: Mapping, questions: Mapping) -> RawResponse:
+        with self._lock:
+            self.in_flight += 1
+            self.peak = max(self.peak, self.in_flight)
+        self.hold.wait(timeout=0.2)
+        with self._lock:
+            self.in_flight -= 1
+        return self.script.send(state, questions)
+
+    def parse(self, raw: RawResponse):
+        return self.script.parse(raw)
+
+
+def _items(count: int) -> list[dict]:
+    return [
+        {"file": f"f{index}.py", "code": f"# {index}\n" + "x" * ONE_ITEM_PER_BATCH_CHARS}
+        for index in range(count)
+    ]
+
+
+def test_batches_of_one_call_are_in_flight_together_up_to_the_concurrency_limit() -> None:
+    # Arrange
+    client = OverlapClient()
+    judge = Judge(client, max_concurrency=4)
+
+    # Act
+    results = judge.check_each(DESCRIBES, _items(10), SHARED)
+
+    # Assert
+    assert len(client.requests) == 10
+    assert client.peak == 4
+    assert [result.item["file"] for result in results] == [f"f{index}.py" for index in range(10)]
+
+
+def test_streamed_batches_overlap_and_every_item_is_answered_once() -> None:
+    # Arrange
+    client = OverlapClient()
+    judge = Judge(client, max_concurrency=16)
+
+    # Act
+    answered = [result.item["file"] for result in judge.iter_check_each(DESCRIBES, _items(6), SHARED)]
+
+    # Assert
+    assert client.peak == 6
+    assert sorted(answered) == sorted(f"f{index}.py" for index in range(6))
+
+
+def test_the_call_cap_stays_exact_under_concurrency_and_answered_batches_still_yield() -> None:
+    # Arrange
+    client = OverlapClient()
+    judge = Judge(client, max_calls=3, max_concurrency=8)
+    answered: list[str] = []
+
+    # Act
+    with pytest.raises(CallCapReachedError):
+        for result in judge.iter_check_each(DESCRIBES, _items(8), SHARED):
+            answered.append(result.item["file"])
+
+    # Assert
+    assert len(client.requests) == 3
+    assert judge.calls == 3
+    assert len(answered) == 3
+
+
+def test_cancellation_stops_every_batch_that_has_not_started_sending() -> None:
+    # Arrange
+    client = OverlapClient()
+    judge = Judge(client, max_concurrency=2)
+    stop = threading.Event()
+    original_send = client.send
+
+    def send_then_cancel(state: Mapping, questions: Mapping) -> RawResponse:
+        stop.set()
+        return original_send(state, questions)
+
+    client.send = send_then_cancel
+
+    # Act
+    answered = list(judge.iter_check_every([DESCRIBES], _items(8), SHARED, cancelled=stop.is_set))
+
+    # Assert
+    assert 1 <= len(client.requests) <= 2, "only requests already in flight finish"
+    assert len(answered) == len(client.requests)
+
+
+def test_a_concurrency_of_one_sends_batches_one_after_another() -> None:
+    # Arrange
+    client = OverlapClient()
+    judge = Judge(client, max_concurrency=1)
+
+    # Act
+    judge.check_each(DESCRIBES, _items(3), SHARED)
+
+    # Assert
+    assert client.peak == 1
+    assert len(client.requests) == 3
+
+
+def test_a_provider_failure_stops_batches_that_have_not_started_and_raises_once_drained() -> None:
+    # Arrange
+    client = OverlapClient()
+    judge = Judge(client, max_concurrency=1)
+    original_send = client.send
+
+    def fail_first(state: Mapping, questions: Mapping) -> RawResponse:
+        if not client.requests:
+            client.requests.append((state, questions))
+            raise ConnectionError("provider unavailable")
+        return original_send(state, questions)
+
+    client.send = fail_first
+
+    # Act / Assert
+    with pytest.raises(ConnectionError):
+        judge.check_each(DESCRIBES, _items(5), SHARED)
+    assert len(client.requests) == 1
