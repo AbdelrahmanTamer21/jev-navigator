@@ -662,18 +662,14 @@ class Judge:
         positions: Sequence[int],
         cancelled: Callable[[], bool] | None = None,
     ) -> Iterator[tuple[_Batch, JevResponse]]:
-        """Send one packed batch of item positions, splitting it when its request cannot fit the
-        provider's measured input budget.
+        """Send one packed batch of item positions, splitting it when the provider refuses its size.
 
-        The batch is measured before it is sent: a request outside ``request_exceeds_input_budget``
-        (state plus the longest question over ``JEV_INPUT_BOX_CHARS``, or the body over
-        ``MAX_REQUEST_CHARS``) is split by item and each half is measured again, so no request the
-        measurement already rejects is ever paid for. A provider refusal that still names an
-        exceeded input budget (``max_tokens_exceeded``) splits the same way. One position whose own
-        state cannot fit has no smaller honest request - its questions name an item path that a
-        partial state would change - so its error propagates and the journal keeps the provider's
-        report. Every sub-batch keeps each item's store key, so replay and resume accounting stay
-        exact.
+        Packing already keeps every batch within ``request_exceeds_input_budget``, so a batch is sent
+        as packed. A provider refusal that names an exceeded input budget (``max_tokens_exceeded``)
+        splits it by item and sends the halves. One position whose own request is refused has no
+        smaller honest request - its questions name an item path that a partial state would change -
+        so its error propagates and the journal keeps the provider's report. Every sub-batch keys
+        each item by its own batch mates, so replay and resume accounting stay exact.
         """
         if not positions:
             return
@@ -681,9 +677,6 @@ class Judge:
         if batch is None:
             return
         splittable = len(positions) > 1
-        if splittable and request_exceeds_input_budget(batch.state, batch.questions):
-            yield from self._split_positions(plan, positions, cancelled)
-            return
         try:
             if cancelled is not None and cancelled():
                 return
@@ -723,8 +716,6 @@ class Judge:
         if batch is None:
             return []
         splittable = len(positions) > 1
-        if splittable and request_exceeds_input_budget(batch.state, batch.questions):
-            return await self._split_positions_async(plan, positions)
         try:
             response = await self.ask_async(
                 batch.state, batch.questions, thresholds=plan.thresholds, masked=plan.hidden, **batch.extras
