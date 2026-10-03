@@ -422,6 +422,55 @@ def test_a_passed_member_is_a_candidate_while_a_passed_function_is_resolved(
         ]
 
 
+PASSED_MEMBER_CONSTANT_PY = """\
+TIMEOUT = 5
+
+
+class Client:
+    def send(self, bus):
+        bus.wait(self.TIMEOUT)
+        bus.wait(TIMEOUT)
+"""
+
+PASSED_MEMBER_CONSTANT_TS = """\
+const TIMEOUT = 5;
+
+class Client {
+  send(bus) {
+    bus.wait(this.TIMEOUT);
+    bus.wait(TIMEOUT);
+  }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("file", "source", "constant", "member_line"),
+    [
+        ("client.py", PASSED_MEMBER_CONSTANT_PY, Span("client.py", 1, 1, "TIMEOUT"), 6),
+        ("client.ts", PASSED_MEMBER_CONSTANT_TS, Span("client.ts", 1, 1, "TIMEOUT"), 5),
+    ],
+    ids=["python", "typescript"],
+)
+def test_a_passed_member_is_a_candidate_while_a_passed_constant_is_resolved(
+    tmp_path: Path, file: str, source: str, constant: Span, member_line: int
+) -> None:
+    """`bus.wait(self.TIMEOUT)` passes an attribute of `self`, not the module constant `TIMEOUT`: an
+    argument can name a constant, but a member argument is bound like a method call on an unknown
+    receiver. The bare `TIMEOUT` on the next line is proven by the same-file definition."""
+    # Arrange
+    (tmp_path / file).write_text(source)
+
+    # Act
+    references = CodeIndex(tmp_path, [file]).find_references("TIMEOUT")
+
+    # Assert
+    assert [(ref.line, ref.binding.status, ref.binding.target) for ref in references] == [
+        (member_line, "candidate", None),
+        (member_line + 1, "resolved", constant),
+    ]
+
+
 USES_PY = """\
 from app.rules import ALLOWED, PATTERN, Store
 
