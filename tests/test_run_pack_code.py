@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from git_repos import commit_files
+
+from jev_navigator.directives.find_code import SearchBudget, find_code
+from jev_navigator.directives.places import MOVES, place_for_line
 from jev_navigator.directives.trace import trace_workflow
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.judge import Judge
@@ -93,3 +97,61 @@ def test_rebuilding_a_request_whose_code_fields_were_withheld_names_them(tmp_pat
     # Assert
     assert not rebuilt.matches
     assert any("links" in difference for difference in rebuilt.differences)
+
+
+def test_a_find_pack_names_a_key_mention_without_quoting_the_key(tmp_path: Path) -> None:
+    # Arrange: the opened function quotes a dictionary key; another file mentions the same key
+    commit_files(
+        tmp_path,
+        {
+            "app/limits.py": 'def item_limit(settings):\n    return settings["dict_key_marker.limit"]\n',
+            "app/defaults.py": 'DEFAULTS = {\n    "dict_key_marker.limit": 4,\n}\n',
+        },
+    )
+    index = CodeIndex.from_directory(tmp_path)
+    start = place_for_line(index, "app/limits.py", 2, "start")
+    pack = tmp_path / "answers.jsonl"
+    judge = Judge(ScriptedJevClient(default_noul=0.6), store=JsonlAnswerStore(pack))
+
+    # Act
+    find_code(
+        index,
+        judge,
+        "the default item limit",
+        [start],
+        budget=SearchBudget(max_steps=3),
+        moves={"keys_mentioned": MOVES["keys_mentioned"]},
+    )
+
+    # Assert
+    stored = pack.read_text()
+    assert "mentions a key (app/defaults.py:" in stored
+    assert "dict_key_marker" not in stored
+
+
+def test_a_pack_that_keeps_requests_keeps_the_key_mention_verbatim(tmp_path: Path) -> None:
+    # Arrange
+    commit_files(
+        tmp_path,
+        {
+            "app/limits.py": 'def item_limit(settings):\n    return settings["dict_key_marker.limit"]\n',
+            "app/defaults.py": 'DEFAULTS = {\n    "dict_key_marker.limit": 4,\n}\n',
+        },
+    )
+    index = CodeIndex.from_directory(tmp_path)
+    start = place_for_line(index, "app/limits.py", 2, "start")
+    pack = tmp_path / "answers.jsonl"
+    judge = Judge(ScriptedJevClient(default_noul=0.6), store=JsonlAnswerStore(pack, keep_requests=True))
+
+    # Act
+    find_code(
+        index,
+        judge,
+        "the default item limit",
+        [start],
+        budget=SearchBudget(max_steps=3),
+        moves={"keys_mentioned": MOVES["keys_mentioned"]},
+    )
+
+    # Assert
+    assert "mentions `dict_key_marker.limit`" in pack.read_text()

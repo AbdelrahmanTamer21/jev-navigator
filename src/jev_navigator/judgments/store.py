@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .answers import Answer, JevResponse, answer_from_json
+from .relations import without_quoted_code
 
 DEFAULT_SHARED_STORE = Path.home() / ".cache/jev-navigator/answers.sqlite"
 SHARED_STORE_VARIABLE = "JEV_NAVIGATOR_ANSWER_STORE"
@@ -39,7 +40,8 @@ SKELETON_ITEM_FIELDS = frozenset(
     {"file", "lines", "commit", "file_sha256", "reached_by", "span_key", "name", "place"}
 )
 """The item fields a run pack keeps without ``keep_requests``: ids, locations, hashes and names. Every
-other field, such as a Trace link line or a Find signature, can quote code and is withheld."""
+other field, such as a Trace link line or a Find signature, can quote code and is withheld; a
+``reached_by`` that quotes a key is rendered from the unit's location."""
 INPUT_BUDGET_REFUSAL = "input_budget_refusal"
 """A store line recording that a route refused one exact request for its input size."""
 
@@ -351,6 +353,7 @@ def _without_request(record: AnswerRecord) -> AnswerRecord:
             **asdict(record),
             "request": None,
             "skeleton": _code_free_skeleton(record.skeleton),
+            "sources": {asked: _code_free_fields(fields) for asked, fields in record.sources.items()},
             "sent_body_base64": None,
             "sent_exact": False,
             "question_ids": record.question_ids,
@@ -364,8 +367,17 @@ def _code_free_skeleton(skeleton: Mapping) -> dict:
         return dict(skeleton)
     items = skeleton["items"]
     withheld = sorted({name for item in items for name in item if name not in SKELETON_ITEM_FIELDS})
-    kept = [{name: value for name, value in item.items() if name in SKELETON_ITEM_FIELDS} for item in items]
-    return {**skeleton, "items": kept, "withheld_fields": withheld}
+    return {**skeleton, "items": [_code_free_fields(item) for item in items], "withheld_fields": withheld}
+
+
+def _code_free_fields(fields: Mapping) -> dict:
+    """A unit's fields cut to ``SKELETON_ITEM_FIELDS``, with a ``reached_by`` that quotes code
+    rendered from the unit's location."""
+    kept = {name: value for name, value in fields.items() if name in SKELETON_ITEM_FIELDS}
+    if "reached_by" in kept:
+        line = kept["lines"][0] if kept.get("lines") else 0
+        kept["reached_by"] = without_quoted_code(kept["reached_by"], kept.get("file", ""), line)
+    return kept
 
 
 def _stamped(record: AnswerRecord) -> AnswerRecord:
