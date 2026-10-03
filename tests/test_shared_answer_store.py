@@ -8,6 +8,7 @@ from pathlib import Path
 
 from conftest import BudgetedClient
 
+from jev_navigator.judgments import judge as judge_module
 from jev_navigator.judgments.client import ReplayOnlyClient
 from jev_navigator.judgments.judge import BATCH_RULE, Judge
 from jev_navigator.judgments.questions import Check, Criterion, Pick
@@ -205,3 +206,22 @@ def test_a_whole_request_replayed_from_the_store_counts_its_answers(tmp_path: Pa
 
     # Assert
     assert (judge.calls, judge.replayed_answers) == (1, 1)
+
+
+def test_a_size_refusal_under_another_input_box_is_not_honoured(tmp_path: Path, monkeypatch) -> None:
+    # Arrange: a refusal recorded while the route's box was different
+    shared = tmp_path / "answers.sqlite"
+    items = [{"file": f"p{index}.py", "code": "y" * 12_000} for index in range(4)]
+    Judge(BudgetedClient(34_000), store=SqliteAnswerStore(shared), served_model="jev-scripted").check_each(
+        DESCRIBES, items, SHARED
+    )
+    monkeypatch.setattr(judge_module, "JEV_INPUT_BOX_CHARS", judge_module.JEV_INPUT_BOX_CHARS + 1)
+    larger = BudgetedClient(200_000)
+
+    # Act
+    Judge(larger, store=SqliteAnswerStore(shared), served_model="jev-scripted").check_each(
+        DESCRIBES, items, SHARED
+    )
+
+    # Assert: the whole batch is tried again under the new box, and the larger route accepts it
+    assert [len(state["items"]) for state, _ in larger.requests] == [4]

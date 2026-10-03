@@ -11,7 +11,6 @@ import asyncio
 import base64
 import copy
 import inspect
-import json
 import logging
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -53,7 +52,6 @@ from .thresholds import NoulVerdict, Thresholds
 
 logger = logging.getLogger(__name__)
 
-MAX_STATE_CHARS = 60_000
 DEFAULT_ITEMS_PER_REQUEST = 16
 """How many items one batched request carries at most (André, 03.10.2026: measured on the code-index
 set, 16 per request kept accuracy and cost about half the tokens of one per request)."""
@@ -243,7 +241,6 @@ class Judge:
         *,
         list_name: str = "items",
         thresholds: Thresholds | None = None,
-        batch_budget: int | None = None,
     ) -> Mapping[str, list[CheckResult]]:
         """Every check asked about every item, in as few requests as the size budget allows.
 
@@ -256,7 +253,7 @@ class Judge:
         measured again, so every request sent fits the measured input budget. Items already judged
         by the same question and model, in the same batch, come from the store.
         """
-        plan = self._check_plan(checks, items, shared, list_name, thresholds, batch_budget)
+        plan = self._check_plan(checks, items, shared, list_name, thresholds)
         for sub_batch, response in self._answered_batches(plan):
             plan.answer(sub_batch, response)
         return plan.answers()
@@ -335,12 +332,11 @@ class Judge:
         *,
         list_name: str = "items",
         thresholds: Thresholds | None = None,
-        batch_budget: int | None = None,
     ) -> Mapping[str, list[CheckResult]]:
         """``check_every`` with its batches sent concurrently; when the served model is still
         unknown and an answer store is present, the first batch pins the model before the remaining
         batches look in the store, exactly as the sequential path does."""
-        plan = self._check_plan(checks, items, shared, list_name, thresholds, batch_budget)
+        plan = self._check_plan(checks, items, shared, list_name, thresholds)
         batches = plan.batches
         if batches and self._must_learn_model_first():
             for sub_batch, response in await self._send_positions_async(plan, _positions(batches[0])):
@@ -474,8 +470,9 @@ class Judge:
         return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton, batch)
 
     def _sendable(self, state: Mapping, questions: Mapping, masked: frozenset[str] | None) -> _Prepared:
-        """The prepared request, refused without a call when this route already refused these exact
-        bytes for their input size, so a replay splits it again for free."""
+        """The prepared request, refused without a call when this route, under the same input box,
+        already refused these exact bytes for their input size, so a replay splits it again for free.
+        A changed box tries the request again."""
         prepared = self._prepare(state, questions, masked)
         if self._known_refusal(prepared):
             raise InputBudgetExceededError("this route refused this exact request for its input size before")
@@ -484,12 +481,12 @@ class Judge:
     def _known_refusal(self, prepared: _Prepared) -> bool:
         if prepared.stored is not None or self.store is None:
             return False
-        return self.store.refused(prepared.request_hash, self.client.model)
+        return self.store.refused(prepared.request_hash, self.client.model, JEV_INPUT_BOX_CHARS)
 
     def _record_refusal(self, prepared: _Prepared, error: Exception) -> None:
         if isinstance(error, InputBudgetExceededError) and self.store is not None:
             with self._bookkeeping:
-                self.store.put_refusal(prepared.request_hash, self.client.model)
+                self.store.put_refusal(prepared.request_hash, self.client.model, JEV_INPUT_BOX_CHARS)
 
     def _prepare(self, state: Mapping, questions: Mapping, masked: frozenset[str] | None) -> _Prepared:
         if masked is None:
@@ -773,7 +770,6 @@ class Judge:
         shared: Mapping | None,
         list_name: str,
         thresholds: Thresholds | None,
-        batch_budget: int | None = None,
     ) -> _CheckPlan:
         """Mask the whole candidate set once, before packing, so copied secret values stay hidden
         across batches; the final scan before each send still runs. Batches form over every item,
@@ -784,7 +780,6 @@ class Judge:
             raise ValueError("independent checks require unique names for their result lists")
         hidden = masked_values([*items, shared or {}], self.masker) if self.masker else frozenset()
         *items, shared = self._masked_together([*items, shared or {}], hidden)
-        budget = MAX_STATE_CHARS if batch_budget is None else batch_budget
         plan = _CheckPlan(
             list_name,
             checks,
@@ -792,7 +787,6 @@ class Judge:
             shared,
             hidden,
             thresholds or self.thresholds,
-            budget,
             self.items_per_request,
         )
         groups = _batches(plan)
@@ -1025,7 +1019,6 @@ class _CheckPlan:
     shared: Mapping
     hidden: frozenset[str]
     thresholds: Thresholds
-    budget: int
     items_per_request: int
     answered: dict[tuple[int, str], _ItemAnswer] = field(default_factory=dict)
     open: dict[int, dict[str, Check]] = field(default_factory=dict)
@@ -1191,28 +1184,26 @@ def _argument_id(operation: str, offer: CallOffer) -> str:
 
 def _batches(plan: _CheckPlan) -> list[list[int]]:
     """Every item, in the stable order, in batches of at most ``items_per_request``; a batch closes
-    early when the next item would not fit."""
+    early when the request carrying the next item would not fit the character boxes."""
     batches: list[list[int]] = []
     current: list[int] = []
-    used = 0
-    wording = _wording_size(plan)
     for position in plan.stable_order():
-        size = len(json.dumps(plan.items[position])) + wording
-        if current and (len(current) == plan.items_per_request or not _fits_in_batch(plan, used, size)):
+        if current and (
+            len(current) == plan.items_per_request or not _fits_in_batch(plan, [*current, position])
+        ):
             batches.append(current)
-            current, used = [], 0
+            current = []
         current.append(position)
-        used += size
     return [*batches, current] if current else batches
 
 
-def _fits_in_batch(plan: _CheckPlan, used: int, size: int) -> bool:
-    """The one size rule of packing: the batch's items and question wording within the character
-    budget left beside the shared state."""
-    return used + size <= plan.budget - len(json.dumps(plan.shared))
-
-
-def _wording_size(plan: _CheckPlan) -> int:
-    """What the wording of every check about one item costs, measured once per plan."""
-    wording = [check.to_question(item_path(plan.list_name, 0)) for check in plan.checks]
-    return sum(len(json.dumps(question)) for question in wording)
+def _fits_in_batch(plan: _CheckPlan, members: list[int]) -> bool:
+    """The one size rule of packing: the request that would carry these members, with every check
+    asked of each, within the boxes ``request_exceeds_input_budget`` measures before a send."""
+    state = {**plan.shared, plan.list_name: [plan.items[position] for position in members]}
+    questions = {
+        f"{check.question_id}#{slot}": check.to_question(item_path(plan.list_name, slot))
+        for slot in range(len(members))
+        for check in plan.checks
+    }
+    return not request_exceeds_input_budget(state, questions)

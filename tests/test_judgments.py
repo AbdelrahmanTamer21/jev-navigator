@@ -373,7 +373,7 @@ def test_each_item_is_masked_once_per_judging_call_across_several_batches() -> N
     items = [{"code": f"def part{index}():\n    return {index}"} for index in range(4)]
 
     # Act
-    Judge(client, masker=masker).check_every([DESCRIBES], items, {"doc": {"sentence": "s"}}, batch_budget=200)
+    Judge(client, masker=masker, items_per_request=1).check_each(DESCRIBES, items, {"doc": {"sentence": "s"}})
 
     # Assert
     assert len(client.requests) > 1
@@ -702,14 +702,12 @@ def _padding_item(label: str, chars: int) -> dict:
     return {"file": f"{label}.py", "lines": [1, 2], "code": f"def {label}():\n    {'y' * chars}"}
 
 
-def test_oversized_batch_is_split_before_sending_so_no_request_exceeds_the_input_budget() -> None:
+def test_items_that_would_overflow_one_request_are_packed_so_no_request_exceeds_the_input_budget() -> None:
     client = BudgetedClient(MAX_REQUEST_CHARS)
     judge = Judge(client)
     items = [_padding_item(f"part{index}", 28_000) for index in range(4)]
 
-    results = judge.check_every(
-        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=200_000
-    )
+    results = judge.check_every([DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts")
 
     assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 4
     assert client.refusals == 0, "a request the measurement already rejects must not be paid for"
@@ -729,9 +727,7 @@ def _boxed_client() -> BudgetedClient:
 
 def _judge_padded_parts(client: BudgetedClient, count: int, chars: int):
     items = [_padding_item(f"part{index}", chars) for index in range(count)]
-    return Judge(client).check_every(
-        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=500_000
-    )
+    return Judge(client).check_every([DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts")
 
 
 def test_a_state_just_under_the_character_box_is_sent_unsplit() -> None:

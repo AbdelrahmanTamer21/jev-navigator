@@ -84,23 +84,23 @@ class AnswerStore(Protocol):
 
     def put(self, record: AnswerRecord) -> None: ...
 
-    def refused(self, request_sha256: str, route: str) -> bool: ...
+    def refused(self, request_sha256: str, route: str, input_box: int) -> bool: ...
 
-    def put_refusal(self, request_sha256: str, route: str) -> None: ...
+    def put_refusal(self, request_sha256: str, route: str, input_box: int) -> None: ...
 
 
 class JsonlAnswerStore:
     """Append-only JSON lines. ``item_keys`` maps an item key (item content hash, shared-state hash,
     question id with its wording hash, batch membership hash) to the question id that answered it;
     lookups also match the served model recorded with the answer. Input-size refusals are kept as
-    ``input_budget_refusal`` lines keyed by request hash and route."""
+    ``input_budget_refusal`` lines keyed by request hash, route and the input box in force."""
 
     def __init__(self, path: Path, *, keep_requests: bool = False) -> None:
         self.path = Path(path)
         self.keep_requests = keep_requests
         self._records: dict[str, AnswerRecord] = {}
         self._items: dict[str, dict[str, StoredItemAnswer]] = {}
-        self._refusals: set[tuple[str, str]] = set()
+        self._refusals: set[tuple[str, str, int]] = set()
         self._write_lock = threading.Lock()
         self._load()
 
@@ -117,14 +117,16 @@ class JsonlAnswerStore:
             return next(reversed(answers.values()), None)
         return answers.get(served_model)
 
-    def refused(self, request_sha256: str, route: str) -> bool:
-        """Whether ``route`` refused this exact request for its input size before."""
-        return (request_sha256, route) in self._refusals
+    def refused(self, request_sha256: str, route: str, input_box: int) -> bool:
+        """Whether ``route`` refused this exact request for its input size before, under the same
+        input box."""
+        return (request_sha256, route, input_box) in self._refusals
 
-    def put_refusal(self, request_sha256: str, route: str) -> None:
+    def put_refusal(self, request_sha256: str, route: str, input_box: int) -> None:
+        line = {"kind": INPUT_BUDGET_REFUSAL, "request_sha256": request_sha256, "route": route}
         with self._write_lock:
-            self._append({"kind": INPUT_BUDGET_REFUSAL, "request_sha256": request_sha256, "route": route})
-            self._refusals.add((request_sha256, route))
+            self._append({**line, "input_box": input_box})
+            self._refusals.add((request_sha256, route, input_box))
 
     def put(self, record: AnswerRecord) -> None:
         stored = record if self.keep_requests else _without_request(record)
@@ -147,7 +149,7 @@ class JsonlAnswerStore:
             raw = json.loads(line)
             kind = raw.get("kind")
             if kind == INPUT_BUDGET_REFUSAL:
-                self._refusals.add((raw["request_sha256"], raw["route"]))
+                self._refusals.add((raw["request_sha256"], raw["route"], raw["input_box"]))
             elif kind != "llm_step":
                 self._index(_record_from_json(raw))
 
@@ -167,8 +169,10 @@ create table if not exists item_answers (
     item_key text not null, model text not null, request_sha256 text not null, answer text not null
 );
 create index if not exists item_answers_by_key on item_answers (item_key, model);
-create table if not exists refusals (request_sha256 text not null, route text not null);
-create index if not exists refusals_by_request on refusals (request_sha256, route);
+create table if not exists refusals (
+    request_sha256 text not null, route text not null, input_box integer not null
+);
+create index if not exists refusals_by_request on refusals (request_sha256, route, input_box);
 """
 
 
@@ -235,17 +239,13 @@ class SqliteAnswerStore:
             )
             self._db.executemany("insert into item_answers values (?, ?, ?, ?)", items)
 
-    def refused(self, request_sha256: str, route: str) -> bool:
-        return (
-            self._one(
-                "select 1 from refusals where request_sha256 = ? and route = ?", (request_sha256, route)
-            )
-            is not None
-        )
+    def refused(self, request_sha256: str, route: str, input_box: int) -> bool:
+        query = "select 1 from refusals where request_sha256 = ? and route = ? and input_box = ?"
+        return self._one(query, (request_sha256, route, input_box)) is not None
 
-    def put_refusal(self, request_sha256: str, route: str) -> None:
+    def put_refusal(self, request_sha256: str, route: str, input_box: int) -> None:
         with self._lock, self._db:
-            self._db.execute("insert into refusals values (?, ?)", (request_sha256, route))
+            self._db.execute("insert into refusals values (?, ?, ?)", (request_sha256, route, input_box))
 
     def _one(self, query: str, parameters: tuple) -> tuple | None:
         with self._lock:
@@ -286,12 +286,14 @@ class LayeredAnswerStore:
         self.run.put(record)
         self.shared.put(record)
 
-    def refused(self, request_sha256: str, route: str) -> bool:
-        return self.run.refused(request_sha256, route) or self.shared.refused(request_sha256, route)
+    def refused(self, request_sha256: str, route: str, input_box: int) -> bool:
+        return self.run.refused(request_sha256, route, input_box) or self.shared.refused(
+            request_sha256, route, input_box
+        )
 
-    def put_refusal(self, request_sha256: str, route: str) -> None:
-        self.run.put_refusal(request_sha256, route)
-        self.shared.put_refusal(request_sha256, route)
+    def put_refusal(self, request_sha256: str, route: str, input_box: int) -> None:
+        self.run.put_refusal(request_sha256, route, input_box)
+        self.shared.put_refusal(request_sha256, route, input_box)
 
 
 def _record_from_json(raw: dict) -> AnswerRecord:

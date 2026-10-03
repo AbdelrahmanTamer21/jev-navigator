@@ -29,7 +29,7 @@ from .index.languages import language_of
 from .judgments.answers import TokenTotal
 from .judgments.client import JevClient
 from .judgments.judge import CallCapReachedError, Judge
-from .judgments.store import run_answer_store
+from .judgments.store import DEFAULT_SHARED_STORE, SHARED_STORE_VARIABLE, run_answer_store, shared_store_path
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
@@ -68,6 +68,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _parser().error(str(error))
     repository = Path(args.repo).resolve()
     output = Path(args.out).expanduser() if args.out else _default_output(repository)
+    _use_answer_store(args)
     client: TypeSafeJevClient | None = None
     try:
         _load_typesafe_environment(os.environ)
@@ -516,6 +517,7 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
         "--max-calls", type=_count_or_none, help="Optional model-request cap; none is unlimited"
     )
     trace.add_argument("--verbose", action="store_true", help="Print expanded masked model requests")
+    _add_answer_store_argument(trace)
     stats = commands.add_parser(
         "stats",
         help="count and rank parsed functions/classes without model calls",
@@ -552,6 +554,24 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     return parser
 
 
+def _use_answer_store(args: argparse.Namespace) -> None:
+    """Point this run at ``--answer-store`` when given, and say which shared store it uses."""
+    if args.answer_store:
+        os.environ[SHARED_STORE_VARIABLE] = str(Path(args.answer_store).expanduser().resolve())
+    print(f"answer store: {shared_store_path()}", file=sys.stderr)
+
+
+def _add_answer_store_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--answer-store",
+        metavar="PATH",
+        help=(
+            f"Shared answer store file (default: ${SHARED_STORE_VARIABLE}, else {DEFAULT_SHARED_STORE}); "
+            "a new file keeps this run from replaying another run's answers"
+        ),
+    )
+
+
 def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEFAULT_MAX_CALLS) -> None:
     find.add_argument(
         "target", help="Behavior to locate; name the concrete check, decision or transformation"
@@ -576,6 +596,7 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         "--out",
         help="New or empty output directory (default: a unique run under ./jvn-results)",
     )
+    _add_answer_store_argument(find)
     defaults = SearchBudget()
     limits.add_argument(
         "--max-depth",

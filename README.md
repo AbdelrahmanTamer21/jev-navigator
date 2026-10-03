@@ -185,8 +185,9 @@ An explicitly selected output directory must be new or empty. Each evidence pack
 - `answers.jsonl`: reusable typed answers keyed by source and request hashes. Every answer is also
   written to the machine's shared answer store (`~/.cache/jev-navigator/answers.sqlite`, or
   `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run on unchanged code replays from
-  it, copies what it replays into its own `answers.jsonl`, and reports those answers as
-  `replayed_answers` beside its live `calls`.
+  it after one live request that learns the served model, and copies what it replays into its own
+  `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
+  `--answer-store PATH` points a run at another store file; each run prints the store it uses.
 
 The manifest and report contain inspected source code. Keep packs for private repositories in a
 private artifact store; the repository includes only a small public-format sample under
