@@ -21,7 +21,7 @@ import os
 import signal
 import threading
 from collections.abc import Mapping, Sequence
-from concurrent.futures import CancelledError, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import IntEnum, StrEnum
@@ -457,8 +457,10 @@ def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[l
     """Ask one beam concurrently. A caller interrupt stops future rounds after the already-sent
     requests settle; successful responses still count and interrupted places return to the frontier."""
     with ThreadPoolExecutor(max_workers=len(opened)) as pool:
-        futures = [pool.submit(_ask_within_cap, judge, search, opening) for opening in opened]
+        futures: list[Future] = []
         try:
+            for opening in opened:
+                futures.append(pool.submit(_ask_within_cap, judge, search, opening))
             return [future.result() for future in futures], False
         except KeyboardInterrupt:
             with _defer_keyboard_interrupts(re_raise=False):
@@ -466,15 +468,16 @@ def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[l
                 for future in futures:
                     future.cancel()
                 wait(futures)
-                responses = []
-                for future in futures:
-                    try:
-                        responses.append(future.result())
-                    except (CancelledError, KeyboardInterrupt):
-                        responses.append(_Unanswered.CANCELLED)
-                    except Exception:
-                        responses.append(_Unanswered.CANCELLED)
-            return responses, True
+                responses = [_settled_response(future) for future in futures]
+            unsubmitted = len(opened) - len(futures)
+            return [*responses, *[_Unanswered.CANCELLED] * unsubmitted], True
+
+
+def _settled_response(future: Future):
+    try:
+        return future.result()
+    except (Exception, KeyboardInterrupt):
+        return _Unanswered.CANCELLED
 
 
 def _merge_round(search: _Search, opened: list[_Opening], responses: list) -> None:

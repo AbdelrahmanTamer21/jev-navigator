@@ -4,7 +4,6 @@ import asyncio
 import base64
 import concurrent.futures
 import json
-import os
 import signal
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -521,9 +520,11 @@ def test_sigint_returns_the_active_http_place_as_resumable(
         range_place(index, "policy.py", 4, 5, "candidate"),
     ]
 
+    main_thread = threading.get_ident()
+
     def interrupt_when_sent() -> None:
         all_entered.wait()
-        os.kill(os.getpid(), signal.SIGINT)
+        signal.pthread_kill(main_thread, signal.SIGINT)
 
     interrupter = threading.Thread(target=interrupt_when_sent)
     interrupter.start()
