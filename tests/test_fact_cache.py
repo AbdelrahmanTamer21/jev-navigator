@@ -50,6 +50,7 @@ def test_warm_index_preserves_incomplete_parser_coverage(tmp_path):
     repository = tmp_path / "repo"
     repository.mkdir()
     (repository / "broken.py").write_text("def broken(\n")
+    (repository / "use.py").write_text("from broken import broken\n\nbroken()\n")
     cache = tmp_path / "cache"
     cold = CodeIndex.from_directory(repository, fact_cache_dir=cache)
     cold.functions_in("broken.py")
@@ -57,6 +58,7 @@ def test_warm_index_preserves_incomplete_parser_coverage(tmp_path):
     warm = CodeIndex.from_directory(repository, fact_cache_dir=cache)
     warm.functions_in("broken.py")
     assert "broken.py" in warm.observed_unparsed_files
+    assert warm.find_callers("broken")[0].binding.status == "unknown", "the unread lines must persist"
 
 
 @pytest.fixture

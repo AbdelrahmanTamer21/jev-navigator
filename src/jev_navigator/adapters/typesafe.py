@@ -16,62 +16,142 @@ import contextvars
 import os
 import threading
 from collections.abc import Coroutine, Mapping
+from contextlib import contextmanager, nullcontext
+from time import perf_counter_ns
 from typing import Any
 
 from ..judgments.answers import JevResponse, response_from_raw
-from ..judgments.client import LATEST_JEV
-from ..judgments.journal import RawResponse
+from ..judgments.client import LATEST_JEV, input_budget_error
+from ..judgments.journal import AttemptJournalCallbackError, RawAttempt, RawResponse
+
+
+class _AttemptCollection:
+    def __init__(self, on_attempt=None) -> None:
+        self.on_attempt = on_attempt
+        self.attempts: list[RawAttempt] = []
+
+    def record(self, attempt: RawAttempt) -> None:
+        self.attempts.append(attempt)
+        if self.on_attempt is not None:
+            try:
+                self.on_attempt(attempt)
+            except Exception as error:
+                raise AttemptJournalCallbackError(error) from error
 
 
 class CapturingTransport:
-    """Passes requests to ``inner`` and keeps each thread's last response, with the exact request
-    body that produced it, as a ``RawResponse``."""
+    """Passes requests through and records each physical request in the active logical call."""
 
     def __init__(self, inner) -> None:
         self._inner = inner
-        self._last = threading.local()
+        self._active = threading.local()
+
+    @contextmanager
+    def collecting(self, on_attempt=None):
+        collection = _AttemptCollection(on_attempt)
+        previous = getattr(self._active, "collection", None)
+        self._active.collection = collection
+        try:
+            yield collection
+        finally:
+            if previous is None:
+                del self._active.collection
+            else:
+                self._active.collection = previous
 
     def handle_request(self, request):
-        response = self._inner.handle_request(request)
-        response.read()
+        started = perf_counter_ns()
+        try:
+            response = self._inner.handle_request(request)
+            response.read()
+        except BaseException as error:
+            self._record(
+                RawAttempt(
+                    self._next_attempt(),
+                    _duration_ms(started),
+                    request.content,
+                    error_type=type(error).__name__,
+                    error=str(error),
+                )
+            )
+            raise
         content_type = response.headers.get("content-type", "")
-        self._last.response = RawResponse(
-            response.content, response.status_code, content_type, sent_body=request.content
+        self._record(
+            RawAttempt(
+                self._next_attempt(),
+                _duration_ms(started),
+                request.content,
+                RawResponse(response.content, response.status_code, content_type, sent_body=request.content),
+            )
         )
         return response
 
-    def take(self) -> RawResponse | None:
-        captured = getattr(self._last, "response", None)
-        self._last.response = None
-        return captured
+    def _next_attempt(self) -> int:
+        collection = getattr(self._active, "collection", None)
+        return len(collection.attempts) + 1 if collection is not None else 1
+
+    def _record(self, attempt: RawAttempt) -> None:
+        collection = getattr(self._active, "collection", None)
+        if collection is not None:
+            collection.record(attempt)
 
     def close(self) -> None:
         self._inner.close()
 
 
 class CapturingAsyncTransport:
-    """Async equivalent of ``CapturingTransport``. A context variable keeps concurrent requests'
-    responses attached to the task that sent each one."""
+    """Async equivalent, isolating each logical call with a context-local attempt collection."""
 
     def __init__(self, inner) -> None:
         self._inner = inner
-        self._last: contextvars.ContextVar[RawResponse | None] = contextvars.ContextVar(
-            "typesafe_raw_response", default=None
+        self._active: contextvars.ContextVar[_AttemptCollection | None] = contextvars.ContextVar(
+            "typesafe_http_attempts", default=None
         )
 
+    @contextmanager
+    def collecting(self, on_attempt=None):
+        collection = _AttemptCollection(on_attempt)
+        token = self._active.set(collection)
+        try:
+            yield collection
+        finally:
+            self._active.reset(token)
+
     async def handle_async_request(self, request):
-        response = await self._inner.handle_async_request(request)
-        await response.aread()
+        started = perf_counter_ns()
+        try:
+            response = await self._inner.handle_async_request(request)
+            await response.aread()
+        except BaseException as error:
+            self._record(
+                RawAttempt(
+                    self._next_attempt(),
+                    _duration_ms(started),
+                    request.content,
+                    error_type=type(error).__name__,
+                    error=str(error),
+                )
+            )
+            raise
         content_type = response.headers.get("content-type", "")
-        self._last.set(
-            RawResponse(response.content, response.status_code, content_type, sent_body=request.content)
+        self._record(
+            RawAttempt(
+                self._next_attempt(),
+                _duration_ms(started),
+                request.content,
+                RawResponse(response.content, response.status_code, content_type, sent_body=request.content),
+            )
         )
         return response
 
-    def take(self) -> RawResponse | None:
-        captured = self._last.get()
-        self._last.set(None)
-        return captured
+    def _next_attempt(self) -> int:
+        collection = self._active.get()
+        return len(collection.attempts) + 1 if collection is not None else 1
+
+    def _record(self, attempt: RawAttempt) -> None:
+        collection = self._active.get()
+        if collection is not None:
+            collection.record(attempt)
 
     async def aclose(self) -> None:
         await self._inner.aclose()
@@ -173,24 +253,69 @@ class TypeSafeJevClient:
         return self.parse(self.send(state, questions))
 
     def send(self, state: Mapping, questions: Mapping) -> RawResponse:
-        """The response as received, with the SDK's decoded form attached."""
+        """The response as received, with the SDK's decoded form attached.
+
+        A provider refusal that names an exceeded input budget is translated to the typed
+        ``InputBudgetExceededError`` so the batching owner can split the batch instead of the run
+        dying on an untyped 400."""
         if self._async_sdk:
             assert self._runner is not None
-            return self._runner.call(self._send_async(state, questions))
-        response = self._sdk.system_one(dict(state), dict(questions))
-        return self._raw_response(response)
+            try:
+                return self._runner.call(self._send_async(state, questions))
+            except Exception as error:
+                typed = input_budget_error(error)
+                if typed is not None:
+                    raise typed from error
+                raise
+        return self.send_with_attempts(state, questions)
 
-    async def _send_async(self, state: Mapping, questions: Mapping) -> RawResponse:
-        response = await self._sdk.system_one(dict(state), dict(questions))
-        return self._raw_response(response)
+    def send_with_attempts(self, state: Mapping, questions: Mapping, on_attempt=None) -> RawResponse:
+        """Send one logical request and notify the owner as each physical HTTP attempt completes."""
+        if self._async_sdk:
+            assert self._runner is not None
+            try:
+                return self._runner.call(self._send_async(state, questions, on_attempt))
+            except Exception as error:
+                typed = input_budget_error(error)
+                if typed is not None:
+                    raise typed from error
+                raise
+        scope = self._capture.collecting(on_attempt) if self._capture else nullcontext(_AttemptCollection())
+        with scope as collection:
+            try:
+                response = self._sdk.system_one(dict(state), dict(questions))
+            except Exception as error:
+                typed = input_budget_error(error)
+                if typed is not None:
+                    raise typed from error
+                raise
+            return self._raw_response(response, collection.attempts)
 
-    def _raw_response(self, response) -> RawResponse:
+    async def _send_async(self, state: Mapping, questions: Mapping, on_attempt=None) -> RawResponse:
+        scope = self._capture.collecting(on_attempt) if self._capture else nullcontext(_AttemptCollection())
+        with scope as collection:
+            try:
+                response = await self._sdk.system_one(dict(state), dict(questions))
+            except Exception as error:
+                typed = input_budget_error(error)
+                if typed is not None:
+                    raise typed from error
+                raise
+            return self._raw_response(response, collection.attempts)
+
+    def _raw_response(self, response, attempts: list[RawAttempt] | None = None) -> RawResponse:
         decoded = response.model_dump(mode="json") if hasattr(response, "model_dump") else dict(response)
-        captured = self._capture.take() if self._capture else None
+        attempts = attempts or []
+        captured = attempts[-1].response if attempts else None
         if captured is None:
             return RawResponse.from_decoded(decoded)
         return RawResponse(
-            captured.body, captured.status, captured.content_type, decoded, sent_body=captured.sent_body
+            captured.body,
+            captured.status,
+            captured.content_type,
+            decoded,
+            sent_body=captured.sent_body,
+            attempts=tuple(attempts),
         )
 
     def parse(self, raw: RawResponse) -> JevResponse:
@@ -213,3 +338,7 @@ class TypeSafeJevClient:
         close = getattr(self._sdk, "close", None)
         if close is not None:
             close()
+
+
+def _duration_ms(started_ns: int) -> float:
+    return (perf_counter_ns() - started_ns) / 1_000_000

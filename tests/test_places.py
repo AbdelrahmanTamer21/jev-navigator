@@ -470,6 +470,32 @@ def test_an_anonymous_callback_offers_its_named_containing_function(tmp_path: Pa
     assert "in the same file as orders.ts:" in offered[0].signature
 
 
+def test_a_callback_inside_a_test_callback_offers_that_test_first(tmp_path: Path) -> None:
+    """Test callbacks are anonymous, so a callback nested in one has no named container: the
+    same-file move offers its nearest container, the test it belongs to, before the other tests."""
+    # Arrange
+    index = committed_index(
+        tmp_path,
+        {
+            "orders.test.ts": (
+                'it("rejects an empty cart", () => {\n'
+                "  expect(() => placeOrder([])).toThrow();\n"
+                "});\n"
+                'it("accepts one item", () => {\n'
+                "  expect(placeOrder([1])).toBe(1);\n"
+                "});\n"
+            )
+        },
+    )
+    inner = next(span for span in index.functions_in("orders.test.ts") if span.start == span.end == 2)
+
+    # Act
+    offered = neighbours(index, index.read_slice(inner), moves={"same_file": MOVES["same_file"]})
+
+    # Assert
+    assert [place.key for place in offered] == ["orders.test.ts:1-3", "orders.test.ts:4-6"]
+
+
 def test_a_constant_used_as_a_method_receiver_is_passed_on(tmp_path: Path) -> None:
     # Arrange
     index = committed_index(

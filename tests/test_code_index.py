@@ -364,6 +364,113 @@ def test_references_in_lists_the_names_a_function_passes_on_without_calling(
     assert "scheduler" not in {ref.name for ref in references}
 
 
+PASSED_MEMBER_PY = """\
+def handler(event):
+    return event
+
+
+class Client:
+    def send(self, bus):
+        bus.on(self.handler)
+        bus.on(handler)
+        bus.on(handler, self.handler)
+"""
+
+PASSED_MEMBER_TS = """\
+function handler(event) {
+  return event;
+}
+
+class Client {
+  send(bus) {
+    bus.on(this.handler);
+    bus.on(handler);
+    bus.on(handler, this.handler);
+  }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("file", "source", "function"),
+    [
+        ("client.py", PASSED_MEMBER_PY, Span("client.py", 1, 2, "handler")),
+        ("client.ts", PASSED_MEMBER_TS, Span("client.ts", 1, 3, "handler")),
+    ],
+    ids=["python", "typescript"],
+)
+def test_a_passed_member_is_a_candidate_while_a_passed_function_is_resolved(
+    tmp_path: Path, file: str, source: str, function: Span
+) -> None:
+    """`bus.on(self.handler)` passes an attribute of `self`, not the function `handler` defined in the
+    same file: it is bound like a method call on an unknown receiver. A line passing both stands as the
+    plain name, as a plain call does for callers. Persisted facts keep the receiver too."""
+    # Arrange
+    (tmp_path / file).write_text(source)
+    cache = tmp_path / "cache"
+
+    for _ in range(2):  # Fresh parser facts, then the persisted ones.
+        # Act
+        index = CodeIndex(tmp_path, [file], fact_cache_dir=cache)
+        references = index.find_references("handler")
+
+        # Assert
+        assert [(ref.line, ref.binding.status, ref.binding.target) for ref in references] == [
+            (7, "candidate", None),
+            (8, "resolved", function),
+            (9, "resolved", function),
+        ]
+
+
+PASSED_MEMBER_CONSTANT_PY = """\
+TIMEOUT = 5
+
+
+class Client:
+    def send(self, bus):
+        bus.wait(self.TIMEOUT)
+        bus.wait(TIMEOUT)
+"""
+
+PASSED_MEMBER_CONSTANT_TS = """\
+const TIMEOUT = 5;
+
+class Client {
+  send(bus) {
+    bus.wait(this.TIMEOUT);
+    bus.wait(TIMEOUT);
+  }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("file", "source", "constant", "member_line"),
+    [
+        ("client.py", PASSED_MEMBER_CONSTANT_PY, Span("client.py", 1, 1, "TIMEOUT"), 6),
+        ("client.ts", PASSED_MEMBER_CONSTANT_TS, Span("client.ts", 1, 1, "TIMEOUT"), 5),
+    ],
+    ids=["python", "typescript"],
+)
+def test_a_passed_member_is_a_candidate_while_a_passed_constant_is_resolved(
+    tmp_path: Path, file: str, source: str, constant: Span, member_line: int
+) -> None:
+    """`bus.wait(self.TIMEOUT)` passes an attribute of `self`, not the module constant `TIMEOUT`: an
+    argument can name a constant, but a member argument is bound like a method call on an unknown
+    receiver. The bare `TIMEOUT` on the next line is proven by the same-file definition."""
+    # Arrange
+    (tmp_path / file).write_text(source)
+
+    # Act
+    references = CodeIndex(tmp_path, [file]).find_references("TIMEOUT")
+
+    # Assert
+    assert [(ref.line, ref.binding.status, ref.binding.target) for ref in references] == [
+        (member_line, "candidate", None),
+        (member_line + 1, "resolved", constant),
+    ]
+
+
 USES_PY = """\
 from app.rules import ALLOWED, PATTERN, Store
 

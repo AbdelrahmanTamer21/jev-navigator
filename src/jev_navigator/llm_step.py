@@ -10,6 +10,12 @@ The user defines all four parts:
 The library only guards what is sent: the context is masked, the rendered prompt is scanned and
 refused on a hit, each call is stored (prompt hash, reply, parsed answer), and an optional budget
 stops further calls. A reply that does not parse is retried once with the parse error.
+
+``run`` never returns ``None``: the result carries a ``status`` (``not_requested``,
+``budget_exhausted``, ``answered``, ``parse_failed``) so callers can inspect the answer and the
+attempt count. Every provider attempt is persisted through the guard before the connector is
+called (its identity, connector, model and exact prompt hash), the reply is persisted before it
+is parsed or a retry starts, and the parse outcome and provider failures are persisted separately.
 """
 
 from __future__ import annotations
@@ -18,8 +24,10 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Generic, Protocol, TypeVar
+from uuid import uuid4
 
 from .judgments.questions import content_hash
 from .judgments.secrets import (
@@ -52,16 +60,28 @@ class AnswerContract(Protocol[Parsed]):
     def parse(self, reply: str, context: Mapping) -> Parsed: ...
 
 
+class LlmStatus(StrEnum):
+    """The four outcomes of ``LlmStep.run``; the string value is the status spelled out."""
+
+    NOT_REQUESTED = "not_requested"
+    BUDGET_EXHAUSTED = "budget_exhausted"
+    ANSWERED = "answered"
+    PARSE_FAILED = "parse_failed"
+
+
 @dataclass(frozen=True)
 class LlmCall(Generic[Parsed]):
-    """``answer`` is None when the reply never parsed; ``parse_error`` then says why."""
+    """One ``LlmStep.run`` outcome. ``answer`` is set only when ``status`` is ``answered``;
+    ``parse_error`` says why the last reply never parsed, and ``attempts`` counts provider calls."""
 
-    answer: Parsed | None
-    reply: str
-    prompt_sha256: str
-    connector: str
-    model: str
+    status: LlmStatus
+    answer: Parsed | None = None
+    reply: str | None = None
     parse_error: str = ""
+    attempts: int = 0
+    connector: str = ""
+    model: str = ""
+    prompt_sha256: str = ""
 
 
 @dataclass
@@ -84,22 +104,61 @@ class LlmGuard:
         refuse_if_secret({"prompt": prompt}, {}, self.scanner)
 
     def record(self, step_name: str, call: LlmCall) -> None:
+        """One summary line per finished call, as before (plus the status)."""
+        self._append(
+            {
+                "event": "call",
+                "status": call.status.value,
+                "attempts": call.attempts,
+                "answer": _jsonable(call.answer),
+                "reply": call.reply,
+                "prompt_sha256": call.prompt_sha256,
+                "connector": call.connector,
+                "model": call.model,
+                "parse_error": call.parse_error,
+            },
+            step_name,
+        )
+
+    def record_attempt(
+        self, step_name: str, attempt: str, connector: str, model: str, prompt_sha256: str
+    ) -> None:
+        """Persist the attempt identity before the connector is called."""
+        self._append(
+            {
+                "event": "attempt",
+                "attempt": attempt,
+                "connector": connector,
+                "model": model,
+                "prompt_sha256": prompt_sha256,
+            },
+            step_name,
+        )
+
+    def record_reply(self, step_name: str, attempt: str, reply: str) -> None:
+        """Persist the exact reply before it is parsed or a retry starts."""
+        self._append({"event": "reply", "attempt": attempt, "reply": reply}, step_name)
+
+    def record_parse(self, step_name: str, attempt: str, parse_error: str = "") -> None:
+        """Persist the parse outcome; an empty ``parse_error`` means the reply parsed."""
+        self._append({"event": "parse", "attempt": attempt, "parse_error": parse_error}, step_name)
+
+    def record_failure(self, step_name: str, attempt: str, error: str) -> None:
+        """Persist a provider failure against its already-created attempt."""
+        self._append({"event": "failure", "attempt": attempt, "error": error}, step_name)
+
+    def _append(self, line: dict, step_name: str) -> None:
         if self.store_path is None:
             return
-        line = {
+        self.store_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
             "kind": "llm_step",
             "step": step_name,
             "recorded_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "answer": _jsonable(call.answer),
-            "reply": call.reply,
-            "prompt_sha256": call.prompt_sha256,
-            "connector": call.connector,
-            "model": call.model,
-            "parse_error": call.parse_error,
+            **line,
         }
-        self.store_path.parent.mkdir(parents=True, exist_ok=True)
         with self.store_path.open("a") as lines:
-            lines.write(json.dumps(line, sort_keys=True) + "\n")
+            lines.write(json.dumps(record, sort_keys=True) + "\n")
 
 
 @dataclass
@@ -111,10 +170,13 @@ class LlmStep(Generic[Results, Parsed]):
     connector: Connector
     guard: LlmGuard = field(default_factory=LlmGuard)
 
-    def run(self, results: Results) -> LlmCall[Parsed] | None:
-        """None when ``when`` says no or the budget is used up; otherwise the call and its answer."""
-        if not self.when(results) or not self.guard.budget_left():
-            return None
+    def run(self, results: Results) -> LlmCall[Parsed]:
+        """``not_requested`` when ``when`` says no, ``budget_exhausted`` when the budget is used up;
+        otherwise the call and its answer, or ``parse_failed`` when no reply ever parsed."""
+        if not self.when(results):
+            return LlmCall(LlmStatus.NOT_REQUESTED)
+        if not self.guard.budget_left():
+            return LlmCall(LlmStatus.BUDGET_EXHAUSTED)
         context = self.guard.safe_context(self.context(results))
         call = self._ask(context)
         self.guard.record(self.name, call)
@@ -124,16 +186,42 @@ class LlmStep(Generic[Results, Parsed]):
         prompt = self.answer.render(context, parse_error)
         self.guard.check_prompt(prompt)
         self.guard.calls += 1
-        reply = self.connector.complete(prompt)
+        attempt_id = uuid4().hex
+        prompt_sha256 = content_hash(prompt)
+        self.guard.record_attempt(
+            self.name, attempt_id, self.connector.name, self.connector.model, prompt_sha256
+        )
+        try:
+            reply = self.connector.complete(prompt)
+        except Exception as error:
+            self.guard.record_failure(self.name, attempt_id, f"{type(error).__name__}: {error}")
+            raise
+        self.guard.record_reply(self.name, attempt_id, reply)
         try:
             parsed = self.answer.parse(reply, context)
         except ReplyParseError as error:
+            self.guard.record_parse(self.name, attempt_id, str(error))
             if attempt == 1 and self.guard.budget_left():
                 return self._ask(context, str(error), attempt=2)
             return LlmCall(
-                None, reply, content_hash(prompt), self.connector.name, self.connector.model, str(error)
+                status=LlmStatus.PARSE_FAILED,
+                reply=reply,
+                parse_error=str(error),
+                attempts=attempt,
+                connector=self.connector.name,
+                model=self.connector.model,
+                prompt_sha256=prompt_sha256,
             )
-        return LlmCall(parsed, reply, content_hash(prompt), self.connector.name, self.connector.model)
+        self.guard.record_parse(self.name, attempt_id)
+        return LlmCall(
+            status=LlmStatus.ANSWERED,
+            answer=parsed,
+            reply=reply,
+            attempts=attempt,
+            connector=self.connector.name,
+            model=self.connector.model,
+            prompt_sha256=prompt_sha256,
+        )
 
 
 @dataclass(frozen=True)

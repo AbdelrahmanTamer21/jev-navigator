@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from conftest import BudgetedClient
 
 from jev_navigator.directives.trace import (
     TRACE_EVIDENCE_CHECKS,
@@ -12,7 +13,7 @@ from jev_navigator.directives.trace import (
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
-from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.judge import MAX_REQUEST_BYTES, Judge
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
@@ -348,3 +349,67 @@ def test_cancelled_static_walk_does_not_start_external_judgments(tmp_path: Path)
     assert result.graph.stop == "cancelled"
     assert not client.requests
     assert {obligation.status for obligation in result.obligations} == {EvidenceStatus.UNRESOLVED}
+
+
+def _hub_index(root: Path, callers: int, line_chars: int) -> CodeIndex:
+    """A hub span referenced from `callers` long call sites: the sanitized failing shape."""
+    (root / "hub.py").write_text("def hub(request):\n    return request.body\n")
+    lines = []
+    for index in range(callers):
+        pad = "x" * line_chars
+        lines.append(f"def caller_{index}(request):\n    hub('{pad}')\n")
+    (root / "callers.py").write_text("\n".join(lines))
+    return CodeIndex.from_directory(root)
+
+
+def test_a_hub_item_keeps_every_link_fact_without_the_repeated_identity_boilerplate(tmp_path: Path) -> None:
+    """The saved trace run's request 5 was one 227-char span whose 165 links carried 138,002
+    characters of per-link identity boilerplate; no input budget could carry it."""
+    index = _hub_index(tmp_path, callers=150, line_chars=200)
+    root = index.find_definition("hub")[0]
+    client = BudgetedClient(MAX_REQUEST_BYTES)
+
+    result = trace_workflow(index, Judge(client), "How does a request become a result?", [root])
+
+    assert result.budget_stopped is False
+    assert client.refusals == 0, "no request over the measured input budget is ever sent"
+    hub_item = next(
+        item
+        for state, _ in client.requests
+        for item in state["trace"]
+        if item.get("span_key") == "hub.py:1-2"
+    )
+    assert len(hub_item["links"]) == 150
+    assert all(isinstance(link, str) for link in hub_item["links"])
+    dense = "\n".join(hub_item["links"])
+    for fact in ("self", "self#hub", "caller_7", "call", "at callers.py:", "binding"):
+        assert fact in dense
+    for obligation in result.obligations:
+        assert obligation.status is EvidenceStatus.EVIDENCE_BACKED
+
+
+def test_class_trace_assigns_method_evidence_to_its_lexical_owner(tmp_path: Path) -> None:
+    """A class with many methods must not repeat every method reference in one giant class item."""
+    names = [f"target_{number}" for number in range(12)]
+    (tmp_path / "targets.py").write_text(
+        "\n".join(f"def {name}(): return {number}" for number, name in enumerate(names))
+    )
+    methods = [
+        f"    def method_{number}(self):\n        return ({', '.join(names)})  # {'x' * 180}\n"
+        for number in range(50)
+    ]
+    (tmp_path / "hub.py").write_text("class Hub:\n" + "\n".join(methods))
+    index = CodeIndex.from_directory(tmp_path)
+    hub = index.find_definition("Hub")[0]
+    client = BudgetedClient(MAX_REQUEST_BYTES)
+
+    result = trace_workflow(index, Judge(client), "Which methods use the targets?", [hub])
+
+    assert client.refusals == 0
+    assert all(obligation.examined for obligation in result.obligations)
+    assert {link.target.name for link in result.graph.links if link.source == hub} >= {
+        "method_0",
+        "method_49",
+    }
+    assert not any(link.source == hub and link.name in names for link in result.graph.links)
+    assert sum(link.name in names for link in result.graph.links) >= 50 * len(names)

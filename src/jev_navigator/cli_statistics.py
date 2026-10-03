@@ -199,8 +199,9 @@ def _symbol(index: CodeIndex, symbol: statistics.Symbol, *, quoted: bool) -> dic
         "size": symbol.size,
         "held": symbol.held,
         "holder": (
-            None if symbol.holder is None else
-            f"{symbol.holder.file}:{symbol.holder.start}-{symbol.holder.end} {symbol.holder.name}"
+            None
+            if symbol.holder is None
+            else f"{symbol.holder.file}:{symbol.holder.start}-{symbol.holder.end} {symbol.holder.name}"
         ),
     }
     if quoted:
@@ -241,8 +242,11 @@ def _largest_section(index: CodeIndex, ranking: statistics.Largest, limit: int |
 
 
 def _ranges_section(
-    index: CodeIndex, ranking: statistics.Largest, quoted: bool,
-    min_lines: int | None, max_lines: int | None,
+    index: CodeIndex,
+    ranking: statistics.Largest,
+    quoted: bool,
+    min_lines: int | None,
+    max_lines: int | None,
 ) -> dict:
     """Every symbol this pack measured, with the lines it fills: a listing, never a top-N cut."""
     per_file: dict[str, list] = {}
