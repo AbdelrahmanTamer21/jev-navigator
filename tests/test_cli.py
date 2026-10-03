@@ -192,6 +192,65 @@ def test_entry_selection_replays_cached_calls_after_its_cap(tmp_path: Path) -> N
     assert json.loads((second / "resume.json").read_text())["stage"] == "navigation"
 
 
+def _capped_pack(tmp_path: Path, name: str) -> tuple[Path, Path, SearchBudget]:
+    repository = tmp_path / "repository"
+    if not repository.exists():
+        commit_files(
+            repository,
+            {
+                "app/one.py": "def one():\n    return 1\n",
+                "app/two.py": "def two():\n    return 2\n",
+                "tests/test_one.py": "def test_one():\n    assert True\n",
+            },
+        )
+    budget = SearchBudget(max_calls=1, beam_width=1)
+    create_evidence_pack(repository, (), "find one", (), tmp_path / name, budget, ScriptedJevClient())
+    return repository, tmp_path / name, budget
+
+
+def test_resuming_an_earlier_receipt_without_the_unreported_count_keeps_that_count_unknown(
+    tmp_path: Path,
+) -> None:
+    repository, first, budget = _capped_pack(tmp_path, "first")
+    manifest = json.loads((first / "manifest.json").read_text())
+    del manifest["provider"]["responses_without_usage"]
+    (first / "manifest.json").write_text(json.dumps(manifest))
+
+    resumed = create_evidence_pack(
+        repository,
+        (),
+        "find one",
+        (),
+        tmp_path / "second",
+        budget,
+        ScriptedJevClient(input_tokens_per_call=None),
+        resume_from=first,
+    )
+
+    assert resumed["provider"]["responses_without_usage"] is None
+    assert (
+        "Responses without usage: not known (earlier receipt)"
+        in (tmp_path / "second" / "report.md").read_text()
+    )
+
+
+def test_resuming_a_receipt_that_knows_its_unreported_count_keeps_adding_to_it(tmp_path: Path) -> None:
+    repository, first, budget = _capped_pack(tmp_path, "first")
+
+    resumed = create_evidence_pack(
+        repository,
+        (),
+        "find one",
+        (),
+        tmp_path / "second",
+        budget,
+        ScriptedJevClient(input_tokens_per_call=None),
+        resume_from=first,
+    )
+
+    assert resumed["provider"]["responses_without_usage"] == resumed["search"]["calls_this_invocation"] > 0
+
+
 def test_resume_rejects_changed_source_before_reusing_the_frontier(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     commit_files(repository, {"policy.py": "def policy():\n    return 1\n"})

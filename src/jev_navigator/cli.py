@@ -891,9 +891,10 @@ def _manifest(
         "provider": {
             "requested_model": requested_model,
             "served_model": served_model,
-            "input_tokens": _provider_total(previous, "input_tokens") + input_total.reported,
-            "responses_without_usage": _provider_total(previous, "responses_without_usage")
-            + input_total.not_reported,
+            "input_tokens": _carried_count(previous, "input_tokens", 0) + input_total.reported,
+            "responses_without_usage": _plus_known(
+                _carried_count(previous, "responses_without_usage", None), input_total.not_reported
+            ),
         },
         "search": {
             "outcome": result.outcome,
@@ -1003,8 +1004,20 @@ def _find_all_report(manifest: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _provider_total(previous: dict | None, key: str) -> int:
-    return previous["provider"].get(key, 0) if previous else 0
+def _carried_count(previous: dict | None, key: str, missing_in_earlier_receipt: int | None) -> int | None:
+    """What an earlier receipt recorded for a provider count; ``missing_in_earlier_receipt`` when the
+    receipt predates the field (0 for a sum that always existed, ``None`` for a count nobody measured)."""
+    if previous is None:
+        return 0
+    return previous["provider"].get(key, missing_in_earlier_receipt)
+
+
+def _unreported_text(count: int | None) -> str:
+    return "not known (earlier receipt)" if count is None else str(count)
+
+
+def _plus_known(carried: int | None, added: int) -> int | None:
+    return None if carried is None else carried + added
 
 
 def _navigator_provenance() -> dict:
@@ -1094,6 +1107,7 @@ def _report(manifest: dict) -> str:
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
         f"`{manifest['provider']['served_model']}`",
+        f"- Responses without usage: {_unreported_text(manifest['provider']['responses_without_usage'])}",
         f"- Navigation elapsed: {search['duration_seconds']:.3f} seconds "
         "(indexing and entry selection excluded)",
         f"- Coverage caveat: {len(search['not_inspected'])} candidates were not independently opened; "
