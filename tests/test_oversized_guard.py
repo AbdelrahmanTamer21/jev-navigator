@@ -170,3 +170,62 @@ def test_scanning_a_scope_with_a_guarded_file_keeps_peak_memory_bounded(tmp_path
     peak_megabytes = report["peak_bytes"] / (1 if sys.platform == "darwin" else 1024) / 1_000_000
     assert peak_megabytes < 250
     assert BUNDLE in report["unavailable"]
+
+
+FUNCTION_RULE = "id: function\nlanguage: typescript\nrule:\n  kind: function_declaration"
+
+
+def _scan_typescript(repository: Path) -> list[dict]:
+    return list(tools.ast_grep_rules(FUNCTION_RULE, ["a.ts"], repository, refused={}))
+
+
+def test_a_repositorys_own_sgconfig_cannot_change_what_is_found(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    commit_files(
+        repository,
+        {
+            "a.ts": "export function a() { return 1 }\n",
+            "sgconfig.yml": "languageGlobs:\n  javascript: ['*.ts']\n",
+        },
+    )
+
+    matches = _scan_typescript(repository)
+
+    assert [match["file"] for match in matches] == ["a.ts"]
+
+
+def test_a_repositorys_custom_language_library_is_never_loaded(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    commit_files(
+        repository,
+        {
+            "a.ts": "export function a() { return 1 }\n",
+            "sgconfig.yml": (
+                "customLanguages:\n  mylang:\n    libraryPath: ./missing.so\n    extensions: [my]\n"
+            ),
+        },
+    )
+
+    matches = _scan_typescript(repository)
+
+    assert [match["file"] for match in matches] == ["a.ts"]
+
+
+def test_a_config_passed_by_the_caller_replaces_the_repositorys_config_and_is_not_merged_with_it(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repo"
+    commit_files(
+        repository,
+        {
+            "a.ts": "export function a() { return 1 }\n",
+            "sgconfig.yml": "languageGlobs:\n  javascript: ['*.ts']\n",
+        },
+    )
+    unrelated_remapping = "languageGlobs:\n  json: ['*.nothing']\n"
+
+    matches = list(
+        tools.ast_grep_rules(FUNCTION_RULE, ["a.ts"], repository, config=unrelated_remapping, refused={})
+    )
+
+    assert [match["file"] for match in matches] == ["a.ts"]
