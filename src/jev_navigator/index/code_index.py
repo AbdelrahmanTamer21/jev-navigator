@@ -7,6 +7,7 @@ policy only; the index has no default refusal and never drops files from a reque
 from __future__ import annotations
 
 import hashlib
+import re
 import tempfile
 import threading
 from collections import Counter
@@ -26,6 +27,8 @@ from .imports import (
     resolve_import,
 )
 from .languages import (
+    declares_type,
+    declares_value,
     language_of,
 )
 from .packages import Packages
@@ -38,6 +41,7 @@ MAX_TEXT_HITS = 20
 CO_CHANGE_COMMITS = 200
 _COMMIT_MARK = "@@commit@@"
 _REGULAR_FILE_MODES = frozenset({"100644", "100755"})
+_WORD = re.compile(r"[\w$]+")
 ScanObserver = Callable[[str, str, int], None]
 
 
@@ -103,6 +107,7 @@ class CodeIndex:
         self._top_level_in = cache(self._top_level_spans)
         self._names_imported = cache(self._read_imported_names)
         self._binding = cache(self._compute_binding)
+        self._unread_names = cache(self._read_unread_names)
 
     @classmethod
     def from_git(
@@ -318,7 +323,8 @@ class CodeIndex:
         """Uses of ``name`` that are not calls: arguments, collection entries, assignments,
         decorators, exports, returns, method receivers, types and conditions, each with its role,
         holder and binding. Code reached this way (a callback, a registry entry, a parameter typed
-        with a class) has no call edge to follow."""
+        with a class) has no call edge to follow. A member passed as an argument (``self.handler``)
+        is bound like a method call on an unknown receiver, never proven by a same-named function."""
         return self._references(self._references_named(name))
 
     def references_in(self, function: Span) -> tuple[Reference, ...]:
@@ -331,9 +337,15 @@ class CodeIndex:
         )
         return tuple(ref for ref in self._references(inside) if self.find_definition(ref.name))
 
-    def binding_of(self, file: str, line: int, name: str, receiver: str | None) -> Binding:
-        """Computed once per call site and cached for the life of the index."""
-        return self._binding(file, line, name, receiver)
+    def binding_of(
+        self, file: str, line: int, name: str, receiver: str | None, role: str | None = None
+    ) -> Binding:
+        """Computed once per site and cached for the life of the index. ``role`` is a reference's
+        role, None for a call, and decides which definitions count: a type names a class or a
+        declaration a type can name, an export any definition, and a call or any other use (an
+        argument, receiver, condition, decorator...) a function, class or declaration a value can
+        name, such as a module constant holding a callable."""
+        return self._binding(file, line, name, receiver, role)
 
     def _references(self, matches: Iterable[ReferenceMatch]) -> tuple[Reference, ...]:
         return tuple(
@@ -343,27 +355,46 @@ class CodeIndex:
                 match.line,
                 match.role,
                 self.enclosing_symbol(match.file, match.line),
-                self.binding_of(match.file, match.line, match.name, None),
+                self.binding_of(match.file, match.line, match.name, match.receiver, match.role),
             )
             for match in sorted(set(matches))
         )
 
-    def _compute_binding(self, file: str, line: int, name: str, receiver: str | None) -> Binding:
+    def _compute_binding(
+        self, file: str, line: int, name: str, receiver: str | None, role: str | None
+    ) -> Binding:
         if self.binding_resolver is not None:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
                 return injected
-        definitions = tuple(span for span in self.find_definition(name) if self._is_callable(span))
+        definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
         facts = CallFacts(
             file,
             name,
             receiver,
             definitions,
-            tuple(span for span in definitions if span in self._top_level_in(file)),
+            tuple(span for span in definitions if span in self._top_level_in(span.file)),
             self._imported_from(file, name),
-            self.observed_unparsed_files | self.unavailable_files.keys(),
+            self._files_hiding(name),
         )
         return binding_from_facts(facts)
+
+    def _files_hiding(self, name: str) -> frozenset[str]:
+        """Where a definition of ``name`` could sit unseen: a file gone from the disk, or an unparsed
+        file whose lines under an ERROR node mention the name. A definition names what it defines, so
+        lines that never mention the name cannot hold one. Every file that mentions it has already
+        been scanned to look for its definitions, so the answer does not depend on scan order."""
+        unparsed = (file for file in self.observed_unparsed_files if name in self._unread_names(file))
+        return frozenset(unparsed) | self.unavailable_files.keys()
+
+    def _read_unread_names(self, file: str) -> frozenset[str]:
+        """The words on the lines of ``file`` that its ERROR nodes span; the whole file's words while
+        its facts are still being recorded."""
+        lines = self._lines_of(file)
+        facts = self._facts.get(file)
+        stretches = facts.unparsed_lines if facts is not None else ((1, len(lines)),)
+        text = "\n".join(line for start, end in stretches for line in lines[start - 1 : end])
+        return frozenset(_WORD.findall(text))
 
     def _file_structure(self, file: str) -> FileStructure:
         self._require_in_scope(file)
@@ -385,8 +416,15 @@ class CodeIndex:
         }
         return tuple(definitions)
 
-    def _is_callable(self, span: Span) -> bool:
-        return span in self._facts_in(span.file).structure.symbols
+    def _can_name(self, role: str | None, span: Span) -> bool:
+        """Whether a use in ``role`` can name the definition ``span``; ``binding_of`` gives the rule."""
+        if role == "export":
+            return True
+        structure = self._facts_in(span.file).structure
+        if span in structure.symbols:
+            return role != "type" or span not in structure.functions
+        first_line = self.read_slice(Span(span.file, span.start, span.start)).text
+        return declares_type(first_line) if role == "type" else declares_value(first_line)
 
     def _calls_with_name(self, name: str):
         files = self._files_for_name(name)
@@ -480,13 +518,20 @@ class CodeIndex:
         return {}
 
     def _top_level_spans(self, file: str) -> frozenset[Span]:
-        """Symbols of ``file`` that no class or other function contains."""
+        """Symbols and declarations of ``file`` that no class or other function contains. A function
+        starting on a declaration's first line is the value it declares, not its container."""
         symbols = self.symbols_in(file)
-        return frozenset(
+        top_symbols = (
             span
             for span in symbols
             if not any(other != span and other.contains(span.start) for other in symbols)
         )
+        top_declarations = (
+            span
+            for span in self.declarations_in(file)
+            if not any(other.start < span.start <= other.end for other in symbols)
+        )
+        return frozenset((*top_symbols, *top_declarations))
 
     def _imported_from(self, file: str, name: str) -> tuple[ImportFact, ...]:
         specifier = self._names_imported(file).get(name)

@@ -25,14 +25,14 @@ PREVIEW_LINES = 3
 CHOOSE_PATH = Pick(
     name="automatic_entry_path",
     instructions=(
-        "Which actual directory or file in `options` is the best place to continue looking for the "
+        "Which supplied directory or file is the best place to continue looking for the "
         "code described by `target.description`? Choose from the supplied repository entries only."
     ),
 )
 CHOOSE_SPAN = Pick(
     name="automatic_entry_span",
     instructions=(
-        "Which actual source span in `options` is most likely to contain the code described by "
+        "Which supplied source span is most likely to contain the code described by "
         "`target.description`? Choose from the supplied spans only."
     ),
 )

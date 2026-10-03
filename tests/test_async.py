@@ -305,3 +305,32 @@ def test_the_async_history_check_matches_the_sync_one() -> None:
     # Assert
     assert judged.probability == 0.9
     assert history.previous_judgments["holds_limit_check"] == judged
+
+
+TWO_ITEMS = [{"code": "x = 1"}, {"code": "y = 2"}]
+
+
+def test_the_first_async_batch_of_check_every_asks_each_item_once_per_check(
+    tmp_path: Path,
+) -> None:
+    """Two checks over two items are two item slots and four questions. The model-pinning first
+    batch once sent four copies of the two items and eight questions, duplicating the answers too."""
+    # Arrange: a warm store whose answers stay unusable until a live answer pins the served model.
+    path = tmp_path / "answers.jsonl"
+    warm = Judge(
+        ScriptedJevClient(nouls={"describes": 0.9, "names_value": 0.9}), store=JsonlAnswerStore(path)
+    )
+    warm.check_every([DESCRIBES, NAMES_VALUE], TWO_ITEMS, SHARED)
+    client = OverlappingAsyncClient(ScriptedJevClient(nouls={"describes": 0.9, "names_value": 0.9}))
+    judge = Judge(client, store=JsonlAnswerStore(path))
+
+    # Act
+    results = run(judge.check_every_async([DESCRIBES, NAMES_VALUE], TWO_ITEMS, SHARED))
+
+    # Assert: the first batch deduplicates its item positions exactly like the sibling senders.
+    state, questions = client.wrapped.requests[0]
+    assert len(state["items"]) == 2
+    assert len(questions) == 4
+    assert judge.calls == 1
+    for name in ("describes", "names_value"):
+        assert [result.probability for result in results[name]] == [0.9, 0.9]
