@@ -12,6 +12,7 @@ from contextlib import ExitStack
 from functools import cache
 from pathlib import Path
 
+from .file_shape import measure
 from .spans import TextHit
 
 logger = logging.getLogger(__name__)
@@ -42,13 +43,22 @@ def ast_grep_version() -> str:
 
 
 def ast_grep_rules(
-    rules_yaml: str, files: Sequence[str], cwd: Path, config: str | None = None
+    rules_yaml: str,
+    files: Sequence[str],
+    cwd: Path,
+    config: str | None = None,
+    *,
+    refused: dict[str, str],
 ) -> Iterator[dict]:
     """The matches of ``rules_yaml`` over ``files``, one at a time as ast-grep prints them, so no
-    process's whole output is ever held. ``config``, when given, is sgconfig YAML text (a
-    ``languageGlobs`` remapping, say); it is written to a temporary file outside every repository and
-    passed with ``-c``."""
-    if not files:
+    process's whole output is ever held. Every parse passes through here: a file whose estimated parse
+    peak is over the bound (``file_shape.MAX_PARSE_PEAK_MB``) is never handed to ast-grep. Each such
+    file is added to ``refused`` with its reason when the iteration starts, so read ``refused`` after
+    the matches. ``config``, when given, is sgconfig YAML text (a ``languageGlobs`` remapping, say);
+    it is written to a temporary file outside every repository and passed with ``-c``."""
+    parseable, skipped = _split_by_parse_peak(files, cwd)
+    refused.update(skipped)
+    if not parseable:
         return
     with ExitStack() as resources:
         command = [AST_GREP, "scan", "--inline-rules", rules_yaml]
@@ -57,8 +67,23 @@ def ast_grep_rules(
             path = Path(directory) / "sgconfig.yml"
             path.write_text(config)
             command += ["--config", str(path)]
-        for chunk in file_chunks(files):
+        for chunk in file_chunks(parseable):
             yield from _json_lines([*command, "--json=stream", *chunk], cwd)
+
+
+def _split_by_parse_peak(files: Sequence[str], cwd: Path) -> tuple[list[str], dict[str, str]]:
+    parseable: list[str] = []
+    refused: dict[str, str] = {}
+    for file in files:
+        try:
+            reason = measure((cwd / file).read_bytes()).refusal
+        except OSError:
+            reason = None
+        if reason is None:
+            parseable.append(file)
+        else:
+            refused[file] = reason
+    return parseable, refused
 
 
 def file_chunks(files: Sequence[str]) -> Iterator[Sequence[str]]:
