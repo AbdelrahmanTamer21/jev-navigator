@@ -9,7 +9,6 @@ import pytest
 from jev_navigator.directives.find_code import Outcome, SearchBudget, StopRule, find_code
 from jev_navigator.directives.places import place_for_line
 from jev_navigator.history import (
-    JEV_STATE_TOKEN_LIMIT,
     FetchedSpan,
     History,
     HistoryCheck,
@@ -23,6 +22,7 @@ from jev_navigator.history import (
     judge_sections,
 )
 from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.judgments.client import JEV_STATE_TOKEN_LIMIT
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
@@ -126,7 +126,7 @@ def test_section_limits_apply_before_any_code_is_evicted() -> None:
 
 def test_the_oldest_code_is_evicted_first_and_every_eviction_is_recorded() -> None:
     # Arrange
-    history = History(budget_tokens=300)
+    history = History(budget_tokens=500)
     for number in range(3):
         history.append(step(number, "y" * 300))
 

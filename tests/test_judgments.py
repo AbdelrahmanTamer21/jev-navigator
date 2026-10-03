@@ -9,12 +9,20 @@ from conftest import BudgetedClient
 
 from jev_navigator.judgments.answers import ChoiceAnswer
 from jev_navigator.judgments.client import (
+    JEV_STATE_TOKEN_LIMIT,
     InputBudgetExceededError,
     MissingAnswerError,
     ReplayOnlyClient,
+    estimate_tokens,
 )
 from jev_navigator.judgments.journal import JsonlJournal
-from jev_navigator.judgments.judge import MAX_REQUEST_CHARS, CallCapReachedError, CallOffer, Judge
+from jev_navigator.judgments.judge import (
+    MAX_REQUEST_BYTES,
+    CallCapReachedError,
+    CallOffer,
+    Judge,
+    request_exceeds_input_budget,
+)
 from jev_navigator.judgments.questions import Check, Criterion, Pick
 from jev_navigator.judgments.secrets import SecretInRequestError, SecretMasker
 from jev_navigator.judgments.store import JsonlAnswerStore
@@ -601,7 +609,7 @@ def _padding_item(label: str, chars: int) -> dict:
 
 
 def test_oversized_batch_is_split_before_sending_so_no_request_exceeds_the_input_budget() -> None:
-    client = BudgetedClient(MAX_REQUEST_CHARS)
+    client = BudgetedClient(MAX_REQUEST_BYTES)
     judge = Judge(client)
     items = [_padding_item(f"part{index}", 28_000) for index in range(4)]
 
@@ -611,14 +619,60 @@ def test_oversized_batch_is_split_before_sending_so_no_request_exceeds_the_input
 
     assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 4
     assert client.refusals == 0, "a request the measurement already rejects must not be paid for"
-    assert len(client.requests) == 2
+    assert len(client.requests) == 4
     judged_files: list[str] = []
     for state, questions in client.requests:
         body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
-        assert body <= MAX_REQUEST_CHARS
+        assert body <= MAX_REQUEST_BYTES
         assert len(questions) == len(state["parts"]), "one atomic question per item and slot"
         judged_files.extend(item["file"] for item in state["parts"])
     assert sorted(judged_files) == [f"part{index}.py" for index in range(4)]
+
+
+def _request_tokens(state: dict, questions: dict) -> int:
+    longest_question = max(
+        estimate_tokens(json.dumps(question, ensure_ascii=False)) for question in questions.values()
+    )
+    return estimate_tokens(json.dumps(state, ensure_ascii=False)) + longest_question
+
+
+def test_state_over_the_token_limit_is_split_before_sending_although_the_body_fits() -> None:
+    client = BudgetedClient(MAX_REQUEST_BYTES)
+    judge = Judge(client)
+    items = [_padding_item(f"part{index}", 20_000) for index in range(4)]
+
+    results = judge.check_every(
+        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=200_000
+    )
+
+    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 4
+    assert client.refusals == 0
+    assert len(client.requests) == 2
+    assert all(_request_tokens(*request) <= JEV_STATE_TOKEN_LIMIT for request in client.requests)
+    judged_files = [item["file"] for state, _ in client.requests for item in state["parts"]]
+    assert sorted(judged_files) == [f"part{index}.py" for index in range(4)]
+
+
+def test_a_body_over_the_byte_limit_is_over_budget_although_state_and_question_fit() -> None:
+    state = {"doc": {"sentence": "s"}}
+    questions = {f"q{index}": {"ask": "x" * 40} for index in range(3_000)}
+
+    assert request_exceeds_input_budget(state, questions)
+    assert not request_exceeds_input_budget(state, dict(list(questions.items())[:100]))
+
+
+def test_state_just_under_the_token_limit_is_sent_unsplit() -> None:
+    client = BudgetedClient(MAX_REQUEST_BYTES)
+    judge = Judge(client)
+    items = [_padding_item(f"part{index}", 20_000) for index in range(2)]
+
+    results = judge.check_every(
+        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=200_000
+    )
+
+    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 2
+    assert len(client.requests) == 1
+    assert _request_tokens(*client.requests[0]) <= JEV_STATE_TOKEN_LIMIT
 
 
 def test_provider_max_tokens_error_splits_the_batch_and_keeps_every_question_identity() -> None:
@@ -674,7 +728,7 @@ def test_split_answers_replay_from_the_store_without_new_calls(tmp_path: Path) -
 
 
 def test_a_normal_small_batch_is_unchanged_by_the_input_budget_boundary() -> None:
-    client = BudgetedClient(MAX_REQUEST_CHARS)
+    client = BudgetedClient(MAX_REQUEST_BYTES)
     judge = Judge(client)
     items = [{"code": "def a(): ..."}, {"code": "def b(): ..."}, {"code": "def c(): ..."}]
 

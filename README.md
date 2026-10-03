@@ -500,8 +500,10 @@ explicitly. An unknown name raises `UnknownSectionError`. Each section has its o
 (newest entries kept, long text cut; defaults in `DEFAULT_LIMITS`), applied before the token budget.
 Text limits also apply inside nested lists and mappings. Rendering a limited view preserves the
 complete code and judgments in the append-only record.
-The budget is capped at Jev's 32k-token limit for state plus the longest question (64k per request
-overall; TypeSafe Models page, read 28.09.2026). When the selected sections still do not fit, the
+The budget is capped at Jev's 32k-token limit for state plus the longest question, the binding limit
+(the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026; a whole request
+may reach the documented 64k). The judge applies the same limit before sending and splits a batch
+that would exceed it. When the selected sections still do not fit, the
 pluggable `evict` policy trims them; the default `drop_oldest_code` replaces the oldest code bodies with
 `[evicted]` and records each eviction in `history.evictions`. A check that reads no code never evicts.
 Pass `recorder=` (for example a `JsonlJournal`) to record every appended step; the recorder gets each

@@ -18,7 +18,13 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from .answers import JevResponse, NoulAnswer, response_to_raw
-from .client import AsyncJevClient, InputBudgetExceededError, JevClient
+from .client import (
+    JEV_STATE_TOKEN_LIMIT,
+    AsyncJevClient,
+    InputBudgetExceededError,
+    JevClient,
+    estimate_tokens,
+)
 from .journal import AttemptJournalCallbackError, Journal, JournalRequest, RawResponse
 from .questions import Check, Pick, Rate, content_hash, item_path, request_body, request_sha256
 from .secrets import (
@@ -38,14 +44,14 @@ from .thresholds import NoulVerdict, Thresholds
 logger = logging.getLogger(__name__)
 
 MAX_STATE_CHARS = 60_000
-MAX_REQUEST_CHARS = 96_000
+MAX_REQUEST_BYTES = 96_000
 """The largest serialized request body the batching owner sends without splitting it.
 
-The Models page of the TypeSafe docs (read 30.09.2026) gives 64k input tokens per request. The
-saved trace run measured 0.43-0.60 provider tokens per body byte across five requests, so the
-boundary stays below 64k tokens even at the densest measured content (64k tokens at 1.5 bytes
-per token). Normal packing never reaches this: ``MAX_STATE_CHARS`` keeps a batch's state at 60k
-characters, so the preflight only fires for a batch that an item alone would overflow."""
+This is the whole-request guard. Jev accepts 64k input tokens per request (TypeSafe Models page,
+read 30.09.2026), and the saved trace run measured 0.43-0.60 provider tokens per body byte, so the
+boundary stays below 64k tokens even at the densest measured content. The binding limit is the
+other one, ``JEV_STATE_TOKEN_LIMIT``; see ``request_exceeds_input_budget``. Normal packing rarely
+reaches either: ``MAX_STATE_CHARS`` keeps a batch's state at 60k characters."""
 CODE_FIELD = "code"
 ROUTE_QUESTION = "route"
 _DEFAULT_MASKER = SecretMasker()
@@ -57,11 +63,27 @@ class CallCapReachedError(RuntimeError):
 
 
 def request_exceeds_input_budget(state: Mapping, questions: Mapping) -> bool:
-    """Whether a request exceeds the batching owner's measured input allowance.
+    """Whether a request exceeds either input limit the batching owner measured.
 
-    This is a preflight estimate. A provider's typed refusal remains authoritative below it.
+    The whole body must stay within ``MAX_REQUEST_BYTES``, and the state plus the longest single
+    question must stay within ``JEV_STATE_TOKEN_LIMIT`` tokens. The Engine measured the second on
+    27.09.2026: 32,883 input tokens pass and about 33,200 are refused with ``max_tokens_exceeded``,
+    although a whole request of 48,951 tokens was accepted. Tokens are estimated with
+    ``estimate_tokens`` on the serialization the body uses. This is a preflight estimate; a
+    provider's typed refusal remains authoritative below it.
     """
-    return len(request_body(state, questions)) > MAX_REQUEST_CHARS
+    if len(request_body(state, questions)) > MAX_REQUEST_BYTES:
+        return True
+    return _state_and_longest_question_tokens(state, questions) > JEV_STATE_TOKEN_LIMIT
+
+
+def _state_and_longest_question_tokens(state: Mapping, questions: Mapping) -> int:
+    longest_question = max((_tokens_of(question) for question in questions.values()), default=0)
+    return _tokens_of(state) + longest_question
+
+
+def _tokens_of(value: object) -> int:
+    return estimate_tokens(json.dumps(value, ensure_ascii=False))
 
 
 @dataclass(frozen=True)
@@ -531,7 +553,7 @@ class Judge:
         """Send one packed batch of item positions, splitting it when its request cannot fit the
         provider's measured input budget.
 
-        The batch is measured before it is sent: a serialized body over ``MAX_REQUEST_CHARS`` is
+        The batch is measured before it is sent: a serialized body over ``MAX_REQUEST_BYTES`` is
         split by item and each half is measured again, so no request the measurement already
         rejects is ever paid for. A provider refusal that still names an exceeded input budget
         (``max_tokens_exceeded``) splits the same way. One position whose own state cannot fit has

@@ -11,8 +11,24 @@ from .answers import JevResponse
 LATEST_JEV = "jev-latest"
 
 MAX_TOKENS_MARKER = "max_tokens_exceeded"
-"""The provider's error_type when a request's input exceeds the model's input budget
-(docs.typesafe.ai/models: 64k tokens per request, 32k for state plus the longest question)."""
+"""The provider's error_type when a request's input exceeds the model's input budget."""
+
+JEV_STATE_TOKEN_LIMIT = 32_000
+"""The input Jev accepts for the state plus the longest single question. The TypeSafe Models page
+(docs.typesafe.ai/models) documents 32k for it and 64k tokens per whole request. The Engine
+measured the binding one on 27.09.2026: 32,883 input tokens pass and about 33,200 are refused with
+``max_tokens_exceeded``, while a whole request of 48,951 tokens was accepted."""
+
+DEFAULT_QUESTION_RESERVE = 2_000
+
+TOKENS_PER_BYTE = 0.60
+"""The densest measured provider tokens per serialized body byte (0.43 to 0.60 on recorded traffic),
+so an estimate with it never undercounts the content this library sends."""
+
+
+def estimate_tokens(text: str) -> int:
+    """A conservative token estimate from the UTF-8 size, when no tokenizer is supplied."""
+    return int(len(text.encode()) * TOKENS_PER_BYTE) + 1
 
 
 class JevClient(Protocol):

@@ -19,9 +19,10 @@ default replaces the oldest code bodies with a stub that keeps the source, and e
 recorded. Checks that select the same sections share one request; different selections run in
 parallel.
 
-The token budget is capped by Jev's context limit. The Models page of the TypeSafe docs
-(https://docs.typesafe.ai/models, read 28.09.2026) gives 64k tokens per request, of which 32k for
-``state`` plus the longest question. The docs also warn that accuracy falls as unrelated state grows,
+The token budget is capped by Jev's input limit for ``state`` plus the longest question, 32k tokens
+(TypeSafe Models page, https://docs.typesafe.ai/models; the Engine measured 32,883 tokens accepted and
+about 33,200 refused on 27.09.2026). The whole request may be larger, up to the documented 64k.
+The docs also warn that accuracy falls as unrelated state grows,
 so select only the sections a check needs, and measure with ``ceiling_curve``.
 
 Whether the history is enough is a caller-defined yes/no question about a concrete property, for
@@ -39,13 +40,11 @@ from enum import StrEnum
 from typing import Protocol
 
 from .judgments.answers import JevResponse
+from .judgments.client import DEFAULT_QUESTION_RESERVE, JEV_STATE_TOKEN_LIMIT, estimate_tokens
 from .judgments.judge import Judge
 from .judgments.questions import Check, content_hash
 from .judgments.thresholds import NoulVerdict
 
-JEV_REQUEST_TOKEN_LIMIT = 64_000
-JEV_STATE_TOKEN_LIMIT = 32_000
-DEFAULT_QUESTION_RESERVE = 2_000
 EVICTED = "[evicted]"
 HISTORY = "history"
 FETCHED = "fetched"
@@ -54,11 +53,6 @@ PREVIOUS_JUDGMENTS = "previous_judgments"
 BUILT_IN_SECTIONS = (HISTORY, FETCHED, DECISIONS, PREVIOUS_JUDGMENTS)
 DEFAULT_STOP_SECTIONS = (FETCHED,)
 _SECTIONS_WITH_CODE = frozenset({HISTORY, FETCHED})
-
-
-def estimate_tokens(text: str) -> int:
-    """A conservative estimate (about three characters per token) when no tokenizer is supplied."""
-    return len(text) // 3 + 1
 
 
 @dataclass(frozen=True)

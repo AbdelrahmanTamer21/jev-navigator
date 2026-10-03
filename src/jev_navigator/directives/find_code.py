@@ -29,7 +29,6 @@ from enum import IntEnum, StrEnum
 from ..history import (
     DEFAULT_QUESTION_RESERVE,
     DEFAULT_STOP_SECTIONS,
-    JEV_STATE_TOKEN_LIMIT,
     FetchedSpan,
     History,
     HistoryJudgment,
@@ -41,7 +40,7 @@ from ..history import (
 from ..index.code_index import CodeIndex
 from ..index.spans import CodeSlice
 from ..judgments.answers import JevResponse, NoulAnswer
-from ..judgments.client import InputBudgetExceededError
+from ..judgments.client import JEV_STATE_TOKEN_LIMIT, InputBudgetExceededError
 from ..judgments.judge import (
     CODE_FIELD,
     CallCapReachedError,
