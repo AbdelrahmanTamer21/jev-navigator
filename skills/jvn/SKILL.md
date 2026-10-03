@@ -60,7 +60,7 @@ journal without a finished manifest. Preserve the diagnostic and existing output
 
 Each request judges at most 16 functions, and a step's requests run in parallel. Every answer goes to
 one shared answer store, `~/.cache/jev-navigator/answers.sqlite`, which holds hashes, locations and
-answers, never code. A later run on unchanged code replays from it after one live request. Give each
+answers, never code. A later run at the same commit replays from it after one live request. Give each
 experiment or eval arm its own store with `--answer-store PATH` (or `JEV_NAVIGATOR_ANSWER_STORE`) so
 arms never reuse each other's answers; stderr names the store in use.
 

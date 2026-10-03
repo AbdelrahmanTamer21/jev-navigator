@@ -184,8 +184,9 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   code) and the exact provider responses, as the run progresses.
 - `answers.jsonl`: reusable typed answers keyed by source and request hashes. Every answer is also
   written to the machine's shared answer store (`~/.cache/jev-navigator/answers.sqlite`, or
-  `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run on unchanged code replays from
-  it after one live request that learns the served model, and copies what it replays into its own
+  `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
+  same questions replays from it after one live request that learns the served model (Find All and
+  Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
   `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
   `--answer-store PATH` points a run at another store file; each run prints the store it uses.
 
@@ -409,8 +410,8 @@ on its own scope, so searches sharing one judge never use up each other's budget
 - **Batches.** A batched request carries at most `Judge(items_per_request=N)` items (default 16)
   and closes early when the next item would not fit the size budget. Batches form over every item in
   an order fixed by each unit's file and lines (by content for an item without them), so the same
-  units form the same batches whatever order a caller passes them in and on any commit, and a request carries all its batch mates even when some of their questions were
-  answered before.
+  units form the same batches whatever order a caller passes them in, and a request carries all
+  its batch mates even when some of their questions were answered before.
 - **Answer store.** Every answer is stored with the served model and the thresholds in force. Jev's
   answer about one item changes with the other items in its request, so an item answer is reused
   only when the item, its batch mates, the shared state, the question with its wording hash and the
@@ -420,7 +421,8 @@ on its own scope, so searches sharing one judge never use up each other's budget
   first batch alone, and the batches after that answer replay as usual. `ReplayOnlyClient` replays
   from the store and never calls Jev.
   `JsonlAnswerStore` is one run's pack. `SqliteAnswerStore(path)` is one insert-only store shared by
-  every run on a machine, so a repeated run on unchanged code asks nothing again. It never holds
+  every run on a machine, so a repeated run at the same commit asks nothing again but the request
+  that learns the served model. It never holds
   code, state or question text: only hashes, unit locations, batch member ids, the batching rule and
   size, the model, raw answers and timestamps. Its location and retention (no expiry) are provisional;
   `LayeredAnswerStore(pack, shared)` reads the pack first, copies every answer it finds only in the
