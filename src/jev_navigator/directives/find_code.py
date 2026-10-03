@@ -27,7 +27,6 @@ from dataclasses import dataclass, field, replace
 from enum import IntEnum, StrEnum
 
 from ..history import (
-    DEFAULT_QUESTION_RESERVE,
     DEFAULT_STOP_SECTIONS,
     FetchedSpan,
     History,
@@ -40,7 +39,7 @@ from ..history import (
 from ..index.code_index import CodeIndex
 from ..index.spans import CodeSlice
 from ..judgments.answers import JevResponse, NoulAnswer
-from ..judgments.client import JEV_STATE_TOKEN_LIMIT, InputBudgetExceededError
+from ..judgments.client import JEV_INPUT_BOX_CHARS, QUESTION_RESERVE_CHARS, InputBudgetExceededError
 from ..judgments.judge import (
     CODE_FIELD,
     CallCapReachedError,
@@ -534,12 +533,12 @@ class StopRule:
 
     check: Check
     shared: Mapping = field(default_factory=dict)
-    budget_tokens: int = JEV_STATE_TOKEN_LIMIT - DEFAULT_QUESTION_RESERVE
+    budget_chars: int = JEV_INPUT_BOX_CHARS - QUESTION_RESERVE_CHARS
     sections: tuple[str, ...] = DEFAULT_STOP_SECTIONS
     context: Mapping[str, object] = field(default_factory=dict)
 
     def new_history(self, subject: Mapping) -> History:
-        return History(budget_tokens=self.budget_tokens, sections={SUBJECT: subject, **self.context})
+        return History(budget_chars=self.budget_chars, sections={SUBJECT: subject, **self.context})
 
 
 def _apply_stop_rule(judge: Judge, search: _Search) -> None:

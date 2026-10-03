@@ -13,30 +13,33 @@ LATEST_JEV = "jev-latest"
 MAX_TOKENS_MARKER = "max_tokens_exceeded"
 """The provider's error_type when a request's input exceeds the model's input budget."""
 
+REQUEST_CHARS_PER_TOKEN = 2.4
+"""Serialized characters per input token, the same value and meaning as the Engine's
+``REQUEST_CHARS_PER_TOKEN`` (analysis-engine ``enginepy/host/system_one.py``). Jev's input measured
+about 254 fixed tokens per request plus 0.23 to 0.30 tokens per body byte on 3,096 real requests
+(03.10.2026), so a limit in tokens becomes a box in characters without a tokenizer."""
+
+
+def chars_for_tokens(tokens: int) -> int:
+    return int(tokens * REQUEST_CHARS_PER_TOKEN)
+
+
 JEV_STATE_TOKEN_LIMIT = 32_000
-"""The input Jev accepts for the state plus the longest single question. The TypeSafe Models page
-(docs.typesafe.ai/models) documents 32k for it and 64k tokens per whole request. The Engine
-measured the binding one on 27.09.2026: 32,883 input tokens pass and about 33,200 are refused with
-``max_tokens_exceeded``, while a whole request of 48,951 tokens was accepted."""
+"""The input Jev accepts for the state plus the longest single question (TypeSafe Models page,
+docs.typesafe.ai/models). The Engine measured it on 27.09.2026: 32,883 input tokens pass and about
+33,200 are refused with ``max_tokens_exceeded``."""
 
-DEFAULT_QUESTION_RESERVE = 2_000
+JEV_REQUEST_TOKEN_LIMIT = 64_000
+"""The input Jev accepts for a whole request; a request of 48,951 tokens was accepted."""
 
-REQUEST_OVERHEAD_TOKENS = 254
-"""The input tokens every request costs before its content, measured on 3,096 real requests
-(03.10.2026). A request's tokens are this once plus the estimate of its content."""
+JEV_INPUT_BOX_CHARS = chars_for_tokens(JEV_STATE_TOKEN_LIMIT)
+"""The character box for the state plus the longest single question: 76,800."""
 
-TOKENS_PER_BYTE = 0.30
-"""Provider input tokens per serialized body byte. The same 3,096 requests measured 0.23 to 0.27
-beyond the fixed overhead (0.268 at the largest, 16 units), and JVN's J07 traffic measured about
-0.28 per character (768,033 tokens over 2.77 million characters). 0.30 is a deliberate margin over
-the largest of them. Small bodies read denser per byte only because the fixed overhead dominates
-them, so the overhead is counted once per request and not in this rate."""
+MAX_REQUEST_CHARS = chars_for_tokens(JEV_REQUEST_TOKEN_LIMIT)
+"""The character box for a whole request body: 153,600."""
 
-
-def estimate_tokens(text: str) -> int:
-    """The content tokens of a text from its UTF-8 size, when no tokenizer is supplied. A whole
-    request adds ``REQUEST_OVERHEAD_TOKENS`` once."""
-    return int(len(text.encode()) * TOKENS_PER_BYTE) + 1
+QUESTION_RESERVE_CHARS = chars_for_tokens(2_000)
+"""What a state leaves free for the question that reads it."""
 
 
 class JevClient(Protocol):

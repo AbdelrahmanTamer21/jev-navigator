@@ -19,15 +19,23 @@ from dataclasses import dataclass, field
 
 from .answers import JevResponse, NoulAnswer, response_to_raw
 from .client import (
-    JEV_STATE_TOKEN_LIMIT,
-    REQUEST_OVERHEAD_TOKENS,
+    JEV_INPUT_BOX_CHARS,
+    MAX_REQUEST_CHARS,
     AsyncJevClient,
     InputBudgetExceededError,
     JevClient,
-    estimate_tokens,
 )
 from .journal import AttemptJournalCallbackError, Journal, JournalRequest, RawResponse
-from .questions import Check, Pick, Rate, content_hash, item_path, request_body, request_sha256
+from .questions import (
+    Check,
+    Pick,
+    Rate,
+    content_hash,
+    item_path,
+    request_body,
+    request_sha256,
+    serialized_chars,
+)
 from .secrets import (
     Masker,
     Scanner,
@@ -45,14 +53,6 @@ from .thresholds import NoulVerdict, Thresholds
 logger = logging.getLogger(__name__)
 
 MAX_STATE_CHARS = 60_000
-MAX_REQUEST_BYTES = 200_000
-"""The largest serialized request body the batching owner sends without splitting it.
-
-This is the whole-request guard. Jev accepts 64k input tokens per request (TypeSafe Models page,
-read 30.09.2026); at the estimate of ``TOKENS_PER_BYTE`` plus ``REQUEST_OVERHEAD_TOKENS`` that is
-about 212 KB, so 200 KB stays below it. The binding limit is the other one,
-``JEV_STATE_TOKEN_LIMIT``; see ``request_exceeds_input_budget``. Normal packing rarely reaches
-either: ``MAX_STATE_CHARS`` keeps a batch's state at 60k characters."""
 CODE_FIELD = "code"
 ROUTE_QUESTION = "route"
 _DEFAULT_MASKER = SecretMasker()
@@ -64,27 +64,18 @@ class CallCapReachedError(RuntimeError):
 
 
 def request_exceeds_input_budget(state: Mapping, questions: Mapping) -> bool:
-    """Whether a request exceeds either input limit the batching owner measured.
+    """Whether a request is outside the character boxes the batching owner sends within.
 
-    The whole body must stay within ``MAX_REQUEST_BYTES``, and the state plus the longest single
-    question must stay within ``JEV_STATE_TOKEN_LIMIT`` tokens. The Engine measured the second on
-    27.09.2026: 32,883 input tokens pass and about 33,200 are refused with ``max_tokens_exceeded``,
-    although a whole request of 48,951 tokens was accepted. Tokens are estimated with
-    ``estimate_tokens`` on the serialization the body uses. This is a preflight estimate; a
-    provider's typed refusal remains authoritative below it.
+    The state plus the longest single question must fit ``JEV_INPUT_BOX_CHARS`` (Jev's documented
+    32,000 tokens), the limit the Engine measured on 27.09.2026 (32,883 tokens pass, about 33,200
+    are refused). The whole body must fit ``MAX_REQUEST_CHARS``, since packing bounds a batch's
+    state but not the questions asked of it. Both boxes measure the serialization the body uses.
+    This is a preflight; a provider's typed refusal remains authoritative.
     """
-    if len(request_body(state, questions)) > MAX_REQUEST_BYTES:
+    longest_question = max((serialized_chars(question) for question in questions.values()), default=0)
+    if serialized_chars(state) + longest_question > JEV_INPUT_BOX_CHARS:
         return True
-    return _state_and_longest_question_tokens(state, questions) > JEV_STATE_TOKEN_LIMIT
-
-
-def _state_and_longest_question_tokens(state: Mapping, questions: Mapping) -> int:
-    longest_question = max((_tokens_of(question) for question in questions.values()), default=0)
-    return REQUEST_OVERHEAD_TOKENS + _tokens_of(state) + longest_question
-
-
-def _tokens_of(value: object) -> int:
-    return estimate_tokens(json.dumps(value, ensure_ascii=False))
+    return serialized_chars({"state": state, "questions": questions}) > MAX_REQUEST_CHARS
 
 
 @dataclass(frozen=True)
@@ -554,9 +545,10 @@ class Judge:
         """Send one packed batch of item positions, splitting it when its request cannot fit the
         provider's measured input budget.
 
-        The batch is measured before it is sent: a serialized body over ``MAX_REQUEST_BYTES`` is
-        split by item and each half is measured again, so no request the measurement already
-        rejects is ever paid for. A provider refusal that still names an exceeded input budget
+        The batch is measured before it is sent: a request outside ``request_exceeds_input_budget``
+        (state plus the longest question over ``JEV_INPUT_BOX_CHARS``, or the body over
+        ``MAX_REQUEST_CHARS``) is split by item and each half is measured again, so no request the
+        measurement already rejects is ever paid for. A provider refusal that still names an exceeded input budget
         (``max_tokens_exceeded``) splits the same way. One position whose own state cannot fit has
         no smaller honest request - its questions name an item path that a partial state would
         change - so its error propagates and the journal keeps the provider's report. Every
