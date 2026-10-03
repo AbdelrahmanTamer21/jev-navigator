@@ -64,8 +64,10 @@ class AnswerRecord:
     batch: Mapping = field(default_factory=dict)
 
     def response(self) -> JevResponse:
+        """The stored answers as a replayed response. Replaying sends nothing, so it reports no
+        token count."""
         answers = {question_id: answer_from_json(raw) for question_id, raw in self.answers.items()}
-        return JevResponse(answers, self.model, 0, self.request_sha256, from_store=True)
+        return JevResponse(answers, self.model, None, self.request_sha256, from_store=True)
 
     def sent_request(self) -> tuple[dict, dict]:
         """The state and questions as they were sent, every key in its sent order."""

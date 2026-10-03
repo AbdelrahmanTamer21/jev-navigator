@@ -21,6 +21,7 @@ from jev_navigator.judgments.store import (
     SqliteAnswerStore,
     UnsupportedAnswerStoreError,
 )
+from jev_navigator.judgments.thresholds import Thresholds
 from jev_navigator.testing import ScriptedJevClient
 
 DESCRIBES = Check(
@@ -209,6 +210,22 @@ def test_a_whole_request_replayed_from_the_store_counts_its_answers(tmp_path: Pa
 
     # Assert
     assert (judge.calls, judge.replayed_answers) == (1, 1)
+
+
+@pytest.mark.parametrize("store_kind", [JsonlAnswerStore, SqliteAnswerStore])
+def test_an_answer_replayed_from_a_store_reports_no_token_count(tmp_path: Path, store_kind) -> None:
+    # Arrange: the first ask is sent and its provider reports 100 input tokens
+    judge = Judge(ScriptedJevClient(), store=store_kind(tmp_path / "answers"))
+    state = {"slice": {"code": "x = 1"}}
+    questions = {"adds_one": {"type": "noul", "instructions": "Does `slice.code` add one?"}}
+    sent = judge.ask(state, questions, thresholds=Thresholds())
+
+    # Act
+    replayed = judge.ask(state, questions, thresholds=Thresholds())
+
+    # Assert: nothing was sent for the replay, so no count was reported, which is not a measured 0
+    assert (sent.input_tokens, sent.from_store) == (100, False)
+    assert (replayed.input_tokens, replayed.from_store) == (None, True)
 
 
 def test_a_size_refusal_under_another_input_box_is_not_honoured(tmp_path: Path, monkeypatch) -> None:
