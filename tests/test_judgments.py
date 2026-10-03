@@ -29,6 +29,12 @@ from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.judgments.thresholds import NoulVerdict, Thresholds
 from jev_navigator.testing import ScriptedJevClient
 
+
+def _asked_item(question_id: str, state: dict) -> str:
+    """The code of the item a batched question asks about, so scripts answer by content, not slot."""
+    return state["items"][int(question_id.split("#")[1])]["code"]
+
+
 DESCRIBES = Check(
     name="describes",
     instructions="Is `{item}.code` the implementation that `doc.sentence` describes?",
@@ -98,9 +104,12 @@ def test_invalid_thresholds_are_rejected(overrides: dict) -> None:
 
 def test_check_each_batches_items_into_one_request_with_three_way_verdicts() -> None:
     # Arrange
-    client = ScriptedJevClient(nouls={"describes#0": 0.95, "describes#1": 0.5, "describes#2": 0.05})
+    by_code = {"def a(): ...": 0.95, "def b(): ...": 0.5, "def c(): ...": 0.05}
+    client = ScriptedJevClient(
+        nouls=lambda question_id, _question, state: by_code[_asked_item(question_id, state)]
+    )
     judge = Judge(client)
-    items = [{"code": "def a(): ..."}, {"code": "def b(): ..."}, {"code": "def c(): ..."}]
+    items = [{"code": code} for code in by_code]
 
     # Act
     results = judge.check_each(DESCRIBES, items, {"doc": {"sentence": "a validates orders"}})
@@ -115,22 +124,24 @@ def test_check_each_batches_items_into_one_request_with_three_way_verdicts() -> 
     )
 
 
-def test_items_judged_before_are_answered_from_the_store(tmp_path: Path) -> None:
+def test_items_judged_before_with_the_same_batch_mates_are_answered_from_the_store(tmp_path: Path) -> None:
     # Arrange
     store = JsonlAnswerStore(tmp_path / "answers.jsonl")
-    first_client = ScriptedJevClient(nouls={"describes": 0.9})
-    Judge(first_client, store=store).check_each(DESCRIBES, [{"code": "x = 1"}], {"doc": {"sentence": "s"}})
+    items = [{"code": "x = 1"}, {"code": "y = 2"}]
+    Judge(ScriptedJevClient(nouls={"describes": 0.9}), store=store).check_each(
+        DESCRIBES, items, {"doc": {"sentence": "s"}}
+    )
     second_client = ScriptedJevClient(nouls={"describes": 0.1})
     second = Judge(
         second_client, store=JsonlAnswerStore(tmp_path / "answers.jsonl"), served_model="jev-scripted"
     )
 
     # Act
-    results = second.check_each(DESCRIBES, [{"code": "x = 1"}, {"code": "y = 2"}], {"doc": {"sentence": "s"}})
+    results = second.check_each(DESCRIBES, items, {"doc": {"sentence": "s"}})
 
     # Assert
-    assert [(result.probability, result.from_store) for result in results] == [(0.9, True), (0.1, False)]
-    assert len(second_client.requests) == 1
+    assert [(result.probability, result.from_store) for result in results] == [(0.9, True), (0.9, True)]
+    assert second_client.requests == []
 
 
 def test_independent_checks_share_a_request_and_reuse_only_the_matching_cached_answers(
@@ -146,24 +157,23 @@ def test_independent_checks_share_a_request_and_reuse_only_the_matching_cached_a
         Criterion("It does not change a value."),
     )
     Judge(ScriptedJevClient(nouls={"describes": 0.9}), store=JsonlAnswerStore(path)).check_each(
-        DESCRIBES, items[:1], shared
+        DESCRIBES, items, shared
     )
-    client = ScriptedJevClient(nouls={"describes": 0.1, "changes#0": 0.5, "changes#1": 0.95})
+    changes_by_code = {"x = 1": 0.5, "y = 2": 0.95}
+    client = ScriptedJevClient(
+        nouls=lambda question_id, _question, state: changes_by_code[_asked_item(question_id, state)]
+    )
     judge = Judge(client, store=JsonlAnswerStore(path), served_model="jev-scripted")
 
     results = judge.check_every([DESCRIBES, changes], items, shared)
 
     assert len(client.requests) == 1
     state, questions = client.requests[0]
-    assert state["items"] == items
-    assert set(questions) == {
-        f"{DESCRIBES.question_id}#1",
-        f"{changes.question_id}#0",
-        f"{changes.question_id}#1",
-    }
+    assert sorted(item["code"] for item in state["items"]) == ["x = 1", "y = 2"]
+    assert set(questions) == {f"{changes.question_id}#0", f"{changes.question_id}#1"}
     assert [(r.item, r.probability, r.from_store) for r in results["describes"]] == [
         (items[0], 0.9, True),
-        (items[1], 0.1, False),
+        (items[1], 0.9, True),
     ]
     assert [r.verdict for r in results["changes"]] == [NoulVerdict.UNSURE, NoulVerdict.YES]
 

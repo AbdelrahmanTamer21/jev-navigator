@@ -399,9 +399,16 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value
   left in a key is refused too. Both are on by default; a host passes its own (a masker offers
   `mask(text)` and `masked_values(text)`), or turns one off explicitly with `None`.
-- **Answer store.** Every answer is stored with the served model and the thresholds in force. An
-  item answer is reused only when the item, the shared state, the question with its wording hash and
-  the served model all match; until the first live answer of a run the served model is unknown, and
+- **Batches.** A batched request carries at most `Judge(items_per_request=N)` items (default 16)
+  and closes early when the next item would not fit the size budget. Batches form over every item in
+  an order fixed by item content, so the same items form the same batches whatever order a caller
+  passes them in, and a request carries all its batch mates even when some of their questions were
+  answered before.
+- **Answer store.** Every answer is stored with the served model and the thresholds in force. Jev's
+  answer about one item changes with the other items in its request, so an item answer is reused
+  only when the item, its batch mates, the shared state, the question with its wording hash and the
+  served model all match. A route's refusal of an exact request for its input size is stored too, so
+  a replay splits that request again without sending it; until the first live answer of a run the served model is unknown, and
   unknown counts as a miss (or pass `served_model=`); with a store, a first `check_each_async` then sends its
   first batch alone, and the batches after that answer replay as usual. `ReplayOnlyClient` replays
   from the store and never calls Jev.

@@ -25,6 +25,9 @@ from typing import Protocol
 
 from .answers import Answer, JevResponse, answer_from_json
 
+INPUT_BUDGET_REFUSAL = "input_budget_refusal"
+"""A store line recording that a route refused one exact request for its input size."""
+
 
 @dataclass(frozen=True)
 class AnswerRecord:
@@ -69,17 +72,23 @@ class AnswerStore(Protocol):
 
     def put(self, record: AnswerRecord) -> None: ...
 
+    def refused(self, request_sha256: str, route: str) -> bool: ...
+
+    def put_refusal(self, request_sha256: str, route: str) -> None: ...
+
 
 class JsonlAnswerStore:
     """Append-only JSON lines. ``item_keys`` maps an item key (item content hash, shared-state hash,
-    question id with its wording hash) to the question id that answered it; lookups also match the
-    served model recorded with the answer."""
+    question id with its wording hash, batch membership hash) to the question id that answered it;
+    lookups also match the served model recorded with the answer. Input-size refusals are kept as
+    ``input_budget_refusal`` lines keyed by request hash and route."""
 
     def __init__(self, path: Path, *, keep_requests: bool = False) -> None:
         self.path = Path(path)
         self.keep_requests = keep_requests
         self._records: dict[str, AnswerRecord] = {}
         self._items: dict[str, dict[str, StoredItemAnswer]] = {}
+        self._refusals: set[tuple[str, str]] = set()
         self._load()
 
     def by_request(self, request_sha256: str) -> AnswerRecord | None:
@@ -94,6 +103,14 @@ class JsonlAnswerStore:
         if served_model is None:
             return next(reversed(answers.values()), None)
         return answers.get(served_model)
+
+    def refused(self, request_sha256: str, route: str) -> bool:
+        """Whether ``route`` refused this exact request for its input size before."""
+        return (request_sha256, route) in self._refusals
+
+    def put_refusal(self, request_sha256: str, route: str) -> None:
+        self._append({"kind": INPUT_BUDGET_REFUSAL, "request_sha256": request_sha256, "route": route})
+        self._refusals.add((request_sha256, route))
 
     def put(self, record: AnswerRecord) -> None:
         stored = record if self.keep_requests else _without_request(record)
@@ -113,7 +130,10 @@ class JsonlAnswerStore:
             if not line.strip():
                 continue
             raw = json.loads(line)
-            if raw.get("kind") != "llm_step":
+            kind = raw.get("kind")
+            if kind == INPUT_BUDGET_REFUSAL:
+                self._refusals.add((raw["request_sha256"], raw["route"]))
+            elif kind != "llm_step":
                 self._index(_record_from_json(raw))
 
     def _index(self, record: AnswerRecord) -> None:

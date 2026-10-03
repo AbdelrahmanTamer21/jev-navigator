@@ -210,7 +210,7 @@ def test_the_first_async_check_each_replays_the_remaining_batches_from_the_store
 
     # Assert: the first batch pins the served model, the other batches replay for free.
     assert judge.calls == 1
-    assert [result.from_store for result in results] == [False, True, True]
+    assert sorted(result.from_store for result in results) == [False, True, True]
     assert all(result.probability == 0.9 for result in results)
     # Replayed batches never send, so only the live first batch can be in flight.
     assert client.max_in_flight == 1
