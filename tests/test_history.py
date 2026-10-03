@@ -126,7 +126,7 @@ def test_section_limits_apply_before_any_code_is_evicted() -> None:
 
 def test_the_oldest_code_is_evicted_first_and_every_eviction_is_recorded() -> None:
     # Arrange
-    history = History(budget_tokens=500)
+    history = History(budget_tokens=300)
     for number in range(3):
         history.append(step(number, "y" * 300))
 

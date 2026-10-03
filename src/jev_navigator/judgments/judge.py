@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from .answers import JevResponse, NoulAnswer, response_to_raw
 from .client import (
     JEV_STATE_TOKEN_LIMIT,
+    REQUEST_OVERHEAD_TOKENS,
     AsyncJevClient,
     InputBudgetExceededError,
     JevClient,
@@ -44,14 +45,14 @@ from .thresholds import NoulVerdict, Thresholds
 logger = logging.getLogger(__name__)
 
 MAX_STATE_CHARS = 60_000
-MAX_REQUEST_BYTES = 96_000
+MAX_REQUEST_BYTES = 200_000
 """The largest serialized request body the batching owner sends without splitting it.
 
 This is the whole-request guard. Jev accepts 64k input tokens per request (TypeSafe Models page,
-read 30.09.2026), and the saved trace run measured 0.43-0.60 provider tokens per body byte, so the
-boundary stays below 64k tokens even at the densest measured content. The binding limit is the
-other one, ``JEV_STATE_TOKEN_LIMIT``; see ``request_exceeds_input_budget``. Normal packing rarely
-reaches either: ``MAX_STATE_CHARS`` keeps a batch's state at 60k characters."""
+read 30.09.2026); at the estimate of ``TOKENS_PER_BYTE`` plus ``REQUEST_OVERHEAD_TOKENS`` that is
+about 212 KB, so 200 KB stays below it. The binding limit is the other one,
+``JEV_STATE_TOKEN_LIMIT``; see ``request_exceeds_input_budget``. Normal packing rarely reaches
+either: ``MAX_STATE_CHARS`` keeps a batch's state at 60k characters."""
 CODE_FIELD = "code"
 ROUTE_QUESTION = "route"
 _DEFAULT_MASKER = SecretMasker()
@@ -79,7 +80,7 @@ def request_exceeds_input_budget(state: Mapping, questions: Mapping) -> bool:
 
 def _state_and_longest_question_tokens(state: Mapping, questions: Mapping) -> int:
     longest_question = max((_tokens_of(question) for question in questions.values()), default=0)
-    return _tokens_of(state) + longest_question
+    return REQUEST_OVERHEAD_TOKENS + _tokens_of(state) + longest_question
 
 
 def _tokens_of(value: object) -> int:

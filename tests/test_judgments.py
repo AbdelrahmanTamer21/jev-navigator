@@ -10,6 +10,7 @@ from conftest import BudgetedClient
 from jev_navigator.judgments.answers import ChoiceAnswer
 from jev_navigator.judgments.client import (
     JEV_STATE_TOKEN_LIMIT,
+    REQUEST_OVERHEAD_TOKENS,
     InputBudgetExceededError,
     MissingAnswerError,
     ReplayOnlyClient,
@@ -619,7 +620,7 @@ def test_oversized_batch_is_split_before_sending_so_no_request_exceeds_the_input
 
     assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 4
     assert client.refusals == 0, "a request the measurement already rejects must not be paid for"
-    assert len(client.requests) == 4
+    assert len(client.requests) == 2
     judged_files: list[str] = []
     for state, questions in client.requests:
         body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
@@ -633,44 +634,44 @@ def _request_tokens(state: dict, questions: dict) -> int:
     longest_question = max(
         estimate_tokens(json.dumps(question, ensure_ascii=False)) for question in questions.values()
     )
-    return estimate_tokens(json.dumps(state, ensure_ascii=False)) + longest_question
+    return REQUEST_OVERHEAD_TOKENS + estimate_tokens(json.dumps(state, ensure_ascii=False)) + longest_question
 
 
-def test_state_over_the_token_limit_is_split_before_sending_although_the_body_fits() -> None:
+def test_state_of_120_kb_is_split_before_sending_and_every_item_is_judged() -> None:
     client = BudgetedClient(MAX_REQUEST_BYTES)
     judge = Judge(client)
-    items = [_padding_item(f"part{index}", 20_000) for index in range(4)]
+    items = [_padding_item(f"part{index}", 20_000) for index in range(6)]
 
     results = judge.check_every(
-        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=200_000
+        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=500_000
     )
 
-    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 4
+    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 6
     assert client.refusals == 0
     assert len(client.requests) == 2
     assert all(_request_tokens(*request) <= JEV_STATE_TOKEN_LIMIT for request in client.requests)
     judged_files = [item["file"] for state, _ in client.requests for item in state["parts"]]
-    assert sorted(judged_files) == [f"part{index}.py" for index in range(4)]
+    assert sorted(judged_files) == [f"part{index}.py" for index in range(6)]
 
 
 def test_a_body_over_the_byte_limit_is_over_budget_although_state_and_question_fit() -> None:
     state = {"doc": {"sentence": "s"}}
-    questions = {f"q{index}": {"ask": "x" * 40} for index in range(3_000)}
+    questions = {f"q{index}": {"ask": "x" * 40} for index in range(5_000)}
 
     assert request_exceeds_input_budget(state, questions)
     assert not request_exceeds_input_budget(state, dict(list(questions.items())[:100]))
 
 
-def test_state_just_under_the_token_limit_is_sent_unsplit() -> None:
+def test_state_of_100_kb_is_sent_unsplit() -> None:
     client = BudgetedClient(MAX_REQUEST_BYTES)
     judge = Judge(client)
-    items = [_padding_item(f"part{index}", 20_000) for index in range(2)]
+    items = [_padding_item(f"part{index}", 20_000) for index in range(5)]
 
     results = judge.check_every(
-        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=200_000
+        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=500_000
     )
 
-    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 2
+    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 5
     assert len(client.requests) == 1
     assert _request_tokens(*client.requests[0]) <= JEV_STATE_TOKEN_LIMIT
 

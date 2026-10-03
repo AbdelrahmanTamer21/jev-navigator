@@ -21,13 +21,21 @@ measured the binding one on 27.09.2026: 32,883 input tokens pass and about 33,20
 
 DEFAULT_QUESTION_RESERVE = 2_000
 
-TOKENS_PER_BYTE = 0.60
-"""The densest measured provider tokens per serialized body byte (0.43 to 0.60 on recorded traffic),
-so an estimate with it never undercounts the content this library sends."""
+REQUEST_OVERHEAD_TOKENS = 254
+"""The input tokens every request costs before its content, measured on 3,096 real requests
+(03.10.2026). A request's tokens are this once plus the estimate of its content."""
+
+TOKENS_PER_BYTE = 0.30
+"""Provider input tokens per serialized body byte. The same 3,096 requests measured 0.23 to 0.27
+beyond the fixed overhead (0.268 at the largest, 16 units), and JVN's J07 traffic measured about
+0.28 per character (768,033 tokens over 2.77 million characters). 0.30 is a deliberate margin over
+the largest of them. Small bodies read denser per byte only because the fixed overhead dominates
+them, so the overhead is counted once per request and not in this rate."""
 
 
 def estimate_tokens(text: str) -> int:
-    """A conservative token estimate from the UTF-8 size, when no tokenizer is supplied."""
+    """The content tokens of a text from its UTF-8 size, when no tokenizer is supplied. A whole
+    request adds ``REQUEST_OVERHEAD_TOKENS`` once."""
     return int(len(text.encode()) * TOKENS_PER_BYTE) + 1
 
 
