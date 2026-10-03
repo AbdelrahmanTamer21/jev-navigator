@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from jev_navigator.judgments.journal import JournalRequest, JsonlJournal, RawResponse
+from jev_navigator.judgments.journal import JournalRequest, JsonlJournal, RawAttempt, RawResponse
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.store import JsonlAnswerStore
@@ -28,6 +28,9 @@ class RecordingJournal:
 
     def record_response(self, request_id: str, response: RawResponse) -> None:
         self.events.append(("response", request_id, response))
+
+    def record_attempt(self, request_id: str, attempt: RawAttempt) -> None:
+        self.events.append(("attempt", request_id, attempt))
 
     def record_failure(self, request_id: str, error: str, response: RawResponse | None = None) -> None:
         self.events.append(("failure", request_id, error, response))

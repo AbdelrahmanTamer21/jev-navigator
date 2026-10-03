@@ -8,7 +8,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .directives.find_code import FindResult, NotInspected, Outcome, QueueTier, Visit
-from .directives.places import Place
+from .directives.places import Place, place_relationship
+from .index.bindings import Binding
 from .index.code_index import CodeIndex
 from .index.spans import CodeSlice, Span
 from .judgments.judge import CheckResult
@@ -166,17 +167,29 @@ def _frontier_record(entry: NotInspected) -> dict:
         "depth": entry.depth,
         "path": list(entry.path),
         "tier": entry.tier.value,
+        "relationship": place_relationship(entry.place),
     }
 
 
 def _read_frontier(record: dict, index: CodeIndex) -> NotInspected:
     span = Span(**record["span"])
     origin = record["origin"]
+    relationship = record.get("relationship") or {}
+    binding_record = relationship.get("binding")
+    binding = None
+    if binding_record is not None:
+        target = binding_record.get("target")
+        binding = Binding(
+            binding_record["status"], binding_record["reason"], Span(**target) if target is not None else None
+        )
     place = Place(
         record["place_key"],
         record["kind"],
         record["signature"],
         lambda: index.read_slice(span, origin=origin),
+        relationship.get("relation"),
+        binding,
+        relationship.get("move"),
     )
     return NotInspected(
         record["place_key"],

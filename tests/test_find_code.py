@@ -327,6 +327,81 @@ def test_jev_sees_only_the_target_the_opened_code_and_neighbour_signatures(sampl
     assert all("goal" not in question["instructions"] for question in questions.values())
 
 
+def test_find_packets_and_history_keep_parsed_relationship_bindings(tmp_path: Path) -> None:
+    # Arrange
+    repository_files = {
+        "app/target.py": "def check():\n    return 'target'\n",
+        "app/duplicate.py": "def check():\n    return 'duplicate'\n",
+        "app/imported.py": "from app.target import check\n\n\ndef imported():\n    return check()\n",
+        "app/ambiguous.py": "def ambiguous():\n    return check()\n",
+    }
+    commit_files(tmp_path, repository_files)
+    index = CodeIndex(tmp_path, list(repository_files))
+    starts = [function_place(index, index.find_definition(name)[0]) for name in ("imported", "ambiguous")]
+    client = ScriptedJevClient(
+        nouls=lambda _question_id, _question, _state: 0.1,
+        choices={"open_first": {"none": 1.0}},
+    )
+
+    # Act
+    result = find_code(
+        index,
+        Judge(client),
+        "the check function",
+        starts,
+        moves={"callees": MOVES["callees"]},
+        budget=SearchBudget(max_steps=2, beam_width=2),
+    )
+
+    # Assert
+    packet_candidates = [
+        candidate for state, _questions in client.requests for candidate in state["candidates"]
+    ]
+    packet_relationships = [candidate["relationship"] for candidate in packet_candidates]
+    assert {item["binding"]["status"] for item in packet_relationships} == {"resolved", "candidate"}
+    resolved = next(item for item in packet_relationships if item["binding"]["status"] == "resolved")
+    ambiguous = next(item for item in packet_relationships if item["binding"]["status"] == "candidate")
+    assert resolved["move"] == ambiguous["move"] == "callees"
+    assert resolved["binding"]["target"]["file"] == "app/target.py"
+    assert "target" not in ambiguous["binding"]
+
+    history_candidates = [
+        candidate
+        for step in result.history.steps
+        if step.operation == "open"
+        for candidate in step.to_json()["judgments"]["could_contain"]
+    ]
+    assert {candidate["relationship"]["binding"]["status"] for candidate in history_candidates} == {
+        "resolved",
+        "candidate",
+    }
+    assert {candidate["probability"] for candidate in history_candidates} == {0.1}
+    assert {candidate["verdict"] for candidate in history_candidates} == {"no"}
+
+    imported_check = next(span for span in index.find_definition("check") if span.file == "app/target.py")
+    caller_client = ScriptedJevClient(nouls=lambda _question_id, _question, _state: 0.1)
+    caller_result = find_code(
+        index,
+        Judge(caller_client),
+        "the check function",
+        [function_place(index, imported_check)],
+        moves={"callers": MOVES["callers"]},
+        budget=SearchBudget(max_steps=1),
+    )
+    caller_relationships = [
+        candidate["relationship"]
+        for state, _questions in caller_client.requests
+        for candidate in state["candidates"]
+    ]
+    assert {item["binding"]["status"] for item in caller_relationships} == {"resolved", "candidate"}
+    assert {item["move"] for item in caller_relationships} == {"callers"}
+    caller_open_step = next(step for step in caller_result.history.steps if step.operation == "open")
+    assert {
+        candidate["relationship"]["binding"]["status"]
+        for candidate in caller_open_step.to_json()["judgments"]["could_contain"]
+    } == {"resolved", "candidate"}
+
+
 def test_beam_width_and_budgets_can_come_from_the_environment() -> None:
     # Act
     budget = SearchBudget.from_env({"JEV_NAVIGATOR_BEAM_WIDTH": "1", "JEV_NAVIGATOR_MAX_STEPS": "5"})

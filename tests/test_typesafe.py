@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import concurrent.futures
 import json
@@ -11,19 +12,33 @@ from pathlib import Path
 
 import pytest
 
-from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code
-from jev_navigator.directives.places import range_place
+from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code, find_code_async
+from jev_navigator.directives.places import MOVES, function_place, range_place
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.store import JsonlAnswerStore
-from jev_navigator.judgments.thresholds import Thresholds
+from jev_navigator.judgments.thresholds import NoulVerdict, Thresholds
+
+DESCRIBES = Check(
+    name="describes",
+    instructions="Is `{item}.code` the implementation that `doc.sentence` describes?",
+    yes=Criterion("The code performs what the sentence says."),
+    no=Criterion("The code does something else, or only calls it."),
+)
 
 STATE = {"slice": {"file": "counter.py", "code": "def add_one(x):\n    return x + 1"}}
 QUESTIONS = {"adds_one": {"type": "noul", "instructions": "Does `slice.code` add one?"}}
 
 
-def _jev_server(exchanges: list[tuple[bytes, bytes]]) -> ThreadingHTTPServer:
+def _jev_server(
+    exchanges: list[tuple[bytes, bytes]],
+    *,
+    input_limit: int | None = None,
+    priority_failure_status: int | None = None,
+    refusal_body: bytes | None = None,
+) -> ThreadingHTTPServer:
     """A local Jev endpoint recording the exact bytes of every request it answers, and its answer.
 
     Those pairs are ground truth for what crossed the wire, so a journal or store entry is checked
@@ -33,16 +48,42 @@ def _jev_server(exchanges: list[tuple[bytes, bytes]]) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             sent = self.rfile.read(int(self.headers["content-length"]))
-            answers = {id_: {"type": "noul", "noul": 0.9} for id_ in json.loads(sent)["questions"]}
-            served = json.dumps(
-                {
-                    "model": "jev-1.13.0",
-                    "usage": {"input_tokens": 12, "output_tokens": 1},
-                    "answers": answers,
-                }
-            ).encode()
+            questions = json.loads(sent)["questions"]
+            status = 200
+            if refusal_body is not None:
+                status, served = 400, refusal_body
+            elif priority_failure_status is not None and all(
+                q["type"] == "choice" for q in questions.values()
+            ):
+                status = priority_failure_status
+                detail = "max_tokens_exceeded" if status == 400 else "invalid_api_key"
+                served = json.dumps({"detail": {"error_type": detail}}).encode()
+            elif input_limit is not None and len(sent) > input_limit:
+                served = b'{"detail":{"error_type":"max_tokens_exceeded"}}'
+                status = 400
+            else:
+                answers = {}
+                for id_, question in questions.items():
+                    if question["type"] == "choice":
+                        options = question["criteria"]
+                        picked = next(iter(options))
+                        answers[id_] = {
+                            "type": "choice",
+                            "choice": picked,
+                            "probabilities": {key: float(key == picked) for key in options},
+                            "confidence": 1.0,
+                        }
+                    else:
+                        answers[id_] = {"type": "noul", "noul": 0.9}
+                served = json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "usage": {"input_tokens": 12, "output_tokens": 1},
+                        "answers": answers,
+                    }
+                ).encode()
             exchanges.append((sent, served))
-            self.send_response(200)
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(served)))
             self.end_headers()
@@ -59,6 +100,321 @@ def _jev_server(exchanges: list[tuple[bytes, bytes]]) -> ThreadingHTTPServer:
 def _stop(server: ThreadingHTTPServer) -> None:
     server.shutdown()
     server.server_close()
+
+
+def _retry_jev_server(
+    exchanges: list[tuple[str, bytes, int, bytes]], *, always_fail: bool = False
+) -> ThreadingHTTPServer:
+    """A local endpoint that retries each logical marker once (or fails all attempts)."""
+    counts: dict[str, int] = {}
+    lock = threading.Lock()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            sent = self.rfile.read(int(self.headers["content-length"]))
+            marker = json.loads(sent)["state"].get("marker", "one")
+            with lock:
+                counts[marker] = counts.get(marker, 0) + 1
+                attempt = counts[marker]
+            if attempt == 1 or always_fail:
+                status = 503
+                served = b'{"detail":{"error_type":"temporary_unavailable"}}'
+            else:
+                status = 200
+                answers = {
+                    question_id: {"type": "noul", "noul": 0.9}
+                    for question_id in json.loads(sent)["questions"]
+                }
+                served = json.dumps(
+                    {
+                        "model": "local-served-model",
+                        "usage": {"input_tokens": attempt, "output_tokens": 1},
+                        "answers": answers,
+                    }
+                ).encode()
+            with lock:
+                exchanges.append((marker, sent, status, served))
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(served)))
+            self.end_headers()
+            self.wfile.write(served)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, name="jev-retry-local-server", daemon=True).start()
+    return server
+
+
+def _seed_index(root: Path, neighbours: int) -> tuple[CodeIndex, list[str]]:
+    blocks = ["def entry():\n    return 0\n"]
+    for number in range(neighbours):
+        lines = [f"def candidate_{number}():"]
+        lines.extend(f"    field_{line} = '{'x' * 130}'" for line in range(6))
+        lines.append("    return field_0")
+        blocks.append("\n".join(lines))
+    (root / "workflow.py").write_text("\n\n".join(blocks))
+    return CodeIndex.from_directory(root), blocks[1:]
+
+
+@pytest.mark.parametrize("async_search", [False, True])
+@pytest.mark.parametrize(
+    "neighbours,input_limit,unavailable_fragment",
+    [
+        (159, 40_000, "request-size packing estimate"),
+        (2, 3_000, None),
+        (379, 40_000, "provider accepts 255"),
+    ],
+    ids=("request-size", "fits", "choice-limit"),
+)
+def test_seed_search_batches_every_neighbour_at_the_real_input_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    async_search: bool,
+    neighbours: int,
+    input_limit: int,
+    unavailable_fragment: str | None,
+) -> None:
+    """Oversized openings keep every neighbour judgment while omitting only the optional Choice."""
+    pytest.importorskip("typesafe_sdk")
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    index, previews = _seed_index(tmp_path, neighbours)
+    entry = index.find_definition("entry")[0]
+    candidate_ids = {span.key for span in index.functions_in(entry.file) if span.key != entry.key}
+    assert len(candidate_ids) == neighbours
+    start = function_place(index, entry)
+    exchanges: list[tuple[bytes, bytes]] = []
+    server = _jev_server(exchanges, input_limit=input_limit)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    client = TypeSafeJevClient()
+    judge = Judge(client, journal=JsonlJournal(tmp_path / "journal.jsonl", keep_request_text=True))
+    search = find_code_async if async_search else find_code
+
+    try:
+        pending = search(
+            index,
+            judge,
+            "the function returning field_0",
+            [start],
+            budget=SearchBudget(max_steps=1, beam_width=1),
+            moves={"same_file": MOVES["same_file"]},
+        )
+        result = asyncio.run(pending) if async_search else pending
+    finally:
+        client.close()
+        _stop(server)
+
+    opened = next(step for step in result.history.steps if step.operation == "open")
+    assessed = opened.judgments["could_contain"]
+    assert len(assessed) == neighbours
+    assert {candidate["place"] for candidate in assessed} == candidate_ids
+    assert len(result.not_inspected) == neighbours
+    accepted = [
+        (json.loads(sent), json.loads(body)) for sent, body in exchanges if "answers" in json.loads(body)
+    ]
+    assert sum(len(body["answers"]) for _, body in accepted) >= neighbours + 1
+    assert all(len(sent) <= input_limit for sent, body in exchanges if "answers" in json.loads(body))
+    delivered = [
+        candidate["code"]
+        for request, _ in accepted
+        if any(key.startswith("could_contain_target@") for key in request["questions"])
+        for candidate in request["state"]["candidates"]
+    ]
+    assert sorted(delivered) == sorted(previews)
+    assert judge.calls == result.calls == len(exchanges)
+    if unavailable_fragment is not None:
+        assert opened.judgments["open_first"]["used"] is False
+        assert unavailable_fragment in opened.judgments["open_first"]["unavailable"]
+    else:
+        assert opened.judgments["open_first"]["used"] is True
+
+
+def test_split_seed_resumes_completed_neighbours_without_another_paid_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("typesafe_sdk")
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    index, previews = _seed_index(tmp_path, 159)
+    start = function_place(index, index.find_definition("entry")[0])
+    exchanges: list[tuple[bytes, bytes]] = []
+    server = _jev_server(exchanges, input_limit=40_000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    client = TypeSafeJevClient()
+    store_path = tmp_path / "answers.jsonl"
+    first_judge = Judge(client, store=JsonlAnswerStore(store_path))
+    try:
+        first = find_code(
+            index,
+            first_judge,
+            "the function returning field_0",
+            [start],
+            budget=SearchBudget(max_calls=3, max_steps=1, beam_width=1),
+            moves={"same_file": MOVES["same_file"]},
+        )
+        assert first.outcome == Outcome.BUDGET
+        assert first.calls == 3
+        assert JsonlAnswerStore(store_path).records()
+        resumed_judge = Judge(
+            client,
+            store=JsonlAnswerStore(store_path),
+            served_model=first_judge.served_model,
+        )
+        resumed = find_code(
+            index,
+            resumed_judge,
+            "the function returning field_0",
+            [],
+            budget=SearchBudget(max_steps=1, beam_width=1),
+            moves={"same_file": MOVES["same_file"]},
+            resume=first,
+        )
+    finally:
+        client.close()
+        _stop(server)
+
+    delivered = [
+        candidate["code"]
+        for sent, body in exchanges
+        if "answers" in json.loads(body)
+        and any(key.startswith("could_contain_target@") for key in json.loads(sent)["questions"])
+        for candidate in json.loads(sent)["state"]["candidates"]
+    ]
+    assert sorted(delivered) == sorted(previews)
+    assert len(resumed.not_inspected) == len(previews)
+    assert len(resumed.starts) == 1
+    assert first.calls + resumed_judge.calls == len(exchanges)
+    stored_text = store_path.read_text()
+    assert not any(json.dumps(preview) in stored_text for preview in previews)
+
+
+@pytest.mark.parametrize("status", [400, 401])
+def test_optional_priority_keeps_size_failure_but_propagates_auth_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    pytest.importorskip("typesafe_sdk")
+    from typesafe_sdk import TypeSafeAuthenticationError
+
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    index, _ = _seed_index(tmp_path, 2)
+    start = function_place(index, index.find_definition("entry")[0])
+    exchanges: list[tuple[bytes, bytes]] = []
+    server = _jev_server(exchanges, input_limit=3_000, priority_failure_status=status)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    client = TypeSafeJevClient()
+    journal_path = tmp_path / "journal.jsonl"
+    judge = Judge(client, journal=JsonlJournal(journal_path))
+    try:
+
+        def search():
+            return find_code(
+                index,
+                judge,
+                "the function returning field_0",
+                [start],
+                budget=SearchBudget(max_steps=1, beam_width=1),
+                moves={"same_file": MOVES["same_file"]},
+            )
+
+        if status == 401:
+            with pytest.raises(TypeSafeAuthenticationError, match="invalid_api_key"):
+                search()
+        else:
+            result = search()
+            opened = next(step for step in result.history.steps if step.operation == "open")
+            assert len(opened.judgments["could_contain"]) == 2
+            assert opened.judgments["open_first"]["used"] is False
+            assert "max_tokens_exceeded" in opened.judgments["open_first"]["unavailable"]
+    finally:
+        client.close()
+        _stop(server)
+
+    records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    cause = "max_tokens_exceeded" if status == 400 else "invalid_api_key"
+    assert any(cause in record.get("error", "") for record in records if record["kind"] == "failure")
+
+
+@pytest.mark.parametrize("async_checks", [False, True])
+@pytest.mark.parametrize(
+    "error_type,message",
+    [
+        ("invalid_question", "unknown question id max_tokens_exceeded"),
+        ("max_tokens_exceeded", None),
+        ("max_tokens_exceeded", "The model's input is too long."),
+    ],
+)
+def test_structured_error_type_controls_retry_at_the_sdk_boundary(
+    monkeypatch: pytest.MonkeyPatch, async_checks: bool, error_type: str, message: str | None
+) -> None:
+    pytest.importorskip("typesafe_sdk")
+    from typesafe_sdk import TypeSafeBadRequestError
+
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+    from jev_navigator.judgments.client import InputBudgetExceededError
+
+    detail = {"error_type": error_type}
+    if message is not None:
+        detail["message"] = message
+    exchanges: list[tuple[bytes, bytes]] = []
+    server = _jev_server(exchanges, refusal_body=json.dumps({"detail": detail}).encode())
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    client = TypeSafeJevClient()
+    judge = Judge(client)
+    expected = InputBudgetExceededError if error_type == "max_tokens_exceeded" else TypeSafeBadRequestError
+    try:
+        with pytest.raises(expected):
+            items = [{"code": "def one(): return 1"}, {"code": "def two(): return 2"}]
+            shared = {"doc": {"sentence": "returns a number"}}
+            if async_checks:
+                asyncio.run(judge.check_every_async([DESCRIBES], items, shared))
+            else:
+                judge.check_every([DESCRIBES], items, shared)
+    finally:
+        client.close()
+        _stop(server)
+
+    assert judge.calls == len(exchanges)
+    assert len(exchanges) == (2 if error_type == "max_tokens_exceeded" else 1)
+
+
+def test_input_batches_keep_values_masked_across_request_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("typesafe_sdk")
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    planted = "order-hook-4f7a1c"
+    items = [
+        {"code": f'WEBHOOK_TOKEN = "{planted}"'},
+        {"code": f'post("{planted}", order)'},
+    ]
+    exchanges: list[tuple[bytes, bytes]] = []
+    server = _jev_server(exchanges)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    client = TypeSafeJevClient()
+    try:
+        answers = Judge(client).check_every(
+            [DESCRIBES], items, {"doc": {"sentence": "posts an order"}}, batch_budget=1
+        )
+    finally:
+        client.close()
+        _stop(server)
+
+    assert len(answers["describes"]) == 2
+    assert len(exchanges) == 2
+    assert all(planted.encode() not in sent for sent, _ in exchanges)
 
 
 def test_cancel_aborts_an_active_official_sdk_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -274,3 +630,209 @@ def test_the_answer_store_keeps_no_request_bytes_by_default_even_after_a_real_ca
     assert kept.sent_exact is True
     assert base64.b64decode(kept.sent_body_base64) == exchanges[1][0]
     assert kept.sent_request() == (STATE, QUESTIONS)
+
+
+def test_a_max_tokens_exceeded_response_is_typed_and_the_batch_splits_at_the_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The saved trace run's request 5 died on an untyped 400 max_tokens_exceeded. The transport
+    owns the provider contract: it translates the refusal, and the batching owner splits the batch
+    so the same questions travel in requests the provider accepts. Sanitized fixture, real socket."""
+    pytest.importorskip("typesafe_sdk")
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    refusals: list[bytes] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            sent = self.rfile.read(int(self.headers["content-length"]))
+            if len(sent) > 40_000:
+                refusals.append(sent)
+                body = b'{"detail":{"error_type":"max_tokens_exceeded"}}'
+                self.send_response(400)
+            else:
+                answers = {id_: {"type": "noul", "noul": 0.9} for id_ in json.loads(sent)["questions"]}
+                body = json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "usage": {"input_tokens": 12, "output_tokens": 1},
+                        "answers": answers,
+                    }
+                ).encode()
+                self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, name="jev-local-server", daemon=True).start()
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    client = TypeSafeJevClient()
+    journal_path = tmp_path / "journal.jsonl"
+    judge = Judge(client, journal=JsonlJournal(journal_path, keep_request_text=True))
+    items = [
+        {"file": f"part{index}.py", "lines": [1, 2], "code": "x = " + "y" * 24_000} for index in range(2)
+    ]
+
+    try:
+        results = judge.check_every([DESCRIBES], items, {}, list_name="parts")
+    finally:
+        client.close()
+        _stop(server)
+
+    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES, NoulVerdict.YES]
+    assert len(refusals) == 1, "the provider's own refusal stays the evidence of the oversized batch"
+    records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    failures = [record for record in records if record["kind"] == "failure"]
+    responses = [record for record in records if record["kind"] == "response"]
+    assert len(failures) == 1 and "max_tokens_exceeded" in failures[0]["error"]
+    assert len(responses) == 2 and all(record["status"] == 200 for record in responses)
+    for record in responses:
+        assert len(base64.b64decode(record["sent_body_base64"])) <= 40_000
+
+
+@pytest.mark.parametrize("sync_transport", [False, True])
+def test_the_journal_retains_each_real_sdk_retry_with_exact_wire_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sync_transport: bool
+) -> None:
+    pytest.importorskip("typesafe_sdk")
+    import httpx2
+
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    exchanges: list[tuple[str, bytes, int, bytes]] = []
+    server = _retry_jev_server(exchanges)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    transport = httpx2.HTTPTransport() if sync_transport else None
+    client = TypeSafeJevClient(transport=transport)
+    journal_path = tmp_path / "retry-journal.jsonl"
+    journal = JsonlJournal(journal_path, keep_request_text=True)
+    judge = Judge(client, journal=journal)
+
+    try:
+        if sync_transport:
+            answer = judge.ask({"marker": "one"}, QUESTIONS, thresholds=Thresholds())
+        else:
+            answer = asyncio.run(judge.ask_async({"marker": "one"}, QUESTIONS, thresholds=Thresholds()))
+    finally:
+        client.close()
+        _stop(server)
+
+    assert answer.noul("adds_one").probability == 0.9
+    records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    request = next(record for record in records if record["kind"] == "request")
+    attempts = [record for record in records if record["kind"] == "http_attempt"]
+    assert [record["attempt_no"] for record in attempts] == [1, 2]
+    assert all(record["request_id"] == request["request_id"] for record in attempts)
+    assert [record["status"] for record in attempts] == [503, 200]
+    assert all(record["duration_ms"] >= 0 for record in attempts)
+    assert [base64.b64decode(record["sent_body_base64"]) for record in attempts] == [
+        sent for _, sent, _, _ in exchanges
+    ]
+    assert [base64.b64decode(record["body_base64"]) for record in attempts] == [
+        served for _, _, _, served in exchanges
+    ]
+    assert json.loads(base64.b64decode(attempts[-1]["body_base64"]))["usage"] == {
+        "input_tokens": 2,
+        "output_tokens": 1,
+    }
+    assert records[-1]["kind"] == "response"
+
+
+def test_concurrent_async_retries_stay_with_their_logical_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("typesafe_sdk")
+
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    exchanges: list[tuple[str, bytes, int, bytes]] = []
+    server = _retry_jev_server(exchanges)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    client = TypeSafeJevClient()
+    journal_path = tmp_path / "concurrent-retry-journal.jsonl"
+    judge = Judge(client, journal=JsonlJournal(journal_path, keep_request_text=True))
+
+    async def ask_both():
+        return await asyncio.gather(
+            judge.ask_async({"marker": "alpha"}, QUESTIONS, thresholds=Thresholds()),
+            judge.ask_async({"marker": "beta"}, QUESTIONS, thresholds=Thresholds()),
+        )
+
+    try:
+        answers = asyncio.run(ask_both())
+    finally:
+        client.close()
+        _stop(server)
+
+    assert [answer.noul("adds_one").probability for answer in answers] == [0.9, 0.9]
+    records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    requests = {record["request_id"]: record for record in records if record["kind"] == "request"}
+    attempts = [record for record in records if record["kind"] == "http_attempt"]
+    assert len(requests) == 2 and len(attempts) == 4
+    for request_id, request in requests.items():
+        marker = json.loads(base64.b64decode(request["body_base64"]))["state"]["marker"]
+        matching = sorted(
+            (record for record in attempts if record["request_id"] == request_id),
+            key=lambda record: record["attempt_no"],
+        )
+        assert [record["attempt_no"] for record in matching] == [1, 2]
+        assert [record["status"] for record in matching] == [503, 200]
+        assert all(
+            json.loads(base64.b64decode(record["sent_body_base64"]))["state"]["marker"] == marker
+            for record in matching
+        )
+    assert {marker for marker, _, _, _ in exchanges} == {"alpha", "beta"}
+
+
+@pytest.mark.parametrize("sync_transport", [False, True])
+def test_terminal_sdk_failure_keeps_all_attempt_responses_before_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sync_transport: bool
+) -> None:
+    pytest.importorskip("typesafe_sdk")
+    import httpx2
+    from typesafe_sdk import TypeSafeInternalServerError
+
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    exchanges: list[tuple[str, bytes, int, bytes]] = []
+    server = _retry_jev_server(exchanges, always_fail=True)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    transport = httpx2.HTTPTransport() if sync_transport else None
+    client = TypeSafeJevClient(transport=transport)
+    journal_path = tmp_path / "terminal-retry-journal.jsonl"
+    judge = Judge(client, journal=JsonlJournal(journal_path, keep_request_text=True))
+
+    try:
+        with pytest.raises(TypeSafeInternalServerError):
+            if sync_transport:
+                judge.ask({"marker": "terminal"}, QUESTIONS, thresholds=Thresholds())
+            else:
+                asyncio.run(judge.ask_async({"marker": "terminal"}, QUESTIONS, thresholds=Thresholds()))
+    finally:
+        client.close()
+        _stop(server)
+
+    records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    request = next(record for record in records if record["kind"] == "request")
+    attempts = [record for record in records if record["kind"] == "http_attempt"]
+    failure = next(record for record in records if record["kind"] == "failure")
+    assert [record["attempt_no"] for record in attempts] == [1, 2, 3]
+    assert all(record["request_id"] == request["request_id"] for record in attempts)
+    assert all(record["status"] == 503 for record in attempts)
+    assert [base64.b64decode(record["sent_body_base64"]) for record in attempts] == [
+        sent for _, sent, _, _ in exchanges
+    ]
+    assert [base64.b64decode(record["body_base64"]) for record in attempts] == [
+        served for _, _, _, served in exchanges
+    ]
+    assert failure["request_id"] == request["request_id"]
+    assert "TypeSafeInternalServerError" in failure["error"]

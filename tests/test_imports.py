@@ -152,6 +152,29 @@ def test_a_public_export_beside_a_template_literal_stays_proven(tmp_path: Path) 
     assert call.binding.target == Span("src/services/one.ts", 2, 2, "run")
 
 
+def test_a_function_inside_an_exported_arrow_does_not_name_the_export(tmp_path: Path) -> None:
+    """The regression: the export's own name is the surface, not the first function in its body,
+    so a call to `Page` through the barrel is proven to reach it."""
+    # Arrange
+    index = indexed(
+        tmp_path,
+        {
+            "src/views/page.ts": (
+                "export const Page = () => {\n  function helper() { return 1; }\n  return helper();\n};\n"
+            ),
+            "src/views/index.ts": 'export * from "./page";\n',
+            "src/app.ts": 'import { Page } from "./views";\nPage();\n',
+        },
+    )
+
+    # Act
+    call = index.find_callers("Page")[0]
+
+    # Assert
+    assert call.binding.status == "resolved"
+    assert call.binding.target == Span("src/views/page.ts", 1, 4, "Page")
+
+
 def test_a_call_imported_through_a_barrel_has_a_proven_target(tmp_path: Path) -> None:
     # Arrange
     index = indexed(

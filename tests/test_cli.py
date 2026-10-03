@@ -851,10 +851,24 @@ def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
         raise AssertionError("structural analysis must not construct a model client")
 
     monkeypatch.setattr(cli, "TypeSafeJevClient", forbidden_provider)
-    assert main(["--json", json.dumps({
-        "command": "stats", "repo": str(root), "kind": ["function"],
-        "limit": 1, "min_lines": 4, "max_lines": 4,
-    })]) == 0
+    assert (
+        main(
+            [
+                "--json",
+                json.dumps(
+                    {
+                        "command": "stats",
+                        "repo": str(root),
+                        "kind": ["function"],
+                        "limit": 1,
+                        "min_lines": 4,
+                        "max_lines": 4,
+                    }
+                ),
+            ]
+        )
+        == 0
+    )
     captured = capsys.readouterr()
     result = json.loads(captured.out)
     output = Path(result["output_directory"])

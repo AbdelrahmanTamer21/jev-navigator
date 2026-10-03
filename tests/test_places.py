@@ -413,6 +413,32 @@ def test_moves_start_from_a_window_inside_a_long_class(tmp_path: Path) -> None:
     assert "refers to CreateOrder as collection" in offered["schema.py:3-3"]
 
 
+def test_uses_proven_to_reach_another_definition_of_the_name_are_not_offered(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(
+        tmp_path,
+        {
+            "archive.py": "def handler(event):\n    return event\n",
+            "jobs.py": "def handler(event):\n    return None\n",
+            "wiring.py": "from jobs import handler\n\n\ndef run(event):\n    return handler(event)\n\n\n"
+            "def wire(bus):\n    bus.on(handler)\n",
+        },
+    )
+    handlers = {span.file: span for span in index.find_definition("handler")}
+    moves = {name: MOVES[name] for name in ("callers", "referenced_by")}
+
+    # Act
+    from_archive = neighbours(index, index.read_slice(handlers["archive.py"]), moves=moves)
+    from_jobs = neighbours(index, index.read_slice(handlers["jobs.py"]), moves=moves)
+
+    # Assert
+    assert from_archive == []
+    assert [place.signature.split("` ")[1] for place in from_jobs] == [
+        "(calls handler)",
+        "(refers to handler as argument)",
+    ]
+
+
 def test_callees_called_from_few_places_come_first(tmp_path: Path) -> None:
     # Arrange
     helpers = "".join(f"def helper_{number}(value):\n    return value\n\n\n" for number in range(9))
@@ -528,6 +554,32 @@ def test_an_anonymous_callback_offers_its_named_containing_function(tmp_path: Pa
     assert "in the same file as orders.ts:" in offered[0].signature
 
 
+def test_a_callback_inside_a_test_callback_offers_that_test_first(tmp_path: Path) -> None:
+    """Test callbacks are anonymous, so a callback nested in one has no named container: the
+    same-file move offers its nearest container, the test it belongs to, before the other tests."""
+    # Arrange
+    index = committed_index(
+        tmp_path,
+        {
+            "orders.test.ts": (
+                'it("rejects an empty cart", () => {\n'
+                "  expect(() => placeOrder([])).toThrow();\n"
+                "});\n"
+                'it("accepts one item", () => {\n'
+                "  expect(placeOrder([1])).toBe(1);\n"
+                "});\n"
+            )
+        },
+    )
+    inner = next(span for span in index.functions_in("orders.test.ts") if span.start == span.end == 2)
+
+    # Act
+    offered = neighbours(index, index.read_slice(inner), moves={"same_file": MOVES["same_file"]})
+
+    # Assert
+    assert [place.key for place in offered] == ["orders.test.ts:1-3", "orders.test.ts:4-6"]
+
+
 def test_a_constant_used_as_a_method_receiver_is_passed_on(tmp_path: Path) -> None:
     # Arrange
     index = committed_index(
@@ -542,7 +594,7 @@ def test_a_constant_used_as_a_method_receiver_is_passed_on(tmp_path: Path) -> No
     offered = neighbour_signatures(index, "redact")
 
     # Assert
-    assert "passed on by redact as receiver" in offered["redaction.py:3-3"]
+    assert offered["redaction.py:3-3"].endswith("(passed on by redact as receiver)")
 
 
 def numbered_functions(count: int) -> str:
