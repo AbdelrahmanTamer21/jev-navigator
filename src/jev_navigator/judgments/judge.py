@@ -216,8 +216,10 @@ class Judge:
     def abort_sends(self, futures: Sequence[Future]) -> None:
         """What a caller interrupt does to one step's concurrent requests: the client aborts those in
         flight, those not started never start, and this returns once every one has settled. Only an
-        interrupt calls it: a client's cancel is permanent, so an ordinary failure lets the requests
-        in flight settle instead and keeps their answers."""
+        interrupt calls it. A client's cancel is permanent (``TypeSafeJevClient`` refuses every later
+        request once cancelled), so cancelling on an ordinary failure, such as a reached call cap,
+        would fail the rest of the run and discard answers already paid for; an ordinary failure
+        instead lets the requests in flight settle and keeps their answers."""
         self.cancel()
         for future in futures:
             future.cancel()
