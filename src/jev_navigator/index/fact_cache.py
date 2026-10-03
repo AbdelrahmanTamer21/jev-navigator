@@ -13,7 +13,7 @@ from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch
 from .spans import Span
 from .tools import ast_grep_version
 
-FACT_RULE_VERSION = "combined-facts-v11-unparsed-lines"
+FACT_RULE_VERSION = "combined-facts-v12-reference-receivers"
 
 
 class FactCache:
@@ -87,7 +87,9 @@ def _decode(file: str, raw: dict) -> FileFacts:
         ),
         tuple(CallMatch(file, call["line"], call["name"], call.get("receiver")) for call in raw["calls"]),
         tuple(
-            ReferenceMatch(file, reference["line"], reference["role"], reference["name"])
+            ReferenceMatch(
+                file, reference["line"], reference["role"], reference["name"], reference["receiver"]
+            )
             for reference in raw["references"]
         ),
         bool(raw["incomplete"]),

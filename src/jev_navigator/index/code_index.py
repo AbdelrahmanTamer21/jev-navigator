@@ -320,7 +320,8 @@ class CodeIndex:
         """Uses of ``name`` that are not calls: arguments, collection entries, assignments,
         decorators, exports, returns, method receivers, types and conditions, each with its role,
         holder and binding. Code reached this way (a callback, a registry entry, a parameter typed
-        with a class) has no call edge to follow."""
+        with a class) has no call edge to follow. A member passed as an argument (``self.handler``)
+        is bound like a method call on an unknown receiver, never proven by a same-named function."""
         return self._references(self._references_named(name))
 
     def references_in(self, function: Span) -> tuple[Reference, ...]:
@@ -345,7 +346,7 @@ class CodeIndex:
                 match.line,
                 match.role,
                 self.enclosing_symbol(match.file, match.line),
-                self.binding_of(match.file, match.line, match.name, None),
+                self.binding_of(match.file, match.line, match.name, match.receiver),
             )
             for match in sorted(set(matches))
         )
