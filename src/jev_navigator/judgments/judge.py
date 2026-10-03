@@ -219,7 +219,10 @@ class Judge:
         interrupt calls it. A client's cancel is permanent (``TypeSafeJevClient`` refuses every later
         request once cancelled), so cancelling on an ordinary failure, such as a reached call cap,
         would fail the rest of the run and discard answers already paid for; an ordinary failure
-        instead lets the requests in flight settle and keeps their answers."""
+        instead lets the requests in flight settle and keeps their answers. Known and accepted: a
+        Ctrl-C that lands while a caller handles a yielded answer closes the batch generator, which
+        cannot tell it from an ordinary early stop, so the requests in flight finish first and only
+        the exit is delayed."""
         self.cancel()
         for future in futures:
             future.cancel()
