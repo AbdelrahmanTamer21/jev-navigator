@@ -35,6 +35,11 @@ from .answers import Answer, JevResponse, answer_from_json
 
 DEFAULT_SHARED_STORE = Path.home() / ".cache/jev-navigator/answers.sqlite"
 SHARED_STORE_VARIABLE = "JEV_NAVIGATOR_ANSWER_STORE"
+SKELETON_ITEM_FIELDS = frozenset(
+    {"file", "lines", "commit", "file_sha256", "reached_by", "span_key", "name", "place"}
+)
+"""The item fields a run pack keeps without ``keep_requests``: ids, locations, hashes and names. Every
+other field, such as a Trace link line or a Find signature, can quote code and is withheld."""
 INPUT_BUDGET_REFUSAL = "input_budget_refusal"
 """A store line recording that a route refused one exact request for its input size."""
 
@@ -321,11 +326,22 @@ def _without_request(record: AnswerRecord) -> AnswerRecord:
         **{
             **asdict(record),
             "request": None,
+            "skeleton": _code_free_skeleton(record.skeleton),
             "sent_body_base64": None,
             "sent_exact": False,
             "question_ids": record.question_ids,
         }
     )
+
+
+def _code_free_skeleton(skeleton: Mapping) -> dict:
+    """The skeleton with each item cut to ``SKELETON_ITEM_FIELDS``, naming the fields withheld."""
+    if not skeleton:
+        return dict(skeleton)
+    items = skeleton["items"]
+    withheld = sorted({name for item in items for name in item if name not in SKELETON_ITEM_FIELDS})
+    kept = [{name: value for name, value in item.items() if name in SKELETON_ITEM_FIELDS} for item in items]
+    return {**skeleton, "items": kept, "withheld_fields": withheld}
 
 
 def _stamped(record: AnswerRecord) -> AnswerRecord:

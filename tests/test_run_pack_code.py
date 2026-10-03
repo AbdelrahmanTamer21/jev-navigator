@@ -1,0 +1,95 @@
+"""A run's answers.jsonl keeps no code by default: ids, locations, hashes and names only."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from jev_navigator.directives.trace import trace_workflow
+from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.questions import Check, Criterion
+from jev_navigator.judgments.rebuild import rebuild_request
+from jev_navigator.judgments.store import JsonlAnswerStore
+from jev_navigator.testing import ScriptedJevClient
+
+HUB = """def handle(order, first_line_marker=None):
+    return send(order, "call_site_marker")
+
+
+def send(order, tag):
+    return tag
+"""
+NEIGHBOUR = Check(
+    name="could_contain_target",
+    instructions="Does `{item}.code`, under `{item}.signature`, implement `target.description`?",
+    yes=Criterion("It implements it."),
+    no=Criterion("It does not."),
+)
+
+
+def _trace_into(pack: JsonlAnswerStore, root: Path) -> None:
+    (root / "hub.py").write_text(HUB)
+    index = CodeIndex.from_directory(root)
+    start = index.find_definition("handle")[0]
+    trace_workflow(index, Judge(ScriptedJevClient(), store=pack), "How does an order become a tag?", [start])
+
+
+def test_a_trace_pack_keeps_neither_a_first_line_nor_a_call_site_line(tmp_path: Path) -> None:
+    # Arrange
+    pack = tmp_path / "answers.jsonl"
+
+    # Act
+    _trace_into(JsonlAnswerStore(pack), tmp_path)
+
+    # Assert
+    stored = pack.read_text()
+    assert "hub.py" in stored and "handle" in stored
+    assert "first_line_marker" not in stored
+    assert "call_site_marker" not in stored
+
+
+def test_a_find_neighbour_pack_keeps_no_signature(tmp_path: Path) -> None:
+    # Arrange
+    pack = tmp_path / "answers.jsonl"
+    neighbour = {
+        "file": "hub.py",
+        "lines": [1, 2],
+        "place": "hub.py:1#handle",
+        "signature": "def handle(order, first_line_marker=None):",
+        "code": "def handle(order, first_line_marker=None):\n    return order",
+    }
+
+    # Act
+    Judge(ScriptedJevClient(), store=JsonlAnswerStore(pack)).check_each(
+        NEIGHBOUR, [neighbour], {"target": {"description": "sends an order"}}, list_name="candidates"
+    )
+
+    # Assert
+    stored = pack.read_text()
+    assert "hub.py:1#handle" in stored
+    assert "first_line_marker" not in stored
+
+
+def test_a_pack_that_keeps_requests_keeps_the_whole_skeleton(tmp_path: Path) -> None:
+    # Arrange
+    pack = tmp_path / "answers.jsonl"
+
+    # Act
+    _trace_into(JsonlAnswerStore(pack, keep_requests=True), tmp_path)
+
+    # Assert
+    assert "call_site_marker" in pack.read_text()
+
+
+def test_rebuilding_a_request_whose_code_fields_were_withheld_names_them(tmp_path: Path) -> None:
+    # Arrange
+    pack = tmp_path / "answers.jsonl"
+    _trace_into(JsonlAnswerStore(pack), tmp_path)
+    record = JsonlAnswerStore(pack).records()[0]
+
+    # Act
+    rebuilt = rebuild_request(record, CodeIndex.from_directory(tmp_path), {})
+
+    # Assert
+    assert not rebuilt.matches
+    assert any("links" in difference for difference in rebuilt.differences)
