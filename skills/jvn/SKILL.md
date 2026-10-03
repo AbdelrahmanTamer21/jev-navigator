@@ -58,11 +58,13 @@ commands never prompt. Continue either search with the same target and `--resume
 completed Findall judgments remain available across the stop. Trace has no saved continuation. Ctrl+C cancels; a cancelled Trace may have a
 journal without a finished manifest. Preserve the diagnostic and existing output.
 
-Each request judges at most 16 functions, and a step's requests run in parallel. Every answer goes to
+Find All and Trace judge at most 16 functions per request and send their requests in parallel; a Find
+opening still asks about all its neighbours in one request. Every answer goes to
 one shared answer store, `~/.cache/jev-navigator/answers.sqlite`, which holds hashes, locations and
 answers, never code. A later run at the same commit replays from it after one live request. Give each
 experiment or eval arm its own store with `--answer-store PATH` (or `JEV_NAVIGATOR_ANSWER_STORE`) so
-arms never reuse each other's answers; stderr names the store in use.
+arms never reuse each other's answers; stderr names the store in use. `jvn trace` reports
+`replayed_answers` beside its live `calls`.
 
 Live searches send selected source to the configured provider. Reuse the user's existing source
 and spend authorization. Credentials come from environment or `~/.config/jvn/env`; never print them.

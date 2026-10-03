@@ -13,7 +13,9 @@ from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.rebuild import rebuild_request
+from jev_navigator.judgments.relations import key_mention, without_quoted_code
 from jev_navigator.judgments.store import JsonlAnswerStore
+from jev_navigator.judgments.thresholds import Thresholds
 from jev_navigator.testing import ScriptedJevClient
 
 HUB = """def handle(order, first_line_marker=None):
@@ -23,6 +25,12 @@ HUB = """def handle(order, first_line_marker=None):
 def send(order, tag):
     return tag
 """
+DESCRIBES_SLICE = Check(
+    name="found",
+    instructions="Does `slice.code` set a value?",
+    yes=Criterion("It sets one."),
+    no=Criterion("It does not."),
+)
 NEIGHBOUR = Check(
     name="could_contain_target",
     instructions="Does `{item}.code`, under `{item}.signature`, implement `target.description`?",
@@ -155,3 +163,35 @@ def test_a_pack_that_keeps_requests_keeps_the_key_mention_verbatim(tmp_path: Pat
 
     # Assert
     assert "mentions `dict_key_marker.limit`" in pack.read_text()
+
+
+def test_a_key_holding_a_backtick_is_dropped_whole_from_the_relation() -> None:
+    # Arrange
+    relation = key_mention("a`b dict_key_marker` tail")
+
+    # Act
+    rendered = without_quoted_code(relation, "app/defaults.py", 2)
+
+    # Assert
+    assert rendered == "mentions a key (app/defaults.py:2)"
+
+
+def test_a_pack_drops_a_backtick_key_whole_from_the_sources(tmp_path: Path) -> None:
+    # Arrange
+    pack = tmp_path / "answers.jsonl"
+    source = {
+        "file": "app/defaults.py",
+        "lines": [2, 2],
+        "reached_by": key_mention("a`b dict_key_marker` tail"),
+    }
+    question = DESCRIBES_SLICE.to_question()
+
+    # Act
+    Judge(ScriptedJevClient(), store=JsonlAnswerStore(pack)).ask(
+        {"slice": {"code": "x = 1"}}, {"found": question}, thresholds=Thresholds(), sources={"found": source}
+    )
+
+    # Assert
+    stored = pack.read_text()
+    assert "mentions a key (app/defaults.py:2)" in stored
+    assert "dict_key_marker" not in stored and "tail" not in stored
