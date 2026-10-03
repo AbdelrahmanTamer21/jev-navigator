@@ -412,6 +412,10 @@ on its own scope, so searches sharing one judge never use up each other's budget
   unknown counts as a miss (or pass `served_model=`); with a store, a first `check_each_async` then sends its
   first batch alone, and the batches after that answer replay as usual. `ReplayOnlyClient` replays
   from the store and never calls Jev.
+  `JsonlAnswerStore` is one run's pack. `SqliteAnswerStore(path)` is one insert-only store shared by
+  every run on a machine, so a repeated run on unchanged code asks nothing again;
+  `LayeredAnswerStore(pack, shared)` reads the pack first, copies every answer it finds only in the
+  shared store into the pack, and writes new answers to both, so the pack alone still replays the run.
 - **Journal, separate from the store.** Pass `journal=` (any object with `record_request(request) ->
   request_id`, `record_response(request_id, response)` and `record_failure(request_id, error,
   response)`). The judge records the masked request before dispatch and the raw response before
