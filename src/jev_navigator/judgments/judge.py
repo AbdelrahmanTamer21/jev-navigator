@@ -343,21 +343,28 @@ class Judge:
         list_name: str = "items",
         thresholds: Thresholds | None = None,
     ) -> Mapping[str, list[CheckResult]]:
-        """``check_every`` with its batches sent concurrently; when the served model is still
-        unknown and an answer store is present, the first batch pins the model before the remaining
-        batches look in the store, exactly as the sequential path does."""
+        """``check_every`` with its batches sent concurrently, at most ``max_concurrency`` at once and,
+        under a call cap, in waves no larger than the calls left, as the sync path does. When the
+        served model is still unknown and an answer store is present, the first batch pins the model
+        before the remaining batches look in the store."""
         plan = self._check_plan(checks, items, shared, list_name, thresholds)
         batches = plan.batches
         if batches and self._must_learn_model_first():
             for sub_batch, response in await self._send_positions_async(plan, _positions(batches[0])):
                 plan.answer(sub_batch, response)
             batches = batches[1:]
-        await asyncio.gather(*(self._answer_batch_async(plan, batch) for batch in batches))
+        slots = asyncio.Semaphore(self.max_concurrency)
+        while batches:
+            size = self._wave_size(len(batches))
+            wave, batches = batches[:size], batches[size:]
+            await asyncio.gather(*(self._answer_batch_async(plan, batch, slots) for batch in wave))
         return plan.answers()
 
-    async def _answer_batch_async(self, plan: _CheckPlan, batch: _Batch) -> None:
-        """Send one packed batch concurrently, splitting it when the provider refuses its size."""
-        for sub_batch, response in await self._send_positions_async(plan, _positions(batch)):
+    async def _answer_batch_async(self, plan: _CheckPlan, batch: _Batch, slots: asyncio.Semaphore) -> None:
+        """Send one packed batch once a slot is free, splitting it when the provider refuses its size."""
+        async with slots:
+            answered = await self._send_positions_async(plan, _positions(batch))
+        for sub_batch, response in answered:
             plan.answer(sub_batch, response)
 
     def ask_all(

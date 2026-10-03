@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import _thread
+import asyncio
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -232,3 +233,64 @@ def test_an_interrupt_with_requests_in_flight_cancels_them_and_sends_nothing_new
     # Assert
     assert client.cancelled
     assert len(client.requests) == 2
+
+
+@dataclass
+class CountingAsyncClient:
+    """Stands in for the provider on the async path: records how many sends overlap."""
+
+    script: ScriptedJevClient = field(default_factory=lambda: ScriptedJevClient(default_noul=0.9))
+    in_flight: int = 0
+    peak: int = 0
+
+    @property
+    def model(self) -> str:
+        return self.script.model
+
+    @property
+    def requests(self) -> list:
+        return self.script.requests
+
+    async def send(self, state: Mapping, questions: Mapping) -> RawResponse:
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        for _ in range(3):
+            await asyncio.sleep(0)
+        self.in_flight -= 1
+        return self.script.send(state, questions)
+
+    def parse(self, raw: RawResponse):
+        return self.script.parse(raw)
+
+
+def test_the_async_path_keeps_at_most_max_concurrency_requests_in_flight() -> None:
+    # Arrange
+    client = CountingAsyncClient()
+    judge = Judge(client, max_concurrency=2)
+
+    # Act
+    asyncio.run(judge.check_each_async(DESCRIBES, _items(6), SHARED))
+
+    # Assert
+    assert len(client.requests) == 6
+    assert client.peak == 2
+
+
+def test_a_capped_async_call_always_answers_the_first_batches_in_their_stable_order() -> None:
+    # Arrange
+    answered_runs = []
+
+    # Act
+    for _ in range(20):
+        client = CountingAsyncClient()
+        with pytest.raises(CallCapReachedError):
+            asyncio.run(
+                Judge(client, max_calls=3, max_concurrency=8).check_each_async(DESCRIBES, _items(8), SHARED)
+            )
+        answered_runs.append(
+            tuple(sorted(item["file"] for state, _ in client.requests for item in state["items"]))
+        )
+
+    # Assert
+    assert len(set(answered_runs)) == 1
+    assert len(answered_runs[0]) == 3
