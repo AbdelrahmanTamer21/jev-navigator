@@ -58,6 +58,54 @@ def imported_modules(source: str, path: str) -> list[str]:
     return list(dict.fromkeys(specifier for _, specifier in sorted(found)))
 
 
+def module_imports(source: str, path: str) -> tuple[tuple[str, frozenset[str] | None], ...]:
+    """Each module specifier the source imports, re-exports or requires, in source order, with the
+    names it takes by name as that module exports them; ``None`` when it takes the whole module (a
+    namespace or default import, ``export *``, ``require``, a dynamic or bare import, ``import m``)."""
+    if path.endswith(".py"):
+        found = [
+            (match.start(), match.group(1), _python_names(match.group(2)))
+            for match in _PYTHON_FROM.finditer(source)
+        ]
+        found += [(match.start(), match.group(1), None) for match in _PYTHON_IMPORT.finditer(source)]
+    else:
+        code = _without_script_comments(source)
+        found = [
+            (match.start(), match.group(3), _script_names(match.group(1), match.group(2)))
+            for match in _SCRIPT_FROM.finditer(code)
+        ]
+        found += [(match.start(), match.group(1), None) for match in _SCRIPT_BARE.finditer(code)]
+    taken: dict[str, frozenset[str] | None] = {}
+    for _, specifier, names in sorted(found, key=lambda entry: entry[0]):
+        if names == frozenset():
+            continue
+        before = taken.get(specifier, frozenset())
+        taken[specifier] = None if before is None or names is None else before | names
+    return tuple(taken.items())
+
+
+def _python_names(clause: str) -> frozenset[str] | None:
+    parts = [
+        part.strip() for part in _PYTHON_COMMENT.sub("", clause).strip("()\n ").split(",") if part.strip()
+    ]
+    if "*" in parts:
+        return None
+    return frozenset(part.split(" as ")[0].strip() for part in parts)
+
+
+def _script_names(keyword: str, clause: str) -> frozenset[str] | None:
+    """The names a script import or re-export takes, as its module exports them."""
+    if "*" in clause or (keyword == "import" and _SCRIPT_DEFAULT_NAME.match(clause)):
+        return None
+    names = frozenset(
+        part.strip().removeprefix("type ").split(" as ")[0].strip()
+        for braces in _SCRIPT_BRACES.findall(clause)
+        for part in braces.split(",")
+        if part.strip()
+    )
+    return None if "default" in names else names
+
+
 def resolve_import(
     specifier: str,
     importer: str,

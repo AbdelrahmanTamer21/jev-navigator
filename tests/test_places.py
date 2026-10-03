@@ -249,6 +249,78 @@ def offered_from(index: CodeIndex, file: str, line: int, per_kind: int = 8) -> l
     return neighbours(index, opened, per_kind)
 
 
+BANNER = "/*!\n * library\n * MIT Licensed\n */\n\n'use strict';\n\n"
+
+
+@pytest.mark.parametrize(
+    ("files", "opened_at", "offered", "not_offered"),
+    [
+        pytest.param(
+            {
+                "index.js": BANNER + "module.exports = require('./lib/app');\n",
+                "lib/app.js": BANNER
+                + "var proto = {};\n\nmodule.exports = function createApplication() {};\n",
+            },
+            ("index.js", 8),
+            "`var proto = {};` (start of a module imported by index.js)",
+            None,
+            id="a-required-module-opens-at-its-first-line-of-code",
+        ),
+        pytest.param(
+            {
+                "src/jwt/index.ts": "export { verify } from './jwt'\n\n"
+                "declare module '..' {\n  interface Variables {}\n}\n",
+                "src/jwt/jwt.ts": "export const verify = (token: string) => token\n"
+                "export const sign = (payload: string) => payload\n",
+            },
+            ("src/jwt/index.ts", 4),
+            "src/jwt/jwt.ts:1 `export const verify = (token: string) => token` "
+            "(imported by src/jwt/index.ts)",
+            "export const sign",
+            id="a-re-exported-name-opens-its-definition-and-only-it",
+        ),
+        pytest.param(
+            {
+                "flask/__init__.py": '"""The package."""\n\nfrom .app import Flask as Flask\n',
+                "flask/app.py": "class Flask:\n    def run(self):\n        return self\n",
+            },
+            ("flask/__init__.py", 3),
+            "flask/app.py:1 `class Flask:` (imported by flask/__init__.py)",
+            None,
+            id="a-python-import-opens-the-imported-class",
+        ),
+        pytest.param(
+            {
+                "app.js": "var helper = require('./helper');\n\nfunction handle() {\n  return 1;\n}\n",
+                "helper.js": "module.exports = function helper() {};\n",
+            },
+            ("app.js", 4),
+            None,
+            "imported by",
+            id="a-function-leaves-its-files-imports-to-module-level-code",
+        ),
+    ],
+)
+def test_module_level_code_offers_what_its_file_imports(
+    tmp_path: Path,
+    files: dict[str, str],
+    opened_at: tuple[str, int],
+    offered: str | None,
+    not_offered: str | None,
+) -> None:
+    # Arrange
+    index = committed_index(tmp_path, files)
+
+    # Act
+    signatures = [place.signature for place in offered_from(index, *opened_at)]
+
+    # Assert
+    if offered is not None:
+        assert any(offered in signature for signature in signatures), signatures
+    if not_offered is not None:
+        assert not any(not_offered in signature for signature in signatures), signatures
+
+
 def test_a_line_on_a_class_opens_the_class_so_code_naming_it_is_offered(tmp_path: Path) -> None:
     # Arrange
     index = committed_index(
