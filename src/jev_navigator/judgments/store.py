@@ -96,6 +96,7 @@ class JsonlAnswerStore:
         self._records: dict[str, AnswerRecord] = {}
         self._items: dict[str, dict[str, StoredItemAnswer]] = {}
         self._refusals: set[tuple[str, str]] = set()
+        self._write_lock = threading.Lock()
         self._load()
 
     def by_request(self, request_sha256: str) -> AnswerRecord | None:
@@ -116,14 +117,16 @@ class JsonlAnswerStore:
         return (request_sha256, route) in self._refusals
 
     def put_refusal(self, request_sha256: str, route: str) -> None:
-        self._append({"kind": INPUT_BUDGET_REFUSAL, "request_sha256": request_sha256, "route": route})
-        self._refusals.add((request_sha256, route))
+        with self._write_lock:
+            self._append({"kind": INPUT_BUDGET_REFUSAL, "request_sha256": request_sha256, "route": route})
+            self._refusals.add((request_sha256, route))
 
     def put(self, record: AnswerRecord) -> None:
         stored = record if self.keep_requests else _without_request(record)
         stored = _stamped(stored)
-        self._append(asdict(stored))
-        self._index(stored)
+        with self._write_lock:
+            self._append(asdict(stored))
+            self._index(stored)
 
     def _append(self, line: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

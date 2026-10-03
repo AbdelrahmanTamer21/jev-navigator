@@ -1145,8 +1145,9 @@ def _batches(plan: _CheckPlan) -> list[list[int]]:
     batches: list[list[int]] = []
     current: list[int] = []
     used = 0
+    wording = _wording_size(plan)
     for position in plan.stable_order():
-        size = _item_size(plan, position)
+        size = len(json.dumps(plan.items[position])) + wording
         if current and (len(current) == plan.items_per_request or not _fits_in_batch(plan, used, size)):
             batches.append(current)
             current, used = [], 0
@@ -1161,7 +1162,7 @@ def _fits_in_batch(plan: _CheckPlan, used: int, size: int) -> bool:
     return used + size <= plan.budget - len(json.dumps(plan.shared))
 
 
-def _item_size(plan: _CheckPlan, position: int) -> int:
-    """What one item and the wording of every check about it would cost on their own."""
+def _wording_size(plan: _CheckPlan) -> int:
+    """What the wording of every check about one item costs, measured once per plan."""
     wording = [check.to_question(item_path(plan.list_name, 0)) for check in plan.checks]
-    return len(json.dumps(plan.items[position])) + sum(len(json.dumps(question)) for question in wording)
+    return sum(len(json.dumps(question)) for question in wording)
