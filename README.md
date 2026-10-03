@@ -405,8 +405,8 @@ on its own scope, so searches sharing one judge never use up each other's budget
   response)`). The judge records the masked request before dispatch and the raw response before
   parsing, as a `RawResponse(body, status, content_type, decoded)`: the body bytes as received, the HTTP
   status, the content type and `input_tokens`, the count the provider reported or the text
-  `not reported`; a missing count is never written as 0. Transport errors and responses that fail to parse are recorded as
-  failures. Clients that offer `send` and `parse` return that `RawResponse`; the TypeSafe adapter
+  `not reported`; a missing count is never written as 0. Transport errors and responses that fail to
+  parse are recorded as failures. Clients that offer `send` and `parse` return that `RawResponse`; the TypeSafe adapter
   captures the exact bytes from its HTTP transport. A client that only parses is journaled with its
   decoded JSON and `exact=False`. `request_sha256` never includes the model; cache reuse checks the
   served model separately. A request holds code, and the library cannot know whose code it is, so
