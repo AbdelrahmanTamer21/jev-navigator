@@ -1024,6 +1024,7 @@ class _CheckPlan:
     open: dict[int, dict[str, Check]] = field(default_factory=dict)
     batches: list[_Batch] = field(default_factory=list)
     item_ids: list[str] = field(init=False)
+    _slot_questions: dict[int, list[tuple[str, dict]]] = field(default_factory=dict, init=False)
 
     def open_at(self, position: int) -> Mapping[str, Check]:
         """The questions still open for one item, keyed by the question id without its slot."""
@@ -1040,6 +1041,16 @@ class _CheckPlan:
             range(len(self.items)),
             key=lambda position: (*_unit_place(self.items[position]), self.item_ids[position], position),
         )
+
+    def slot_questions(self, slot: int) -> list[tuple[str, dict]]:
+        """Every check's question about the item at ``slot``, keyed as a request asks it; built once
+        per slot, since packing measures many candidate requests."""
+        if slot not in self._slot_questions:
+            path = item_path(self.list_name, slot)
+            self._slot_questions[slot] = [
+                (f"{check.question_id}#{slot}", check.to_question(path)) for check in self.checks
+            ]
+        return self._slot_questions[slot]
 
     def membership(self, members: Sequence[int]) -> str:
         """The identity of a batch: its members' content hashes in their order in the request."""
@@ -1202,8 +1213,6 @@ def _fits_in_batch(plan: _CheckPlan, members: list[int]) -> bool:
     asked of each, within the boxes ``request_exceeds_input_budget`` measures before a send."""
     state = {**plan.shared, plan.list_name: [plan.items[position] for position in members]}
     questions = {
-        f"{check.question_id}#{slot}": check.to_question(item_path(plan.list_name, slot))
-        for slot in range(len(members))
-        for check in plan.checks
+        asked: question for slot in range(len(members)) for asked, question in plan.slot_questions(slot)
     }
     return not request_exceeds_input_budget(state, questions)
