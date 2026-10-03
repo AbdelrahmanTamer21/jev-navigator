@@ -41,7 +41,9 @@ jvn --json '{"command":"find","target":"where source quotes are rejected","repo"
 jvn --json request.json
 ```
 
-Read `report.md`, `manifest.json` and the request journal. Find stops at a match. Findall describes
+Read `report.md`, `manifest.json` and the request journal. `provider.input_tokens` adds only the counts
+the provider reported, and `responses_without_usage` counts responses that reported none (null when
+resumed from an older pack), so 0 tokens with a non-zero count means unknown, not free. Find stops at a match. Findall describes
 coverage of indexed function bodies; uncertain, unsupported and unexamined code remain gaps.
 Trace currently expands the bidirectional connected component, which can be broad: it is not a
 precise data-flow slice or a proof that the requested path is complete. Its five atomic judgments

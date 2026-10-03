@@ -891,10 +891,8 @@ def _manifest(
         "provider": {
             "requested_model": requested_model,
             "served_model": served_model,
-            "input_tokens": _carried_count(previous, "input_tokens", 0) + input_total.reported,
-            "responses_without_usage": _plus_known(
-                _carried_count(previous, "responses_without_usage", None), input_total.not_reported
-            ),
+            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_total.reported,
+            "responses_without_usage": _plus_known(_carried_unreported(previous), input_total.not_reported),
         },
         "search": {
             "outcome": result.outcome,
@@ -1004,12 +1002,9 @@ def _find_all_report(manifest: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _carried_count(previous: dict | None, key: str, missing_in_earlier_receipt: int | None) -> int | None:
-    """What an earlier receipt recorded for a provider count; ``missing_in_earlier_receipt`` when the
-    receipt predates the field (0 for a sum that always existed, ``None`` for a count nobody measured)."""
-    if previous is None:
-        return 0
-    return previous["provider"].get(key, missing_in_earlier_receipt)
+def _carried_unreported(previous: dict | None) -> int | None:
+    """The unreported-response count of an earlier receipt, ``None`` when it predates the field."""
+    return 0 if previous is None else previous["provider"].get("responses_without_usage")
 
 
 def _unreported_text(count: int | None) -> str:

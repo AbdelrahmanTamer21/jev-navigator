@@ -137,8 +137,8 @@ class BudgetedClient:
     """A Jev client that refuses any request over a measured input budget, the way the real
     endpoint answered request 5 of the saved trace run: HTTP 400 ``max_tokens_exceeded``.
 
-    ``budget`` bounds the whole body in UTF-8 bytes. ``input_box`` bounds the state plus the longest single
-    question, the way the provider measures its documented input limit. Both count serialized
+    ``budget`` bounds the whole body in UTF-8 bytes. ``input_box`` bounds the state plus the longest
+    single question, the way the provider measures its documented input limit, and counts serialized
     characters.
 
     It records the requests it accepted, so a test can prove no request over the budget was ever
