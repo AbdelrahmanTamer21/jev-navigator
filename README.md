@@ -183,8 +183,8 @@ An explicitly selected output directory must be new or empty. Each evidence pack
 - `journal.jsonl`: every masked request as sent (state, questions and body bytes, so it holds
   code) and the exact provider responses, as the run progresses.
 - `answers.jsonl`: reusable typed answers keyed by source and request hashes. Every answer is also
-  written to the machine's shared answer store (`~/.cache/jev-navigator/answers.sqlite`, or
-  `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
+  written to the machine's shared answer store (`$XDG_CACHE_HOME/jev-navigator/answers.sqlite`,
+  `~/.cache` when the variable is unset, or `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
   same questions replays from it after the live requests that learn the served model (one for Find
   All and Trace, one per place a Find's first round opens, up to `--beam-width`; Find All and
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own

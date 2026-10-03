@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import tempfile
 from dataclasses import asdict
 from functools import cache
 from pathlib import Path
 
+from ..cache_root import cache_root
 from . import imports, languages, scope_scan, spans
 from .languages import FLOW_LANGUAGE, FLOW_SGCONFIG, parse_language
 from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch, fact_rules
@@ -62,8 +62,8 @@ class FactCache:
 
 
 def user_fact_cache() -> Path:
-    """The shared fact cache under ``$XDG_CACHE_HOME``, or ``~/.cache`` when it is not set."""
-    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "jev-navigator/facts"
+    """The fact cache every index on this machine shares."""
+    return cache_root() / "facts"
 
 
 @cache
