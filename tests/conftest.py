@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 from git_repos import git, write_files
 
+from jev_navigator.index import fact_cache
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
@@ -127,6 +130,35 @@ def sample_repo(tmp_path: Path) -> Path:
     )
     git(root, "commit", "-qam", "orders and validation change together")
     return root
+
+
+@pytest.fixture(autouse=True)
+def private_fact_cache(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Each test starts with an empty fact cache of its own, so no test reads facts another run
+    wrote, and no test, or jvn process a test starts, writes the user's cache."""
+    root = tmp_path_factory.mktemp("cache")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(root))
+    return fact_cache.user_fact_cache()
+
+
+@pytest.fixture
+def spawned(monkeypatch: pytest.MonkeyPatch) -> Counter[str]:
+    """How many processes each tool started (``git`` counted by subcommand); every process still runs."""
+    spawns: Counter[str] = Counter()
+
+    class CountedPopen(subprocess.Popen):
+        def __init__(self, arguments, *args, **kwargs) -> None:
+            spawns[_tool_name(arguments)] += 1
+            super().__init__(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", CountedPopen)
+    return spawns
+
+
+def _tool_name(arguments) -> str:
+    if arguments[0] != "git":
+        return arguments[0]
+    return "git " + next(part for part in arguments[1:] if not part.startswith("-") and "=" not in part)
 
 
 @pytest.fixture
