@@ -290,8 +290,12 @@ Calls are found by name in the syntax tree, which is not a resolved binding. Eve
 `Binding(status, reason, target)`: `resolved` when a definition in the same file or an import naming
 it proves the target, `candidate` when only the name matches (a method on an unknown receiver, or a
 definition elsewhere with no import), `unresolved` when nothing in scope defines it, and `unknown` when
-the definition may sit in lines the index could not parse. A host with a
-real resolver (a code-intelligence service, a TypeScript alias resolver, an LSP) passes it as
+the definition may sit in lines the index could not parse. References carry a binding too. A
+binding counts only the definitions its site can name: a call, a function or class; a type, a
+class or a declaration a type can name, such as an interface; an export, any definition; and any
+other reference (an argument, receiver, condition or decorator), a function, class or declaration
+a value can name, such as a module constant. A host with a real resolver (a code-intelligence
+service, a TypeScript alias resolver, an LSP) passes it as
 `binding_resolver=`; its answer wins. Trace steps and search neighbours carry the binding, so a
 candidate edge is never presented as a proven call. Script constructor expressions such as `new
 MemoryAdapter()` are calls too. A bound method passed as an argument (`bus.on(self.handler)`) is

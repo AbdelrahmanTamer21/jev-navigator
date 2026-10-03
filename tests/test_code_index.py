@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
-from git_repos import commit_all, git
+from git_repos import commit_all, git, write_files
 
 from jev_navigator.index.code_index import CodeIndex, ScopeTooWideError, UnsafePathError
 from jev_navigator.index.spans import Span, TextHit
@@ -422,6 +422,55 @@ def test_a_passed_member_is_a_candidate_while_a_passed_function_is_resolved(
         ]
 
 
+PASSED_MEMBER_CONSTANT_PY = """\
+TIMEOUT = 5
+
+
+class Client:
+    def send(self, bus):
+        bus.wait(self.TIMEOUT)
+        bus.wait(TIMEOUT)
+"""
+
+PASSED_MEMBER_CONSTANT_TS = """\
+const TIMEOUT = 5;
+
+class Client {
+  send(bus) {
+    bus.wait(this.TIMEOUT);
+    bus.wait(TIMEOUT);
+  }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("file", "source", "constant", "member_line"),
+    [
+        ("client.py", PASSED_MEMBER_CONSTANT_PY, Span("client.py", 1, 1, "TIMEOUT"), 6),
+        ("client.ts", PASSED_MEMBER_CONSTANT_TS, Span("client.ts", 1, 1, "TIMEOUT"), 5),
+    ],
+    ids=["python", "typescript"],
+)
+def test_a_passed_member_is_a_candidate_while_a_passed_constant_is_resolved(
+    tmp_path: Path, file: str, source: str, constant: Span, member_line: int
+) -> None:
+    """`bus.wait(self.TIMEOUT)` passes an attribute of `self`, not the module constant `TIMEOUT`: an
+    argument can name a constant, but a member argument is bound like a method call on an unknown
+    receiver. The bare `TIMEOUT` on the next line is proven by the same-file definition."""
+    # Arrange
+    (tmp_path / file).write_text(source)
+
+    # Act
+    references = CodeIndex(tmp_path, [file]).find_references("TIMEOUT")
+
+    # Assert
+    assert [(ref.line, ref.binding.status, ref.binding.target) for ref in references] == [
+        (member_line, "candidate", None),
+        (member_line + 1, "resolved", constant),
+    ]
+
+
 USES_PY = """\
 from app.rules import ALLOWED, PATTERN, Store
 
@@ -508,6 +557,125 @@ def test_a_function_passes_on_the_names_on_its_first_line(tmp_path: Path) -> Non
 
     # Assert
     assert [(ref.name, ref.line, ref.role) for ref in references] == [("Answer", 3, "type")]
+
+
+@pytest.mark.parametrize(
+    ("files", "holder", "declaration"),
+    [
+        pytest.param(
+            {
+                "hmr.ts": "interface PropagationBoundary {\n  boundary: string\n}\n\n"
+                "export function propagateUpdate(boundaries: PropagationBoundary[]): boolean {\n"
+                "  return boundaries.length > 0\n}\n"
+            },
+            "propagateUpdate",
+            Span("hmr.ts", 1, 3, "PropagationBoundary"),
+            id="interface",
+        ),
+        pytest.param(
+            {
+                "modes.ts": 'export const Mode = { Full: "full" } as const;\n'
+                "export type Mode = (typeof Mode)[keyof typeof Mode];\n\n"
+                "export function reload(mode: Mode) {\n  return mode;\n}\n"
+            },
+            "reload",
+            Span("modes.ts", 2, 2, "Mode"),
+            id="type-alias-named-like-a-constant",
+        ),
+        pytest.param(
+            {
+                "items.py": 'from typing import TypeVar\n\nItem = TypeVar("Item")\n\n\n'
+                "def first(items: list[Item]):\n    return items[0]\n"
+            },
+            "first",
+            Span("items.py", 3, 3, "Item"),
+            id="python-type-alias",
+        ),
+    ],
+)
+def test_a_type_reference_binds_to_the_declaration_it_names(
+    tmp_path: Path, files: dict[str, str], holder: str, declaration: Span
+) -> None:
+    # Arrange
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files))
+
+    # Act
+    references = index.references_in(index.find_definition(holder)[0])
+
+    # Assert
+    assert [(ref.name, ref.role, ref.binding.status, ref.binding.target) for ref in references] == [
+        (declaration.name, "type", "resolved", declaration)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("files", "name", "expected"),
+    [
+        pytest.param(
+            {
+                "redaction.py": 'import re\n\nSECRET_PATTERN = re.compile(r"key=\\w+")\n\n\n'
+                'def redact(text):\n    return SECRET_PATTERN.sub("key=[hidden]", text)\n'
+            },
+            "SECRET_PATTERN",
+            [(7, "receiver", Span("redaction.py", 3, 3, "SECRET_PATTERN"))],
+            id="receiver",
+        ),
+        pytest.param(
+            {
+                "limits.ts": "export const MAX_ITEMS = 50;\n\n"
+                "export function clamp(items: string[]) {\n"
+                "  if (items.length > MAX_ITEMS) {\n    return items.slice(0, MAX_ITEMS);\n  }\n"
+                "  return items;\n}\n"
+            },
+            "MAX_ITEMS",
+            [
+                (4, "condition", Span("limits.ts", 1, 1, "MAX_ITEMS")),
+                (5, "argument", Span("limits.ts", 1, 1, "MAX_ITEMS")),
+            ],
+            id="condition-and-argument",
+        ),
+        pytest.param(
+            {
+                "modes.ts": 'export const Mode = { Full: "full" } as const;\n'
+                "export type Mode = (typeof Mode)[keyof typeof Mode];\n\n"
+                "export function isFull(mode: Mode) {\n  return mode === Mode.Full;\n}\n"
+            },
+            "Mode",
+            [(4, "type", Span("modes.ts", 2, 2, "Mode")), (5, "receiver", Span("modes.ts", 1, 1, "Mode"))],
+            id="value-and-type-named-alike",
+        ),
+        pytest.param(
+            {
+                "cache.py": "import functools\n\ncached = functools.lru_cache(maxsize=None)\n\n\n"
+                "@cached\ndef load(path):\n    return path\n"
+            },
+            "cached",
+            [(6, "decorator", Span("cache.py", 3, 3, "cached"))],
+            id="decorator",
+        ),
+        pytest.param(
+            {"options.ts": "interface Options {\n  strict: boolean\n}\n\nexport { Options };\n"},
+            "Options",
+            [(5, "export", Span("options.ts", 1, 3, "Options"))],
+            id="export-of-an-interface",
+        ),
+    ],
+)
+def test_a_non_call_reference_binds_to_the_declaration_it_names(
+    tmp_path: Path, files: dict[str, str], name: str, expected: list[tuple[int, str, Span]]
+) -> None:
+    # Arrange
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files))
+
+    # Act
+    references = index.find_references(name)
+
+    # Assert
+    assert [(ref.line, ref.role, ref.binding.status, ref.binding.target) for ref in references] == [
+        (line, role, "resolved", declaration) for line, role, declaration in expected
+    ]
 
 
 def test_a_one_line_function_calls_what_its_first_line_calls(sample_index: CodeIndex) -> None:

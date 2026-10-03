@@ -125,6 +125,8 @@ def grammar_of(language: str) -> str:
 _DECLARED_NAME = re.compile(
     r"^\s*(?:export\s+)?(?:declare\s+)?(?:(?:type|interface|enum|const|let|var)\s+)?(\w+)"
 )
+_SCRIPT_VALUE_DECLARATION = re.compile(r"^\s*(?:export\s+)?(?:const|let)\s+(?!enum\b)[A-Za-z_$]")
+_SCRIPT_TYPE_DECLARATION = re.compile(r"^\s*(?:export\s+)?(?:declare\s+)?(?:type|interface)\s+[A-Za-z_$]")
 
 
 def language_of(path: str) -> str | None:
@@ -184,6 +186,18 @@ def declared_name(first_line: str) -> str:
     """The name a module-level assignment, constant, type, interface or enum declares."""
     match = _DECLARED_NAME.search(first_line)
     return match.group(1) if match else "<anonymous>"
+
+
+def declares_type(first_line: str) -> bool:
+    """Whether a type can name what a module-level declaration declares: a type alias, interface or
+    enum, or a Python assignment (which may be a type alias), but not a script constant or variable."""
+    return not _SCRIPT_VALUE_DECLARATION.match(first_line)
+
+
+def declares_value(first_line: str) -> bool:
+    """Whether a value can name what a module-level declaration declares: a script constant, variable
+    or enum, or a Python assignment, but not a script type alias or interface."""
+    return not _SCRIPT_TYPE_DECLARATION.match(first_line)
 
 
 @dataclass(frozen=True)

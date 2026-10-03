@@ -26,6 +26,8 @@ from .imports import (
     resolve_import,
 )
 from .languages import (
+    declares_type,
+    declares_value,
     language_of,
 )
 from .packages import Packages
@@ -334,9 +336,15 @@ class CodeIndex:
         )
         return tuple(ref for ref in self._references(inside) if self.find_definition(ref.name))
 
-    def binding_of(self, file: str, line: int, name: str, receiver: str | None) -> Binding:
-        """Computed once per call site and cached for the life of the index."""
-        return self._binding(file, line, name, receiver)
+    def binding_of(
+        self, file: str, line: int, name: str, receiver: str | None, role: str | None = None
+    ) -> Binding:
+        """Computed once per site and cached for the life of the index. ``role`` is a reference's
+        role, None for a call, and decides which definitions count: a call names a function or class,
+        a type a class or a declaration a type can name, an export any definition, and any other use
+        (an argument, receiver, condition, decorator...) a function, class or declaration a value can
+        name."""
+        return self._binding(file, line, name, receiver, role)
 
     def _references(self, matches: Iterable[ReferenceMatch]) -> tuple[Reference, ...]:
         return tuple(
@@ -346,17 +354,19 @@ class CodeIndex:
                 match.line,
                 match.role,
                 self.enclosing_symbol(match.file, match.line),
-                self.binding_of(match.file, match.line, match.name, match.receiver),
+                self.binding_of(match.file, match.line, match.name, match.receiver, match.role),
             )
             for match in sorted(set(matches))
         )
 
-    def _compute_binding(self, file: str, line: int, name: str, receiver: str | None) -> Binding:
+    def _compute_binding(
+        self, file: str, line: int, name: str, receiver: str | None, role: str | None
+    ) -> Binding:
         if self.binding_resolver is not None:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
                 return injected
-        definitions = tuple(span for span in self.find_definition(name) if self._is_callable(span))
+        definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
         facts = CallFacts(
             file,
             name,
@@ -405,8 +415,17 @@ class CodeIndex:
         }
         return tuple(definitions)
 
-    def _is_callable(self, span: Span) -> bool:
-        return span in self._facts_in(span.file).structure.symbols
+    def _can_name(self, role: str | None, span: Span) -> bool:
+        """Whether a use in ``role`` can name the definition ``span``; ``binding_of`` gives the rule."""
+        if role == "export":
+            return True
+        structure = self._facts_in(span.file).structure
+        if span in structure.symbols:
+            return role != "type" or span not in structure.functions
+        if role is None:
+            return False
+        first_line = self.read_slice(Span(span.file, span.start, span.start)).text
+        return declares_type(first_line) if role == "type" else declares_value(first_line)
 
     def _calls_with_name(self, name: str):
         files = self._files_for_name(name)
@@ -500,11 +519,11 @@ class CodeIndex:
         return {}
 
     def _top_level_spans(self, file: str) -> frozenset[Span]:
-        """Symbols of ``file`` that no class or other function contains."""
+        """Symbols and declarations of ``file`` that no class or other function contains."""
         symbols = self.symbols_in(file)
         return frozenset(
             span
-            for span in symbols
+            for span in (*symbols, *self.declarations_in(file))
             if not any(other != span and other.contains(span.start) for other in symbols)
         )
 
