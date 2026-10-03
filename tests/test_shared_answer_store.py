@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
+import pytest
 from conftest import BudgetedClient
 
 from jev_navigator.judgments import judge as judge_module
@@ -13,10 +14,12 @@ from jev_navigator.judgments.client import ReplayOnlyClient
 from jev_navigator.judgments.judge import BATCHING_RULE, Judge
 from jev_navigator.judgments.questions import Check, Criterion, Pick
 from jev_navigator.judgments.store import (
+    SHARED_STORE_VERSION,
     AnswerRecord,
     JsonlAnswerStore,
     LayeredAnswerStore,
     SqliteAnswerStore,
+    UnsupportedAnswerStoreError,
 )
 from jev_navigator.testing import ScriptedJevClient
 
@@ -225,3 +228,43 @@ def test_a_size_refusal_under_another_input_box_is_not_honoured(tmp_path: Path, 
 
     # Assert: the whole batch is tried again under the new box, and the larger route accepts it
     assert [len(state["items"]) for state, _ in larger.requests] == [4]
+
+
+def test_a_store_from_an_older_layout_is_refused_with_what_to_delete(tmp_path: Path) -> None:
+    # Arrange
+    shared = tmp_path / "answers.sqlite"
+    old = sqlite3.connect(shared)
+    old.execute("create table answers (request_sha256 text, model text, record text)")
+    old.commit()
+    old.close()
+
+    # Act / Assert
+    with pytest.raises(UnsupportedAnswerStoreError, match=f"delete {shared}"):
+        SqliteAnswerStore(shared)
+
+
+def test_a_store_with_an_unknown_version_is_refused(tmp_path: Path) -> None:
+    # Arrange
+    shared = tmp_path / "answers.sqlite"
+    SqliteAnswerStore(shared)
+    newer = sqlite3.connect(shared)
+    newer.execute("pragma user_version = 999")
+    newer.commit()
+    newer.close()
+
+    # Act / Assert
+    with pytest.raises(UnsupportedAnswerStoreError, match="version 999"):
+        SqliteAnswerStore(shared)
+
+
+def test_a_new_store_is_created_with_the_current_version_and_reopens(tmp_path: Path) -> None:
+    # Arrange
+    shared = tmp_path / "answers.sqlite"
+
+    # Act
+    SqliteAnswerStore(shared)
+    reopened = SqliteAnswerStore(shared)
+
+    # Assert
+    assert reopened.records() == ()
+    assert sqlite3.connect(shared).execute("pragma user_version").fetchone()[0] == SHARED_STORE_VERSION

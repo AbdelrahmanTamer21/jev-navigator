@@ -167,6 +167,14 @@ class JsonlAnswerStore:
             )
 
 
+SHARED_STORE_VERSION = 1
+"""The layout of ``SqliteAnswerStore``; a file in any other layout is refused, never migrated."""
+
+
+class UnsupportedAnswerStoreError(RuntimeError):
+    """The shared store file was written in a layout this JVN does not read."""
+
+
 _SCHEMA = """
 create table if not exists answers (request_sha256 text not null, model text not null, record text not null);
 create index if not exists answers_by_request on answers (request_sha256, model);
@@ -197,7 +205,22 @@ class SqliteAnswerStore:
         self._lock = threading.Lock()
         self._db = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
         self._db.execute("pragma journal_mode=wal")
-        self._db.executescript(_SCHEMA)
+        self._open_current_layout()
+
+    def _open_current_layout(self) -> None:
+        """Create the layout in a new file; refuse a file written in any other layout."""
+        version = self._db.execute("pragma user_version").fetchone()[0]
+        if version == 0 and not self._db.execute("select name from sqlite_master").fetchall():
+            self._db.executescript(_SCHEMA)
+            self._db.execute(f"pragma user_version = {SHARED_STORE_VERSION}")
+            return
+        if version != SHARED_STORE_VERSION:
+            self._db.close()
+            raise UnsupportedAnswerStoreError(
+                f"{self.path} holds answer store version {version}, this JVN reads version "
+                f"{SHARED_STORE_VERSION}; delete {self.path} and its -wal and -shm files, or point "
+                "--answer-store at a new file"
+            )
 
     def by_request(self, request_sha256: str) -> AnswerRecord | None:
         row = self._one(
