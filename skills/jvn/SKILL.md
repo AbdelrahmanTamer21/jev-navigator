@@ -62,7 +62,7 @@ journal without a finished manifest. Preserve the diagnostic and existing output
 
 Find All and Trace judge at most 16 functions per request and send their requests in parallel; a Find
 opening still asks about all its neighbours in one request. Every answer goes to
-one shared answer store, `~/.cache/jev-navigator/answers.sqlite`, which holds hashes, locations and
+one shared answer store, `$XDG_CACHE_HOME/jev-navigator/answers.sqlite` (`~/.cache` when unset), which holds hashes, locations and
 answers, never code. A later run at the same commit replays from it after one live request. Give each
 experiment or eval arm its own store with `--answer-store PATH` (or `JEV_NAVIGATOR_ANSWER_STORE`) so
 arms never reuse each other's answers; stderr names the store in use. `jvn trace` reports

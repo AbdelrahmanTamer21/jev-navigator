@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from git_repos import git, write_files
 
-from jev_navigator.index import fact_cache
+from jev_navigator.cache_root import cache_root
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
@@ -133,12 +133,13 @@ def sample_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def private_fact_cache(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Each test starts with an empty fact cache of its own, so no test reads facts another run
-    wrote, and no test, or jvn process a test starts, writes the user's cache."""
-    root = tmp_path_factory.mktemp("cache")
-    monkeypatch.setenv("XDG_CACHE_HOME", str(root))
-    return fact_cache.user_fact_cache()
+def private_cache_root(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Each test starts with an empty cache folder of its own, holding its fact cache and its shared
+    answer store, so no test reads what another run wrote, and no test, or jvn process a test
+    starts, writes the user's caches."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("cache")))
+    monkeypatch.delenv(SHARED_STORE_VARIABLE, raising=False)
+    return cache_root()
 
 
 @pytest.fixture
@@ -207,10 +208,3 @@ class BudgetedClient:
             (len(json.dumps(question, ensure_ascii=False)) for question in questions.values()), default=0
         )
         return len(json.dumps(state, ensure_ascii=False)) + longest
-
-
-@pytest.fixture(autouse=True)
-def isolated_shared_answer_store(tmp_path_factory, monkeypatch) -> None:
-    """Every test gets its own shared answer store, never the machine's real one."""
-    store = tmp_path_factory.mktemp("shared-answers") / "answers.sqlite"
-    monkeypatch.setenv(SHARED_STORE_VARIABLE, str(store))

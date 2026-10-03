@@ -29,7 +29,7 @@ from .index.languages import language_of
 from .judgments.answers import TokenTotal
 from .judgments.client import JevClient
 from .judgments.judge import CallCapReachedError, Judge
-from .judgments.store import DEFAULT_SHARED_STORE, SHARED_STORE_VARIABLE, run_answer_store, shared_store_path
+from .judgments.store import SHARED_STORE_VARIABLE, default_shared_store, run_answer_store, shared_store_path
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
@@ -570,7 +570,7 @@ def _add_answer_store_argument(parser: argparse.ArgumentParser) -> None:
         "--answer-store",
         metavar="PATH",
         help=(
-            f"Shared answer store file (default: ${SHARED_STORE_VARIABLE}, else {DEFAULT_SHARED_STORE}); "
+            f"Shared answer store file (default: ${SHARED_STORE_VARIABLE}, else {default_shared_store()}); "
             "a new file keeps this run from replaying another run's answers"
         ),
     )
