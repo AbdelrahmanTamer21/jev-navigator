@@ -581,16 +581,55 @@ def test_an_unsupported_flow_construct_keeps_its_file_incomplete(tmp_path: Path)
     assert index.unparsed_files == {"src/native/RootTag.js"}
 
 
-def test_a_name_defined_only_in_a_partly_recovered_file_is_unknown_not_unresolved(tmp_path: Path) -> None:
+BROKEN_FLOW = "// @flow\nexport class Broken {\n  find(a: string:\n"
+
+
+@pytest.mark.parametrize(
+    ("files", "name", "status", "hiding"),
+    [
+        pytest.param(
+            {"src/native/RootTag.js": ROOT_TAG, "src/native/show.js": ROOT_TAG_CALLER},
+            "createRootTag",
+            "resolved",
+            None,
+            id="a-definition-recovered-outside-the-unread-lines-binds",
+        ),
+        pytest.param(
+            {
+                "src/broken.js": BROKEN_FLOW,
+                "src/use.js": "import { find } from './broken';\n\n"
+                "export function use() {\n  return find('a');\n}\n",
+            },
+            "find",
+            "unknown",
+            "src/broken.js",
+            id="a-name-on-an-unread-line-stays-unknown",
+        ),
+        pytest.param(
+            {"src/broken.js": BROKEN_FLOW, "src/use.js": "export function use() {\n  return missing();\n}\n"},
+            "missing",
+            "unresolved",
+            None,
+            id="a-name-no-unread-line-mentions-is-unresolved",
+        ),
+    ],
+)
+def test_a_partly_recovered_file_leaves_unknown_only_the_names_its_unread_lines_mention(
+    tmp_path: Path, files: dict[str, str], name: str, status: str, hiding: str | None
+) -> None:
+    """Code the grammar swallowed is unknown, not absent, but a definition names what it defines:
+    lines that never mention a name cannot hold its definition."""
     # Arrange
-    index = a_root_tag_scope(tmp_path)
+    index = committed(tmp_path, files)
+    assert len(index.unparsed_files) == 1
 
     # Act
-    site = index.find_callers("createRootTag")[0]
+    [site] = index.find_callers(name)
 
     # Assert
-    assert site.binding.status == "unknown"
-    assert "src/native/RootTag.js" in site.binding.reason
+    assert site.binding.status == status, site.binding.reason
+    if hiding is not None:
+        assert hiding in site.binding.reason
 
 
 def test_a_malformed_flow_file_still_counts_as_unparsed(tmp_path: Path) -> None:

@@ -7,6 +7,7 @@ policy only; the index has no default refusal and never drops files from a reque
 from __future__ import annotations
 
 import hashlib
+import re
 import tempfile
 import threading
 from collections import Counter
@@ -37,6 +38,7 @@ MAX_TEXT_HITS = 20
 CO_CHANGE_COMMITS = 200
 _COMMIT_MARK = "@@commit@@"
 _REGULAR_FILE_MODES = frozenset({"100644", "100755"})
+_WORD = re.compile(r"[\w$]+")
 ScanObserver = Callable[[str, str, int], None]
 
 
@@ -102,6 +104,7 @@ class CodeIndex:
         self._top_level_in = cache(self._top_level_spans)
         self._names_imported = cache(self._read_imported_names)
         self._binding = cache(self._compute_binding)
+        self._unread_names = cache(self._read_unread_names)
 
     @classmethod
     def from_git(
@@ -360,9 +363,26 @@ class CodeIndex:
             definitions,
             tuple(span for span in definitions if span in self._top_level_in(file)),
             self._imported_from(file, name),
-            self.observed_unparsed_files | self.unavailable_files.keys(),
+            self._files_hiding(name),
         )
         return binding_from_facts(facts)
+
+    def _files_hiding(self, name: str) -> frozenset[str]:
+        """Where a definition of ``name`` could sit unseen: a file gone from the disk, or an unparsed
+        file whose lines under an ERROR node mention the name. A definition names what it defines, so
+        lines that never mention the name cannot hold one. Every file that mentions it has already
+        been scanned to look for its definitions, so the answer does not depend on scan order."""
+        unparsed = (file for file in self.observed_unparsed_files if name in self._unread_names(file))
+        return frozenset(unparsed) | self.unavailable_files.keys()
+
+    def _read_unread_names(self, file: str) -> frozenset[str]:
+        """The words on the lines of ``file`` that its ERROR nodes span; the whole file's words while
+        its facts are still being recorded."""
+        lines = self._lines_of(file)
+        facts = self._facts.get(file)
+        stretches = facts.unparsed_lines if facts is not None else ((1, len(lines)),)
+        text = "\n".join(line for start, end in stretches for line in lines[start - 1 : end])
+        return frozenset(_WORD.findall(text))
 
     def _file_structure(self, file: str) -> FileStructure:
         self._require_in_scope(file)

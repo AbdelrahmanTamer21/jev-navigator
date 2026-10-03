@@ -277,8 +277,10 @@ ERROR nodes.
 
 The facts include grammar ERROR nodes. A language's parser may recover only part of such a file
 (a Flow-only construct, for example), so what it swallowed must not silently count as
-indexed; the symbols it did recover still count. Code in those files is unknown, not absent: a
-binding that may depend on them has status `unknown`, with the files in its reason. A completed
+indexed; the symbols it did recover still count. What it swallowed is unknown, not absent. The facts
+keep the lines each ERROR node spans, and a definition names what it defines, so only a name those
+lines mention can be hidden there: a call to such a name has status `unknown`, with the files in its
+reason, unless a definition in another file, not imported from one of them, settles it. A completed
 search reports `scope_incomplete` instead of `nothing_left`; a budget-limited result reports which
 fact scans completed and which remain pending. A file that disappears after the working-directory
 inventory was built is reported separately as unavailable. Any ast-grep or ripgrep failure other
@@ -288,7 +290,7 @@ Calls are found by name in the syntax tree, which is not a resolved binding. Eve
 `Binding(status, reason, target)`: `resolved` when a definition in the same file or an import naming
 it proves the target, `candidate` when only the name matches (a method on an unknown receiver, or a
 definition elsewhere with no import), `unresolved` when nothing in scope defines it, and `unknown` when
-the definition may sit in a file the index could not parse. A host with a
+the definition may sit in lines the index could not parse. A host with a
 real resolver (a code-intelligence service, a TypeScript alias resolver, an LSP) passes it as
 `binding_resolver=`; its answer wins. Trace steps and search neighbours carry the binding, so a
 candidate edge is never presented as a proven call. Script constructor expressions such as `new
