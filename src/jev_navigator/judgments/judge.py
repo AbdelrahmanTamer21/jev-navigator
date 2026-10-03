@@ -55,9 +55,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_ITEMS_PER_REQUEST = 16
 """How many items one batched request carries at most (André, 03.10.2026: measured on the code-index
 set, 16 per request kept accuracy and cost about half the tokens of one per request)."""
-BATCH_RULE = "content-order-count-v1"
-"""The version of the rule that forms batches; it is part of every item key, so answers formed under
-another rule are never reused."""
+BATCHING_RULE = "unit-place-order-count-and-box-v1"
+"""How batches form: units in file-and-lines order, closed at ``items_per_request`` items or at the
+character box. Recorded on every stored answer; the batch membership hash in the item key already
+tells two batches apart."""
 DEFAULT_MAX_CONCURRENCY = 16
 """How many batches of one synchronous judging call are in flight at once."""
 CODE_FIELD = "code"
@@ -856,7 +857,7 @@ class Judge:
             "sources": sources,
             "skeleton": _skeleton(plan.list_name, questions, batch_items, plan.shared),
             "batch": {
-                "rule": BATCH_RULE,
+                "batching_rule": BATCHING_RULE,
                 "items_per_request": plan.items_per_request,
                 "members": [plan.item_ids[position] for position in members],
             },
@@ -908,8 +909,8 @@ class Judge:
 
     def _item_key(self, check: Check, item: Mapping, shared: Mapping, mates: str) -> str:
         """Item content, the shared state the question refers to, the question with its wording, and
-        the batch the item was asked in, under the rule that formed it."""
-        return f"{content_hash(item)}|{content_hash(shared)}|{check.question_id}|{BATCH_RULE}:{mates}"
+        the batch the item was asked in."""
+        return f"{content_hash(item)}|{content_hash(shared)}|{check.question_id}|{mates}"
 
     def _accepts(self, stored_model: str) -> bool:
         return self._knows_model() and self._model_filter() in (None, stored_model)

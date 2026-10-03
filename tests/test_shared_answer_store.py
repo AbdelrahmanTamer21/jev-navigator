@@ -10,7 +10,7 @@ from conftest import BudgetedClient
 
 from jev_navigator.judgments import judge as judge_module
 from jev_navigator.judgments.client import ReplayOnlyClient
-from jev_navigator.judgments.judge import BATCH_RULE, Judge
+from jev_navigator.judgments.judge import BATCHING_RULE, Judge
 from jev_navigator.judgments.questions import Check, Criterion, Pick
 from jev_navigator.judgments.store import (
     AnswerRecord,
@@ -133,7 +133,7 @@ def test_every_shared_row_records_its_batch_members_and_composition(tmp_path: Pa
     batches = [record.batch for record in SqliteAnswerStore(shared).records()]
     assert sorted(len(batch["members"]) for batch in batches) == [1, 2]
     assert {batch["items_per_request"] for batch in batches} == {2}
-    assert {batch["rule"] for batch in batches} == {BATCH_RULE}
+    assert {batch["batching_rule"] for batch in batches} == {BATCHING_RULE}
 
 
 def test_replayed_answers_are_counted_apart_from_live_requests(tmp_path: Path) -> None:
