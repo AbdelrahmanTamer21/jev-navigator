@@ -27,9 +27,10 @@ DIRECT_MAIN_FILES = 2
 SYMBOLS_PER_FILE = 8
 FILE_READ_CAP = 30
 DOC_LINE_CHARS = 120
-DOC_SCAN_LINES = 8
+DOC_SCAN_LINES = 40
 DESCRIPTION_CHARS = 2_000
 REQUEST_RESERVE_CHARS = 4_000
+_DIRECTIVE_MARKERS = ("eslint", "noqa", "@ts-", "prettier-ignore", "pylint:", "type: ignore", "ruff:")
 _DOC_MARKERS = ('"""', "'''", "/**", "//", "#", "*")
 
 CHOOSE_PATH = Pick(
@@ -261,7 +262,7 @@ def _file_description(index: CodeIndex, path: str, symbols: dict[str, tuple[str,
     names = symbols.get(path)
     parts = [f"file {path}:"]
     if doc:
-        parts.append(f"{doc.rstrip('.')}.")
+        parts.append(doc)
     if names:
         parts.append(f"Symbols: {', '.join(names)}")
     return " ".join(parts)
@@ -306,16 +307,20 @@ def _listed(items: list[str]) -> str:
 
 
 def _first_doc_line(lines: tuple[str, ...]) -> str:
-    """The first line of a leading docstring or comment, without its markers; nothing for code."""
-    for position, line in enumerate(lines):
+    """The first line of the first docstring or comment among the file's opening lines, without its
+    markers. Imports may come first; tool directives such as ``eslint-disable`` or ``noqa`` are not docs."""
+    for line in lines:
         stripped = line.strip()
-        if not stripped or stripped.startswith("#!"):
+        if not stripped.startswith(_DOC_MARKERS) or stripped.startswith("#!") or _is_directive(stripped):
             continue
-        if not stripped.startswith(_DOC_MARKERS):
-            return ""
         text = stripped.strip("\"'/#* ").strip()
-        return text[:DOC_LINE_CHARS] if text else _first_doc_line(lines[position + 1 :])
+        if text and not _is_directive(text):
+            return text[:DOC_LINE_CHARS]
     return ""
+
+
+def _is_directive(comment: str) -> bool:
+    return any(marker in comment for marker in _DIRECTIVE_MARKERS)
 
 
 def _bounded(description: str, limit: int) -> str:

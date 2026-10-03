@@ -161,3 +161,40 @@ def test_anonymous_functions_are_not_listed_as_symbols_and_nested_test_cases_are
     checks = _option_for(options, "file checks.ts")
 
     assert checks == "file checks.ts: Symbols: describe, admit"
+
+
+TYPESCRIPT_WITH_LATE_DOC = (
+    'import type { A } from "./a.js";\n'
+    'import type {\n  B,\n  C,\n} from "./b.js";\n\n'
+    "/**\n * The desired-state seam: what the hub says should be running.\n *\n * More detail.\n */\n"
+    "export function project() { return 1 }\n"
+)
+
+
+def test_a_doc_comment_after_the_import_block_is_the_files_doc_line(tmp_path: Path) -> None:
+    index = _index(tmp_path, {"seam.ts": TYPESCRIPT_WITH_LATE_DOC, "other/readme.py": "x = 1\n"})
+
+    seam = _option_for(_root_options(index), "file seam.ts")
+
+    assert (
+        seam == "file seam.ts: The desired-state seam: what the hub says should be running. Symbols: project"
+    )
+
+
+def test_a_file_of_only_types_still_shows_its_doc_line(tmp_path: Path) -> None:
+    types_only = "// Admission catalog contract.\nexport interface Catalog {\n  find(): void\n}\n"
+    index = _index(tmp_path, {"catalog.ts": types_only, "other/readme.py": "x = 1\n"})
+
+    catalog = _option_for(_root_options(index), "file catalog.ts")
+
+    assert catalog == "file catalog.ts: Admission catalog contract."
+
+
+@pytest.mark.parametrize("directive", ["// eslint-disable-next-line x", "# noqa: E501", "// @ts-nocheck"])
+def test_tool_directives_are_not_taken_for_a_doc_line(tmp_path: Path, directive: str) -> None:
+    source = f"{directive}\nexport function real() {{ return 1 }}\n"
+    index = _index(tmp_path, {"code.ts": source, "other/readme.py": "x = 1\n"})
+
+    code = _option_for(_root_options(index), "file code.ts")
+
+    assert code == "file code.ts: Symbols: real"
