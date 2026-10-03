@@ -20,6 +20,12 @@ MAX_PARSE_PEAK_MB = 250.0
 of about 70,000 characters. The largest parse measured under it peaked at 122 MB, and ast-grep scans
 files in parallel, so several can be in memory at once."""
 
+PARSEABLE_BELOW_BYTES = int(
+    1000 * ((MAX_PARSE_PEAK_MB - BASE_PEAK_MB) / PEAK_MB_PER_SQUARED_THOUSAND_CHARACTERS) ** 0.5
+)
+"""A file this small can never be over the bound, whatever its lines: the sum of the squared line
+lengths is at most the square of the file's size. The size alone clears it, without a read."""
+
 
 LONG_LINE_CHARS = 10_000
 DENSE_AVERAGE_LINE_CHARS = 110
@@ -86,12 +92,21 @@ def shape_of(root: Path, path: str) -> FileShape:
     return measure((root / path).read_bytes())
 
 
+def refusal_of(root: Path, path: str) -> str | None:
+    """Why the file must not be parsed, or None. A file small enough to be safe by size is not read."""
+    file = root / path
+    if file.stat().st_size <= PARSEABLE_BELOW_BYTES:
+        return None
+    return measure(file.read_bytes()).refusal
+
+
 def measure(content: bytes) -> FileShape:
-    lines = content.decode(errors="replace").split("\n")
+    """Line lengths are counted in bytes, which over-counts multibyte text and so errs on the safe side."""
+    lines = content.split(b"\n")
     lengths = [len(line) for line in lines]
     return FileShape(
         size_bytes=len(content),
-        line_count=len(lines) - 1 if lines[-1] == "" else len(lines),
+        line_count=len(lines) - 1 if lines[-1] == b"" else len(lines),
         longest_line=max(lengths),
         squared_thousands=sum((length / 1000) ** 2 for length in lengths),
     )

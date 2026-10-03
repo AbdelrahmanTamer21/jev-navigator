@@ -12,7 +12,7 @@ from contextlib import ExitStack
 from functools import cache
 from pathlib import Path
 
-from .file_shape import measure
+from .file_shape import refusal_of
 from .spans import TextHit
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,7 @@ def _split_by_parse_peak(files: Sequence[str], cwd: Path) -> tuple[list[str], di
     refused: dict[str, str] = {}
     for file in files:
         try:
-            reason = measure((cwd / file).read_bytes()).refusal
+            reason = refusal_of(cwd, file)
         except OSError:
             reason = None
         if reason is None:

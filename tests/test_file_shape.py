@@ -10,8 +10,10 @@ from jev_navigator.index.file_shape import (
     LARGE_FILE_BYTES,
     LONG_LINE_CHARS,
     MAX_PARSE_PEAK_MB,
+    PARSEABLE_BELOW_BYTES,
     Trigger,
     measure,
+    refusal_of,
     shape_of,
 )
 
@@ -145,3 +147,32 @@ def test_shape_of_reads_one_file_given_the_repository_folder_and_the_path(tmp_pa
     assert shape.size_bytes == 24_745
     assert (shape.line_count, shape.longest_line) == (1, 24_745)
     assert shape.triggers == (Trigger.LONG_LINE, Trigger.DENSE_LINES)
+
+
+def test_the_stat_shortcut_is_exact_a_file_up_to_the_safe_size_can_never_be_over_the_bound() -> None:
+    assert not measure(_one_line(PARSEABLE_BELOW_BYTES)).too_large_to_parse
+    assert measure(_one_line(PARSEABLE_BELOW_BYTES + 1)).too_large_to_parse
+
+
+def test_a_small_file_is_cleared_from_its_size_without_reading_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "small.js").write_bytes(_one_line(60_000))
+    (tmp_path / "big.js").write_bytes(_one_line(668_777))
+    reads: list[Path] = []
+    original = Path.read_bytes
+
+    def counting(self: Path) -> bytes:
+        reads.append(self)
+        return original(self)
+
+    monkeypatch.setattr(Path, "read_bytes", counting)
+
+    assert refusal_of(tmp_path, "small.js") is None
+    assert reads == []
+    assert refusal_of(tmp_path, "big.js").startswith("too large to parse")
+    assert [path.name for path in reads] == ["big.js"]
+
+
+def test_line_lengths_are_measured_in_bytes_so_multibyte_text_errs_on_the_safe_side() -> None:
+    assert measure(("é" * 1_000).encode()).longest_line == 2_000
