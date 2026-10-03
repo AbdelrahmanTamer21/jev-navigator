@@ -129,3 +129,31 @@ def test_a_request_carries_every_batch_mate_and_asks_only_the_open_questions(tmp
     assert sorted(item["code"] for item in state["items"]) == ["x = 1", "y = 2"]
     assert {question_id.split("#")[0] for question_id in questions} == {CHANGES.question_id}
     assert all(result.from_store for result in results["describes"])
+
+
+def test_a_new_commit_does_not_reorder_the_batches() -> None:
+    # Arrange
+    def units(commit: str) -> list[dict]:
+        return [
+            {
+                "file": f"f{index % 3}.py",
+                "lines": [index * 10, index * 10 + 5],
+                "commit": commit,
+                "code": f"v = {index}",
+            }
+            for index in range(20)
+        ]
+
+    before, after = ScriptedJevClient(), ScriptedJevClient()
+
+    # Act
+    Judge(before, items_per_request=4).check_each(DESCRIBES, units("aaaa"), SHARED)
+    Judge(after, items_per_request=4).check_each(DESCRIBES, units("bbbb"), SHARED)
+
+    # Assert
+    def members(client: ScriptedJevClient) -> list[list[tuple]]:
+        return sorted(
+            [[(item["file"], item["lines"][0]) for item in state["items"]] for state, _ in client.requests]
+        )
+
+    assert members(before) == members(after)

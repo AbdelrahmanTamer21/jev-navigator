@@ -29,7 +29,7 @@ from .index.languages import language_of
 from .judgments.answers import TokenTotal
 from .judgments.client import JevClient
 from .judgments.judge import CallCapReachedError, Judge
-from .judgments.store import JsonlAnswerStore
+from .judgments.store import run_answer_store
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
@@ -290,7 +290,7 @@ def create_evidence_pack(
             max_calls=budget.max_calls,
             served_model=previous["provider"]["served_model"] if previous else None,
             journal=journal,
-            store=JsonlAnswerStore(output / "answers.jsonl"),
+            store=run_answer_store(output / "answers.jsonl"),
         )
         selection: EntrySelection | None = None
         started = monotonic()

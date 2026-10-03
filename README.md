@@ -180,8 +180,13 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   versioned code spans, raw probabilities, full search history, uninspected frontier, and unparsed
   files.
 - `report.md`: a readable outcome, source table, found code, and coverage caveat.
-- `journal.jsonl`: request hashes and exact provider responses as the run progresses.
-- `answers.jsonl`: reusable typed answers keyed by source and request hashes.
+- `journal.jsonl`: every masked request as sent (state, questions and body bytes, so it holds
+  code) and the exact provider responses, as the run progresses.
+- `answers.jsonl`: reusable typed answers keyed by source and request hashes. Every answer is also
+  written to the machine's shared answer store (`~/.cache/jev-navigator/answers.sqlite`, or
+  `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run on unchanged code replays from
+  it, copies what it replays into its own `answers.jsonl`, and reports those answers as
+  `replayed_answers` beside its live `calls`.
 
 The manifest and report contain inspected source code. Keep packs for private repositories in a
 private artifact store; the repository includes only a small public-format sample under
@@ -378,7 +383,8 @@ call cap stays exact under concurrency, and after a failure or cancellation no b
 request, while answers already received still yield. A sync method given an async client raises
 `TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
 
-Budgets: `judge.calls` counts requests sent (store hits are free). `Judge(max_calls=N)` caps a judge
+Budgets: `judge.calls` counts requests sent (store hits are free; `judge.replayed_answers` counts
+the answers the store gave instead). `Judge(max_calls=N)` caps a judge
 together with every `judge.scope()` made from it, and a scope counts its own calls; `find_code` runs
 on its own scope, so searches sharing one judge never use up each other's budget.
 
@@ -401,8 +407,8 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `mask(text)` and `masked_values(text)`), or turns one off explicitly with `None`.
 - **Batches.** A batched request carries at most `Judge(items_per_request=N)` items (default 16)
   and closes early when the next item would not fit the size budget. Batches form over every item in
-  an order fixed by item content, so the same items form the same batches whatever order a caller
-  passes them in, and a request carries all its batch mates even when some of their questions were
+  an order fixed by each unit's file and lines (by content for an item without them), so the same
+  units form the same batches whatever order a caller passes them in and on any commit, and a request carries all its batch mates even when some of their questions were
   answered before.
 - **Answer store.** Every answer is stored with the served model and the thresholds in force. Jev's
   answer about one item changes with the other items in its request, so an item answer is reused
@@ -413,7 +419,9 @@ on its own scope, so searches sharing one judge never use up each other's budget
   first batch alone, and the batches after that answer replay as usual. `ReplayOnlyClient` replays
   from the store and never calls Jev.
   `JsonlAnswerStore` is one run's pack. `SqliteAnswerStore(path)` is one insert-only store shared by
-  every run on a machine, so a repeated run on unchanged code asks nothing again;
+  every run on a machine, so a repeated run on unchanged code asks nothing again. It never holds
+  code, state or question text: only hashes, unit locations, batch member ids, the batching rule and
+  size, the model, raw answers and timestamps. Its location and retention (no expiry) are provisional;
   `LayeredAnswerStore(pack, shared)` reads the pack first, copies every answer it finds only in the
   shared store into the pack, and writes new answers to both, so the pack alone still replays the run.
 - **Journal, separate from the store.** Pass `journal=` (any object with `record_request(request) ->

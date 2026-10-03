@@ -13,24 +13,28 @@ differently, so ask again only from ``record.sent_request()``, with a judge that
 with this store answers from it).
 
 ``SqliteAnswerStore`` is one store shared by every run on a machine, so a repeated run on unchanged
-code asks nothing again; ``LayeredAnswerStore`` puts a run's own pack in front of it, so the pack
-still holds every answer the run used.
+code asks nothing again. It never holds code, state or question text, in any mode: only hashes,
+unit locations, batch member ids, the model, raw answers and timestamps. ``LayeredAnswerStore`` puts
+a run's own pack in front of it, so the pack still holds every answer the run used.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import os
 import sqlite3
 import threading
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
 from .answers import Answer, JevResponse, answer_from_json
 
+DEFAULT_SHARED_STORE = Path.home() / ".cache/jev-navigator/answers.sqlite"
+SHARED_STORE_VARIABLE = "JEV_NAVIGATOR_ANSWER_STORE"
 INPUT_BUDGET_REFUSAL = "input_budget_refusal"
 """A store line recording that a route refused one exact request for its input size."""
 
@@ -50,6 +54,7 @@ class AnswerRecord:
     recorded_at: str = ""
     sent_body_base64: str | None = None
     sent_exact: bool = False
+    batch: Mapping = field(default_factory=dict)
 
     def response(self) -> JevResponse:
         answers = {question_id: answer_from_json(raw) for question_id, raw in self.answers.items()}
@@ -170,12 +175,15 @@ create index if not exists refusals_by_request on refusals (request_sha256, rout
 class SqliteAnswerStore:
     """One SQLite file shared by every run on a machine. Rows are only ever inserted, never updated or
     deleted, so no answer is lost; the newest answer for a key wins a lookup. WAL mode lets several
-    runs read and write the file at once. Request text follows ``keep_requests`` as in
-    ``JsonlAnswerStore``."""
+    runs read and write the file at once. A record is stored without its request, sent bytes and
+    skeleton, so no code, state or question text reaches this file whatever the caller keeps.
 
-    def __init__(self, path: Path, *, keep_requests: bool = False) -> None:
+    Provisional (open question O29 for André): the location defaults to ``DEFAULT_SHARED_STORE``
+    under the JVN cache root, overridable with ``SHARED_STORE_VARIABLE``, and answers never expire.
+    """
+
+    def __init__(self, path: Path) -> None:
         self.path = Path(path)
-        self.keep_requests = keep_requests
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._db = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
@@ -215,7 +223,7 @@ class SqliteAnswerStore:
         return StoredItemAnswer(answer_from_json(json.loads(row[0])), row[1], row[2]) if row else None
 
     def put(self, record: AnswerRecord) -> None:
-        stored = _stamped(record if self.keep_requests else _without_request(record))
+        stored = _stamped(_code_free(record))
         items = [
             (item_key, stored.model, stored.request_sha256, json.dumps(stored.answers[question_id]))
             for item_key, question_id in stored.item_keys.items()
@@ -289,6 +297,21 @@ class LayeredAnswerStore:
 def _record_from_json(raw: dict) -> AnswerRecord:
     raw["question_ids"] = tuple(raw["question_ids"])
     return AnswerRecord(**raw)
+
+
+def run_answer_store(pack: Path) -> LayeredAnswerStore:
+    """A run's own pack at ``pack`` in front of the machine's shared store."""
+    return LayeredAnswerStore(JsonlAnswerStore(pack), SqliteAnswerStore(shared_store_path()))
+
+
+def shared_store_path(environment: Mapping[str, str] | None = None) -> Path:
+    """The shared store's file: ``SHARED_STORE_VARIABLE`` when set, else ``DEFAULT_SHARED_STORE``."""
+    environment = os.environ if environment is None else environment
+    return Path(environment.get(SHARED_STORE_VARIABLE) or DEFAULT_SHARED_STORE)
+
+
+def _code_free(record: AnswerRecord) -> AnswerRecord:
+    return replace(_without_request(record), skeleton={})
 
 
 def _without_request(record: AnswerRecord) -> AnswerRecord:

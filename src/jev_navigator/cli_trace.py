@@ -20,7 +20,7 @@ from .index.code_index import CodeIndex
 from .index.spans import Span
 from .judgments.client import JevClient
 from .judgments.judge import CheckResult, Judge
-from .judgments.store import JsonlAnswerStore
+from .judgments.store import run_answer_store
 from .judgments.thresholds import Thresholds
 from .progress import ProgressJournal, TerminalProgress
 
@@ -100,7 +100,7 @@ def create_trace_evidence_pack(
             max_calls=max_calls,
             served_model=served_model,
             journal=journal,
-            store=JsonlAnswerStore(output / "answers.jsonl"),
+            store=run_answer_store(output / "answers.jsonl"),
         )
         progress.phase("tracing workflow")
         result = trace_workflow(index, judge, question, start_spans, depth=depth, cancelled=cancelled)
@@ -165,6 +165,7 @@ def _manifest(
             "requested_model": getattr(judge.client, "model", "unknown"),
             "served_model": judge.served_model,
             "calls": judge.calls,
+            "replayed_answers": judge.replayed_answers,
             "input_tokens": judge.input_total.reported,
             "responses_without_usage": judge.input_total.not_reported,
         },

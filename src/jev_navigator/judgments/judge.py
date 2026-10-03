@@ -57,6 +57,9 @@ MAX_STATE_CHARS = 60_000
 DEFAULT_ITEMS_PER_REQUEST = 16
 """How many items one batched request carries at most (André, 03.10.2026: measured on the code-index
 set, 16 per request kept accuracy and cost about half the tokens of one per request)."""
+BATCH_RULE = "content-order-count-v1"
+"""The version of the rule that forms batches; it is part of every item key, so answers formed under
+another rule are never reused."""
 DEFAULT_MAX_CONCURRENCY = 16
 """How many batches of one synchronous judging call are in flight at once."""
 CODE_FIELD = "code"
@@ -154,7 +157,8 @@ class CallDecision:
 
 
 class Judge:
-    """``calls`` counts requests sent (store hits are free). ``scope()`` gives one caller, such as a
+    """``calls`` counts requests sent (store hits are free); ``replayed_answers`` counts the answers
+    the store gave instead. ``scope()`` gives one caller, such as a
     single search, its own counter on the same client, store and journal; every scope adds its calls
     to its parent, and ``max_calls`` caps a judge together with all of its scopes.
     ``items_per_request`` caps the items of one batched request, and ``max_concurrency`` bounds how
@@ -185,6 +189,7 @@ class Judge:
         self.items_per_request = items_per_request
         self.max_concurrency = max_concurrency
         self.calls = 0
+        self.replayed_answers = 0
         self.input_total = TokenTotal()
         self._parent: Judge | None = None
         self._bookkeeping = threading.Lock()
@@ -193,6 +198,7 @@ class Judge:
         child = copy.copy(self)
         child.max_calls = None
         child.calls = 0
+        child.replayed_answers = 0
         child.input_total = TokenTotal()
         child._parent = self
         return child
@@ -432,17 +438,20 @@ class Judge:
         sources: Mapping[str, Mapping] | None = None,
         skeleton: Mapping | None = None,
         masked: frozenset[str] | None = None,
+        batch: Mapping | None = None,
     ) -> JevResponse:
         """Masks, scans, hashes and looks up the store; only a miss sends, and every fresh answer is
         recorded. The async variant shares every step except the send. ``masked`` marks a request
         the caller already masked as one, with the values it hid: masking is skipped, the final
-        scan is not."""
+        scan is not, so question wording must never quote customer text; a secret there is
+        refused, not masked."""
         prepared = self._sendable(state, questions, masked)
         if prepared.stored is not None:
+            self._count_replayed(len(prepared.stored.answers))
             return prepared.stored
         self._reserve_call()
         dispatched = self._dispatch(prepared)
-        return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton)
+        return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton, batch)
 
     async def ask_async(
         self,
@@ -454,13 +463,15 @@ class Judge:
         sources: Mapping[str, Mapping] | None = None,
         skeleton: Mapping | None = None,
         masked: frozenset[str] | None = None,
+        batch: Mapping | None = None,
     ) -> JevResponse:
         prepared = self._sendable(state, questions, masked)
         if prepared.stored is not None:
+            self._count_replayed(len(prepared.stored.answers))
             return prepared.stored
         self._reserve_call()
         dispatched = await self._dispatch_async(prepared)
-        return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton)
+        return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton, batch)
 
     def _sendable(self, state: Mapping, questions: Mapping, masked: frozenset[str] | None) -> _Prepared:
         """The prepared request, refused without a call when this route already refused these exact
@@ -502,14 +513,22 @@ class Judge:
         item_keys: Mapping[str, str] | None,
         sources: Mapping[str, Mapping] | None,
         skeleton: Mapping | None,
+        batch: Mapping | None,
     ) -> JevResponse:
         response = dispatched.response
         with self._bookkeeping:
             for judge in self._chain():
                 judge.served_model = response.model
                 judge.input_total.add(response.input_tokens)
-            self._record(prepared, dispatched, thresholds, item_keys or {}, sources or {}, skeleton or {})
+            self._record(
+                prepared, dispatched, thresholds, item_keys or {}, sources or {}, skeleton or {}, batch or {}
+            )
         return JevResponse(response.answers, response.model, response.input_tokens, prepared.request_hash)
+
+    def _count_replayed(self, answers: int) -> None:
+        with self._bookkeeping:
+            for judge in self._chain():
+                judge.replayed_answers += answers
 
     def _reserve_call(self) -> None:
         with self._bookkeeping:
@@ -578,8 +597,10 @@ class Judge:
     ) -> Iterator[tuple[_Batch, JevResponse]]:
         """Every request of the plan's batches with its answer, a batch at a time as batches complete,
         with at most ``max_concurrency`` batches in flight. Answers are applied by the caller, on its
-        own thread. The first failure stops every request not yet sent and raises after every
-        batch already sending has yielded what it answered."""
+        own thread. Under a call cap, batches go in waves no larger than the calls left, in their
+        stable order, so a capped call always answers the same batches. The first failure stops
+        every request not yet sent and raises after every batch already sending has yielded what it
+        answered."""
         batches = list(plan.batches)
         if batches and self._must_learn_model_first():
             yield from self._send_positions(plan, _positions(batches.pop(0)), cancelled)
@@ -588,11 +609,20 @@ class Judge:
         stop = _BatchStop(cancelled)
         pool = ThreadPoolExecutor(max_workers=min(self.max_concurrency, len(batches)))
         try:
-            futures = [pool.submit(self._send_batch, plan, batch, stop) for batch in batches]
-            yield from _completed_batches(futures)
+            while batches and not stop.requested():
+                size = self._wave_size(len(batches))
+                wave, batches = batches[:size], batches[size:]
+                futures = [pool.submit(self._send_batch, plan, batch, stop) for batch in wave]
+                yield from _completed_batches(futures)
         finally:
             stop.halted.set()
             pool.shutdown(wait=True, cancel_futures=True)
+
+    def _wave_size(self, waiting: int) -> int:
+        """Every waiting batch when uncapped; else as many as calls are left, at least one, since a
+        batch the store answers needs no call."""
+        left = self.calls_left()
+        return waiting if left is None else max(1, min(left, waiting))
 
     def _send_batch(self, plan: _CheckPlan, batch: _Batch, stop: _BatchStop) -> _SentBatch:
         """One batch's requests on a worker thread; a failure stops the other batches' unsent
@@ -768,6 +798,7 @@ class Judge:
         groups = _batches(plan)
         for members in groups:
             self._look_up_batch(plan, members)
+        self._count_replayed(len(plan.answered))
         plan.batches = [
             batch for batch in (self._batch(plan, members) for members in groups) if batch is not None
         ]
@@ -815,6 +846,11 @@ class Judge:
             "item_keys": item_keys,
             "sources": sources,
             "skeleton": _skeleton(plan.list_name, questions, batch_items, plan.shared),
+            "batch": {
+                "rule": BATCH_RULE,
+                "items_per_request": plan.items_per_request,
+                "members": [plan.item_ids[position] for position in members],
+            },
         }
         return _Batch({**plan.shared, plan.list_name: batch_items}, questions, tuple(members), slots, extras)
 
@@ -863,8 +899,8 @@ class Judge:
 
     def _item_key(self, check: Check, item: Mapping, shared: Mapping, mates: str) -> str:
         """Item content, the shared state the question refers to, the question with its wording, and
-        the hash of the batch the item was asked in."""
-        return f"{content_hash(item)}|{content_hash(shared)}|{check.question_id}|{mates}"
+        the batch the item was asked in, under the rule that formed it."""
+        return f"{content_hash(item)}|{content_hash(shared)}|{check.question_id}|{BATCH_RULE}:{mates}"
 
     def _accepts(self, stored_model: str) -> bool:
         return self._knows_model() and self._model_filter() in (None, stored_model)
@@ -886,6 +922,7 @@ class Judge:
         item_keys: Mapping[str, str],
         sources: Mapping[str, Mapping],
         skeleton: Mapping,
+        batch: Mapping,
     ) -> None:
         if self.store is None:
             return
@@ -901,6 +938,7 @@ class Judge:
                 item_keys=dict(item_keys),
                 sources=dict(sources),
                 skeleton=dict(skeleton),
+                batch=dict(batch),
                 request={"state": prepared.state, "questions": prepared.questions},
                 sent_body_base64=base64.b64encode(dispatched.sent_body).decode("ascii"),
                 sent_exact=dispatched.sent_exact,
@@ -1002,9 +1040,13 @@ class _CheckPlan:
         self.item_ids = [content_hash(item) for item in self.items]
 
     def stable_order(self) -> list[int]:
-        """Every item position ordered by the item's content, so the same items always form the same
-        batches whatever order the caller gave them in."""
-        return sorted(range(len(self.items)), key=lambda position: (self.item_ids[position], position))
+        """Every item position ordered by the unit's place (file, then lines) where the item has one,
+        else by its content, so the same units always form the same batches whatever order the
+        caller gave them in, and a new commit does not reorder them."""
+        return sorted(
+            range(len(self.items)),
+            key=lambda position: (*_unit_place(self.items[position]), self.item_ids[position], position),
+        )
 
     def membership(self, members: Sequence[int]) -> str:
         """The identity of a batch: its members' content hashes in their order in the request."""
@@ -1117,6 +1159,14 @@ def _skeleton(list_name: str, questions: Mapping, items: list[Mapping], shared: 
         "item_code_sha256": [content_hash(item.get(CODE_FIELD, "")) for item in items],
         "shared_sha256": content_hash(shared),
     }
+
+
+def _unit_place(item: Mapping) -> tuple[str, int, int]:
+    """The unit's file and line range, or empty when the item names none."""
+    lines = item.get("lines")
+    if not isinstance(lines, list | tuple) or len(lines) != 2:
+        return str(item.get("file", "")), 0, 0
+    return str(item.get("file", "")), int(lines[0]), int(lines[1])
 
 
 def _source_of(item: Mapping) -> dict:

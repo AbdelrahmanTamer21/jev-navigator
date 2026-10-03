@@ -160,3 +160,22 @@ def test_a_provider_failure_stops_batches_that_have_not_started_and_raises_once_
     with pytest.raises(ConnectionError):
         judge.check_each(DESCRIBES, _items(5), SHARED)
     assert len(client.requests) == 1
+
+
+def test_a_capped_call_always_answers_the_first_batches_in_their_stable_order() -> None:
+    # Arrange
+    items = _items(8)
+    answered_runs = []
+
+    # Act
+    for _ in range(20):
+        client = ScriptedJevClient(default_noul=0.9)
+        answered: list[str] = []
+        with pytest.raises(CallCapReachedError):
+            judge = Judge(client, max_calls=3, max_concurrency=8)
+            for result in judge.iter_check_each(DESCRIBES, items, SHARED):
+                answered.append(result.item["file"])
+        answered_runs.append(sorted(answered))
+
+    # Assert
+    assert len({tuple(run) for run in answered_runs}) == 1

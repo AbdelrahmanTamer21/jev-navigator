@@ -9,8 +9,8 @@ from pathlib import Path
 from conftest import BudgetedClient
 
 from jev_navigator.judgments.client import ReplayOnlyClient
-from jev_navigator.judgments.judge import Judge
-from jev_navigator.judgments.questions import Check, Criterion
+from jev_navigator.judgments.judge import BATCH_RULE, Judge
+from jev_navigator.judgments.questions import Check, Criterion, Pick
 from jev_navigator.judgments.store import (
     AnswerRecord,
     JsonlAnswerStore,
@@ -89,22 +89,66 @@ def test_answers_from_another_served_model_are_kept_and_not_reused(tmp_path: Pat
     assert [result.probability for result in replay_old] == [0.9] * 3
 
 
-def test_the_shared_store_keeps_no_request_text_unless_asked(tmp_path: Path) -> None:
+def _every_stored_text(path: Path) -> str:
+    database = sqlite3.connect(path)
+    tables = [name for (name,) in database.execute("select name from sqlite_master where type = 'table'")]
+    return "\n".join(str(row) for table in tables for row in database.execute(f"select * from {table}"))
+
+
+def test_the_shared_store_never_holds_code_state_or_question_text(tmp_path: Path) -> None:
     # Arrange
     shared = tmp_path / "answers.sqlite"
-    secretless_code = [{"code": "def unique_marker_function(): ..."}]
+    items = [
+        {
+            "file": "hub.py",
+            "lines": [3, 9],
+            "signature": "def code_marker_signature(order):",
+            "links": ["call send: hub.py -> mail.py | at hub.py:5 code_marker_link_line(order)"],
+            "code": "def code_marker_body(): ...",
+        }
+    ]
+    shared_state = {"doc": {"sentence": "state_marker_sentence"}}
 
     # Act
-    Judge(ScriptedJevClient(), store=SqliteAnswerStore(shared)).check_each(DESCRIBES, secretless_code, SHARED)
-    Judge(
-        ScriptedJevClient(), store=SqliteAnswerStore(tmp_path / "kept.sqlite", keep_requests=True)
-    ).check_each(DESCRIBES, secretless_code, SHARED)
+    Judge(ScriptedJevClient(), store=SqliteAnswerStore(shared)).check_each(DESCRIBES, items, shared_state)
 
     # Assert
-    stored = sqlite3.connect(shared).execute("select record from answers").fetchall()
-    assert stored and not any("unique_marker_function" in record for (record,) in stored)
-    record = SqliteAnswerStore(tmp_path / "kept.sqlite").records()[0]
-    assert record.sent_request()[0]["items"][0]["code"] == "def unique_marker_function(): ..."
+    stored = _every_stored_text(shared)
+    assert "hub.py" in stored
+    for marker in ("code_marker", "state_marker", "doc.sentence"):
+        assert marker not in stored
+
+
+def test_every_shared_row_records_its_batch_members_and_composition(tmp_path: Path) -> None:
+    # Arrange
+    shared = tmp_path / "answers.sqlite"
+
+    # Act
+    Judge(ScriptedJevClient(), store=SqliteAnswerStore(shared), items_per_request=2).check_each(
+        DESCRIBES, ITEMS, SHARED
+    )
+
+    # Assert
+    batches = [record.batch for record in SqliteAnswerStore(shared).records()]
+    assert sorted(len(batch["members"]) for batch in batches) == [1, 2]
+    assert {batch["items_per_request"] for batch in batches} == {2}
+    assert {batch["rule"] for batch in batches} == {BATCH_RULE}
+
+
+def test_replayed_answers_are_counted_apart_from_live_requests(tmp_path: Path) -> None:
+    # Arrange
+    shared = tmp_path / "answers.sqlite"
+    Judge(ScriptedJevClient(), store=SqliteAnswerStore(shared)).check_each(DESCRIBES, ITEMS, SHARED)
+    judge = Judge(ScriptedJevClient(), store=SqliteAnswerStore(shared), served_model="jev-scripted")
+    scoped = judge.scope()
+
+    # Act
+    scoped.check_each(DESCRIBES, ITEMS, SHARED)
+    scoped.check_each(DESCRIBES, [{"code": "w = 0"}], SHARED)
+
+    # Assert
+    assert (scoped.calls, scoped.replayed_answers) == (1, 3)
+    assert (judge.calls, judge.replayed_answers) == (1, 3)
 
 
 def test_two_writers_on_one_shared_file_lose_no_record(tmp_path: Path) -> None:
@@ -148,3 +192,16 @@ def test_a_size_refusal_is_remembered_across_runs(tmp_path: Path) -> None:
 
     # Assert
     assert replay.requests == [] and replay.refusals == 0
+
+
+def test_a_whole_request_replayed_from_the_store_counts_its_answers(tmp_path: Path) -> None:
+    # Arrange
+    judge = Judge(ScriptedJevClient(), store=SqliteAnswerStore(tmp_path / "answers.sqlite"))
+    pick = Pick("first", "Which entry of `options` comes first?")
+    judge.pick(pick, {"0": "a", "1": "b"}, SHARED)
+
+    # Act
+    judge.pick(pick, {"0": "a", "1": "b"}, SHARED)
+
+    # Assert
+    assert (judge.calls, judge.replayed_answers) == (1, 1)
