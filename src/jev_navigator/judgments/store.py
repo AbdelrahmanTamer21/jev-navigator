@@ -329,9 +329,10 @@ def _record_from_json(raw: dict) -> AnswerRecord:
     return AnswerRecord(**raw)
 
 
-def run_answer_store(pack: Path) -> LayeredAnswerStore:
-    """A run's own pack at ``pack`` in front of the machine's shared store."""
-    return LayeredAnswerStore(JsonlAnswerStore(pack), SqliteAnswerStore(shared_store_path()))
+def run_answer_store(pack: Path, shared: Path | None = None) -> LayeredAnswerStore:
+    """A run's own pack at ``pack`` in front of the shared store at ``shared``, else at
+    ``shared_store_path()``."""
+    return LayeredAnswerStore(JsonlAnswerStore(pack), SqliteAnswerStore(shared or shared_store_path()))
 
 
 def shared_store_path(environment: Mapping[str, str] | None = None) -> Path:

@@ -68,7 +68,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _parser().error(str(error))
     repository = Path(args.repo).resolve()
     output = Path(args.out).expanduser() if args.out else _default_output(repository)
-    _use_answer_store(args)
+    answer_store = _answer_store(args)
     client: TypeSafeJevClient | None = None
     try:
         _load_typesafe_environment(os.environ)
@@ -85,6 +85,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 depth=budget.max_depth,
                 max_calls=budget.max_calls,
                 verbose=args.verbose,
+                answer_store=answer_store,
             )
         else:
             resume_from = Path(args.resume).expanduser() if getattr(args, "resume", None) else None
@@ -99,6 +100,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     client,
                     thresholds=Thresholds.from_env(),
                     verbose=args.verbose,
+                    answer_store=answer_store,
                     workflow=args.command,
                     resume_from=resume_from,
                 )
@@ -239,6 +241,7 @@ def create_evidence_pack(
     thresholds: Thresholds | None = None,
     verbose: bool = False,
     fact_cache_dir: Path | None = None,
+    answer_store: Path | None = None,
     workflow: str = "find",
     resume_from: Path | None = None,
 ) -> dict:
@@ -291,7 +294,7 @@ def create_evidence_pack(
             max_calls=budget.max_calls,
             served_model=previous["provider"]["served_model"] if previous else None,
             journal=journal,
-            store=run_answer_store(output / "answers.jsonl"),
+            store=run_answer_store(output / "answers.jsonl", answer_store),
         )
         selection: EntrySelection | None = None
         started = monotonic()
@@ -554,11 +557,12 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     return parser
 
 
-def _use_answer_store(args: argparse.Namespace) -> None:
-    """Point this run at ``--answer-store`` when given, and say which shared store it uses."""
-    if args.answer_store:
-        os.environ[SHARED_STORE_VARIABLE] = str(Path(args.answer_store).expanduser().resolve())
-    print(f"answer store: {shared_store_path()}", file=sys.stderr)
+def _answer_store(args: argparse.Namespace) -> Path:
+    """The shared store this run uses: ``--answer-store`` when given, else ``shared_store_path()``.
+    The run says which on stderr."""
+    path = Path(args.answer_store).expanduser().resolve() if args.answer_store else shared_store_path()
+    print(f"answer store: {path}", file=sys.stderr)
+    return path
 
 
 def _add_answer_store_argument(parser: argparse.ArgumentParser) -> None:
