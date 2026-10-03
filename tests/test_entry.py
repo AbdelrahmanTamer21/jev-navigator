@@ -149,7 +149,7 @@ def test_all_options_of_a_request_fit_the_character_box_however_many_there_are(t
     assert sum(len(text) for text in options.values()) <= JEV_INPUT_BOX_CHARS
 
 
-def test_anonymous_functions_are_not_listed_as_symbols_and_nested_test_cases_are_not_top_level(
+def test_anonymous_functions_and_calls_are_not_listed_as_symbols(
     tmp_path: Path,
 ) -> None:
     source = (
@@ -160,7 +160,7 @@ def test_anonymous_functions_are_not_listed_as_symbols_and_nested_test_cases_are
 
     checks = _option_for(options, "file checks.ts")
 
-    assert checks == "file checks.ts: Symbols: describe, admit"
+    assert checks == "file checks.ts: Symbols: admit"
 
 
 TYPESCRIPT_WITH_LATE_DOC = (
