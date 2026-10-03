@@ -10,6 +10,8 @@ nodes and the estimate over-counts it, which errs on the safe side.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
 
 BASE_PEAK_MB = 25.0
 PEAK_MB_PER_SQUARED_THOUSAND_CHARACTERS = 0.05
@@ -17,6 +19,25 @@ MAX_PARSE_PEAK_MB = 250.0
 """A file whose estimated parse peak exceeds this is never parsed. For a one-line file that is a line
 of about 70,000 characters. The largest parse measured under it peaked at 122 MB, and ast-grep scans
 files in parallel, so several can be in memory at once."""
+
+
+LONG_LINE_CHARS = 10_000
+DENSE_AVERAGE_LINE_CHARS = 110
+DENSE_MINIMUM_BYTES = 4_096
+LARGE_FILE_BYTES = 500_000
+
+
+class Trigger(StrEnum):
+    """A reason to ask whether a file is generated. A trigger never refuses a parse: only the memory
+    bound does that. Starting values from the census of 12,976 files (37 flagged)."""
+
+    LONG_LINE = "long_line"
+    """Some line is longer than ``LONG_LINE_CHARS`` characters."""
+    DENSE_LINES = "dense_lines"
+    """More than ``DENSE_AVERAGE_LINE_CHARS`` characters per line (the average GitHub Linguist uses for
+    minified files) on a file of at least ``DENSE_MINIMUM_BYTES``."""
+    LARGE_FILE = "large_file"
+    """More than ``LARGE_FILE_BYTES`` bytes."""
 
 
 @dataclass(frozen=True)
@@ -35,6 +56,18 @@ class FileShape:
         return BASE_PEAK_MB + PEAK_MB_PER_SQUARED_THOUSAND_CHARACTERS * self.squared_thousands
 
     @property
+    def triggers(self) -> tuple[Trigger, ...]:
+        fired = (
+            (Trigger.LONG_LINE, self.longest_line > LONG_LINE_CHARS),
+            (
+                Trigger.DENSE_LINES,
+                self.size_bytes >= DENSE_MINIMUM_BYTES and self.chars_per_line > DENSE_AVERAGE_LINE_CHARS,
+            ),
+            (Trigger.LARGE_FILE, self.size_bytes > LARGE_FILE_BYTES),
+        )
+        return tuple(trigger for trigger, tripped in fired if tripped)
+
+    @property
     def too_large_to_parse(self) -> bool:
         return self.parse_peak_mb > MAX_PARSE_PEAK_MB
 
@@ -46,6 +79,11 @@ class FileShape:
             f"too large to parse: estimated parse peak {_peak_text(self.parse_peak_mb)}, "
             f"longest line {self.longest_line:,} characters"
         )
+
+
+def shape_of(root: Path, path: str) -> FileShape:
+    """The measured facts and fired triggers of one file, given the repository folder and the path."""
+    return measure((root / path).read_bytes())
 
 
 def measure(content: bytes) -> FileShape:

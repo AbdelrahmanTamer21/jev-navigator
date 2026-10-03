@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from jev_navigator.index.file_shape import MAX_PARSE_PEAK_MB, measure
+from jev_navigator.index.file_shape import (
+    DENSE_AVERAGE_LINE_CHARS,
+    DENSE_MINIMUM_BYTES,
+    LARGE_FILE_BYTES,
+    LONG_LINE_CHARS,
+    MAX_PARSE_PEAK_MB,
+    Trigger,
+    measure,
+    shape_of,
+)
 
 
 def _one_line(characters: int) -> bytes:
@@ -56,3 +67,81 @@ def test_the_refusal_names_the_estimated_peak_and_the_longest_line() -> None:
 
     assert reason == "too large to parse: estimated parse peak 22 GB, longest line 668,777 characters"
     assert measure(_one_line(20_000)).refusal is None
+
+
+def _lines(count: int, width: int) -> bytes:
+    return b"\n".join(b"x" * width for _ in range(count)) + b"\n"
+
+
+def test_a_line_over_the_long_line_limit_fires_only_that_trigger_on_a_small_file() -> None:
+    content = b"short\n" * 10 + b"y" * (LONG_LINE_CHARS + 1) + b"\n" + b"short\n" * 5000
+
+    assert measure(content).triggers == (Trigger.LONG_LINE,)
+    assert measure(b"short\n" * 10 + b"y" * LONG_LINE_CHARS + b"\n" + b"short\n" * 5000).triggers == ()
+
+
+def test_dense_lines_fire_only_above_the_average_and_the_minimum_size() -> None:
+    dense = _lines(count=45, width=DENSE_AVERAGE_LINE_CHARS + 5)
+    at_the_average = _lines(count=40, width=DENSE_AVERAGE_LINE_CHARS - 1)
+    too_small = _lines(count=30, width=DENSE_AVERAGE_LINE_CHARS + 5)
+
+    assert measure(dense).triggers == (Trigger.DENSE_LINES,)
+    assert measure(at_the_average).triggers == ()
+    assert measure(too_small).size_bytes < DENSE_MINIMUM_BYTES
+    assert measure(too_small).triggers == ()
+
+
+def test_a_file_over_the_large_file_limit_fires_only_that_trigger_when_its_lines_are_short() -> None:
+    over = _lines(count=6_000, width=LARGE_FILE_BYTES // 6_000)
+    under = b"x" * 80 + b"\n"
+    under = under * ((LARGE_FILE_BYTES // len(under)) - 1)
+
+    assert measure(over).size_bytes > LARGE_FILE_BYTES
+    assert measure(over).triggers == (Trigger.LARGE_FILE,)
+    assert measure(under).size_bytes <= LARGE_FILE_BYTES
+    assert measure(under).triggers == ()
+
+
+def test_a_hand_written_module_of_many_short_lines_fires_nothing() -> None:
+    module = _lines(count=6_000, width=38)
+
+    assert measure(module).size_bytes > 200_000
+    assert measure(module).triggers == ()
+
+
+def test_a_component_with_one_long_svg_path_line_fires_nothing() -> None:
+    component = _lines(count=95, width=30) + b"<path d='" + b"M1 2 " * 1_050 + b"'/>\n"
+
+    shape = measure(component)
+
+    assert shape.longest_line > 5_000
+    assert shape.size_bytes < LARGE_FILE_BYTES
+    assert shape.triggers == ()
+    assert not shape.too_large_to_parse
+
+
+def test_a_one_line_minified_bundle_fires_the_line_and_density_triggers_but_is_still_parseable() -> None:
+    shape = measure(_one_line(24_745))
+
+    assert shape.triggers == (Trigger.LONG_LINE, Trigger.DENSE_LINES)
+    assert not shape.too_large_to_parse
+
+
+def test_a_two_and_a_half_megabyte_image_string_fires_every_trigger_and_is_over_the_memory_bound() -> None:
+    background = b"export const background = '" + b"A" * 2_504_000 + b"';\n"
+
+    shape = measure(background)
+
+    assert shape.triggers == (Trigger.LONG_LINE, Trigger.DENSE_LINES, Trigger.LARGE_FILE)
+    assert shape.too_large_to_parse
+
+
+def test_shape_of_reads_one_file_given_the_repository_folder_and_the_path(tmp_path: Path) -> None:
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "bundle.js").write_bytes(_one_line(24_745))
+
+    shape = shape_of(tmp_path, "dist/bundle.js")
+
+    assert shape.size_bytes == 24_745
+    assert (shape.line_count, shape.longest_line) == (1, 24_745)
+    assert shape.triggers == (Trigger.LONG_LINE, Trigger.DENSE_LINES)
