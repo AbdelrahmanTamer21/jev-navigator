@@ -162,7 +162,7 @@ def test_a_pack_that_keeps_requests_keeps_the_key_mention_verbatim(tmp_path: Pat
     )
 
     # Assert
-    assert "mentions `dict_key_marker.limit`" in pack.read_text()
+    assert key_mention("dict_key_marker.limit") in pack.read_text()
 
 
 def test_a_key_holding_a_backtick_is_dropped_whole_from_the_relation() -> None:
