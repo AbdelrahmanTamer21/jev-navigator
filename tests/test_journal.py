@@ -301,7 +301,7 @@ def test_the_tokens_are_on_the_response_line_only_not_on_its_attempt_or_failure_
     journal = JsonlJournal(tmp_path / "usage.jsonl")
 
     journal.record_attempt("r1", RawAttempt(1, 5.0, b"{}", response=raw))
-    journal.record_failure("r1", "ParseError: bad", raw)
+    journal.record_failure("r1", ValueError("bad"), raw)
     journal.record_response("r1", raw)
 
     lines = {
