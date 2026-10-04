@@ -333,7 +333,8 @@ fact scans completed and which remain pending. A file that disappears after the 
 inventory was built, or changes after the index first read it, is reported separately as
 unavailable. So is a file too large to parse safely. `tools.ast_grep_rules`, the one door every
 parse passes through, estimates each file's parse peak (`index/file_shape.py`): 80 MB per MB of code,
-counting every line of up to 10,000 bytes, plus the square of the punctuation `{}();,[]` on each line,
+counting every byte outside a quoted string of 1,000 bytes or more on one line (such a string is one
+node, however long), plus the square of the punctuation `{}();,[]` on each line,
 which a minified bundle of a few tens of kilobytes on one line drives up. Files estimated at up to
 250 MB are parsed side by side. A file over that, but within the single-file limit
 (`MemoryLimit.single_parse_mb`: the memory allowance less Python's 270 MB share, so 754 MB at the
