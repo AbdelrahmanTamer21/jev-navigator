@@ -9,13 +9,15 @@ already set, so shell exports and CI secrets keep precedence everywhere.
 Two rules keep an untrusted repository from configuring the tool through a `.env` it ships:
 
 - The `.env` is read only from this tool's own source checkout (`checkout_root`), never from the
-  directory a search happens to run in. So a repository under analysis cannot point the API key at
-  another host with its own `.env`, and an installed `jvn` that is not run from a checkout takes no
-  `.env` at all — it uses the real environment and `~/.config/jvn/env`.
-- A file may set only the tool's own recognised settings (`TYPESAFE_*`, `JEV_NAVIGATOR_*`,
-  `SYSTEM_ONE_*`); every other name is ignored. So a config file cannot inject an unrelated
-  variable such as `PATH`, `LD_PRELOAD` or `RIPGREP_CONFIG_PATH` into the tool or into the `rg`,
-  `git` and `ast-grep` subprocesses it runs.
+  directory a search happens to run in, so a repository under analysis cannot point the API key at
+  another host with its own `.env`. Where the tool's code is installed decides whether there is a
+  checkout, not the directory it runs in: `uv run jvn` in the checkout, or an editable install,
+  reads that checkout's `.env`; a package installed elsewhere (`uv tool install`, `pipx`) reads no
+  `.env` and uses the real environment and `~/.config/jvn/env`.
+- A file may set only the tool's own recognised settings (`TYPESAFE_*`, `JEV_NAVIGATOR_*` and
+  `SYSTEM_ONE_*`); every other name is ignored and named on stderr. So a config file cannot inject
+  an unrelated variable such as `PATH`, `LD_PRELOAD` or `RIPGREP_CONFIG_PATH` into the tool or into
+  the `rg`, `git` and `ast-grep` subprocesses it runs.
 """
 
 from __future__ import annotations
@@ -34,8 +36,8 @@ LEGACY_CONFIG = Path.home() / ".config/jvn/env"
 
 
 def checkout_root() -> Path | None:
-    """This tool's own source checkout — the first directory above this file that holds the
-    `jev-navigator` `pyproject.toml` — or None when `jvn` is installed outside such a checkout.
+    """This tool's own source checkout, the first directory above this file whose `pyproject.toml`
+    names the `jev-navigator` project, or None when `jvn` is installed outside such a checkout.
 
     The `.env` is trusted only from here. Returning None rather than the current directory is what
     stops an arbitrary working directory's `.env` from configuring the tool.

@@ -96,14 +96,17 @@ jvn find "where do we reject evidence quotes that are absent from the source?" -
 ```
 
 Explicit `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` process values win independently. Otherwise
-`jvn` reads those settings from `~/.config/jvn/env` with a dotenv parser; it does not execute that
-file or print the values. `TYPESAFE_BASE_URL` is the API root before `/v1/systemone`, such as
-`http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
+`jvn` reads those settings from `~/.config/jvn/env`, a file in dotenv syntax that it parses itself;
+it does not execute that file or print the values. `TYPESAFE_BASE_URL` is the API root before
+`/v1/systemone`, such as `http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
 
-Run from a jev-navigator source checkout, `jvn` first fills what is missing from that checkout's
-`.env` (see `.env.example`). It never reads a `.env` from the directory or repository it searches,
-and a settings file can set only `jvn`'s own `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*`
-names; any other name in it is ignored.
+When its code runs from a jev-navigator source checkout (`uv run jvn` there, or an editable
+install), `jvn` first fills what is missing from that checkout's `.env` (see `.env.example`). A
+`jvn` installed as a package elsewhere, for example with `uv tool install`, reads no `.env`, and when
+the directory it runs in holds one, it says on stderr that it did not read it. It never reads a
+`.env` from the directory or repository it searches. A settings file can set only `jvn`'s own
+`TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names; `jvn` names on stderr any other name it
+ignores, never its value.
 
 ### JSON input for agents and pipelines
 
