@@ -1246,6 +1246,29 @@ def test_a_default_export_is_imported_only_as_the_default(tmp_path: Path) -> Non
     }
 
 
+def test_a_default_whose_definition_may_sit_in_unparsed_lines_stays_unknown(tmp_path: Path) -> None:
+    """parse-server's AdapterLoader.js: Flow annotations the JavaScript grammar cannot parse hide the
+    function `export default loadAdapter` names. A default import of it is unknown, since the lines
+    the parser lost mention the definition's own name."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "loader.js": (
+                "export function loadAdapter<T>(adapter): T {\n  return adapter;\n}\n"
+                "export default loadAdapter;\n"
+            ),
+            "use.js": "import load from './loader';\nload();\n",
+        },
+    )
+
+    # Act
+    binding = index.binding_of("use.js", 2, "load", None)
+
+    # Assert
+    assert binding.status.value == "unknown", binding
+
+
 def test_only_what_a_script_module_exports_is_importable(tmp_path: Path) -> None:
     """A script module's own functions are importable only where it exports them: by an `export`
     statement or list, as its default export, or as a CommonJS export (`exports.x = x`, a function

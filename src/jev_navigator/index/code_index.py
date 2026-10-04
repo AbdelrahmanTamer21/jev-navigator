@@ -627,15 +627,21 @@ class CodeIndex:
         """The binding of ``name`` imported from the module ``specifier`` names, read from that
         module's own facts and those of the modules it re-exports ``name`` from, never from a search
         of the scope: one definition proves the target, several leave a candidate, an exporter whose
-        unparsed lines mention ``name`` or that vanished leaves it unknown, and no definition leaves a
-        candidate naming the modules. None when ``specifier`` names no module of the scope."""
+        unparsed lines mention ``name`` or the name of a definition it exports as ``name`` (see
+        ``_own_names``), or that vanished, leaves it unknown, and no definition leaves a candidate
+        naming the modules. None when ``specifier`` names no module of the scope."""
         exporters = self._exporters(file, specifier, name)
         if not exporters:
             return None
         definitions = tuple(
             span for exporter in exporters for span in self._importable_definitions(exporter.path, name, role)
         )
-        hiding = self._files_hiding(name) & {exporter.path for exporter in exporters}
+        hiding = {
+            exporter.path
+            for exporter in exporters
+            for looked_up in {name, *self._own_names(exporter.path, name)}
+            if exporter.path in self._files_hiding(looked_up)
+        }
         return binding_from_facts(
             CallFacts(file, name, None, definitions, (), definitions, exporters, hiding)
         )
@@ -652,7 +658,7 @@ class CodeIndex:
         name or the one an export list gives it (`export { inner as outer }`), and the functions and
         classes it assigns to CommonJS exports."""
         structure = self._file_structure(file)
-        own_names = {name} if language_of(file) == "python" else self._export_names_in(file).get(name, set())
+        own_names = self._own_names(file, name)
         exported = {span for span in self._module_scope_in(file) if span.name in own_names}
         exported |= {span for span in structure.commonjs_exports if span.name == name}
         return tuple(
@@ -660,6 +666,11 @@ class CodeIndex:
             for span in (*structure.symbols, *structure.declarations)
             if span in exported and self._can_name(role, span)
         )
+
+    def _own_names(self, file: str, name: str) -> set[str]:
+        """The names of the definitions ``file`` exports as ``name``: the same name in a Python
+        module, and in a script module the ones ``_export_names_in`` gives."""
+        return {name} if language_of(file) == "python" else self._export_names_in(file).get(name, set())
 
     def _export_names_in(self, file: str) -> dict[str, set[str]]:
         """Each name script module ``file`` exports from its own definitions, ``default`` for its
