@@ -119,3 +119,14 @@ def test_a_process_killed_partway_through_a_line_reports_why_it_stopped(
         list(tools.ast_grep_rules(VALID_RULE, ["a.py", "b.py"], tmp_path))
     assert str(failure.value) == f"{tools.AST_GREP} exited 137: ast-grep: out of memory"
     assert isinstance(failure.value.__cause__, ValueError)
+
+
+def test_a_file_whose_name_starts_with_a_dash_is_scanned_as_a_file(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "-x.py").write_text("def x():\n    return 1\n")
+
+    # Act
+    matches = list(tools.ast_grep_rules(VALID_RULE, ["-x.py"], tmp_path))
+
+    # Assert
+    assert [match["file"] for match in matches] == ["-x.py"]

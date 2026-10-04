@@ -59,7 +59,7 @@ def ast_grep_rules(
             path.write_text(config)
             command += ["--config", str(path)]
         for chunk in file_chunks(files):
-            yield from _json_lines([*command, "--json=stream", *chunk], cwd)
+            yield from _json_lines([*command, "--json=stream", "--", *chunk], cwd)
 
 
 def file_chunks(files: Sequence[str]) -> Iterator[Sequence[str]]:
