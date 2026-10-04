@@ -198,7 +198,7 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
   `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
   `--answer-store PATH` points a run at another store file; each run prints the store it uses.
-- `resume.json` (budget-stopped or cancelled runs): the frontier as locations; Resume re-reads the
+- `resume.json` (budget-stopped, cancelled or failed runs): the frontier as locations; Resume re-reads the
   code from the unchanged repository.
 
 By default the manifest, report, journal and resume state hold no source code, only locations and
@@ -334,7 +334,10 @@ reading them, and a warm lookup starts no text search and parses no file. The fi
 index covers its whole scope: each file the table lacks is read from the fact cache, or parsed, and
 its rows are written. A changed file gets new rows under its new content, a file deleted before the
 first lookup answers none, one deleted later is reported unavailable and proves nothing, and a change
-to the parser or to any language's rules starts a new table. `definitions_in(file)` reads one file's
+to the parser or to any language's rules starts a new table. When the table is warm but the fact
+cache is not (after a change to the fact rules, or after housekeeping pruned it), callers and
+references load the facts their bindings read, the files of the uses and of the definitions, in one
+scan instead of one per file. `definitions_in(file)` reads one file's
 definitions from the table. The table holds names and line numbers, never code. A file counts as read
 in a Find's counts only when navigation reached it, never because the table covered it. A call's or
 argument's receiver, in the table and in the cached facts alike, is kept only when it is a plain chain
@@ -372,12 +375,18 @@ reason, unless a definition in another file, not imported from one of them, sett
 search reports `scope_incomplete` instead of `nothing_left`; a budget-limited result reports which
 fact scans completed and which remain pending. A file that disappears after the working-directory
 inventory was built, or changes after the index first read it, is reported separately as
-unavailable. So is a file too large to parse safely:
-`tools.ast_grep_rules`, the one door every parse passes through, never hands ast-grep a file whose
-estimated parse peak (from the length of each line, `index/file_shape.py`) is over 250 MB, about
-70,000 bytes on one line. A large file that cannot be read to measure it is refused too, with the
-error. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
-peak and the longest line in bytes. A refused file is never recorded as parsed: it stays readable and
+unavailable. So is a file too large to parse safely. `tools.ast_grep_rules`, the one door every
+parse passes through, estimates each file's parse peak (`index/file_shape.py`): 80 MB per MB of the
+file, every byte counted as code, plus the square of the punctuation `{}();,[]` on each line,
+which a minified bundle of a few tens of kilobytes on one line drives up. Files estimated at up to
+250 MB are parsed side by side. A file over that, but within the single-file limit
+(`tools.single_parse_limit_mb()`), is parsed alone, one at a time, with no other file beside it. A file
+over the single-file limit is never handed to ast-grep, and neither is a large file that cannot be read
+to measure it. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
+peak, the limit it is over, and the longest line in bytes. A file that ast-grep itself skips without
+parsing (it prints nothing for a file that is not valid UTF-8, or for one of more than 3,000,000
+bytes and 200,000 lines, which a file parsed alone can be) is refused too, as `not parsed`, and is
+never taken for a file without functions. A refused file is never recorded as parsed: it stays readable and
 searchable as text, it keeps its path in import relations (also as a re-export target), a name its
 bytes mention binds `unknown`, `jvn stats` names it as never scanned, and `find_comments` lists it in
 `refused_files`. Any ast-grep or ripgrep failure other than that verified disappearance still fails the
@@ -413,6 +422,60 @@ pluggable rules (`jev_navigator.facts`): each `Fact` has a name, offsets, line a
 is `FactRule(name, pattern, keep=None)`; the shipped `DEFAULT_COMMENT_RULES` (TODO without owner,
 commented-out code, date, ticket reference) are examples. `outside_names` is an optional filter that
 skips matches inside paths, file names or identifiers: `DATE.with_filter(outside_names)`.
+
+### Choosing the files a search covers
+
+`resolve_scope` decides which files a search covers from paths, git and the first lines of files. It
+parses nothing, and it is not yet wired into the `jvn` commands. A `Scope` carries the request's
+`scope` object: the four `with_` switches and `max_files` are required, because the request schema
+owns their defaults (switches off, a cap of 200), and `Scope` repeats none of them.
+
+```python
+from jev_navigator.index.scope import ResolvedScope, Scope, resolve_scope
+
+scope = Scope(
+    repo=repo_root,
+    include=("app/",),
+    languages=("python",),
+    with_tests=False,
+    with_generated=False,
+    with_vendored=False,
+    with_docs=False,
+    max_files=200,
+)
+resolved = resolve_scope(scope)
+if isinstance(resolved, ResolvedScope):
+    resolved.files  # the files in scope; resolved.filters names every filter applied
+else:
+    resolved.counts_by_folder, resolved.counts_by_language  # a ScopeRefusal: over max_files
+```
+
+- Only files JVN parses (Python, TypeScript, TSX, JavaScript) enter a scope and count toward the cap,
+  plus markup files with `with_docs`; `filters["supported_languages"]` names them.
+- Left out unless asked for: tests (`with_tests`), generated code (`with_generated`: a true
+  `linguist-generated` attribute, or a comment line holding `@generated` or `do not edit`, in any case,
+  in the first 10 lines), vendored code (`with_vendored`: a true `linguist-vendored` attribute, or a
+  `vendor`, `third_party` or `node_modules` folder) and docs (`with_docs`: a `docs` folder or a markup
+  file). A false linguist attribute keeps a file the path or header rule would leave out.
+- A file none of those rules decides may still look generated by its shape: a line over 10,000
+  characters, dense lines, or a very large file (the triggers of `file_shape.shape_of`). Under an
+  output folder (`dist`, `build`, `generated`, `__generated__` or one starting with `generated-`) such
+  a file is left out before the count, listed in `resolved.set_aside` with "left out as generated:
+  under dist/" and its measured facts. Anywhere else it stays in `files`, counted toward the cap, and
+  is listed in `resolved.awaiting_generated_judgment` with its measured facts, for Jev to judge. With
+  `with_generated` nothing is measured and nothing awaits a judgment.
+- `include` and `exclude` entries without `*`, `?` or `[` are folders or files. Other entries are
+  globs over the whole path: `**` crosses folders, and a glob without `/` matches the file name at any
+  depth unless a leading `/` anchors it at the root.
+- `changed_since` keeps the files that differ from a git ref in the working tree, untracked files
+  included; `filters["changed_since_commit"]` records the commit the ref named.
+- More files than `max_files` returns a `ScopeRefusal` instead of files: the count, the cap, the
+  filters, and counts per language and per folder one level below the folder the files share. Each
+  folder label (`src/`, or `/src/*` for files directly in `src`), used as an `include` entry with the
+  same other filters, keeps exactly the files it counts. Raise the cap with `max_files`.
+- An unusable field raises `InvalidScopeError` naming it (`/scope/languages`, `/scope/changed_since`,
+  `/scope/repo`). `checked_root(scope)` runs the `/scope/repo` check alone, for a caller that reads
+  files inside the folder before it resolves the scope.
 
 ### Static trace graphs
 
@@ -593,10 +656,14 @@ signature names its file and lines: a function quotes its first line; a window a
 or key outside any function gives its line range and quotes that line; a stretch chosen by position (the
 lines before or after, the start of a co-changed or imported file) gives its range and quotes its first
 line of code, past blank lines, comments, a license banner, a `'use strict'` directive or a module
-docstring. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
-`scope_incomplete`, and the result keeps three sets: `found`; `searched` and `unsure` (bodies actually
-judged, start places apart in `starts`); and `not_inspected`, each entry with its reason (`budget`,
-`deprioritized`, `capped` or `depth`) and its `QueueTier`: `START`, `PICK` or `MOVE`. Resume
+docstring. The outcome is `found`, `stop_rule`, `budget`, `cancelled`, `failed`, `nothing_left`,
+`unsure_only` or `scope_incomplete`, and the result keeps three sets: `found`; `searched` and `unsure`
+(bodies actually judged, start places apart in `starts`); and `not_inspected`, each entry with its
+reason (`budget`, `cancelled`, `failed`, `deprioritized`, `capped` or `depth`) and its `QueueTier`:
+`START`, `PICK` or `MOVE`. A request that fails, such as a provider error or a full disk while
+storing its answer, ends `find_code` and `find_code_async` as `failed`: `failure` holds that same error object, the answers
+its round did get stay merged, and the failed place waits in `not_inspected` with reason `failed`.
+A request Ctrl-C stopped is `cancelled` instead. Resume
 preserves that role, so waiting starts still open before picks and are never reported as new finds.
 `searched` means "opened and judged at or below the no bar, probability kept", and `nothing_left`
 means "nothing left worth opening in a scope the search parsed whole"; neither proves that the code does not exist, because one "no" about
