@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
 import pytest
 
 from jev_navigator.cache_root import cache_root
+from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.fact_cache import FactCache
+from jev_navigator.index.scope_scan import Unparsed, scan_facts
 from jev_navigator.judgments.store import (
     SHARED_STORE_VARIABLE,
     SHARED_STORE_VERSION,
@@ -85,3 +88,25 @@ def test_a_store_inside_the_cache_folder_is_refused_when_either_path_runs_throug
     # Act / Assert
     with pytest.raises(StoreInCacheFolderError, match="JVN prunes that folder"):
         shared_store_path(str(store_home / "jev-navigator" / "answers.sqlite"))
+
+
+def test_facts_planted_in_the_suites_own_cache_never_reach_a_tests_index(
+    tmp_path: Path, outer_cache_root: Path
+) -> None:
+    # Arrange: wrong facts for this exact content, written where an unisolated index would look
+    content = f"def real():\n    return {uuid.uuid4().int}\n"
+    (tmp_path / "module.py").write_text(content)
+    (tmp_path / "planted.py").write_text("def planted():\n    return 1\n")
+    wrong = scan_facts(["planted.py"], tmp_path, Unparsed())["planted.py"]
+    planted = FactCache(outer_cache_root / "facts")
+    before = set(planted.root.rglob("*.json"))
+    planted.save("module.py", content.encode(), wrong)
+    try:
+        # Act
+        names = [span.name for span in CodeIndex(tmp_path, ["module.py"]).functions_in("module.py")]
+    finally:
+        for entry in set(planted.root.rglob("*.json")) - before:
+            entry.unlink()
+
+    # Assert
+    assert names == ["real"]

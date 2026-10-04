@@ -34,7 +34,7 @@ Output defaults to a unique run folder under `~/.local/share/jev-navigator/runs/
 inspect the returned function, then trace it. Quote the entire natural-language argument once.
 Do not edit files in scope while a search runs: a file that changes is reported unavailable when the index reads it again, and a
 search that finds nothing then ends `scope_incomplete` instead of `nothing_left`. A file too large to
-parse safely (a one-line bundle of about 70,000 characters or more) is never parsed: it is reported
+parse safely (a one-line bundle of about 70,000 bytes or more) is never parsed: it is reported
 unavailable with the reason "too large to parse", and it ends a not-found search the same way.
 
 For agents and pipelines, discover the current contract with `jvn schema find`, `jvn schema findall`
