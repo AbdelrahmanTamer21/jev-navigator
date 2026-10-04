@@ -111,6 +111,9 @@ class CodeIndex:
         self._references_named = cache(self._references_with_name)
         self._definitions = cache(self._definitions_by_name)
         self._module_scope_in = cache(self._module_scope_spans)
+        self._export_names_in = cache(self._read_export_names)
+        self._reexports_in = cache(self._read_reexports)
+        self._exporters = cache(self._read_exporters)
         self._names_imported = cache(self._read_imported_names)
         self._local_scopes = cache(self._read_local_scopes)
         self._binding = cache(self._compute_binding)
@@ -667,12 +670,16 @@ class CodeIndex:
             if span in exported and self._can_name(role, span)
         )
 
-    def _own_names(self, file: str, name: str) -> set[str]:
+    def _own_names(self, file: str, name: str) -> frozenset[str]:
         """The names of the definitions ``file`` exports as ``name``: the same name in a Python
         module, and in a script module the ones ``_export_names_in`` gives."""
-        return {name} if language_of(file) == "python" else self._export_names_in(file).get(name, set())
+        return (
+            frozenset((name,))
+            if language_of(file) == "python"
+            else self._export_names_in(file).get(name, frozenset())
+        )
 
-    def _export_names_in(self, file: str) -> dict[str, set[str]]:
+    def _read_export_names(self, file: str) -> dict[str, frozenset[str]]:
         """Each name script module ``file`` exports from its own definitions, ``default`` for its
         default export, with the names of the definitions it may export under it: a module that
         assigns `module.exports` twice has two."""
@@ -680,10 +687,10 @@ class CodeIndex:
         renamed: dict[str, set[str]] = {}
         for exported, own in facts.renamed_exports:
             renamed.setdefault(exported, set()).add(own)
-        own_names = {name: {name} for name in (*facts.export_names, *facts.exported_values)}
-        return own_names | renamed
+        own_names = {name: frozenset((name,)) for name in (*facts.export_names, *facts.exported_values)}
+        return own_names | {exported: frozenset(owns) for exported, owns in renamed.items()}
 
-    def _exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
+    def _read_exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
         """The module ``file``'s import of ``specifier`` resolves to, then each module it re-exports
         ``name`` from, with the evidence for each."""
         resolved = resolve_import(specifier, file, self._scope, self._script_paths(file), self._packages())
@@ -694,8 +701,7 @@ class CodeIndex:
         seen = {(resolved.path, resolved.proven)}
         while pending:
             exporter = pending.pop()
-            source = "\n".join(self._lines_of(exporter.path))
-            for names, target_specifier in reexported_names(source, exporter.path):
+            for names, target_specifier in self._reexports_in(exporter.path):
                 if names is not None and name not in names:
                     continue
                 target = resolve_import(
@@ -722,6 +728,9 @@ class CodeIndex:
                         found[inherited.path] = inherited
                 pending.append(inherited)
         return tuple(found.values())
+
+    def _read_reexports(self, file: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
+        return reexported_names("\n".join(self._lines_of(file)), file)
 
     def _read_imported_names(self, file: str) -> dict[str, ImportedName]:
         return imported_names("\n".join(self._lines_of(file)), file)
