@@ -13,7 +13,7 @@ import copy
 import inspect
 import logging
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, field
 
@@ -352,26 +352,38 @@ class Judge:
         """``check_every`` with its batches sent concurrently, at most ``max_concurrency`` at once and,
         under a call cap, in waves no larger than the calls left, as the sync path does. When the
         served model is still unknown and an answer store is present, the first batch pins the model
-        before the remaining batches look in the store."""
+        before the remaining batches look in the store. A batch refused for its size comes back as
+        its halves, which are sent one per wave before any other batch, as on the sync path."""
         plan = self._check_plan(checks, items, shared, list_name, thresholds)
-        batches = plan.batches
-        if batches and self._must_learn_model_first():
-            for sub_batch, response in await self._send_positions_async(plan, _positions(batches[0])):
-                plan.answer(sub_batch, response)
-            batches = batches[1:]
+        queue = _WaveQueue(list(plan.batches))
         slots = asyncio.Semaphore(self.max_concurrency)
-        while batches:
-            size = self._wave_size(len(batches))
-            wave, batches = batches[:size], batches[size:]
-            await asyncio.gather(*(self._answer_batch_async(plan, batch, slots) for batch in wave))
+        while queue:
+            wave = queue.next_wave(self._next_wave_size)
+            split = await asyncio.gather(*(self._answer_batch_async(plan, batch, slots) for batch in wave))
+            queue.put_halves([half for halves in split for half in halves])
         return plan.answers()
 
-    async def _answer_batch_async(self, plan: _CheckPlan, batch: _Batch, slots: asyncio.Semaphore) -> None:
-        """Send one packed batch once a slot is free, splitting it when the provider refuses its size."""
+    async def _answer_batch_async(
+        self, plan: _CheckPlan, batch: _Batch, slots: asyncio.Semaphore
+    ) -> list[_Batch]:
+        """Send one packed batch once a slot is free and apply its answers; a size refusal returns
+        its halves instead."""
         async with slots:
-            answered = await self._send_positions_async(plan, _positions(batch))
-        for sub_batch, response in answered:
-            plan.answer(sub_batch, response)
+            try:
+                response = await self.ask_async(
+                    batch.state,
+                    batch.questions,
+                    thresholds=plan.thresholds,
+                    masked=plan.hidden,
+                    **batch.extras,
+                )
+            except InputBudgetExceededError:
+                halves = self._halves(plan, batch)
+                if halves is None:
+                    raise
+                return halves
+        plan.answer(batch, response)
+        return []
 
     def ask_all(
         self,
@@ -618,25 +630,23 @@ class Judge:
         """Every request of the plan's batches with its answer, a batch at a time as batches complete,
         with at most ``max_concurrency`` batches in flight. Answers are applied by the caller, on its
         own thread. Under a call cap, batches go in waves no larger than the calls left, in their
-        stable order, so a capped call always answers the same batches. The first failure stops
+        stable order, so a capped call always answers the same batches. A batch refused for its size
+        comes back as its halves, which are sent one per wave before any other batch (see
+        ``_WaveQueue``), so they never take a call from their own wave. The first failure stops
         every request not yet sent and raises after every batch already sending has yielded what it
         answered."""
-        batches = list(plan.batches)
-        if batches and self._must_learn_model_first():
-            yield from self._send_positions(plan, _positions(batches.pop(0)), cancelled)
-        if not batches:
+        queue = _WaveQueue(list(plan.batches))
+        if not queue:
             return
         stop = _BatchStop(cancelled)
-        pool = ThreadPoolExecutor(max_workers=min(self.max_concurrency, len(batches)))
+        pool = ThreadPoolExecutor(max_workers=min(self.max_concurrency, len(plan.batches)))
         futures: list[Future] = []
         try:
-            while batches and not stop.requested():
-                size = self._wave_size(len(batches))
-                wave, batches = batches[:size], batches[size:]
+            while queue and not stop.requested():
                 futures = []
-                for batch in wave:
+                for batch in queue.next_wave(self._next_wave_size):
                     futures.append(pool.submit(self._send_batch, plan, batch, stop))
-                yield from _completed_batches(futures)
+                queue.put_halves((yield from _completed_wave(futures)))
         except KeyboardInterrupt:
             stop.halted.set()
             self.abort_sends(futures)
@@ -645,100 +655,46 @@ class Judge:
             stop.halted.set()
             pool.shutdown(wait=True, cancel_futures=True)
 
-    def _wave_size(self, waiting: int) -> int:
-        """Every waiting batch when uncapped; else as many as calls are left, at least one, since a
-        batch the store answers needs no call."""
+    def _next_wave_size(self, waiting: int) -> int:
+        """One batch alone while the served model is still to be learned; else every waiting batch
+        when uncapped, else as many as calls are left, at least one, since a batch the store answers
+        needs no call."""
+        if self._must_learn_model_first():
+            return 1
         left = self.calls_left()
         return waiting if left is None else max(1, min(left, waiting))
 
     def _send_batch(self, plan: _CheckPlan, batch: _Batch, stop: _BatchStop) -> _SentBatch:
-        """One batch's requests on a worker thread; a failure stops the other batches' unsent
-        requests and is kept with the requests answered before it, so the caller yields those first."""
-        answered: list[tuple[_Batch, JevResponse]] = []
+        """One batch's request on a worker thread. A size refusal returns the batch's halves for a
+        later wave; any other failure stops the other batches' unsent requests and is kept for the
+        caller to raise."""
+        if stop.requested():
+            return _SentBatch([], None, [])
         try:
-            answered.extend(self._send_positions(plan, _positions(batch), stop.requested))
-        except Exception as error:
-            stop.halted.set()
-            return _SentBatch(answered, error)
-        return _SentBatch(answered, None)
-
-    def _send_positions(
-        self,
-        plan: _CheckPlan,
-        positions: Sequence[int],
-        cancelled: Callable[[], bool] | None = None,
-    ) -> Iterator[tuple[_Batch, JevResponse]]:
-        """Send one packed batch of item positions, splitting it when the provider refuses its size.
-
-        Packing already keeps every batch within ``request_exceeds_input_budget``, so a batch is sent
-        as packed. A provider refusal that names an exceeded input budget (``max_tokens_exceeded``)
-        splits it by item and sends the halves. One position whose own request is refused has no
-        smaller honest request - its questions name an item path that a partial state would change -
-        so its error propagates and the journal keeps the provider's report. Every sub-batch keys
-        each item by its own batch mates, so replay and resume accounting stay exact.
-        """
-        if not positions:
-            return
-        batch = self._batch(plan, list(positions))
-        if batch is None:
-            return
-        splittable = len(positions) > 1
-        try:
-            if cancelled is not None and cancelled():
-                return
-            yield (
-                batch,
-                self.ask(
-                    batch.state,
-                    batch.questions,
-                    thresholds=plan.thresholds,
-                    masked=plan.hidden,
-                    **batch.extras,
-                ),
-            )
-        except InputBudgetExceededError:
-            if not splittable:
-                raise
-            yield from self._split_positions(plan, positions, cancelled)
-
-    def _split_positions(
-        self,
-        plan: _CheckPlan,
-        positions: Sequence[int],
-        cancelled: Callable[[], bool] | None = None,
-    ) -> Iterator[tuple[_Batch, JevResponse]]:
-        middle = len(positions) // 2
-        yield from self._send_positions(plan, positions[:middle], cancelled)
-        yield from self._send_positions(plan, positions[middle:], cancelled)
-
-    async def _send_positions_async(
-        self, plan: _CheckPlan, positions: Sequence[int]
-    ) -> list[tuple[_Batch, JevResponse]]:
-        """The async form of ``_send_positions``; halves recurse sequentially so a refusal cannot
-        leave an orphaned half running inside a cancelled gather."""
-        if not positions:
-            return []
-        batch = self._batch(plan, list(positions))
-        if batch is None:
-            return []
-        splittable = len(positions) > 1
-        try:
-            response = await self.ask_async(
+            response = self.ask(
                 batch.state, batch.questions, thresholds=plan.thresholds, masked=plan.hidden, **batch.extras
             )
-        except InputBudgetExceededError:
-            if not splittable:
-                raise
-            return await self._split_positions_async(plan, positions)
-        return [(batch, response)]
+        except InputBudgetExceededError as error:
+            halves = self._halves(plan, batch)
+            if halves is None:
+                stop.halted.set()
+                return _SentBatch([], error, [])
+            return _SentBatch([], None, halves)
+        except Exception as error:
+            stop.halted.set()
+            return _SentBatch([], error, [])
+        return _SentBatch([(batch, response)], None, [])
 
-    async def _split_positions_async(
-        self, plan: _CheckPlan, positions: Sequence[int]
-    ) -> list[tuple[_Batch, JevResponse]]:
-        middle = len(positions) // 2
-        left = await self._send_positions_async(plan, positions[:middle])
-        right = await self._send_positions_async(plan, positions[middle:])
-        return [*left, *right]
+    def _halves(self, plan: _CheckPlan, batch: _Batch) -> list[_Batch] | None:
+        """The two requests a refused batch splits into, by item, without the halves that have no
+        open question; None for a one-item batch, whose request has no smaller honest form - its
+        questions name an item path that a partial state would change."""
+        members = list(batch.members)
+        if len(members) < 2:
+            return None
+        middle = len(members) // 2
+        built = (self._batch(plan, members[:middle]), self._batch(plan, members[middle:]))
+        return [half for half in built if half is not None]
 
     def _journal_request(self, prepared: _Prepared) -> str | None:
         if self.journal is None:
@@ -1008,10 +964,38 @@ class _BatchStop:
         return self.halted.is_set() or (self.cancelled is not None and self.cancelled())
 
 
+class _WaveQueue:
+    """The batches still to send, in stable order. The halves of a batch refused for its size are
+    sent one per wave, before any other batch and depth first, as a sequential split would send
+    them: so they never share a wave, and a call cap, with other batches, and a half that no split
+    can answer stops its sibling from being sent."""
+
+    def __init__(self, batches: list[_Batch]) -> None:
+        self._batches = batches
+        self._halves: list[_Batch] = []
+
+    def __bool__(self) -> bool:
+        return bool(self._halves or self._batches)
+
+    def next_wave(self, size_for: Callable[[int], int]) -> list[_Batch]:
+        if self._halves:
+            return [self._halves.pop(0)]
+        size = size_for(len(self._batches))
+        wave, self._batches = self._batches[:size], self._batches[size:]
+        return wave
+
+    def put_halves(self, halves: list[_Batch]) -> None:
+        self._halves = halves + self._halves
+
+
 @dataclass(frozen=True)
 class _SentBatch:
+    """What one batch's worker brought back: its answer, the failure to raise, or the halves a size
+    refusal split it into."""
+
     answered: list[tuple[_Batch, JevResponse]]
     error: Exception | None
+    halves: list[_Batch]
 
 
 @dataclass(frozen=True)
@@ -1143,12 +1127,9 @@ class _CallRequest:
         return CallDecision(chosen.name, argument_result.choice, route_result, argument_result)
 
 
-def _positions(batch: _Batch) -> list[int]:
-    """The item positions a batch carries, in their place in the request."""
-    return list(batch.members)
-
-
-def _completed_batches(futures: list[Future]) -> Iterator[tuple[_Batch, JevResponse]]:
+def _completed_wave(futures: list[Future]) -> Generator[tuple[_Batch, JevResponse], None, list[_Batch]]:
+    """Yield a wave's answers as its batches complete, then return the halves its refused batches
+    split into, in the wave's stable order; the first failure is raised after every batch settled."""
     failure: Exception | None = None
     for future in as_completed(futures):
         sent = future.result()
@@ -1156,6 +1137,7 @@ def _completed_batches(futures: list[Future]) -> Iterator[tuple[_Batch, JevRespo
         failure = failure or sent.error
     if failure is not None:
         raise failure
+    return [half for future in futures for half in future.result().halves]
 
 
 def _is_async(client: object) -> bool:

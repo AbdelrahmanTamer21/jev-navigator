@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS
+from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS, InputBudgetExceededError
 from jev_navigator.judgments.journal import RawResponse
 from jev_navigator.judgments.judge import CallCapReachedError, Judge
 from jev_navigator.judgments.questions import Check, Criterion
@@ -304,3 +304,69 @@ def test_a_capped_async_call_always_answers_the_first_batches_in_their_stable_or
     # Assert
     assert len(set(answered_runs)) == 1
     assert len(answered_runs[0]) == 3
+
+
+class HoldingScanner:
+    """A pre-send scanner that finds no secret but holds the request carrying ``held`` until
+    ``release`` returns true or ten seconds pass, so a test can decide which batch reserves a call
+    first."""
+
+    def __init__(self, held: Callable[[str], bool], release: Callable[[], bool]) -> None:
+        self.held = held
+        self.release = release
+
+    def findings(self, text: str) -> list[str]:
+        if self.held(text):
+            deadline = threading.Event()
+            for _ in range(1000):
+                if self.release():
+                    break
+                deadline.wait(0.01)
+        return []
+
+
+def _answered_files(client: ScriptedJevClient) -> list[str]:
+    return sorted(item["file"] for state, _ in client.requests for item in state["items"])
+
+
+def test_a_capped_call_answers_its_first_batches_even_when_the_first_is_held_back() -> None:
+    # Arrange: three calls for eight one-item batches; f0 waits until two other requests were sent
+    client = ScriptedJevClient(default_noul=0.9)
+    scanner = HoldingScanner(lambda text: text == "f0.py", lambda: len(client.requests) >= 2)
+    judge = Judge(client, scanner=scanner, max_calls=3, max_concurrency=8, items_per_request=1)
+
+    # Act
+    with pytest.raises(CallCapReachedError):
+        judge.check_each(DESCRIBES, SMALL_ITEMS, SHARED)
+
+    # Assert: the waves keep later batches from taking the calls of the first three
+    assert _answered_files(client) == ["f0.py", "f1.py", "f2.py"]
+
+
+class RefusesThePairWithF0(ScriptedJevClient):
+    """Refuses, for its input size, the one request that carries f0 together with another item."""
+
+    refused: threading.Event
+
+    def send(self, state: Mapping, questions: Mapping) -> RawResponse:
+        files = [item["file"] for item in state["items"]]
+        if "f0.py" in files and len(files) > 1:
+            self.refused.set()
+            raise InputBudgetExceededError("max_tokens_exceeded")
+        return super().send(state, questions)
+
+
+def test_a_batch_split_in_a_capped_wave_never_takes_a_call_from_its_wave() -> None:
+    # Arrange: three calls for three two-item batches; the f0 pair is refused for its size, and the
+    # other two batches reserve their calls only after that refusal
+    client = RefusesThePairWithF0(default_noul=0.9)
+    client.refused = threading.Event()
+    scanner = HoldingScanner(lambda text: text in ("f2.py", "f4.py"), client.refused.is_set)
+    judge = Judge(client, scanner=scanner, max_calls=3, max_concurrency=8, items_per_request=2)
+
+    # Act
+    with pytest.raises(CallCapReachedError):
+        judge.check_each(DESCRIBES, SMALL_ITEMS[:6], SHARED)
+
+    # Assert: the halves of the refused pair wait for the next wave, which has no call left
+    assert _answered_files(client) == ["f2.py", "f3.py", "f4.py", "f5.py"]
