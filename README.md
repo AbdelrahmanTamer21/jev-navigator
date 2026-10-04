@@ -184,8 +184,9 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   code) and the exact provider responses, as the run progresses.
 - `answers.jsonl`: reusable typed answers keyed by source and request hashes. Every answer is also
   written to the machine's shared answer store (`$XDG_CACHE_HOME/jev-navigator/answers.sqlite`,
-  `~/.cache` when the variable is unset, or `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
-  same questions replays from it after one live request that learns the served model (Find All and
+  `~/.cache` when the variable is unset or relative, or `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
+  same questions replays from it after the live requests that learn the served model (one for Find
+  All and Trace, one per place a Find's first round opens, up to `--beam-width`; Find All and
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
   `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
   `--answer-store PATH` points a run at another store file; each run prints the store it uses.
@@ -277,14 +278,18 @@ The index extracts symbols, declarations, calls and non-call references together
 pass over the files a lookup actually needs. The pass runs a few hundred files per ast-grep process
 and turns each match into its fact as ast-grep prints it, so memory holds the facts, never the
 parser's output, and no command line outgrows the system's argument limit. Facts that start on the
-same line are ordered by their position in the line, so every run returns them in the same order.
+same line are ordered by their position in the line, so every run returns them in the same order;
+symbols spanning the same lines are ordered by name.
 Exact-name lookups first use ripgrep to narrow the candidate files, and `prefetch_names` narrows
 several names with one ripgrep; opening a known span parses its file directly. The resulting
 per-file facts are cached by source bytes, language, ast-grep version, the rule text and the source
 of the code that reads the matches, in `$XDG_CACHE_HOME/jev-navigator/facts` (`~/.cache` when the
-variable is unset), so a new index can reuse facts without treating changed source or changed
+variable is unset or relative), so a new index can reuse facts without treating changed source or changed
 parser rules as current. A file that changes on disk after the index first read it is
-reported as unavailable rather than read in its new form. Each call
+reported as unavailable when the index reads it again, and its code still reads as the text the
+index first read, the text its SHA-256 names, never in its new form. The index keeps each file's
+first read compressed for the run (about 2 MB per 1,000 files of Heedvane's web app), and
+`CodeIndex.source_memory` reports that size. Each call
 site's binding is computed once, and `search_text` and `co_changed_files` each run their tool once
 per argument for the life of the index. The index keeps the lines of a bounded number of recently
 read files (`LINE_CACHE_FILES`). There is no default file-count refusal or parser timeout, and no requested file is silently
@@ -306,7 +311,8 @@ lines mention can be hidden there: a call to such a name has status `unknown`, w
 reason, unless a definition in another file, not imported from one of them, settles it. A completed
 search reports `scope_incomplete` instead of `nothing_left`; a budget-limited result reports which
 fact scans completed and which remain pending. A file that disappears after the working-directory
-inventory was built is reported separately as unavailable. So is a file too large to parse safely:
+inventory was built, or changes after the index first read it, is reported separately as
+unavailable. So is a file too large to parse safely:
 `tools.ast_grep_rules`, the one door every parse passes through, never hands ast-grep a file whose
 estimated parse peak (from the length of each line, `index/file_shape.py`) is over 250 MB, about
 70,000 characters on one line, and `unavailable_files` gives the estimated peak and the longest line.
@@ -389,12 +395,12 @@ Every one of these has an async form (`check_each_async`, `pick_async`, `ask_all
 `send`), such as a host's own orchestrator; a sync client also works there and runs in a worker
 thread. Both paths share one core: masking, the secret scan, the hash, the store lookup, the call
 budget, the journal and the recording are the same steps, and only the send differs (a direct call,
-or an awaited one). Batches of `check_each_async` and the places of each `find_code_async` round are
-sent with `asyncio.gather` — except that the first batch of a `check_each_async` whose served model
-is still unknown and which has an answer store goes out alone. Its live answer pins the served model,
-so the remaining batches can replay from the store. The sync `check_each`, `check_every` and their
-`iter_` forms send their batches on a thread pool, at most `Judge(max_concurrency=N)` at once
-(default 16), with the same first-batch rule; the `iter_` forms yield each batch as it completes. The
+or an awaited one). Batches of `check_each_async` go out concurrently, at most
+`Judge(max_concurrency=N)` at once (default 16), and the places of each `find_code_async` round are
+sent with `asyncio.gather`; the first batch of a `check_each_async` whose served model is still
+unknown and which has an answer store goes out alone. Its live answer pins the served model, so the
+remaining batches can replay from the store. The sync `check_each`, `check_every` and their `iter_`
+forms send their batches on a thread pool under the same `max_concurrency` and first-batch rule; the `iter_` forms yield each batch as it completes. The
 call cap stays exact under concurrency, and after a failure or cancellation no batch sends a new
 request, while answers already received still yield. A sync method given an async client raises
 `TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
@@ -435,8 +441,8 @@ on its own scope, so searches sharing one judge never use up each other's budget
   first batch alone, and the batches after that answer replay as usual. `ReplayOnlyClient` replays
   from the store and never calls Jev.
   `JsonlAnswerStore` is one run's pack. `SqliteAnswerStore(path)` is one insert-only store shared by
-  every run on a machine, so a repeated run at the same commit asks nothing again but the request
-  that learns the served model. It never holds
+  every run on a machine, so a repeated run at the same commit asks nothing again but the requests
+  that learn the served model (one batch, or the places of a Find's first round). It never holds
   code, state or question text: only hashes, unit locations, batch member ids, the batching rule and
   size, the model, raw answers and timestamps. Its location and retention (no expiry) are provisional;
   `LayeredAnswerStore(pack, shared)` reads the pack first, copies every answer it finds only in the
@@ -461,9 +467,11 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `record.sent_request()`, with a judge that has no store. `JsonlJournal(keep_request_text=True)`
   likewise keeps the body as handed to the client (`body_base64`) and the wire bytes when captured
   (`sent_body_base64`), and `export_for_review` keeps the order the request is sent in. By default the store keeps
-  hashes, question wording, and each item's file, lines and commit, so
-  `rebuild_request(record, CodeIndex.at_commit(...), shared)` can rebuild the exact request and prove
-  it matches, or name the part that differs.
+  hashes, question wording, and each item's ids, file, lines, commit and names, so
+  `rebuild_request(record, CodeIndex.at_commit(...), shared)` rebuilds a request from the code at
+  that commit and proves it matches, or names the part that differs. A request whose items carried a
+  field that can quote code, such as a Trace link line or a Find signature, keeps that field withheld,
+  so it does not rebuild exactly; the mismatch then names the withheld fields first.
 
 ## Layer 3: directives
 
