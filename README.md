@@ -386,7 +386,8 @@ index first read, the text its SHA-256 names, never in its new form. The index k
 first read compressed for the run, about 2 MB per 1,000 files of Heedvane's web app. Each call
 site's binding is computed once, and `search_text` and `co_changed_files` each run their tool once
 per argument for the life of the index. The index keeps the lines of a bounded number of recently
-read files (`LINE_CACHE_FILES`). There is no default file-count refusal or parser timeout, and no requested file is silently
+read files (`LINE_CACHE_FILES`). Every cache an index keeps lives in the index itself and none holds
+it back, so a dropped index, with its facts and first reads, is freed at once. There is no default file-count refusal or parser timeout, and no requested file is silently
 omitted.
 
 Before that pass, `.js` files whose leading comments (before any code, after an optional byte-order
@@ -495,6 +496,15 @@ else:
   under dist/" and its measured facts. Anywhere else it stays in `files`, counted toward the cap, and
   is listed in `resolved.awaiting_generated_judgment` with its measured facts, for Jev to judge. With
   `with_generated` nothing is measured and nothing awaits a judgment.
+- `judgments.generated_files.judge_generated_files(judge, index, resolved.awaiting_generated_judgment)`
+  asks Jev about those files, one question each: is the file generated, meaning no person edits it as
+  source? Each file is sent as its path, its measured facts, up to 10 files that import it with their
+  true count, up to 5 files that name its path with the naming line (at most 200 characters around
+  the path; files outside the scope count, non-test files come first; a path written relative to the
+  naming file, such as `../src/a.js`, or joined to a variable folder, such as `$root/src/a.js`, is not
+  found) and their true count, and two 2,000-character excerpts (the opening and the middle). A file
+  the secret scan would refuse is never sent and comes back in `not_judged` with the reason. Nothing calls it yet: the
+  search that acts on the answers lands with Find v2's round controller.
 - `include` and `exclude` entries without `*`, `?` or `[` are folders or files. Other entries are
   globs over the whole path: `**` crosses folders, and a glob without `/` matches the file name at any
   depth unless a leading `/` anchors it at the root.
