@@ -348,8 +348,7 @@ def find_code(
     move frontier. Explicit ``start`` places retain their caller-known semantics and never count as
     finds. ``moves`` chooses how neighbours are listed (default ``places.MOVES``); pass a
     subset, or add a move of your own. Each round's places are asked concurrently in threads;
-    ``find_code_async`` is the same search for an async client, except that a failed request
-    raises its error there instead of ending the search ``failed``."""
+    ``find_code_async`` is the same search for an async client."""
     options = _SearchOptions(
         budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
     )
@@ -392,8 +391,8 @@ async def find_code_async(
     initial_candidates: Sequence[tuple[Place, float]] = (),
 ) -> FindResult:
     """``find_code`` with each round's places sent concurrently with ``asyncio.gather``; budgets,
-    masking, the store, the journal and the history work exactly as in ``find_code``, but a failed
-    request raises its error instead of ending the search ``failed``. Opening places
+    masking, the store, the journal and the history work exactly as in ``find_code``, and a failed
+    request ends the search ``failed`` the same way. Opening places
     runs ripgrep, git and the parser, so it runs in a worker thread and the event loop stays free."""
     options = _SearchOptions(
         budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
@@ -539,6 +538,16 @@ class _Failed:
     error: Exception
 
 
+def _failed(error: Exception) -> _Failed:
+    """Every error a round's request or the stop check raises gets resume state: the search ends
+    ``failed`` holding this same error, and the CLI re-raises it after saving, so its edge still
+    decides between one line and a traceback. Only a send the abort stopped is re-raised, to count
+    as cancelled."""
+    if isinstance(error, ABORTED_SEND_ERRORS):
+        raise error
+    return _Failed(error)
+
+
 @contextmanager
 def _defer_keyboard_interrupts(*, re_raise: bool = True):
     """Keep the small receipt commit indivisible on the main thread.
@@ -600,15 +609,13 @@ def _apply_stop_rule(judge: Judge, search: _Search) -> None:
         )
     except CallCapReachedError:
         search.cap_reached = True
-    except ABORTED_SEND_ERRORS:
-        raise
-    except Exception as error:  # noqa: BLE001 - as in _ask_within_cap: the search ends failed holding this same error, and the CLI re-raises it after saving
-        search.failure = error
+    except Exception as error:  # noqa: BLE001 - _failed owns which errors end the search failed
+        search.failure = _failed(error).error
 
 
 async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:
     rule = search.stop_rule
-    if rule is None:
+    if rule is None or search.failure is not None:
         return
     try:
         search.stop_judgment = await judge_history_async(
@@ -616,6 +623,8 @@ async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:
         )
     except CallCapReachedError:
         search.cap_reached = True
+    except Exception as error:  # noqa: BLE001 - _failed owns which errors end the search failed
+        search.failure = _failed(error).error
 
 
 def _restore(search: _Search, previous: FindResult) -> None:
@@ -777,10 +786,8 @@ def _ask_within_cap(judge: Judge, search: _Search, opening: _Opening):
     except CallCapReachedError:
         search.cap_reached = True
         return _Unanswered.BUDGET
-    except ABORTED_SEND_ERRORS:
-        raise
-    except Exception as error:  # noqa: BLE001 - every failure gets resume state: the search ends failed holding this same error, and the CLI re-raises it after saving, so its edge still decides between one line and a traceback
-        return _Failed(error)
+    except Exception as error:  # noqa: BLE001 - _failed owns which errors end the search failed
+        return _failed(error)
 
 
 async def _ask_within_cap_async(judge: Judge, search: _Search, opening: _Opening):
@@ -798,6 +805,8 @@ async def _ask_within_cap_async(judge: Judge, search: _Search, opening: _Opening
     except CallCapReachedError:
         search.cap_reached = True
         return _Unanswered.BUDGET
+    except Exception as error:  # noqa: BLE001 - _failed owns which errors end the search failed
+        return _failed(error)
 
 
 def _split_opening_state(request: _OpeningRequest) -> Mapping:
