@@ -314,6 +314,26 @@ def _script_local_names(language: str, exclusions: str) -> str:
 {exclusions}"""
 
 
+# A function's own `const name = require('module')`: the name holds that module for the function's
+# body, and a `const` is never bound again. The binding itself is one of the function's own names
+# (see ``LOCAL_NAME_RULES``); this rule says which module it holds, joined to it by the name's
+# position. A `let` or `var` may be bound again, and a computed module names none.
+def _script_local_modules(language: str) -> str:
+    functions = ", ".join(f"{{kind: {kind}}}" for kind in FUNCTION_KINDS[language])
+    return f"""  pattern: {{context: 'var $NAME = require($SPEC)', selector: variable_declarator}}
+  all:
+    - not: {{not: {{has: {{field: name, kind: identifier}}}}}}
+    - not: {{not: {{has: {{field: value, has: {{field: arguments, has: {{kind: string}}}}}}}}}}
+    - not: {{not: {{inside: {{kind: lexical_declaration, has: {{field: kind, regex: '^const$'}}}}}}}}
+    - not: {{not: {{inside: {{stopBy: end, any: [{functions}]}}}}}}"""
+
+
+LOCAL_MODULE_RULES = {
+    "typescript": _script_local_modules("typescript"),
+    "tsx": _script_local_modules("tsx"),
+    "javascript": _script_local_modules("javascript"),
+}
+
 LOCAL_NAME_RULES = {
     "python": """  kind: identifier
   all:
@@ -358,6 +378,7 @@ TYPE_AND_VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_ENUMS
 DECLARED_NAME_RULES[FLOW_LANGUAGE] = _TYPED_SCRIPT_DECLARED_NAMES
 MODULE_ALIAS_RULES[FLOW_LANGUAGE] = _SCRIPT_MODULE_ALIASES
 LOCAL_NAME_RULES[FLOW_LANGUAGE] = LOCAL_NAME_RULES["tsx"]
+LOCAL_MODULE_RULES[FLOW_LANGUAGE] = LOCAL_MODULE_RULES["tsx"]
 
 # ast-grep reads `languageGlobs` only from a config file: a scan of flow files passes this sgconfig,
 # which parses every JavaScript suffix with the tsx grammar. Plain-JS files are scanned in their own

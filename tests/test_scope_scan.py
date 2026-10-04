@@ -1264,9 +1264,10 @@ def test_each_binding_of_a_functions_own_name_is_its_own_fact(tmp_path: Path) ->
 
 
 def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_it(tmp_path: Path) -> None:
-    """`db.query()` binds to db.js's `query` where `db` is the module-level alias; a parameter `db`, a
-    `const store = require(...)` inside a function, a name module-level code binds to two modules, or
-    an alias that only a template string spells, leave the call a candidate."""
+    """`db.query()` binds to db.js's `query` where `db` is the module-level alias, and to the module a
+    function's own `const store = require(...)` names inside that function; a parameter `db`, a name
+    module-level code binds to two modules, or an alias that only a template string spells, leave the
+    call a candidate."""
     # Arrange
     index = committed(
         tmp_path,
@@ -1305,17 +1306,100 @@ def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_i
         for line, receiver in found
     }
     real = index.binding_of("handler.js", 2, "query", "db")
+    own = [index.binding_of("two.js", line, "query", "store").target for line in (1, 2)]
 
     # Assert
     assert (real.status.value, real.target) == ("resolved", Span("db.js", 1, 1, "query"))
+    assert own == [Span("db.js", 1, 1, "query"), Span("fake.js", 1, 1, "query")]
     assert bindings == {
         ("handler.js", 2): "resolved",
         ("handler.js", 3): "candidate",
-        ("two.js", 1): "candidate",
-        ("two.js", 2): "candidate",
+        ("two.js", 1): "resolved",
+        ("two.js", 2): "resolved",
         ("gen.js", 2): "candidate",
         ("twice.js", 3): "candidate",
     }
+
+
+REST_QUERY = "function RestQuery(options) {\n  return options;\n}\nmodule.exports = RestQuery;\n"
+
+
+def test_a_name_a_function_binds_once_to_a_require_holds_that_module(tmp_path: Path) -> None:
+    """parse-server's Auth.js: a module-level `import RestQuery from './RestQuery'`, and inside a
+    function its own `const RestQuery = require('./RestQuery')`. The function binds the name once, to
+    the module, and a `const` is never bound again, so `RestQuery({...})` there calls the module's
+    export, `module.exports = RestQuery`, and `lib.find()` calls the `find` that `lib` exports. An
+    inner arrow that binds nothing reads the same binding."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "RestQuery.js": REST_QUERY,
+            "lib.js": "function find() {\n  return 1;\n}\nmodule.exports = { find };\n",
+            "Auth.js": (
+                "import RestQuery from './RestQuery';\n\n"
+                "async function load(config) {\n"
+                "  const RestQuery = require('./RestQuery');\n"
+                "  const lib = require('./lib');\n"
+                "  const query = await RestQuery({ config });\n"
+                "  const later = () => RestQuery({ config });\n"
+                "  return lib.find(query, later);\n"
+                "}\n"
+            ),
+        },
+    )
+
+    # Act
+    called = [index.binding_of("Auth.js", line, "RestQuery", None) for line in (6, 7)]
+    found = index.binding_of("Auth.js", 8, "find", "lib")
+
+    # Assert
+    rest_query = Span("RestQuery.js", 1, 3, "RestQuery")
+    assert [(binding.status.value, binding.target) for binding in called] == [("resolved", rest_query)] * 2
+    assert (found.status.value, found.target) == ("resolved", Span("lib.js", 1, 3, "find"))
+
+
+@pytest.mark.parametrize(
+    ("body", "line"),
+    [
+        (
+            "  const RestQuery = require('./RestQuery');\n"
+            "  if (name) {\n    const RestQuery = wrap();\n  }\n  return RestQuery({});\n",
+            8,
+        ),
+        (
+            "  let RestQuery = require('./RestQuery');\n"
+            "  RestQuery = wrap(RestQuery);\n  return RestQuery({});\n",
+            6,
+        ),
+        (
+            "  const RestQuery = require('./RestQuery');\n"
+            "  function inner(RestQuery) {\n    return RestQuery({});\n  }\n  return inner;\n",
+            6,
+        ),
+        ("  const RestQuery = require('fs');\n  return RestQuery({});\n", 5),
+        ("  const RestQuery = require(name);\n  return RestQuery({});\n", 5),
+    ],
+    ids=["bound twice", "a let", "an inner function binds it", "no module in scope", "a computed module"],
+)
+def test_a_name_a_function_binds_otherwise_stays_its_own_value(tmp_path: Path, body: str, line: int) -> None:
+    """A name a function binds twice, a `let` that may be bound again, a parameter of an inner
+    function, a require of a module outside the scope, or of a computed name, holds no module of the
+    scope there: the call is a candidate whose local value is not resolved."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "RestQuery.js": REST_QUERY,
+            "Auth.js": f"import RestQuery from './RestQuery';\n\nfunction load(name) {{\n{body}}}\n",
+        },
+    )
+
+    # Act
+    binding = index.binding_of("Auth.js", line, "RestQuery", None)
+
+    # Assert
+    assert (binding.status.value, binding.target) == ("candidate", None), binding
 
 
 def test_an_import_alias_replaced_by_a_local_name_binds_nothing_through_the_import(tmp_path: Path) -> None:

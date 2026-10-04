@@ -44,6 +44,7 @@ from .scope_scan import (
     CallMatch,
     FileFacts,
     FileStructure,
+    LocalName,
     ReferenceMatch,
     Unparsed,
     first_identifier,
@@ -144,7 +145,7 @@ class CodeIndex:
         self._exporters = cache(self._read_exporters)
         self._importable_in = cache(self._read_importable_definitions)
         self._names_imported = cache(self._read_imported_names)
-        self._local_scopes = cache(self._read_local_scopes)
+        self._local_bindings = cache(self._read_local_bindings)
         self._binding = cache(self._compute_binding)
         self._nameable = cache(self._nameable_definitions)
         self._unread_names = cache(self._read_unread_names)
@@ -470,8 +471,12 @@ class CodeIndex:
             enclosing = self._binding_beyond_the_function(file, line, name, receiver, role)
             if enclosing is not None:
                 return enclosing
-        elif receiver is None:
-            return local_binding(name)
+        else:
+            own_module = self._binding_through_local_module(file, line, name, receiver, role)
+            if own_module is not None:
+                return own_module
+            if receiver is None:
+                return local_binding(name)
         return binding_from_facts(self._call_facts(file, name, receiver, role))
 
     def _binding_beyond_the_function(
@@ -512,9 +517,7 @@ class CodeIndex:
         ]
         if not members:
             return None
-        first, last = max(
-            ((member.first, member.last) for member in members), key=lambda lines: (lines[0], -lines[1])
-        )
+        first, last = _innermost_lines((member.first, member.last) for member in members)
         if self._unread_lines_mention(file, name, first, last):
             return unparsed_binding(name, (file,))
         innermost = [member.span for member in members if (member.first, member.last) == (first, last)]
@@ -532,20 +535,50 @@ class CodeIndex:
     def _binds_locally(self, file: str, line: int, name: str, receiver: str | None, role: str | None) -> bool:
         """Whether a function holding ``line`` binds the name the use looks up first for its own body:
         ``stop`` in ``stop()``, ``db`` in ``db.query()``. That name then holds a local value, never a
-        definition, import or module alias of its module; a method on it is still looked up by its
-        own name. A type is looked up among types, which no local value replaces, and an export names
+        definition, import or module alias of its module (only the module a function's own require
+        binds, see ``_binding_through_local_module``); a method on it is still looked up by its own
+        name. A type is looked up among types, which no local value replaces, and an export names
         module-level code. A function counts from its first line, so a call on that line before the
         function starts counts as inside it."""
         if role in ("type", "export"):
             return False
         looked_up = name if receiver is None else first_identifier(receiver)
-        return any(first <= line <= last for first, last in self._local_scopes(file).get(looked_up, ()))
+        return any(
+            local.first <= line <= local.last for local in self._local_bindings(file).get(looked_up, ())
+        )
 
-    def _read_local_scopes(self, file: str) -> dict[str, tuple[tuple[int, int], ...]]:
-        scopes: dict[str, list[tuple[int, int]]] = {}
+    def _binding_through_local_module(
+        self, file: str, line: int, name: str, receiver: str | None, role: str | None
+    ) -> Binding | None:
+        """The binding of a use of a name that the innermost function around ``line`` binds exactly
+        once, and to a whole module of the scope (``const db = require('./db')``, see ``LocalName``):
+        ``db()`` calls the module's default export, ``db.query()`` the ``query`` it exports. None
+        when that function binds the name more than once or to anything else, or when the receiver is
+        longer than the name."""
+        module = self._local_module(file, line, name if receiver is None else receiver)
+        if module is None:
+            return None
+        return self._binding_through_exporters(file, module, "default" if receiver is None else name, role)
+
+    def _local_module(self, file: str, line: int, name: str) -> str | None:
+        """The module ``name`` holds at ``line`` when the innermost function there that binds it binds
+        it once, to a whole module."""
+        holding = [
+            local for local in self._local_bindings(file).get(name, ()) if local.first <= line <= local.last
+        ]
+        if not holding:
+            return None
+        innermost = _innermost_lines((local.first, local.last) for local in holding)
+        own = [local for local in holding if (local.first, local.last) == innermost]
+        if len(own) != 1:
+            return None
+        return own[0].module or None
+
+    def _read_local_bindings(self, file: str) -> dict[str, tuple[LocalName, ...]]:
+        bindings: dict[str, list[LocalName]] = {}
         for local in self._file_structure(file).local_names:
-            scopes.setdefault(local.name, []).append((local.first, local.last))
-        return {name: tuple(lines) for name, lines in scopes.items()}
+            bindings.setdefault(local.name, []).append(local)
+        return {name: tuple(found) for name, found in bindings.items()}
 
     def _nameable_definitions(self, name: str, role: str | None) -> tuple[tuple[Span, ...], tuple[Span, ...]]:
         """The definitions of ``name`` a use in ``role`` can name, and those of them their module's
@@ -1149,3 +1182,9 @@ def _outermost(symbols: Sequence[Span]) -> list[Span]:
     return [
         span for span in symbols if not any(other != span and other.contains(span.start) for other in symbols)
     ]
+
+
+def _innermost_lines(lines: Iterable[tuple[int, int]]) -> tuple[int, int]:
+    """Of the nested scopes around one line, as first and last lines, the innermost: the one that
+    starts last, and of those starting together the one that ends first."""
+    return max(lines, key=lambda scope: (scope[0], -scope[1]))

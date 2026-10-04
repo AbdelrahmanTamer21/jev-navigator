@@ -199,8 +199,8 @@ def _decode(file: str, raw: dict) -> FileFacts:
             tuple(_span(file, span) for span in structure["type_declarations"]),
             tuple(_span(file, span) for span in structure["value_declarations"]),
             tuple(
-                LocalName(int(first), int(last), name, int(line))
-                for first, last, name, line in structure["local_names"]
+                LocalName(int(first), int(last), name, int(line), module)
+                for first, last, name, line, module in structure["local_names"]
             ),
             tuple(
                 NamespaceMember(int(first), int(last), _span(file, span))

@@ -94,7 +94,8 @@ def test_roundtrip_keeps_every_fact_a_script_module_records(tmp_path):
     exports under another name."""
     content = (
         b"const db = require('./db');\nimport * as jwt from './jwt';\n"
-        b"function run(task, { retries }) {\n  const done = db.save(task);\n  return done;\n}\n"
+        b"function run(task, { retries }) {\n  const store = require('./store');\n"
+        b"  const done = db.save(task);\n  return store.keep(done);\n}\n"
         b"exports.run = run;\nexports.stop = function () { return 0; };\nexport const LIMIT = 3;\n"
         b"export { run as start };\n"
     )
@@ -106,6 +107,7 @@ def test_roundtrip_keeps_every_fact_a_script_module_records(tmp_path):
     restored = cache.load("module.js", content)
 
     assert facts.structure.local_names and facts.module_aliases and facts.exported_values
+    assert [local.module for local in facts.structure.local_names if local.name == "store"] == ["./store"]
     assert facts.structure.commonjs_exports and facts.export_names and facts.renamed_exports
     assert restored == facts
 
