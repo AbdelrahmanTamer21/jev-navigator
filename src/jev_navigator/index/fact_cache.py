@@ -95,13 +95,15 @@ class FactCache:
         if folder in self._used:
             return
         self._used.add(folder)
-        with suppress(FileNotFoundError):
+        with suppress(OSError):
             os.utime(folder)
 
 
 def _confirm(entry: Path, modified: float) -> None:
+    """A stamp is evidence for housekeeping, never a condition of serving: a cache that refuses it
+    (gone meanwhile, read-only, another user's) still serves the facts."""
     if day_of(modified) < today():
-        with suppress(FileNotFoundError):
+        with suppress(OSError):
             os.utime(entry)
 
 

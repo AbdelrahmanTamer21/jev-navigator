@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -302,3 +303,23 @@ def test_a_load_marks_its_identity_folder_used_even_when_it_misses(tmp_path, exa
 
     # Assert
     assert day_of(folder.stat().st_mtime) == today()
+
+
+@pytest.mark.skipif(not hasattr(os, "chflags"), reason="needs BSD file flags to refuse a stamp to its owner")
+def test_a_cache_that_refuses_stamps_still_serves_its_facts(tmp_path, example, request):
+    # Arrange: the entry and its identity folder are immutable, so neither can be stamped
+    content, facts = example
+    cache = FactCache(tmp_path / "cache")
+    cache.save("module.py", content, facts)
+    [entry] = cache.root.rglob("*.json")
+    _days_ago(entry, 40)
+    for path in (entry, entry.parent):
+        os.chflags(path, stat.UF_IMMUTABLE)
+        request.addfinalizer(lambda path=path: os.chflags(path, 0))
+
+    # Act
+    loaded = FactCache(tmp_path / "cache").load("module.py", content)
+
+    # Assert
+    assert loaded == facts
+    assert day_of(entry.stat().st_mtime) == today() - 40

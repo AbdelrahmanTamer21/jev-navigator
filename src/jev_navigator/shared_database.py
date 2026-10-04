@@ -16,12 +16,14 @@ def open_shared_database(path: Path, schema: str, version: int = 0) -> sqlite3.C
     whole under a temporary name, in WAL mode with ``schema`` and ``version``, then linked into
     place. Linking fails when another process got there first, so every process opens one finished
     file and none has to change its journal mode, which needs the file to itself. Opening stamps the
-    file's modification time, so that time says when a JVN process last used the file."""
+    file's modification time, so that time says when a JVN process last used the file; a file that
+    refuses the stamp still opens."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         _create(path, schema, version)
     database = sqlite3.connect(path, timeout=30, check_same_thread=False)
-    os.utime(path)
+    with suppress(OSError):
+        os.utime(path)
     return database
 
 
