@@ -284,7 +284,8 @@ same line are ordered by their position in the line, so every run returns them i
 Exact-name lookups (definitions, callers, call counts and references) read the persistent name table
 in `$XDG_CACHE_HOME/jev-navigator/names`, which ties every name to the lines it sits on in each file
 content. A file's content is identified by its git blob id, taken from the Git listing for a clean
-tracked file and hashed from its bytes otherwise, so a new index maps its files to table rows without
+tracked file and hashed from its bytes otherwise (also when its bytes differ from the listed blob, as
+on a checkout that converts line endings), so a new index maps its files to table rows without
 reading them, and a warm lookup starts no text search and parses no file. The first name lookup of an
 index covers its whole scope: each file the table lacks is read from the fact cache, or parsed, and
 its rows are written. A changed file gets new rows under its new content, a deleted file answers no

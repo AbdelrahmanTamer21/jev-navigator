@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
-from git_repos import commit_files
+from git_repos import commit_files, git
 
 from jev_navigator.index import fact_cache, languages, name_table, tools
 from jev_navigator.index.code_index import CodeIndex
@@ -187,6 +187,29 @@ def test_a_warm_run_needs_no_write_lock_on_the_table(tmp_path: Path, private_cac
     # Assert
     assert not run.is_alive(), "the warm run waited for the table's write lock"
     assert len(outcome) == 1 and isinstance(outcome[0], dict)
+
+
+def test_a_checkout_that_converts_line_endings_answers_warm_lookups(
+    tmp_path: Path, spawned: Counter[str]
+) -> None:
+    # Arrange: Git stores LF and checks out CRLF, so every working file differs from its blob
+    commit_files(tmp_path, {".gitattributes": "* text eol=crlf\n", **REPOSITORY})
+    git(tmp_path, "rm", "-q", "--cached", "-r", ".")
+    git(tmp_path, "reset", "-q", "--hard")
+    assert b"\r\n" in (tmp_path / "app/rules.py").read_bytes()
+    assert git(tmp_path, "status", "--porcelain") == ""
+    cold = every_lookup(CodeIndex.from_git(tmp_path))
+    index = CodeIndex.from_git(tmp_path)
+    spawned.clear()
+
+    # Act
+    warm = every_lookup(index)
+
+    # Assert
+    assert [span.file for span in warm["check"][0]] == ["app/rules.py", "web/handle.ts", "web/store.ts"]
+    assert warm == cold
+    assert index.unavailable_files == {}
+    assert spawned[tools.AST_GREP] == 0
 
 
 def test_no_table_row_holds_a_string_literal(tmp_path: Path, private_cache_root: Path) -> None:

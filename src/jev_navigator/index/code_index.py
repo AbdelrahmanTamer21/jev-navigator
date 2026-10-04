@@ -522,9 +522,10 @@ class CodeIndex:
             if self._entries is not None:
                 return self._entries
             files = self._available_files(self._code_files)
-            blobs = {file: blob for file in files if (blob := self._blob_of(file)) is not None}
+            blobs = self._blobs_of(files)
             held = self._name_table.entries(set(blobs.values()))
             self._ensure_facts([file for file, blob in blobs.items() if blob not in held])
+            blobs = self._blobs_of(files)
             held = self._name_table.entries(set(blobs.values()))
             self._entries = {file: held[blob] for file, blob in blobs.items() if blob in held}
             by_blob: dict[str, list[str]] = {}
@@ -533,6 +534,9 @@ class CodeIndex:
             self._files_by_blob = {blob: tuple(files) for blob, files in by_blob.items()}
             self._file_order = {file: position for position, file in enumerate(self._entries)}
             return self._entries
+
+    def _blobs_of(self, files: Iterable[str]) -> dict[str, str]:
+        return {file: blob for file in files if (blob := self._blob_of(file)) is not None}
 
     def _blob_of(self, file: str) -> str | None:
         """The git blob id of ``file``'s content: from the Git listing for a clean tracked file,
@@ -804,27 +808,37 @@ class CodeIndex:
         return self._sha256.get(file, "")
 
     def _read_bytes(self, file: str) -> bytes | None:
-        """The file's bytes, the first read checked against the Git listing and every later read
-        against the first: once a file changes on disk, its facts, lines and table rows no longer
-        agree, so it is reported unavailable instead of read."""
+        """The file's bytes, every read checked against the first: once a file changes on disk, its
+        facts, lines and table rows no longer agree, so it is reported unavailable instead of read."""
         try:
             content = (self.root / file).read_bytes()
         except FileNotFoundError:
             self._unavailable[file] = "disappeared after inventory"
             return None
         digest = hashlib.sha256(content).hexdigest()
-        unchanged = self._sha256[file] == digest if file in self._sha256 else self._as_listed(file, content)
+        unchanged = (
+            self._sha256[file] == digest if file in self._sha256 else self._first_read_stands(file, content)
+        )
         if not unchanged:
             self._unavailable[file] = "changed on disk after the index first read it"
             return None
         self._sha256[file] = digest
         return content
 
-    def _as_listed(self, file: str, content: bytes) -> bool:
-        """Whether ``content`` is the blob the Git listing named for ``file``; table rows are keyed by
-        that blob, so a file edited after the listing is never read under it."""
+    def _first_read_stands(self, file: str, content: bytes) -> bool:
+        """Whether the first bytes read from ``file`` can stand. Bytes that differ from the blob the
+        Git listing named (a checkout that converts line endings, or an edit since the listing) are
+        keyed by their own hash instead, unless table rows of the listed blob were already answered
+        for the file."""
         listed = self._listed_blobs.get(file)
-        return listed is None or git_blob_id(content) == listed
+        actual = git_blob_id(content)
+        if listed is None or actual == listed:
+            return True
+        if self._entries is not None and file in self._entries:
+            return False
+        del self._listed_blobs[file]
+        self._blobs[file] = actual
+        return True
 
     def _available_files(self, files: Sequence[str]) -> tuple[str, ...]:
         available = []
