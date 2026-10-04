@@ -69,8 +69,9 @@ class NamespaceMember(NamedTuple):
 
 @dataclass(frozen=True)
 class FileStructure:
-    """``top_level_symbols`` are the symbols no other function, class or namespace holds in the
-    syntax tree. Symbols sharing a line each hold the other's first line, so lines alone cannot tell.
+    """``top_level_symbols`` are the symbols with a syntax node no value, other function, class or
+    namespace holds. Symbols sharing a line each hold the other's first line, so lines alone cannot
+    tell.
     ``declarations`` holds module-level and namespace-level declarations; ``namespace_members`` says
     which symbols and declarations a namespace holds."""
 
@@ -213,7 +214,8 @@ def _structure_from_matches(files, unparsed, matches):
             _ordered(functions[file] | classes[file], positions),
             tuple(sorted(span for _, span in declarations[file])),
             _ordered(
-                (functions[file] | classes[file]) - _held(ranges[file], held_nodes[file], namespaces[file]),
+                (functions[file] | classes[file])
+                & _top_level(ranges[file], held_nodes[file], namespaces[file]),
                 positions,
             ),
             _namespace_members(ranges[file], held_nodes[file], namespaces[file], declarations[file]),
@@ -269,21 +271,23 @@ def _source_positions(ranges: Iterable[tuple[int, int, Span]]) -> dict[Span, int
     return positions
 
 
-def _held(
+def _top_level(
     ranges: list[tuple[int, int, Span]], held_nodes: set[tuple[int, int]], namespaces: list[_Namespace]
 ) -> set[Span]:
-    """The spans whose syntax node is a value's (see ``_held_rule``) or lies inside another function,
-    class or namespace node, counting the callbacks ``_same_lines_as_a_named_symbol`` drops: a
-    function inside a one-line callback is the callback's. Nodes nest or are disjoint, so a node is
-    inside another exactly when one starting no later reaches at least as far."""
-    held = {span for start, end, span in ranges if (start, end) in held_nodes}
+    """The spans with a syntax node that is no value's (see ``_held_rule``) and lies inside no other
+    function, class or namespace node, counting the callbacks ``_same_lines_as_a_named_symbol`` drops:
+    a function inside a one-line callback is the callback's. A span is lines and a name, so one node
+    at the top is enough: `function handler() {} const table = { handler() {} };` on one line is one
+    span holding a module-level function. Nodes nest or are disjoint, so a node is inside another
+    exactly when one starting no later reaches at least as far."""
     nodes = [*ranges, *((namespace.start, namespace.end, None) for namespace in namespaces)]
+    top: set[Span] = set()
     furthest = -1
-    for _start, end, span in sorted(nodes, key=lambda node: (node[0], -node[1])):
-        if end <= furthest and span is not None:
-            held.add(span)
+    for start, end, span in sorted(nodes, key=lambda node: (node[0], -node[1])):
+        if end > furthest and span is not None and (start, end) not in held_nodes:
+            top.add(span)
         furthest = max(furthest, end)
-    return held
+    return top
 
 
 def _same_lines_as_a_named_symbol(symbols: set[Span]) -> set[Span]:

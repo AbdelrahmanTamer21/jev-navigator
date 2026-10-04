@@ -13,7 +13,7 @@ from .scope_scan import CallMatch, FileFacts, FileStructure, NamespaceMember, Re
 from .spans import Span
 from .tools import ast_grep_version
 
-FACT_RULE_VERSION = "combined-facts-v18-members-bind-inside-their-namespace"
+FACT_RULE_VERSION = "combined-facts-v19-one-top-level-node-makes-a-top-level-span"
 
 
 class FactCache:

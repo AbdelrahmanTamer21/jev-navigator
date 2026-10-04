@@ -505,6 +505,28 @@ def test_a_function_given_as_a_default_value_is_named_by_the_name_it_defaults(tm
     }
 
 
+def test_a_module_level_function_sharing_its_line_and_name_with_a_held_method_stays_top_level(
+    tmp_path: Path,
+) -> None:
+    """Spans are lines and a name, so `handler` and the object's method `handler` on one line are one
+    span. The module-level function among them makes it a module-level definition."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/oneline.js": (
+                "function handler() { return 1; } const table = { handler() { return 2; } }; handler();\n"
+            )
+        },
+    )
+
+    # Act
+    binding = index.find_callers("handler")[0].binding
+
+    # Assert
+    assert (binding.status.value, binding.target) == ("resolved", Span("src/oneline.js", 1, 1, "handler"))
+
+
 def test_symbols_sharing_a_line_are_top_level_only_when_nothing_holds_them(tmp_path: Path) -> None:
     """Symbols on one line each hold the other's first line, so lines cannot say which is top level;
     the syntax tree can. `retry` and the one-line class `Box` stay provable from their file, while
