@@ -146,8 +146,9 @@ def test_a_file_whose_name_starts_with_a_dash_is_scanned_as_a_file(tmp_path: Pat
     [
         lambda repository: tools.ripgrep_files("needle", ("a.py",), repository),
         lambda repository: tuple(hit.file for hit in tools.ripgrep_fixed("needle", ("a.py",), repository, 5)),
+        lambda repository: tuple(hit.file for hit in tools.ripgrep_lines(("needle",), ("a.py",), repository)),
     ],
-    ids=["ripgrep_files", "ripgrep_fixed"],
+    ids=["ripgrep_files", "ripgrep_fixed", "ripgrep_lines"],
 )
 def test_ripgrep_ignores_a_configured_preprocessor(tmp_path: Path, monkeypatch, search) -> None:
     # A ripgrep config in the environment (RIPGREP_CONFIG_PATH) can name `--pre=<program>`, which
