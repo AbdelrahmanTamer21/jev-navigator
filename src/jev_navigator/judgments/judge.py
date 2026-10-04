@@ -17,6 +17,7 @@ from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_co
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
+from ..interrupts import defer_keyboard_interrupts
 from .answers import JevResponse, NoulAnswer, TokenTotal, response_to_raw
 from .client import (
     AsyncJevClient,
@@ -705,9 +706,9 @@ class Judge:
         futures: list[Future] = []
         try:
             while queue and not stop.requested():
-                futures = []
-                for batch in queue.next_wave(self._next_wave_size):
-                    futures.append(pool.submit(self._send_batch, plan, batch, stop))
+                wave = queue.next_wave(self._next_wave_size)
+                with defer_keyboard_interrupts():
+                    futures = [pool.submit(self._send_batch, plan, batch, stop) for batch in wave]
                 queue.put_halves((yield from _completed_wave(futures)))
         except KeyboardInterrupt:
             stop.halted.set()
