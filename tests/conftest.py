@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from git_repos import git, write_files
 from isolated_jvn import NO_SETTINGS
-from no_skipped_tests import pytest_addoption, pytest_configure, pytest_sessionfinish  # noqa: F401
+from no_skipped_tests import *  # noqa: F403
 
 from jev_navigator.cache_root import cache_root
 from jev_navigator.data_root import data_root
