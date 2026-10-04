@@ -268,6 +268,33 @@ def test_a_place_answered_from_the_table_reads_as_its_listed_blob_after_the_file
     assert "a.py" in index.unavailable_files
 
 
+@pytest.mark.parametrize("lookup", ["find_callers", "find_references"])
+def test_a_warm_table_with_an_empty_fact_cache_loads_a_names_facts_in_one_scan(
+    tmp_path: Path, spawned: Counter[str], lookup: str
+) -> None:
+    # Arrange: check is defined twice, and six files call it and pass it on; the table is warm, the
+    # facts are not
+    uses = {
+        f"app/use_{n}.py": f"from app.rules import check\n\n\ndef use_{n}(order):\n"
+        "    run(check)\n    return check(order)\n"
+        for n in range(6)
+    }
+    repository = tmp_path / "repository"
+    commit_files(repository, {**REPOSITORY, **uses})
+    expected = getattr(CodeIndex.from_git(repository, fact_cache_dir=tmp_path / "warm-facts"), lookup)(
+        "check"
+    )
+    index = CodeIndex.from_git(repository, fact_cache_dir=tmp_path / "empty-facts")
+    spawned.clear()
+
+    # Act
+    found = getattr(index, lookup)("check")
+
+    # Assert
+    assert found == expected
+    assert spawned[tools.AST_GREP] == 1
+
+
 def test_a_files_definitions_come_from_the_table_with_their_lines(
     tmp_path: Path, spawned: Counter[str]
 ) -> None:
