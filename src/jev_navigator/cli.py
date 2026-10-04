@@ -265,6 +265,7 @@ def create_evidence_pack(
     repository = repository.resolve()
     output = output.resolve()
     _validate_budget(budget)
+    navigator = _navigator_provenance()
     thresholds = thresholds or Thresholds()
     previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client, workflow)
     _prepare_output(output)
@@ -394,6 +395,7 @@ def create_evidence_pack(
             thresholds,
             index,
             result,
+            navigator=navigator,
             requested_model=getattr(client, "model", "unknown"),
             served_model=judge.served_model,
             input_total=judge.input_total,
@@ -966,6 +968,7 @@ def _manifest(
     index: CodeIndex,
     result: FindResult,
     *,
+    navigator: dict,
     requested_model: str,
     served_model: str | None,
     input_total: TokenTotal,
@@ -985,7 +988,7 @@ def _manifest(
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "navigator": _navigator_provenance(),
+        "navigator": navigator,
         "source": {
             "repository": str(repository),
             "revision": index.commit,
@@ -1155,6 +1158,8 @@ def _find_all_report(manifest: dict) -> str:
 
 
 def _navigator_provenance() -> dict:
+    """JVN's own build. A run reads it before it searches: its git calls take a memory slot, so read
+    while writing a pack after a memory stop, the limit would refuse them and the pack would be lost."""
     package_root = Path(__file__).resolve().parent
     source_files = sorted(package_root.rglob("*.py"))
     digest = hashlib.sha256()
