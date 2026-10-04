@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import multiprocessing
+import os
 import sqlite3
 import threading
+import time
 from collections import Counter
 from pathlib import Path
 
 import pytest
 from git_repos import commit_files, git
 
+from jev_navigator.confirmation import day_of, today
 from jev_navigator.index import fact_cache, languages, name_table, tools
 from jev_navigator.index.code_index import CodeIndex
 
@@ -385,3 +388,142 @@ def test_the_table_lives_in_the_cache_root(private_cache_root: Path) -> None:
 
     # Assert
     assert path.parent == private_cache_root / "names"
+
+
+OTHER_REPOSITORY = {
+    "lib/other.py": "def elsewhere(x):\n    return x\n",
+    "lib/more.py": "def more():\n    return 2\n",
+}
+
+
+def set_confirmed(cache: Path, days_ago: int) -> None:
+    """Every file content in the table was last confirmed ``days_ago`` days ago."""
+    [path] = (cache / "names").glob("*.sqlite")
+    with sqlite3.connect(path) as database:
+        database.execute("update files set confirmed = ?", (today() - days_ago,))
+
+
+def confirmed_days(cache: Path) -> list[int]:
+    [path] = (cache / "names").glob("*.sqlite")
+    with sqlite3.connect(path) as database:
+        return [day for (day,) in database.execute("select confirmed from files")]
+
+
+def test_covering_a_scope_confirms_its_files_today(tmp_path: Path, private_cache_root: Path) -> None:
+    # Arrange
+    commit_files(tmp_path, REPOSITORY)
+    every_lookup(CodeIndex.from_git(tmp_path))
+    set_confirmed(private_cache_root, 40)
+
+    # Act
+    every_lookup(CodeIndex.from_git(tmp_path))
+
+    # Assert
+    assert confirmed_days(private_cache_root) == [today()] * len(REPOSITORY)
+
+
+def test_forgetting_unconfirmed_files_keeps_every_answer_for_the_scope_a_run_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, private_cache_root: Path, spawned: Counter[str]
+) -> None:
+    # Arrange: two repositories share the table; only the first is covered again
+    kept, gone = tmp_path / "kept", tmp_path / "gone"
+    commit_files(kept, REPOSITORY)
+    commit_files(gone, OTHER_REPOSITORY)
+    every_lookup(CodeIndex.from_git(kept))
+    every_lookup(CodeIndex.from_git(gone))
+    set_confirmed(private_cache_root, 40)
+    every_lookup(CodeIndex.from_git(kept))
+
+    # Act
+    forgotten = name_table.NameTable().forget_unconfirmed(before=today() - 30, limit=2_000)
+    spawned.clear()
+    warm = every_lookup(CodeIndex.from_git(kept))
+
+    # Assert
+    assert forgotten == len(OTHER_REPOSITORY)
+    assert len(confirmed_days(private_cache_root)) == len(REPOSITORY)
+    assert spawned[tools.AST_GREP] == 0
+    assert warm == answered_from_scratch(kept, monkeypatch, tmp_path / "fresh")
+
+
+def test_forgetting_takes_the_least_recently_confirmed_first_and_stops_at_the_limit(
+    tmp_path: Path, private_cache_root: Path
+) -> None:
+    # Arrange
+    commit_files(tmp_path, REPOSITORY)
+    every_lookup(CodeIndex.from_git(tmp_path))
+    [path] = (private_cache_root / "names").glob("*.sqlite")
+    with sqlite3.connect(path) as database:
+        blobs = [blob for (blob,) in database.execute("select blob from files order by blob")]
+        for age, blob in enumerate(blobs):
+            database.execute("update files set confirmed = ? where blob = ?", (today() - 40 - age, blob))
+
+    # Act
+    forgotten = name_table.NameTable().forget_unconfirmed(before=today(), limit=2)
+
+    # Assert
+    with sqlite3.connect(path) as database:
+        left = {blob for (blob,) in database.execute("select blob from files")}
+        orphans = database.execute("select count(*) from names where blob not in (select blob from files)")
+        assert orphans.fetchone() == (0,)
+    assert forgotten == 2
+    assert left == set(blobs[:2])
+
+
+def test_forgetting_returns_the_freed_space_to_the_disk(tmp_path: Path, private_cache_root: Path) -> None:
+    # Arrange
+    commit_files(
+        tmp_path, {f"app/module_{n}.py": f"def f{n}(x):\n    return g{n}(x)\n" * 40 for n in range(30)}
+    )
+    every_lookup(CodeIndex.from_git(tmp_path))
+    table = name_table.NameTable()
+    with sqlite3.connect(table.path) as database:
+        database.execute("pragma wal_checkpoint(truncate)")
+    before = table.path.stat().st_size
+
+    # Act
+    table.forget_unconfirmed(before=today() + 1, limit=2_000)
+
+    # Assert
+    assert table.path.stat().st_size < before / 2
+
+
+def test_opening_the_table_marks_its_file_used(tmp_path: Path, private_cache_root: Path) -> None:
+    # Arrange
+    commit_files(tmp_path, REPOSITORY)
+    every_lookup(CodeIndex.from_git(tmp_path))
+    path = name_table.NameTable().path
+    stamp = time.time() - 10 * 86_400
+    os.utime(path, (stamp, stamp))
+
+    # Act
+    name_table.NameTable()
+
+    # Assert
+    assert day_of(path.stat().st_mtime) == today()
+
+
+def test_a_lookup_whose_stamp_cannot_be_written_keeps_its_entries_and_says_so(
+    tmp_path: Path, private_cache_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange: another process holds the write lock past the table's (shortened) busy wait
+    commit_files(tmp_path, REPOSITORY)
+    every_lookup(CodeIndex.from_git(tmp_path))
+    set_confirmed(private_cache_root, 40)
+    table = name_table.NameTable()
+    with sqlite3.connect(table.path) as database:
+        blobs = [blob for (blob,) in database.execute("select blob from files")]
+    table._db.execute("pragma busy_timeout = 50")
+    writer = sqlite3.connect(table.path, isolation_level=None)
+    writer.execute("begin immediate")
+
+    # Act
+    try:
+        entries = table.entries(blobs)
+    finally:
+        writer.execute("rollback")
+
+    # Assert
+    assert set(entries) == set(blobs)
+    assert "not stamped" in caplog.text
+    assert confirmed_days(private_cache_root) == [today() - 40] * len(blobs)

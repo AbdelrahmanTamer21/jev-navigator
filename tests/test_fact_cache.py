@@ -1,4 +1,7 @@
 import json
+import os
+import stat
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -6,6 +9,7 @@ from threading import Barrier
 import pytest
 from git_repos import commit_files
 
+from jev_navigator.confirmation import day_of, today
 from jev_navigator.index import fact_cache, imports, languages, scope_scan, spans, tools
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.fact_cache import FactCache
@@ -218,3 +222,111 @@ def test_the_fact_cache_never_writes_a_literal_quoted_by_a_receiver(tmp_path, pr
     written = " ".join(path.read_text() for path in (private_cache_root / "facts").rglob("*.json"))
     assert '"fetch"' in written
     assert "literal" not in written
+
+
+def _days_ago(path: Path, days: int) -> None:
+    stamp = time.time() - days * 86_400
+    os.utime(path, (stamp, stamp))
+
+
+def test_a_rule_change_puts_entries_in_another_identity_folder_and_retires_the_old_one(
+    tmp_path, example, monkeypatch, rule_identity_reset
+):
+    # Arrange
+    content, facts = example
+    cache = FactCache(tmp_path / "cache")
+    cache.save("module.py", content, facts)
+    [before] = cache.current_folders()
+
+    # Act
+    monkeypatch.setitem(languages.FUNCTION_KINDS, "python", ("function_definition", "lambda"))
+    fact_cache._rules_identity.cache_clear()
+    cache.save("module.py", content, facts)
+
+    # Assert
+    [after] = cache.current_folders()
+    assert after != before and after.parent == before.parent == cache.root / "python"
+    assert cache.retired() == [before]
+    assert [path.parent for path in cache.root.rglob("*.json")] in ([before, after], [after, before])
+
+
+def test_an_entry_in_the_layout_before_identity_folders_is_retired(tmp_path, example):
+    # Arrange
+    content, facts = example
+    cache = FactCache(tmp_path / "cache")
+    cache.save("module.py", content, facts)
+    flat = cache.root / "python" / f"{'0' * 64}.json"
+    flat.write_text("{}")
+
+    # Act
+    retired = cache.retired()
+
+    # Assert
+    assert retired == [flat]
+
+
+def test_loading_an_entry_confirms_it_today(tmp_path, example):
+    # Arrange
+    content, facts = example
+    cache = FactCache(tmp_path / "cache")
+    cache.save("module.py", content, facts)
+    [entry] = cache.root.rglob("*.json")
+    _days_ago(entry, 40)
+
+    # Act
+    loaded = FactCache(tmp_path / "cache").load("module.py", content)
+
+    # Assert
+    assert loaded == facts
+    assert day_of(entry.stat().st_mtime) == today()
+
+
+def test_a_corrupt_entry_is_never_confirmed(tmp_path, example):
+    # Arrange
+    content, facts = example
+    cache = FactCache(tmp_path / "cache")
+    cache.save("module.py", content, facts)
+    [entry] = cache.root.rglob("*.json")
+    entry.write_text("{")
+    _days_ago(entry, 40)
+
+    # Act
+    loaded = cache.load("module.py", content)
+
+    # Assert
+    assert loaded is None
+    assert day_of(entry.stat().st_mtime) == today() - 40
+
+
+def test_a_load_marks_its_identity_folder_used_even_when_it_misses(tmp_path, example):
+    # Arrange
+    content, facts = example
+    FactCache(tmp_path / "cache").save("module.py", content, facts)
+    [folder] = FactCache(tmp_path / "cache").current_folders()
+    _days_ago(folder, 10)
+
+    # Act
+    FactCache(tmp_path / "cache").load("other.py", b"x = 1\n")
+
+    # Assert
+    assert day_of(folder.stat().st_mtime) == today()
+
+
+@pytest.mark.skipif(not hasattr(os, "chflags"), reason="needs BSD file flags to refuse a stamp to its owner")
+def test_a_cache_that_refuses_stamps_still_serves_its_facts(tmp_path, example, request):
+    # Arrange: the entry and its identity folder are immutable, so neither can be stamped
+    content, facts = example
+    cache = FactCache(tmp_path / "cache")
+    cache.save("module.py", content, facts)
+    [entry] = cache.root.rglob("*.json")
+    _days_ago(entry, 40)
+    for path in (entry, entry.parent):
+        os.chflags(path, stat.UF_IMMUTABLE)
+        request.addfinalizer(lambda path=path: os.chflags(path, 0))
+
+    # Act
+    loaded = FactCache(tmp_path / "cache").load("module.py", content)
+
+    # Assert
+    assert loaded == facts
+    assert day_of(entry.stat().st_mtime) == today() - 40
