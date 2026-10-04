@@ -166,8 +166,9 @@ FUNCTION_RULE = "id: function\nlanguage: typescript\nrule:\n  kind: function_dec
 
 
 def _without_the_memory_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ast-grep's own size skip (over 3,000,000 bytes and 200,000 lines) sits above JVN's bound, so these
-    tests lift the bound to reach it: what they prove is the detection of any file ast-grep skips."""
+    """These tests reach ast-grep's own size skip (over 3,000,000 bytes and 200,000 lines) with a file the
+    side-by-side share would refuse, so they lift that share: what they prove is the detection of any
+    file ast-grep skips in a side-by-side run."""
     monkeypatch.setattr(file_shape, "MAX_PARSE_PEAK_MB", float("inf"))
 
 
@@ -636,3 +637,21 @@ def test_without_a_single_file_limit_a_file_over_the_side_by_side_share_is_refus
 
     # Assert
     assert ", over the 250 MB one file may take," in index.refused_files["src/big.py"]
+
+
+def test_a_file_parsed_alone_that_ast_grep_skips_is_named_not_taken_for_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: 110,000 small functions, 3.4 MB on 220,000 lines, over ast-grep's own size skip but within
+    # the single-file limit, so the file is parsed alone and ast-grep prints nothing for it
+    _with_single_parse_limit(monkeypatch, SINGLE_PARSE_LIMIT_MB)
+    many = "".join(f"def f{n}():\n    return {n}\n" for n in range(110_000))
+    commit_files(tmp_path / "repo", {"src/many.py": many, "src/one.py": "def one():\n    return 1\n"})
+    index = CodeIndex.from_git(tmp_path / "repo", fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    index.functions_in_files(index.files)
+
+    # Assert
+    assert index.refused_files == {"src/many.py": tools.NOT_PARSED_REASON}
+    assert [span.name for span in index.functions_in("src/one.py")] == ["one"]

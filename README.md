@@ -332,9 +332,9 @@ which a minified bundle of a few tens of kilobytes on one line drives up. Files 
 over the single-file limit is never handed to ast-grep, and neither is a large file that cannot be read
 to measure it. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
 peak, the limit it is over, and the longest line in bytes. A file that ast-grep itself skips without
-parsing (it prints nothing for a file that is not valid UTF-8; its own size skip, over 3,000,000 bytes
-and 200,000 lines, sits above JVN's bound) is refused too, as `not parsed`, and is never taken for a
-file without functions. A refused file is never recorded as parsed: it stays readable and
+parsing (it prints nothing for a file that is not valid UTF-8, or for one of more than 3,000,000
+bytes and 200,000 lines, which a file parsed alone can be) is refused too, as `not parsed`, and is
+never taken for a file without functions. A refused file is never recorded as parsed: it stays readable and
 searchable as text, it keeps its path in import relations (also as a re-export target), a name its
 bytes mention binds `unknown`, `jvn stats` names it as never scanned, and `find_comments` lists it in
 `refused_files`. Any ast-grep or ripgrep failure other than that verified disappearance still fails the
