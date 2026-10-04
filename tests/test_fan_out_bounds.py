@@ -12,13 +12,13 @@ from pathlib import Path
 import pytest
 from git_repos import commit_files
 
-from jev_navigator.directives.find_code import SearchBudget, find_code, find_code_async
+from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code, find_code_async
 from jev_navigator.directives.places import function_place
 from jev_navigator.history import History, HistoryCheck, judge_sections, judge_sections_async
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.client import InputBudgetExceededError
 from jev_navigator.judgments.judge import Judge
-from jev_navigator.judgments.questions import Check, Criterion
+from jev_navigator.judgments.questions import Check, Criterion, request_sha256
 from jev_navigator.testing import ScriptedJevClient
 
 TARGET = "the check that limits how many items an order may have"
@@ -68,6 +68,28 @@ class CountingClient:
         return self.script.ask(state, questions)
 
 
+class InterruptedOnTheFirstRequest:
+    """Answers like ``ScriptedJevClient`` and records every request it receives. The first request
+    raises ``KeyboardInterrupt``, as a Ctrl-C would, and every other one is held ``HOLD_SECONDS``, so
+    the places queued behind the bound have not started when the interrupt lands."""
+
+    model = "jev-scripted"
+
+    def __init__(self) -> None:
+        self.script = ScriptedJevClient(default_noul=0.05)
+        self.received: list[tuple[Mapping, Mapping]] = []
+        self._lock = threading.Lock()
+
+    def ask(self, state: Mapping, questions: Mapping):
+        with self._lock:
+            self.received.append((state, questions))
+            first = len(self.received) == 1
+        if first:
+            raise KeyboardInterrupt
+        time.sleep(HOLD_SECONDS)
+        return self.script.ask(state, questions)
+
+
 class AsyncCountingClient:
     """``CountingClient`` with an awaitable ask that holds each request on the event loop."""
 
@@ -83,6 +105,10 @@ class AsyncCountingClient:
             return self.counting._answer(state, questions)
         finally:
             self.counting._leave()
+
+
+def _hashes(requests: list[tuple[Mapping, Mapping]]) -> list[str]:
+    return [request_sha256(state, questions) for state, questions in requests]
 
 
 def _finished_within_the_deadline(call: Callable[[], object]) -> object:
@@ -152,6 +178,38 @@ def test_an_async_beam_of_two_hundred_with_nested_batches_stays_bounded_and_fini
     # Assert
     assert result.steps == 200
     assert client.peak_in_flight <= BOUND * BOUND
+
+
+def test_ctrl_c_in_a_round_wider_than_the_bound_resumes_to_the_uninterrupted_result(tmp_path: Path) -> None:
+    # Arrange: six starts asked two at a time, so four wait in the pool when the first request is
+    # interrupted. No step limit: steps are a fresh allowance per run, so every run goes to its end.
+    index = _functions(tmp_path, 6)
+    starts, _ = _beam_of(index, 6)
+    budget = SearchBudget(beam_width=6, neighbours_per_kind=2)
+    whole = ScriptedJevClient(default_noul=0.05)
+    uninterrupted = find_code(index, Judge(whole, max_concurrency=2), TARGET, starts, budget=budget)
+    stopping = InterruptedOnTheFirstRequest()
+    resuming = ScriptedJevClient(default_noul=0.05)
+
+    # Act
+    stopped = find_code(index, Judge(stopping, max_concurrency=2), TARGET, starts, budget=budget)
+    resumed = find_code(
+        index, Judge(resuming, max_concurrency=2), TARGET, starts, budget=budget, resume=stopped
+    )
+
+    # Assert: a round fills its beam with low-scored neighbours too, and an interrupt changes which ones
+    # share a round, so the resume may open other low-scored ones; each it leaves is listed as such.
+    starts_left = {start.key for start in starts} - stopped.visited
+    assert stopped.outcome == Outcome.CANCELLED
+    assert len(stopping.received) < 6
+    assert {entry.place_key for entry in stopped.not_inspected if entry.reason == "cancelled"} >= starts_left
+    assert resumed.outcome == uninterrupted.outcome
+    assert {start.key for start in starts} <= resumed.visited
+    left_unopened = {entry.place_key for entry in resumed.not_inspected if entry.reason == "deprioritized"}
+    assert uninterrupted.visited - resumed.visited <= left_unopened
+    interrupted, *answered = stopping.received
+    assert not set(_hashes(answered)) & set(_hashes(resuming.requests))
+    assert request_sha256(*interrupted) in _hashes(resuming.requests)
 
 
 @pytest.mark.parametrize("entry", ["sync", "async"])
