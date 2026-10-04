@@ -200,7 +200,8 @@ class BudgetedClient:
 
 
 @pytest.fixture(autouse=True)
-def isolated_shared_answer_store(tmp_path_factory, monkeypatch) -> None:
-    """Every test gets its own shared answer store, never the machine's real one."""
+def isolated_shared_answer_store(no_developer_settings, tmp_path_factory, monkeypatch) -> None:
+    """Every test gets its own shared answer store, never the machine's real one. It is set after
+    ``no_developer_settings`` drops every ``JEV_NAVIGATOR_`` variable, so the drop never removes it."""
     store = tmp_path_factory.mktemp("shared-answers") / "answers.sqlite"
     monkeypatch.setenv(SHARED_STORE_VARIABLE, str(store))
