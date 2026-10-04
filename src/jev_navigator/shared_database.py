@@ -45,8 +45,9 @@ def database_base(path: Path) -> Path:
 def release_free_pages(database: sqlite3.Connection) -> None:
     """Returns the pages deleted rows left free to the disk: they move to the end of the file, and a
     checkpoint cuts them off and empties the write-ahead log, as far as no reader still needs it. The
-    vacuum frees one page per step, so its rows are fetched to the end."""
-    database.execute("pragma incremental_vacuum").fetchall()
+    vacuum frees one page per step, and Python's ``execute`` before 3.12 runs it for one step only,
+    so it runs as a script, which steps it to the end. A script commits an open transaction first."""
+    database.executescript("pragma incremental_vacuum;")
     database.execute("pragma wal_checkpoint(truncate)").fetchall()
 
 

@@ -12,7 +12,7 @@ from jev_navigator.index import tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.languages import has_flow_pragma
-from jev_navigator.index.scope_scan import FileFacts, FileStructure, Unparsed, scan_facts
+from jev_navigator.index.scope_scan import OPAQUE_RECEIVER, FileFacts, FileStructure, Unparsed, scan_facts
 from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
@@ -775,6 +775,44 @@ def test_reading_the_parsed_files_receipt_parses_nothing(tmp_path: Path, ast_gre
     # Assert
     assert parsed == {"app/a.py"}
     assert len(ast_grep_runs) == runs_before
+
+
+RECEIVERS = {
+    "app/clients.ts": "export function load(client, cfg, store) {\n"
+    '  client("api-key-literal").fetch(1);\n'
+    '  cfg["token-literal"].get(2);\n'
+    "  `template-${store}`.trim();\n"
+    "  this.store.save(3);\n"
+    "  store?.rows.push(4);\n"
+    "  run(this.handler, cfg.read);\n"
+    "}\n",
+    "app/model.py": "class Model:\n    def save(self):\n        self.items.append(1)\n"
+    '        super().save()\n        open("secret-path").read()\n',
+}
+
+
+def test_a_receiver_is_kept_only_as_a_plain_chain_of_names(tmp_path: Path) -> None:
+    # Arrange
+    commit_files(tmp_path, RECEIVERS)
+
+    # Act
+    facts = scan_facts(sorted(RECEIVERS), tmp_path, Unparsed())
+
+    # Assert
+    calls = {(call.name, call.receiver) for fact in facts.values() for call in fact.calls}
+    references = {(ref.name, ref.receiver) for fact in facts.values() for ref in fact.references}
+    assert {
+        ("fetch", OPAQUE_RECEIVER),
+        ("get", OPAQUE_RECEIVER),
+        ("trim", OPAQUE_RECEIVER),
+        ("save", "this.store"),
+        ("push", "store.rows"),
+        ("append", "self.items"),
+        ("read", OPAQUE_RECEIVER),
+    } <= calls
+    assert {("handler", "this"), ("read", "cfg")} <= references
+    receivers = " ".join(str(call.receiver) for fact in facts.values() for call in fact.calls)
+    assert "literal" not in receivers and "secret" not in receivers and "template" not in receivers
 
 
 def test_a_parsed_file_that_vanished_still_counts_as_read_and_is_listed_unavailable(tmp_path: Path) -> None:

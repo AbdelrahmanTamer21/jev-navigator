@@ -822,8 +822,8 @@ def test_large_scope_warning_starts_above_twenty_thousand_files() -> None:
 
 @pytest.mark.parametrize("search_here", [False, True])
 @pytest.mark.parametrize("input_mode", ["flags", "json-file", "json-stdin", "json-inline"])
-def test_find_defaults_to_unique_results_under_invocation_directory(
-    tmp_path, monkeypatch, capsys, search_here, input_mode
+def test_find_defaults_to_unique_results_in_jvns_data_folder(
+    tmp_path, tmp_path_factory, monkeypatch, capsys, search_here, input_mode, private_data_root
 ):
     from jev_navigator import cli
 
@@ -852,8 +852,7 @@ def test_find_defaults_to_unique_results_under_invocation_directory(
         if input_mode == "flags":
             arguments = ["find", "the policy", "--repo", str(repository)]
         elif input_mode == "json-file":
-            request_file = tmp_path / "jvn-results" / "request.json"
-            request_file.parent.mkdir(exist_ok=True)
+            request_file = tmp_path_factory.mktemp("requests") / "request.json"
             request_file.write_text(json.dumps(request))
             arguments = ["--json", str(request_file)]
         elif input_mode == "json-inline":
@@ -870,7 +869,7 @@ def test_find_defaults_to_unique_results_under_invocation_directory(
             assert response["manifest"] == str(pack / "manifest.json")
             assert response["report"] == str(pack / "report.md")
             assert "jvn" in captured.err
-    packs = [path for path in (tmp_path / "jvn-results").iterdir() if path.is_dir()]
+    packs = [path for path in (private_data_root / "runs").iterdir() if path.is_dir()]
     assert len(packs) == 2
     for pack in packs:
         manifest = json.loads((pack / "manifest.json").read_text())
@@ -878,8 +877,8 @@ def test_find_defaults_to_unique_results_under_invocation_directory(
         assert manifest["source"]["tracked_files"] == 1
         assert (pack / "report.md").is_file()
         assert (pack / "journal.jsonl").is_file()
-    if not search_here:
-        assert not (repository / "jvn-results").exists()
+    assert not (tmp_path / "jvn-results").exists()
+    assert not (repository / "jvn-results").exists()
 
 
 def test_report_distinguishes_included_lines_from_an_unopened_candidate(tmp_path):
@@ -1097,7 +1096,10 @@ def test_findall_budget_stop_writes_partial_pack_with_completed_results(tmp_path
 
 
 def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    private_data_root: Path,
 ) -> None:
     from jev_navigator import cli
 
@@ -1139,7 +1141,7 @@ def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
     captured = capsys.readouterr()
     result = json.loads(captured.out)
     output = Path(result["output_directory"])
-    assert output.parent == tmp_path / "jvn-results"
+    assert output.parent == private_data_root / "runs"
     pack = json.loads((output / "statistics.json").read_text())
     assert pack["counts"]["totals"] == {"function": 2}
     assert pack["largest"]["ranking"][0]["name"] == "larger"
@@ -1153,7 +1155,10 @@ def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
 
 
 def test_stats_schema_and_validation_share_the_cli_contract(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    private_data_root: Path,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     assert main(["schema", "stats"]) == 0
@@ -1163,9 +1168,9 @@ def test_stats_schema_and_validation_share_the_cli_contract(
     with pytest.raises(SystemExit) as exc:
         main(["--json", '{"command":"stats","operation":["guess"]}'])
     assert exc.value.code == 2
-    assert not (tmp_path / "jvn-results").exists()
+    assert not (private_data_root / "runs").exists()
     assert main(["stats", "--min-lines", "10", "--max-lines", "2"]) == 1
-    assert not (tmp_path / "jvn-results").exists()
+    assert not (private_data_root / "runs").exists()
 
 
 def test_each_run_names_its_answer_store_and_a_fresh_store_isolates_runs(
@@ -1243,6 +1248,37 @@ def test_the_answer_store_variable_chooses_the_shared_store_when_no_flag_is_give
     assert capsys.readouterr().err.count(f"answer store: {store}") == 2
     first, repeat = (len(instance.requests) for instance in clients)
     assert store.is_file() and first > 1 and repeat == 1
+
+
+@pytest.mark.parametrize("named_by", ["flag", "variable"])
+def test_a_store_named_inside_jvns_cache_folder_stops_the_run_with_exit_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    private_cache_root: Path,
+    private_data_root: Path,
+    named_by: str,
+) -> None:
+    from jev_navigator import cli
+
+    # Arrange: an older JVN's default file name, which housekeeping prunes as an older layout
+    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "TypeSafeJevClient", ScriptedJevClient)
+    store = private_cache_root / "answers.sqlite"
+    flag = ["--answer-store", str(store)] if named_by == "flag" else []
+    if named_by == "variable":
+        monkeypatch.setenv(SHARED_STORE_VARIABLE, str(store))
+
+    # Act
+    with pytest.raises(SystemExit) as stopped:
+        main(["find", "the order limit", "--repo", str(tmp_path), *flag])
+
+    # Assert
+    error = capsys.readouterr().err
+    assert stopped.value.code == 2
+    assert str(store) in error and "JVN prunes" in error
+    assert not store.exists()
+    assert not (private_data_root / "runs").exists()
 
 
 REFUSED_BUNDLE = ("export function admit(){return 1};" * 6_000)[:200_000]
