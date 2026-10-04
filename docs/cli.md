@@ -17,6 +17,7 @@ that are absent from the source?” rather than “find everything important”.
 - [Find All function search](#find-all-function-search)
 - [Workflow trace](#workflow-trace)
 - [Structural measurements](#structural-measurements)
+- [Disk use and housekeeping](#disk-use-and-housekeeping)
 
 ## Start with one command
 
@@ -25,8 +26,10 @@ jvn find "the check that limits how many items an order may have"
 ```
 
 The current directory is the search root. Git is optional and uncommitted changes are included.
-The command chooses an entry point and creates `./jvn-results/<directory>-<timestamp>/` in the
-directory where you invoked it. You do not need to supply a scope, starting line or budget.
+The command chooses an entry point and creates a run folder,
+`$XDG_DATA_HOME/jev-navigator/runs/<directory>-<timestamp>/` (`~/.local/share` when the variable is
+unset), and prints its path. Nothing is written into the directory you search or start from. You do
+not need to supply a scope, starting line or budget.
 
 Credentials come from `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` in the process environment, then
 from `~/.config/jvn/env`. The file uses dotenv syntax and is not executed. When `jvn`'s code runs
@@ -58,8 +61,8 @@ unlimited unless you set a limit.
 | `--repo PATH` | Current directory. Select another search root. | `jvn find "the order limit" --repo /path/to/repository` |
 | `--prefix PATH` | Whole source inventory. Limit scope to a file or directory, relative to the search root. Repeat for multiple scopes. | `jvn find "the order limit" --prefix app/ --prefix tests/` |
 | `--start PATH:LINE` | Automatic entry selection. Start from a known caller or entry point; repeat for multiple starts. Lines are 1-based, paths are relative to the search root. | `jvn find "the order limit" --start app/orders.py:42 --start app/routes.py:18` |
-| `--out PATH` | A unique directory under `./jvn-results/`. Choose another new or empty directory. | `jvn find "the order limit" --out ./order-evidence` |
-| `--answer-store PATH` | `$JEV_NAVIGATOR_ANSWER_STORE`, else `$XDG_CACHE_HOME/jev-navigator/answers.sqlite` (`~/.cache` when unset or relative; provisional). The shared store every run reads and writes; a run prints `answer store: PATH` on stderr. Point an eval arm at a new file so it never replays another arm's answers. A missing file is created; an existing one must be a JVN answer store, on a disk with the locks SQLite's WAL mode needs (any local disk). A run refuses any other file, naming it. `find`, `findall` and `trace` accept it. | `jvn find "the order limit" --answer-store ./arm-a.sqlite` |
+| `--out PATH` | A unique run folder under `$XDG_DATA_HOME/jev-navigator/runs/`. Choose another new or empty directory; JVN never prunes a folder you name. | `jvn find "the order limit" --out ./order-evidence` |
+| `--answer-store PATH` | `$JEV_NAVIGATOR_ANSWER_STORE`, else `$XDG_CACHE_HOME/jev-navigator/answers-v2.sqlite` (`~/.cache` when unset or relative). The default store forgets a request no run reused for 30 days; a store you name keeps every answer, and must lie outside JVN's cache folder (`$XDG_CACHE_HOME/jev-navigator`), which JVN prunes: a run naming a store inside it stops with exit status 2. The shared store every run reads and writes; a run prints `answer store: PATH` on stderr. Point an eval arm at a new file so it never replays another arm's answers. A missing file is created; an existing one must be a JVN answer store, on a disk with the locks SQLite's WAL mode needs (any local disk). A run refuses any other file, naming it. `find`, `findall` and `trace` accept it. | `jvn find "the order limit" --answer-store ./arm-a.sqlite` |
 | `--resume PATH` | Off. Continue a budget-stopped, cancelled or failed evidence pack into a new output directory. | `jvn find "the order limit" --resume ./order-evidence` |
 | `--max-depth N` | Unlimited. Maximum relationship hops from the starting places; `0` opens only those places. | `jvn find "the order limit" --max-depth 3` |
 | `--max-steps N` | Unlimited. Maximum distinct code openings during navigation; entry selection is separate. | `jvn find "the order limit" --max-steps 8` |
@@ -238,8 +241,8 @@ Their sum is `search.calls`, the whole workflow's actual model-request count.
 Continue a budget-stopped pack with the same query and scope:
 
 ```sh
-jvn findall "functions enforcing the order item limit" --resume ./jvn-results/previous-pack
-jvn --json '{"command":"findall","target":"functions enforcing the order item limit","resume":"./jvn-results/previous-pack"}'
+jvn findall "functions enforcing the order item limit" --resume ./previous-pack
+jvn --json '{"command":"findall","target":"functions enforcing the order item limit","resume":"./previous-pack"}'
 ```
 
 A stop during seed selection resumes that stage first. Once enumeration has begun, continuation
@@ -262,8 +265,8 @@ jvn schema trace
 `--start PATH:LINE` is required and repeatable; paths are relative to `--repo` (current directory by
 default). Use `find` first when the entry point is unknown. `--prefix` narrows scope, `--out` chooses
 a new output directory, `--verbose` displays masked requests, and `--keep-requests` keeps code and
-request text in the pack as for `find`. Without `--out`, packs go under
-`./jvn-results/` in the invocation directory.
+request text in the pack as for `find`. Without `--out`, packs go to a run folder under
+`$XDG_DATA_HOME/jev-navigator/runs/`, as for `find`.
 
 Static relationships drive traversal. Jev receives batched, independent questions about input
 origin, transformation, handoff, outcome and relevant branches. The manifest retains all walked
@@ -298,7 +301,7 @@ jvn --json '{"command":"stats","kind":["function"],"limit":1}'
 jvn schema stats
 ```
 
-The command writes `statistics.json` and `statistics.md` under a unique `./jvn-results/` directory.
+The command writes `statistics.json` and `statistics.md` into a unique run folder, as for `find`.
 `--repo`, repeatable `--prefix`, and `--out` work as for search. Repeat `--operation` to choose
 `count`, `largest`, or `range` sections; repeat `--kind` for `function` and `class`. Both kinds and
 all sections are included by default. `--top-level` excludes methods/nested symbols from rankings
@@ -312,3 +315,31 @@ claim that unsupported or malformed code was completely understood. Inspect `cov
 
 These are explicit structural commands. `find` still accepts a semantic target; it does not yet
 route arbitrary natural-language arithmetic questions into `stats` automatically.
+
+## Disk use and housekeeping
+
+```sh
+jvn cache status    # what each cache and the run folders hold, and what each rule would remove
+jvn cache prune     # apply every rule now
+```
+
+Run folders live in `$XDG_DATA_HOME/jev-navigator/runs/` and caches in `$XDG_CACHE_HOME/jev-navigator/`
+(`~/.local/share` and `~/.cache` when unset); JVN writes nothing into the directory it searches unless
+you name one with `--out`. Each `find`, `findall`, `trace` and `stats` run applies the housekeeping
+rules as it ends, at most once a day and deleting at most 2,000 files per run:
+
+| What | Goes when |
+|---|---|
+| Another JVN version's fact folder or name table | no JVN version used it for 3 days |
+| The default answer store in an older layout (its answers were paid for) | no JVN version used it for 30 days |
+| A file's cached facts, or its rows in the name table | no run met that exact file content for 30 days |
+| An answer in the default shared store, with its item answers and refusals | no run reused it for 30 days |
+| A run folder JVN named | 14 days after its run started; 30 days while it holds `resume.json` |
+| Anything above the disk budget (`JEV_NAVIGATOR_DISK_BUDGET`, default `5GB`) | run folders first, oldest first; then other versions' facts and name tables; then facts and names; answers last, older layouts first |
+
+A store named with `--answer-store` or `JEV_NAVIGATOR_ANSWER_STORE` and a folder named with `--out`
+are never touched; a named store inside the cache folder is refused with exit status 2. A cleanup that fails prints `jvn: housekeeping skipped: <reason>` on stderr and
+leaves the run's exit status as it was. Ctrl-C during the cleanup, which starts only once the run has
+ended (its result saved, or its failure reported), ends it with `jvn: housekeeping interrupted after
+the run ended; a later run finishes it` and exit status 130, also after a failed run, so a shell loop
+stops.
