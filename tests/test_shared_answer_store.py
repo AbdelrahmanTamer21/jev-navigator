@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import sqlite3
 import threading
 from pathlib import Path
@@ -247,17 +248,23 @@ def test_a_size_refusal_under_another_input_box_is_not_honoured(tmp_path: Path, 
     assert [len(state["items"]) for state, _ in larger.requests] == [4]
 
 
-def test_a_store_from_an_older_layout_is_refused_with_what_to_delete(tmp_path: Path) -> None:
-    # Arrange
+def test_a_store_from_an_older_layout_is_refused_pointing_at_a_new_file_never_at_deleting_it(
+    tmp_path: Path,
+) -> None:
+    # Arrange: other runs may be writing this file, so the refusal must not advise deleting it
     shared = tmp_path / "answers.sqlite"
     old = sqlite3.connect(shared)
     old.execute("create table answers (request_sha256 text, model text, record text)")
     old.commit()
     old.close()
 
-    # Act / Assert
-    with pytest.raises(UnsupportedAnswerStoreError, match=f"delete {shared}"):
+    # Act
+    with pytest.raises(UnsupportedAnswerStoreError) as refused:
         SqliteAnswerStore(shared)
+
+    # Assert
+    assert "point --answer-store or JEV_NAVIGATOR_ANSWER_STORE at a new file" in str(refused.value)
+    assert "delete" not in str(refused.value)
 
 
 def test_a_store_with_an_unknown_version_is_refused(tmp_path: Path) -> None:
@@ -285,3 +292,79 @@ def test_a_new_store_is_created_with_the_current_version_and_reopens(tmp_path: P
     # Assert
     assert reopened.records() == ()
     assert sqlite3.connect(shared).execute("pragma user_version").fetchone()[0] == SHARED_STORE_VERSION
+
+
+def test_a_whole_request_replays_the_served_models_answer_when_another_model_answered_later(
+    tmp_path: Path,
+) -> None:
+    # Arrange: model A answers a pick, then model B answers the same pick
+    shared = tmp_path / "answers.sqlite"
+    pick = Pick("first", "Which entry of `options` comes first?")
+    for model in ("jev-a", "jev-b"):
+        Judge(ScriptedJevClient(model=model), store=_run_store(tmp_path / model, shared)).pick(
+            pick, {"0": "a", "1": "b"}, SHARED
+        )
+    client = ScriptedJevClient(model="jev-a")
+    pack = tmp_path / "third" / "answers.jsonl"
+
+    # Act
+    Judge(client, store=_run_store(tmp_path / "third", shared), served_model="jev-a").pick(
+        pick, {"0": "a", "1": "b"}, SHARED
+    )
+
+    # Assert: model A's answer replays, and model B's never reaches this run's pack
+    assert client.requests == []
+    assert {record.model for record in JsonlAnswerStore(pack).records()} == {"jev-a"}
+
+
+def test_a_whole_request_replayed_from_the_shared_store_lands_in_the_runs_own_pack(tmp_path: Path) -> None:
+    # Arrange: run 1 asks a whole request; run 2 replays it from the shared store
+    shared = tmp_path / "answers.sqlite"
+    pick = Pick("first", "Which entry of `options` comes first?")
+    options = {"0": "a", "1": "b"}
+    first = Judge(
+        ScriptedJevClient(choices={"first": {"0": 0.1, "1": 0.9}}),
+        store=_run_store(tmp_path / "run1", shared),
+    )
+    first.pick(pick, options, SHARED)
+    second = Judge(
+        ScriptedJevClient(), store=_run_store(tmp_path / "run2", shared), served_model="jev-scripted"
+    )
+    second.pick(pick, options, SHARED)
+
+    # Act: the second run's pack alone, without the shared store, answers offline
+    pack_only = Judge(ReplayOnlyClient(), store=JsonlAnswerStore(tmp_path / "run2" / "answers.jsonl"))
+    replayed = pack_only.pick(pick, options, SHARED)
+
+    # Assert
+    assert replayed is not None and replayed.choice == "1"
+
+
+def _open_and_write_after(barrier, path: str, request_sha256: str) -> None:
+    barrier.wait()
+    store = SqliteAnswerStore(Path(path))
+    store.put(AnswerRecord(request_sha256, ("q",), {"q": {"type": "noul", "p": 0.5}}, "m", 1, {}))
+
+
+def test_processes_creating_a_new_store_at_once_all_open_it(tmp_path: Path) -> None:
+    # Arrange: five rounds of four processes, each round on a store file that does not exist yet
+    context = multiprocessing.get_context("spawn")
+    rounds = []
+
+    # Act
+    for round_number in range(5):
+        shared, barrier = tmp_path / f"round-{round_number}" / "answers.sqlite", context.Barrier(4)
+        openers = [
+            context.Process(target=_open_and_write_after, args=(barrier, str(shared), f"r{n}"))
+            for n in range(4)
+        ]
+        for opener in openers:
+            opener.start()
+        for opener in openers:
+            opener.join(timeout=60)
+        rounds.append((shared, [opener.exitcode for opener in openers]))
+
+    # Assert
+    for shared, exit_codes in rounds:
+        assert exit_codes == [0, 0, 0, 0]
+        assert len(SqliteAnswerStore(shared).records()) == 4

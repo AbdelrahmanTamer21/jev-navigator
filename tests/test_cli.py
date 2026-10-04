@@ -1036,3 +1036,38 @@ def test_each_run_names_its_answer_store_and_a_fresh_store_isolates_runs(
     assert os.environ.get(SHARED_STORE_VARIABLE) == default_store, (
         "the flag never travels through the environment"
     )
+
+
+def test_the_answer_store_variable_chooses_the_shared_store_when_no_flag_is_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from jev_navigator import cli
+
+    # Arrange
+    repository = tmp_path / "repository"
+    functions = "".join(
+        f"def admit_{index}(item):\n    return len(item) <= {index}\n\n\n" for index in range(20)
+    )
+    commit_files(repository, {"app/policy.py": functions})
+    clients: list[ScriptedJevClient] = []
+
+    def client() -> ScriptedJevClient:
+        instance = ScriptedJevClient(default_noul=0.96)
+        instance.close = lambda: None
+        clients.append(instance)
+        return instance
+
+    store = tmp_path / "from-variable.sqlite"
+    monkeypatch.setenv(SHARED_STORE_VARIABLE, str(store))
+    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "TypeSafeJevClient", client)
+    common = ["findall", "the item limit", "--repo", str(repository)]
+
+    # Act
+    main([*common, "--out", str(tmp_path / "first")])
+    main([*common, "--out", str(tmp_path / "repeat")])
+
+    # Assert: both runs use the variable's store, so the repeat replays from it
+    assert capsys.readouterr().err.count(f"answer store: {store}") == 2
+    first, repeat = (len(instance.requests) for instance in clients)
+    assert store.is_file() and first > 1 and repeat == 1
