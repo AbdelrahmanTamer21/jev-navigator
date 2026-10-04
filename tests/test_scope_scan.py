@@ -533,6 +533,24 @@ def test_an_object_literals_functions_are_its_properties_not_names_in_scope(tmp_
     }
 
 
+def test_a_default_in_a_module_level_destructuring_is_never_the_proven_target(tmp_path: Path) -> None:
+    """`const { onError = () => {} } = options` gives `onError` one possible value: the options may
+    hold another function. The default keeps its name, but `onError()` is never proven to call it."""
+    # Arrange
+    script = "const {\n  onError = () => {\n    return 'default';\n  },\n} = options;\nonError();\n"
+    index = committed(tmp_path, {"src/config.js": script, "src/config.ts": script})
+
+    # Act
+    named = {
+        file: [span.name for span in index.functions_in(file)] for file in ("src/config.js", "src/config.ts")
+    }
+    targets = {file: index.binding_of(file, 6, "onError", None).target for file in named}
+
+    # Assert
+    assert named == {"src/config.js": ["onError"], "src/config.ts": ["onError"]}
+    assert all(target != Span(file, 2, 4, "onError") for file, target in targets.items()), targets
+
+
 def test_a_callback_on_exactly_a_named_functions_lines_is_that_function(tmp_path: Path) -> None:
     """A callback spanning exactly a named function's lines is the same place at line granularity,
     so it stays part of that function: the function stays top level, a same-file call to it stays

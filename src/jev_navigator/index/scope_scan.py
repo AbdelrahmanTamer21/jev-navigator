@@ -26,7 +26,7 @@ from .languages import (
     FUNCTION_KINDS,
     NAME_HOLDERS,
     NAME_WRAPPERS,
-    OBJECT_KINDS,
+    VALUE_KINDS,
     declared_name,
     export_rules,
     grammar_of,
@@ -165,7 +165,7 @@ def _structure_from_matches(files, unparsed, matches):
     classes: dict[str, set[Span]] = {file: set() for file in files}
     declarations: dict[str, set[Span]] = {file: set() for file in files}
     ranges: dict[str, list[tuple[int, int, Span]]] = {file: [] for file in files}
-    object_members: dict[str, set[tuple[int, int]]] = {file: set() for file in files}
+    held_values: dict[str, set[tuple[int, int]]] = {file: set() for file in files}
     for match in matches:
         file, start, end = match["file"], _line_of(match), match["range"]["end"]["line"] + 1
         if match["ruleId"] == _ERROR_RULE:
@@ -174,8 +174,8 @@ def _structure_from_matches(files, unparsed, matches):
             unparsed.add("facts", [file])
             continue
         offsets = match["range"]["byteOffset"]
-        if match["ruleId"] == _OBJECT_MEMBER_RULE:
-            object_members[file].add((offsets["start"], offsets["end"]))
+        if match["ruleId"] == _HELD_VALUE_RULE:
+            held_values[file].add((offsets["start"], offsets["end"]))
         elif match["ruleId"] == "declaration":
             # Named from its own text: a declaration may start after other code on its line.
             declarations[file].add(Span(file, start, end, declared_name(match["text"])))
@@ -195,9 +195,7 @@ def _structure_from_matches(files, unparsed, matches):
             _ordered(functions[file], positions),
             _ordered(functions[file] | classes[file], positions),
             tuple(sorted(declarations[file])),
-            _ordered(
-                (functions[file] | classes[file]) - _held(ranges[file], object_members[file]), positions
-            ),
+            _ordered((functions[file] | classes[file]) - _held(ranges[file], held_values[file]), positions),
         )
         for file in files
     }
@@ -210,12 +208,12 @@ def _source_positions(ranges: Iterable[tuple[int, int, Span]]) -> dict[Span, int
     return positions
 
 
-def _held(ranges: list[tuple[int, int, Span]], object_members: set[tuple[int, int]]) -> set[Span]:
-    """The spans whose syntax node is an object literal's member or lies inside another function or
+def _held(ranges: list[tuple[int, int, Span]], held_values: set[tuple[int, int]]) -> set[Span]:
+    """The spans whose syntax node is a value (see ``VALUE_KINDS``) or lies inside another function or
     class node, counting the callbacks ``_same_lines_as_a_named_symbol`` drops: a function inside a
     one-line callback is the callback's. Nodes nest or are disjoint, so a node is inside another
     exactly when one starting no later reaches at least as far."""
-    held = {span for start, end, span in ranges if (start, end) in object_members}
+    held = {span for start, end, span in ranges if (start, end) in held_values}
     furthest = -1
     for _start, end, span in sorted(ranges, key=lambda range_: (range_[0], -range_[1])):
         if end <= furthest:
@@ -288,8 +286,8 @@ def _captured_name(match: dict) -> str:
 
 
 _ERROR_RULE = "parse_error"
-_OBJECT_MEMBER_RULE = "object_member"
-_STRUCTURE_RULE_IDS = frozenset({"function", "class", "declaration", _OBJECT_MEMBER_RULE, _ERROR_RULE})
+_HELD_VALUE_RULE = "held_value"
+_STRUCTURE_RULE_IDS = frozenset({"function", "class", "declaration", _HELD_VALUE_RULE, _ERROR_RULE})
 _EXPORT_STATEMENT_RULE = "export_surface"
 _EXPORT_SPECIFIER_RULE = "export_specifier"
 _EXPORT_RULE_IDS = (_EXPORT_STATEMENT_RULE, _EXPORT_SPECIFIER_RULE)
@@ -314,18 +312,18 @@ def _structure_rules(languages: Sequence[str]) -> str:
             f"id: declaration\nlanguage: {grammar_of(language)}\nrule:\n{DECLARATION_RULES[language]}"
         )
         documents.append(f"id: {_ERROR_RULE}\nlanguage: {grammar_of(language)}\nrule:\n  kind: ERROR")
-        if OBJECT_KINDS[language]:
-            documents.append(_object_member_rule(language))
+        if VALUE_KINDS[language]:
+            documents.append(_held_value_rule(language))
     return "\n---\n".join(documents)
 
 
-def _object_member_rule(language: str) -> str:
-    """Every function and class anywhere inside an object literal (see ``OBJECT_KINDS``)."""
+def _held_value_rule(language: str) -> str:
+    """Every function and class anywhere inside a value node (see ``VALUE_KINDS``)."""
     symbols = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language]))
-    objects = _kinds(OBJECT_KINDS[language])
+    values = _kinds(VALUE_KINDS[language])
     return (
-        f"id: {_OBJECT_MEMBER_RULE}\nlanguage: {grammar_of(language)}\nrule:\n"
-        f"  any: {symbols}\n  inside:\n    stopBy: end\n    any: {objects}"
+        f"id: {_HELD_VALUE_RULE}\nlanguage: {grammar_of(language)}\nrule:\n"
+        f"  any: {symbols}\n  inside:\n    stopBy: end\n    any: {values}"
     )
 
 

@@ -85,9 +85,17 @@ NAME_WRAPPERS = {
     "javascript": ("parenthesized_expression",),
 }
 
-# An object literal's functions and classes are its properties: `const api = { fetch() {} }` defines
-# `api.fetch`, never a name `fetch` that its module or an importer can call.
-OBJECT_KINDS = {"python": (), "typescript": ("object",), "tsx": ("object",), "javascript": ("object",)}
+# Nodes whose functions and classes are values, never module-level definitions. An object literal's
+# are its properties: `const api = { fetch() {} }` defines `api.fetch`, never a name `fetch` that its
+# module or an importer can call. A pattern's default is one possible value of its name:
+# `const { onError = () => {} } = options` takes `onError` from `options` when it is there.
+_SCRIPT_VALUE_KINDS = ("object", "assignment_pattern", "object_assignment_pattern")
+VALUE_KINDS = {
+    "python": (),
+    "typescript": _SCRIPT_VALUE_KINDS,
+    "tsx": _SCRIPT_VALUE_KINDS,
+    "javascript": _SCRIPT_VALUE_KINDS,
+}
 
 # ast-grep prints every node a rule's relations match, so asking whether a declaration sits in the
 # program printed the whole file once per declaration. Under a double negation the condition holds
@@ -114,7 +122,7 @@ DECLARATION_RULES = {
 FLOW_LANGUAGE = "flow"
 FUNCTION_KINDS[FLOW_LANGUAGE] = FUNCTION_KINDS["tsx"]
 CLASS_KINDS[FLOW_LANGUAGE] = CLASS_KINDS["tsx"]
-OBJECT_KINDS[FLOW_LANGUAGE] = OBJECT_KINDS["tsx"]
+VALUE_KINDS[FLOW_LANGUAGE] = VALUE_KINDS["tsx"]
 DECLARATION_RULES[FLOW_LANGUAGE] = _SCRIPT_DECLARATIONS
 
 # ast-grep reads `languageGlobs` only from a config file: a scan of flow files passes this sgconfig,
