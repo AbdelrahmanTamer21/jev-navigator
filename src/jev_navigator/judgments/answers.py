@@ -81,10 +81,34 @@ class AnswerSource:
         }
 
 
+ANSWERED_BY = "answered_by"
+SCORED_BY = "scored_by"
+ANSWER_SOURCE_FIELDS = frozenset({ANSWERED_BY, SCORED_BY})
+"""Run-file join keys, never shown to Jev: ``from_store`` differs between a run and its replay."""
+
+
 def answered_by(source: AnswerSource | None) -> dict:
     """A record's ``answered_by`` field, or nothing when no request is known: the one form every run
     file uses to join a judgment to its journal answer."""
-    return {"answered_by": source.to_json()} if source is not None else {}
+    return {ANSWERED_BY: source.to_json()} if source is not None else {}
+
+
+def scored_by(source: AnswerSource | None) -> dict:
+    """A queued place's ``scored_by`` field: the answer whose probability became its priority."""
+    return {SCORED_BY: source.to_json()} if source is not None else {}
+
+
+def without_answer_sources(value: object) -> object:
+    """``value`` with every answer source field removed, at any depth."""
+    if isinstance(value, Mapping):
+        return {
+            key: without_answer_sources(item)
+            for key, item in value.items()
+            if key not in ANSWER_SOURCE_FIELDS
+        }
+    if isinstance(value, list | tuple):
+        return [without_answer_sources(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True)
