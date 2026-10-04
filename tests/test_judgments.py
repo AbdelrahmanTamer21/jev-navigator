@@ -566,16 +566,16 @@ def test_a_response_without_usage_is_reported_as_not_reported_and_never_added_as
     assert [response.input_tokens for response in answered] == [10, None, 0]
     assert judge.input_total.reported == 10
     assert judge.input_total.not_reported == 1
-    assert judge.input_total.complete_total() is None
+    assert judge.unanswered_requests == 0
 
 
-def test_a_total_with_every_response_reported_is_complete() -> None:
+def test_a_total_with_every_response_reported_has_nothing_unreported() -> None:
     judge = Judge(_UsageClient(10, 0))
 
     for index in range(2):
         judge.ask({"s": index}, {"q": {"type": "noul"}}, thresholds=Thresholds())
 
-    assert judge.input_total.complete_total() == 10
+    assert (judge.input_total.reported, judge.input_total.not_reported) == (10, 0)
 
 
 def test_a_scoped_judge_adds_unreported_responses_to_its_parent() -> None:

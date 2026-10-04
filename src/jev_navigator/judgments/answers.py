@@ -162,7 +162,3 @@ class TokenTotal:
             self.not_reported += 1
         else:
             self.reported += tokens
-
-    def complete_total(self) -> int | None:
-        """The total when every response reported its count, else ``None``."""
-        return self.reported if self.not_reported == 0 else None
