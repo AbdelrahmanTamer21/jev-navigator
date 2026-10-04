@@ -97,17 +97,32 @@ VALUE_KINDS = {
     "javascript": _SCRIPT_VALUE_KINDS,
 }
 
-# ast-grep prints every node a rule's relations match, so asking whether a declaration sits in the
-# program printed the whole file once per declaration. Under a double negation the condition holds
-# the same and only the declaration is printed.
-_MODULE_VARIABLES = (
-    "{kind: lexical_declaration, not: {not: {inside: {any: [{kind: program}, {kind: export_statement}]}}}}"
+# A TypeScript namespace or module body holds its members: `namespace A { export function read() {} }`
+# defines `A.read`, never a module-level `read`.
+_SCRIPT_NAMESPACE_KINDS = ("internal_module", "module")
+NAMESPACE_KINDS = {
+    "python": (),
+    "typescript": _SCRIPT_NAMESPACE_KINDS,
+    "tsx": _SCRIPT_NAMESPACE_KINDS,
+    "javascript": (),
+}
+
+# A module-level declaration sits in the program or in an export the program holds, never in a
+# namespace's export; in TypeScript also in a `declare` that sits there. ast-grep prints every node a
+# rule's relations match, so asking whether a declaration sits in the program printed the whole file
+# once per declaration. Under a double negation the condition holds the same and only the declaration
+# is printed.
+_IN_MODULE = "inside: {any: [{kind: program}, {kind: export_statement, inside: {kind: program}}]}"
+_IN_TYPED_MODULE = (
+    "inside: {any: [{kind: program}, {kind: export_statement, inside: {kind: program}}, "
+    f"{{kind: ambient_declaration, {_IN_MODULE}}}]}}"
 )
-_SCRIPT_DECLARATIONS = f"""  any:
-    - kind: type_alias_declaration
-    - kind: interface_declaration
-    - kind: enum_declaration
-    - {_MODULE_VARIABLES}"""
+_MODULE_VARIABLES = f"{{kind: lexical_declaration, not: {{not: {{{_IN_MODULE}}}}}}}"
+_MODULE_TYPES = (
+    "{any: [{kind: type_alias_declaration}, {kind: interface_declaration}, {kind: enum_declaration}], "
+    f"not: {{not: {{{_IN_TYPED_MODULE}}}}}}}"
+)
+_SCRIPT_DECLARATIONS = f"  any: [{_MODULE_TYPES}, {_MODULE_VARIABLES}]"
 
 DECLARATION_RULES = {
     "python": """  kind: assignment
@@ -123,6 +138,7 @@ FLOW_LANGUAGE = "flow"
 FUNCTION_KINDS[FLOW_LANGUAGE] = FUNCTION_KINDS["tsx"]
 CLASS_KINDS[FLOW_LANGUAGE] = CLASS_KINDS["tsx"]
 VALUE_KINDS[FLOW_LANGUAGE] = VALUE_KINDS["tsx"]
+NAMESPACE_KINDS[FLOW_LANGUAGE] = NAMESPACE_KINDS["tsx"]
 DECLARATION_RULES[FLOW_LANGUAGE] = _SCRIPT_DECLARATIONS
 
 # ast-grep reads `languageGlobs` only from a config file: a scan of flow files passes this sgconfig,

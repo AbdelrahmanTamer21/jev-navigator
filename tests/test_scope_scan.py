@@ -551,6 +551,58 @@ def test_a_default_in_a_module_level_destructuring_is_never_the_proven_target(tm
     assert all(target != Span(file, 2, 4, "onError") for file, target in targets.items()), targets
 
 
+def test_a_namespace_member_is_no_module_level_definition(tmp_path: Path) -> None:
+    """A TypeScript namespace's members are its own: `config` inside namespace B is never proven to be
+    namespace A's, and a module-level `read()` never reaches a namespace's `read`."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/spaces.ts": (
+                "namespace A { export const config = 1; export function read() { return 1; } }\n"
+                "namespace B {\n  export const config = 2;\n  export function show() { return config; }\n}\n"
+                "read();\n"
+            )
+        },
+    )
+
+    # Act
+    config = index.binding_of("src/spaces.ts", 4, "config", None, "return")
+    read = index.binding_of("src/spaces.ts", 6, "read", None)
+
+    # Assert
+    assert config.target != Span("src/spaces.ts", 1, 1, "config"), config
+    assert read.status.value != "resolved", read
+
+
+def test_several_definitions_of_a_name_in_one_file_make_a_candidate(tmp_path: Path) -> None:
+    """Two module-level definitions of one name leave the call open; a declaration and the function
+    it holds are one definition, also over several lines and through an import."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "app/util.py": (
+                "try:\n    import fast\n\n    def pick():\n        return fast.pick()\n"
+                "except ImportError:\n\n    def pick():\n        return 1\n\n\n"
+                "def use():\n    return pick()\n"
+            ),
+            "src/x.ts": "export const load =\n  () => 2;\nconst handler =\n  () => 1;\nhandler();\n",
+            "src/use.ts": "import { load } from './x';\nload();\n",
+        },
+    )
+
+    # Act
+    pick = index.binding_of("app/util.py", 13, "pick", None)
+    handler = index.binding_of("src/x.ts", 5, "handler", None)
+    load = index.binding_of("src/use.ts", 2, "load", None)
+
+    # Assert
+    assert (pick.status.value, pick.target) == ("candidate", None)
+    assert (handler.status.value, handler.target) == ("resolved", Span("src/x.ts", 4, 4, "handler"))
+    assert (load.status.value, load.target) == ("resolved", Span("src/x.ts", 2, 2, "load"))
+
+
 def test_a_callback_on_exactly_a_named_functions_lines_is_that_function(tmp_path: Path) -> None:
     """A callback spanning exactly a named function's lines is the same place at line granularity,
     so it stays part of that function: the function stays top level, a same-file call to it stays

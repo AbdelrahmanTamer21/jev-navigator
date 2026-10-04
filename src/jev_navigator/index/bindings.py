@@ -74,11 +74,18 @@ def binding_from_facts(facts: CallFacts) -> Binding:
             BindingStatus.CANDIDATE,
             f"method call on {facts.receiver}; receiver type not resolved ({count} definitions)",
         )
-    same_file = [span for span in facts.top_level if span.file == facts.file]
-    if same_file:
+    same_file = _one_per_definition([span for span in facts.top_level if span.file == facts.file])
+    if len(same_file) == 1:
         return Binding(BindingStatus.RESOLVED, "defined in the same file", same_file[0])
+    if same_file:
+        return Binding(
+            BindingStatus.CANDIDATE, f"{len(same_file)} definitions of {facts.name} in the same file"
+        )
     imported = [
-        (span, fact) for span in facts.top_level for fact in facts.imported_from if span.file == fact.path
+        (span, fact)
+        for span in _one_per_definition(facts.top_level)
+        for fact in facts.imported_from
+        if span.file == fact.path
     ]
     if len(imported) == 1:
         span, fact = imported[0]
@@ -92,3 +99,15 @@ def binding_from_facts(facts: CallFacts) -> Binding:
     return Binding(
         BindingStatus.CANDIDATE, f"name match only; {count} definitions in scope and no import names it"
     )
+
+
+def _one_per_definition(spans: Sequence[Span]) -> list[Span]:
+    """The first span of each definition: a declaration and the function or class it holds overlap,
+    `const load =\n  () => 2` is one definition of `load` over lines 1 to 2 and 2 to 2."""
+    kept: list[Span] = []
+    for span in spans:
+        if not any(
+            other.file == span.file and other.start <= span.end and span.start <= other.end for other in kept
+        ):
+            kept.append(span)
+    return kept
