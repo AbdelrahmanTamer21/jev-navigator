@@ -4,14 +4,24 @@ from journal order."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from pathlib import Path
 
+import pytest
+from git_repos import commit_files
 from test_cli_run_logs import TARGET, limit_client, marked_repository
+from test_history import FETCHED_HOLDS_LIMIT
+from test_typesafe import _jev_server, _seed_index, _stop
 
 from jev_navigator.cli import create_evidence_pack
-from jev_navigator.directives.find_code import SearchBudget
+from jev_navigator.directives.find_code import SearchBudget, StopRule, find_code, find_code_async
+from jev_navigator.directives.places import MOVES, function_place, place_for_line
+from jev_navigator.judgments.journal import JsonlJournal
+from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.store import JsonlAnswerStore
+from jev_navigator.testing import ScriptedJevClient
 
 
 def run_pack(tmp_path: Path) -> Path:
@@ -88,3 +98,141 @@ def test_a_place_a_choose_next_step_opens_names_the_answer_that_scored_it(tmp_pa
     assert scored
     for chosen in scored:
         assert answered_probability(records, chosen["scored_by"]) == chosen["priority"]
+
+
+def opened_split(tmp_path: Path, judge, async_search: bool):
+    """One opening of ``entry`` beside 159 neighbours, too large for one request, through the real
+    TypeSafe client against a local Jev that refuses requests over 40,000 characters."""
+    tmp_path.mkdir()
+    index, _ = _seed_index(tmp_path, 159)
+    start = function_place(index, index.find_definition("entry")[0])
+    search = find_code_async if async_search else find_code
+    pending = search(
+        index,
+        judge,
+        "the function returning field_0",
+        [start],
+        budget=SearchBudget(max_steps=1, beam_width=1),
+        moves={"same_file": MOVES["same_file"]},
+    )
+    result = asyncio.run(pending) if async_search else pending
+    return next(step for step in result.history.steps if step.operation == "open")
+
+
+@pytest.mark.parametrize("async_search", [False, True])
+def test_a_split_opening_joins_each_judgment_to_its_own_sub_request_also_when_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, async_search: bool
+) -> None:
+    # Arrange
+    pytest.importorskip("typesafe_sdk")
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    server = _jev_server([], input_limit=40_000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    client = TypeSafeJevClient()
+    store = tmp_path / "answers.jsonl"
+    live = Judge(client, store=JsonlAnswerStore(store), journal=JsonlJournal(tmp_path / "journal.jsonl"))
+
+    # Act
+    try:
+        first = opened_split(tmp_path / "first", live, async_search)
+        replaying = Judge(client, store=JsonlAnswerStore(store), served_model=live.served_model)
+        replayed = opened_split(tmp_path / "second", replaying, async_search)
+    finally:
+        client.close()
+        _stop(server)
+
+    # Assert
+    records = journal(tmp_path)
+    judged = [first.judgments["contains_target"], *first.judgments["could_contain"]]
+    assert len({entry["answered_by"]["request_sha256"] for entry in judged}) > 2
+    for entry in judged:
+        assert answered_probability(records, entry["answered_by"]) == entry["probability"]
+    assert replaying.calls == 0
+    again = [replayed.judgments["contains_target"], *replayed.judgments["could_contain"]]
+    assert [entry["answered_by"] for entry in again] == [
+        {**entry["answered_by"], "from_store": True} for entry in judged
+    ]
+
+
+def test_the_stop_step_names_the_answer_of_its_last_stop_check(sample_index, tmp_path: Path) -> None:
+    # Arrange
+    def answer(question_id: str, question: dict, state: dict) -> float:
+        if "fetched" in state:
+            bodies = [span["code"] for span in state["fetched"]]
+            return 0.9 if any("<= limit" in body for body in bodies) else 0.1
+        return 0.3
+
+    journal_path = tmp_path / "journal.jsonl"
+    judge = Judge(ScriptedJevClient(nouls=answer), journal=JsonlJournal(journal_path))
+    start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
+
+    # Act
+    result = find_code(
+        sample_index,
+        judge,
+        "the item limit check",
+        start,
+        budget=SearchBudget(beam_width=1),
+        stop_rule=StopRule(FETCHED_HOLDS_LIMIT),
+    )
+
+    # Assert
+    records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    stop_check = result.history.steps[-1].judgments["last_stop_check"]
+    assert answered_probability(records, stop_check["answered_by"]) == stop_check["probability"]
+
+
+def test_a_find_all_pack_saved_before_question_ids_were_recorded_still_resumes(tmp_path: Path) -> None:
+    # Arrange: a budget stop during enumeration, its saved answers stripped of their question ids
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "entry.py": "from policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "policy.py": "def admit(item):\n    return len(item) <= 3\n",
+            "other.py": "def fits(item):\n    return len(item) <= 3\n",
+        },
+    )
+
+    def response(question_id, question, state):
+        code = (
+            state["items"][int(question_id.rsplit("#", 1)[1])]["code"]
+            if "items" in state
+            else state["slice"]["code"]
+        )
+        return 0.96 if "len(item)" in code else 0.04
+
+    first = tmp_path / "first"
+    stopped = create_evidence_pack(
+        repository,
+        (),
+        "item limit",
+        ("entry.py:3",),
+        first,
+        SearchBudget(max_calls=3, beam_width=1),
+        ScriptedJevClient(nouls=response),
+        workflow="findall",
+    )
+    checkpoint = json.loads((first / "resume.json").read_text())
+    assert all(answer.pop("question_id") for answer in checkpoint["completed"])
+    (first / "resume.json").write_text(json.dumps(checkpoint))
+
+    # Act
+    resumed = create_evidence_pack(
+        repository,
+        (),
+        "item limit",
+        ("entry.py:3",),
+        tmp_path / "second",
+        SearchBudget(max_calls=1, beam_width=1),
+        ScriptedJevClient(nouls=response),
+        workflow="findall",
+        resume_from=first,
+    )
+
+    # Assert
+    assert stopped["search"]["outcome"] == "budget"
+    assert resumed["search"]["outcome"] == "scope_examined"
+    assert {entry["name"] for entry in resumed["search"]["found"]} == {"admit", "fits"}

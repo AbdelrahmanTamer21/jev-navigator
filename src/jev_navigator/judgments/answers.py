@@ -65,11 +65,28 @@ NOT_REPORTED_TEXT = "not reported"
 
 
 @dataclass(frozen=True)
+class AnswerSource:
+    """Where one answer came from: the request's hash and the question id it was asked under, which
+    a journal's request row lists, and whether the store replayed it."""
+
+    request_sha256: str
+    question_id: str
+    from_store: bool
+
+    def to_json(self) -> dict:
+        return {
+            "request_sha256": self.request_sha256,
+            "question_id": self.question_id,
+            "from_store": self.from_store,
+        }
+
+
+@dataclass(frozen=True)
 class JevResponse:
     """``input_tokens`` is what the provider reported for the request, ``None`` when it reported
     nothing; a missing count is never 0. ``from_store`` marks a replay: it sent nothing and carries
     no count. A response composed from several requests carries none either; totals count only
-    requests sent."""
+    requests sent. Its ``sources`` name the request and question behind each of its answers."""
 
     answers: Mapping[str, Answer]
     model: str
@@ -77,6 +94,15 @@ class JevResponse:
     request_sha256: str = ""
     from_store: bool = False
     extra: Mapping[str, object] = field(default_factory=dict)
+    sources: Mapping[str, AnswerSource] = field(default_factory=dict)
+
+    def source(self, question_id: str) -> AnswerSource | None:
+        """The request and question that answered ``question_id``; None when no request is known."""
+        if question_id in self.sources:
+            return self.sources[question_id]
+        if not self.request_sha256:
+            return None
+        return AnswerSource(self.request_sha256, question_id, self.from_store)
 
     def choice(self, question_id: str) -> ChoiceAnswer:
         answer = self.answers[question_id]

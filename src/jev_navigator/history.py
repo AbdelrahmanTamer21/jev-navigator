@@ -39,7 +39,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
 
-from .judgments.answers import JevResponse
+from .judgments.answers import AnswerSource, JevResponse
 from .judgments.client import JEV_INPUT_BOX_CHARS, QUESTION_RESERVE_CHARS
 from .judgments.judge import Judge
 from .judgments.questions import Check, content_hash, serialized_chars
@@ -278,6 +278,7 @@ class HistoryJudgment:
     chars: int
     evictions: tuple[dict, ...]
     sections: tuple[str, ...] = DEFAULT_STOP_SECTIONS
+    answered_by: AnswerSource | None = None
 
 
 @dataclass(frozen=True)
@@ -388,7 +389,8 @@ def _judged(
         chars = history.size(group.state)
         for name, check in group.checks.items():
             probability = response.noul(check.question_id).probability
-            results[name] = _judgment(judge, probability, chars, history, group.sections, exhausted)
+            judgment = _judgment(judge, probability, chars, history, group.sections, exhausted)
+            results[name] = replace(judgment, answered_by=response.source(check.question_id))
     history.previous_judgments.update(results)
     return results
 
