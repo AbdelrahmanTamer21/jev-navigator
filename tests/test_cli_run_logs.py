@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 from git_repos import commit_files
+from isolated_jvn import JVN
 
 from jev_navigator.cli import create_evidence_pack
 from jev_navigator.cli_trace import create_trace_evidence_pack
@@ -74,7 +79,9 @@ def files_holding_code(folder: Path) -> list[str]:
     return sorted(path.name for path in folder.iterdir() if holds_code(path))
 
 
-def find_pack(repository: Path, output: Path, workflow: str, max_calls: int, **options) -> dict:
+def find_pack(
+    repository: Path, output: Path, workflow: str, max_calls: int, client: object | None = None, **options
+) -> dict:
     return create_evidence_pack(
         repository,
         ("app/",),
@@ -82,7 +89,7 @@ def find_pack(repository: Path, output: Path, workflow: str, max_calls: int, **o
         ("app/entry.py:5",),
         output,
         SearchBudget(max_calls=max_calls, beam_width=1),
-        limit_client(),
+        client or limit_client(),
         fact_cache_dir=output.parent / "fact-cache",
         workflow=workflow,
         **options,
@@ -550,3 +557,118 @@ def test_a_key_mention_outside_any_function_is_shown_at_its_mention_line_everywh
     opened = [visit["place"] for visit in manifest["search"]["searched"] + manifest["search"]["unsure"]]
     assert any(place.startswith("app/other.py:15~") for place in opened)
     assert strings_starting_with(manifest, "mentions a key") == {"mentions a key (app/other.py:15)"}
+
+
+def echoing_server() -> ThreadingHTTPServer:
+    """A provider that refuses every request with 422 and echoes the request it got, as many
+    validation errors do: the request, and so the code, comes back in the error."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            sent = json.loads(self.rfile.read(int(self.headers["content-length"])))
+            served = json.dumps({"detail": [{"msg": "unprocessable request", "input": sent}]}).encode()
+            self.send_response(422)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(served)))
+            self.end_headers()
+            self.wfile.write(served)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, name="echoing-jev", daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize("command", ["find", "findall", "trace"])
+def test_a_failure_that_echoes_the_request_leaves_no_code_in_the_run_folder(
+    tmp_path: Path, command: str
+) -> None:
+    # Arrange
+    pytest.importorskip("typesafe_sdk")
+    repository = marked_repository(tmp_path / "repository")
+    output = tmp_path / "pack"
+    server = echoing_server()
+    arguments = [
+        command,
+        TARGET,
+        "--repo",
+        str(repository),
+        "--start",
+        "app/entry.py:5",
+        "--out",
+        str(output),
+    ]
+    environment = {
+        **os.environ,
+        "TYPESAFE_API_KEY": "local-test-key",
+        "TYPESAFE_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+    }
+
+    # Act
+    try:
+        finished = subprocess.run([*JVN, *arguments], capture_output=True, text=True, env=environment)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # Assert
+    assert finished.returncode == 1, finished.stderr
+    records = [json.loads(line) for line in (output / "journal.jsonl").read_text().splitlines()]
+    assert any(record["kind"] == "failure" for record in records)
+    assert files_holding_code(output) == []
+    if command != "trace":
+        assert json.loads((output / "manifest.json").read_text())["search"]["failure"]["status"] == 422
+
+
+class EchoesTheRequest:
+    """Answers its first request, then fails with an error whose message quotes the request."""
+
+    def __init__(self) -> None:
+        self.script = limit_client()
+        self.model = self.script.model
+        self.asked = 0
+
+    def ask(self, state, questions):
+        self.asked += 1
+        if self.asked == 2:
+            raise RuntimeError(f"422 Unprocessable Entity: {json.dumps(state)}")
+        return self.script.ask(state, questions)
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize("workflow", ["find", "findall"])
+def test_an_error_quoting_its_request_reaches_stderr_but_no_run_file(
+    tmp_path: Path, workflow: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    output = tmp_path / "pack"
+
+    # Act
+    with pytest.raises(RuntimeError, match=MARKER):
+        find_pack(repository, output, workflow, 5, EchoesTheRequest())
+
+    # Assert
+    assert MARKER in capsys.readouterr().err
+    assert json.loads((output / "manifest.json").read_text())["search"]["outcome"] == "failed"
+    assert files_holding_code(output) == []
+
+
+def test_keep_requests_keeps_the_whole_error_message(tmp_path: Path) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    output = tmp_path / "pack"
+
+    # Act
+    with pytest.raises(RuntimeError) as raised:
+        find_pack(repository, output, "find", 5, EchoesTheRequest(), keep_requests=True)
+
+    # Assert
+    message = str(raised.value)
+    records = [json.loads(line) for line in (output / "journal.jsonl").read_text().splitlines()]
+    assert [record["message"] for record in records if record["kind"] == "failure"] == [message]
+    assert json.loads((output / "manifest.json").read_text())["search"]["failure"]["message"] == message

@@ -15,6 +15,7 @@ import re
 from collections.abc import Mapping
 
 from .index.code_index import CodeIndex
+from .judgments.journal import message_fields
 from .judgments.relations import without_quoted_code
 
 _LINE_RANGE = re.compile(r"[-~]")
@@ -57,13 +58,21 @@ def source_shown(source: Mapping, place_key: str) -> dict:
 
 
 def step_shown(step: Mapping) -> dict:
-    """A history step with every neighbour relation and fetched ``reached_by`` as a run file keeps it."""
+    """A history step with every neighbour relation and fetched ``reached_by``, and the failure that
+    ended a search, as a run file keeps them."""
     judgments = {
         name: [_entry_shown(entry) for entry in value] if name in _NEIGHBOUR_LISTS else value
         for name, value in step.get("judgments", {}).items()
     }
+    if "message" in judgments.get("failure", {}):
+        judgments["failure"] = _failure_shown(judgments["failure"])
     fetched = [source_shown(source, step["arguments"]["place"]) for source in step.get("fetched", [])]
     return {**step, "judgments": judgments, "fetched": fetched}
+
+
+def _failure_shown(failure: Mapping) -> dict:
+    """A history read back from a saved pack already holds the digest; only a message is reduced."""
+    return {"type": failure["type"], **message_fields(failure["message"], keep_text=False)}
 
 
 def _entry_shown(entry: Mapping) -> Mapping:

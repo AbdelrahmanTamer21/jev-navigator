@@ -33,6 +33,7 @@ from .index.code_index import CodeIndex
 from .index.languages import language_of
 from .judgments.answers import TokenTotal
 from .judgments.client import JevClient
+from .judgments.journal import error_message, message_fields
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import (
     SHARED_STORE_VARIABLE,
@@ -481,13 +482,16 @@ def _choose_entry(
 
 
 def _failure_record(error: BaseException, judge: Judge, journal: ProgressJournal) -> dict:
-    """The error that ended the search, with its cause chain and the journal request it failed in."""
+    """The error that ended the search, with its cause chain, the journal request it failed in, and
+    that request's route and HTTP status when known. Messages are kept as ``message_fields`` allows."""
     request_id = judge.failed_request(error)
+    keep = journal.keep_request_text
     return {
-        **_error_fields(error),
-        "causes": [_error_fields(cause) for cause in _causes(error)],
+        **_error_fields(error, keep),
+        "causes": [_error_fields(cause, keep) for cause in _causes(error)],
         "request_id": request_id,
         "route": journal.routes.get(request_id) if request_id is not None else None,
+        "status": journal.statuses.get(request_id) if request_id is not None else None,
     }
 
 
@@ -501,11 +505,19 @@ def _entry_pending_lines(search: dict) -> list[str]:
 
 def _failure_lines(search: dict, bullet: str) -> list[str]:
     failure = search.get("failure")
-    return [f"{bullet}Failure: {failure['type']}: {failure['message']}"] if failure else []
+    if not failure:
+        return []
+    status = f" (HTTP {failure['status']})" if failure["status"] is not None else ""
+    if "message" in failure:
+        return [f"{bullet}Failure: {failure['type']}{status}: {failure['message']}"]
+    return [
+        f"{bullet}Failure: {failure['type']}{status}; its message ({failure['message_length']} characters, "
+        f"SHA-256 `{failure['message_sha256']}`) was printed to stderr and is kept only with --keep-requests"
+    ]
 
 
-def _error_fields(error: BaseException) -> dict:
-    return {"type": type(error).__name__, "message": str(error)}
+def _error_fields(error: BaseException, keep: bool) -> dict:
+    return {"type": type(error).__name__, **message_fields(error_message(error), keep_text=keep)}
 
 
 def _causes(error: BaseException) -> list[BaseException]:

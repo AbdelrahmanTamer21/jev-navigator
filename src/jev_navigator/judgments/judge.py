@@ -781,7 +781,7 @@ class Judge:
 
     def _journal_failure(self, request_id: str | None, error: Exception, raw: RawResponse | None) -> None:
         if self.journal is not None and request_id is not None:
-            self.journal.record_failure(request_id, _failure_text(error), raw)
+            self.journal.record_failure(request_id, error, raw)
             self._failed_requests.append((error, request_id))
 
     def _propagate_attempt_journal_error(
@@ -1324,12 +1324,6 @@ def _pick_result(response: JevResponse, question_id: str, thresholds: Thresholds
 
 def _argument_id(operation: str, offer: CallOffer) -> str:
     return f"{operation}.{offer.argument.question_id}"
-
-
-def _failure_text(error: Exception) -> str:
-    if isinstance(error, CancelledError) and not str(error):
-        return f"{type(error).__name__}: the request was cancelled after it was sent"
-    return f"{type(error).__name__}: {error}"
 
 
 def _batches(plan: _CheckPlan) -> list[list[int]]:

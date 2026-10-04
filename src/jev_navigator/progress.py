@@ -11,7 +11,7 @@ from pathlib import Path
 from time import monotonic
 
 from .judgments.answers import NOT_REPORTED_TEXT, TokenTotal, reported_input_tokens, reported_output_tokens
-from .judgments.journal import JournalRequest, JsonlJournal, RawAttempt, RawResponse
+from .judgments.journal import JournalRequest, JsonlJournal, RawAttempt, RawResponse, error_message
 from .run_files import place_location, step_shown
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -139,6 +139,7 @@ class ProgressJournal(JsonlJournal):
         self.progress = progress
         self.place_label: Callable[[str], str] = place_location
         self.routes: dict[str, str] = {}
+        self.statuses: dict[str, int] = {}
 
     def record_step(self, step: Mapping) -> None:
         super().record_step(step if self.keep_request_text else self._shown(step))
@@ -163,14 +164,24 @@ class ProgressJournal(JsonlJournal):
         self.progress.response(request_id, response)
 
     def record_attempt(self, request_id: str, attempt: RawAttempt) -> None:
-        """Also remembers the route a routed client sent the request on."""
+        """Also remembers the route a routed client sent the request on, and the HTTP status of its
+        latest answer."""
         super().record_attempt(request_id, attempt)
         if attempt.route is not None:
             self.routes[request_id] = attempt.route
+        self._remember_status(request_id, attempt.response)
 
-    def record_failure(self, request_id: str, error: str, response: RawResponse | None = None) -> None:
+    def record_failure(
+        self, request_id: str, error: BaseException, response: RawResponse | None = None
+    ) -> None:
+        """The run file keeps the message as ``message_fields`` allows; stderr always shows it whole."""
         super().record_failure(request_id, error, response)
-        self.progress.failure(request_id, error)
+        self._remember_status(request_id, response)
+        self.progress.failure(request_id, f"{type(error).__name__}: {error_message(error)}")
+
+    def _remember_status(self, request_id: str, response: RawResponse | None) -> None:
+        if response is not None and response.status is not None:
+            self.statuses[request_id] = response.status
 
     def record_terminal(self, outcome: str) -> None:
         self._append({"kind": "terminal", "outcome": outcome})
