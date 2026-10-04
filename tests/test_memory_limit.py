@@ -29,6 +29,7 @@ from jev_navigator.index import tools
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.fact_cache import FactCache
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.round import RoundRegistration, freeze
 from jev_navigator.memory_limit import MemoryLimit, MemoryLimitReachedError
 from jev_navigator.testing import ScriptedJevClient
 
@@ -737,6 +738,38 @@ def _copied_index(library: Path, names: list[str], root: Path) -> CodeIndex:
     for name in names:
         shutil.copy(library / name, root / name)
     return CodeIndex(root, names, fact_cache_dir=root.parent / f"{root.name}-facts")
+
+
+ONE_QUESTION = {"keep": {"type": "noul", "instructions": "Does the comment hold?"}}
+
+
+@pytest.mark.parametrize("caller", ["navigator_fingerprint", "frozen_round"])
+def test_the_git_calls_outside_the_index_wait_for_a_memory_slot_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caller: str
+) -> None:
+    # Arrange: another JVN process holds the only slot, and this one may not wait.
+    slots = tmp_path / "slots"
+    one_slot = {"allowance_mb": "512", "ceiling_mb": "512"}
+    holder = _jvn_process(TAKES_A_SLOT_AND_HOLDS_IT, slots, **one_slot)
+    assert holder.stdout.readline() == "holding\n"
+    _limit_the_process(monkeypatch, slots, allowance_mb=512, ceiling_mb=512)
+
+    # Act
+    try:
+        with pytest.raises(MemoryLimitReachedError) as refused:
+            if caller == "navigator_fingerprint":
+                cli._navigator_provenance()
+            else:
+                freeze(
+                    tmp_path / "round",
+                    RoundRegistration(("case",), ONE_QUESTION, {"escalate_below": 0.8}, "", "3.13"),
+                )
+    finally:
+        holder.kill()
+        holder.wait()
+
+    # Assert
+    assert str(holder.pid) in str(refused.value)
 
 
 def test_the_process_guard_follows_the_settings_it_is_read_with(

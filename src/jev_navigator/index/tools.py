@@ -37,12 +37,15 @@ class ToolFailedError(RuntimeError):
     """A command-line tool failed for a reason other than finding nothing."""
 
 
-def run_command(arguments: Sequence[str], cwd: Path, *, no_match_exit: int | None = None) -> str:
-    """The command's output; ``no_match_exit`` is the exit code a search tool uses for "nothing found"."""
+def run_command(
+    arguments: Sequence[str], cwd: Path, *, no_match_exit: int | None = None, timeout: float | None = None
+) -> str:
+    """The command's output; ``no_match_exit`` is the exit code a search tool uses for "nothing found".
+    A command still running after ``timeout`` seconds is stopped and raises ``subprocess.TimeoutExpired``."""
     with memory_limit.started(
         arguments, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     ) as process:
-        output, errors = process.communicate()
+        output, errors = process.communicate(timeout=timeout)
     if process.returncode not in (0, no_match_exit):
         raise ToolFailedError(f"{arguments[0]} exited {process.returncode}: {errors.strip()[:300]}")
     return output
@@ -240,8 +243,8 @@ def _decoded(field: dict) -> str:
     return base64.b64decode(field["bytes"]).decode("utf-8", errors="replace")
 
 
-def git(arguments: Sequence[str], cwd: Path) -> str:
-    return run_command(["git", *arguments], cwd)
+def git(arguments: Sequence[str], cwd: Path, *, timeout: float | None = None) -> str:
+    return run_command(["git", *arguments], cwd, timeout=timeout)
 
 
 def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) -> None:

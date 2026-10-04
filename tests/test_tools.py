@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import stat
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -182,3 +184,15 @@ def test_listing_outside_git_ignores_a_configured_ripgrep_filter(tmp_path: Path,
     (directory / "a.py").write_text("needle = 1\n")
 
     assert tools.listed_files(directory) == ("a.py",)
+
+
+def test_a_command_still_running_after_its_timeout_is_stopped(tmp_path: Path) -> None:
+    # Arrange
+    started = time.monotonic()
+
+    # Act
+    with pytest.raises(subprocess.TimeoutExpired):
+        tools.run_command([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path, timeout=0.5)
+
+    # Assert
+    assert time.monotonic() - started < 10

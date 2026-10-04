@@ -8,7 +8,6 @@ import importlib.metadata
 import json
 import os
 import shutil
-import subprocess
 import sys
 from collections.abc import MutableMapping, Sequence
 from dataclasses import asdict
@@ -25,6 +24,7 @@ from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code, search_failure
 from .directives.places import Place, place_for_line
+from .index import tools
 from .index.code_index import CodeIndex
 from .index.languages import language_of
 from .judgments.answers import TokenTotal
@@ -1178,14 +1178,9 @@ def _navigator_provenance() -> dict:
 
 
 def _git(repository: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", *args],
-        cwd=repository,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    ).stdout.strip()
+    """The checkout above JVN's own source can be a whole project, when JVN is installed in a virtual
+    environment inside it, so its status may take long."""
+    return tools.git(args, repository, timeout=10).strip()
 
 
 def _visit(visit: Visit) -> dict:

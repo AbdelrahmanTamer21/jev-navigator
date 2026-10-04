@@ -217,6 +217,8 @@ covers the `jvn` command and every program that imports `jev_navigator`.
   process holds, so a program that imports JVN and later holds much data of its own uses up JVN's
   allowance too. Over it, JVN stops those processes and raises `MemoryLimitReachedError`, which names
   the allowance, the memory in use and that baseline.
+- **What it does not cover:** the model command a command-line connector runs (`CommandConnector`) is a
+  separate program the user names, so JVN neither counts nor stops its memory.
 - **One parse at a time:** a process runs one ast-grep scan at a time, and ast-grep parses only as
   many files at once as the allowance affords: 3 at the default. Scans started in parallel threads
   take turns instead of outgrowing the allowance together.
