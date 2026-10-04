@@ -32,6 +32,7 @@ DOC_SCAN_LINES = 40
 DESCRIPTION_CHARS = 2_000
 OPTION_OVERHEAD_CHARS = serialized_chars({"199": ""})
 """What one option adds to a question beyond its description: its key, quotes, colon and comma."""
+CUT_MARK = "…"
 _DIRECTIVE_MARKERS = ("eslint", "noqa", "@ts-", "prettier-ignore", "pylint:", "type: ignore", "ruff:")
 _BLOCK_CLOSERS = {'"""': '"""', "'''": "'''", "/**": "*/", "/*": "*/"}
 _LINE_OPENERS = ("//", "#")
@@ -377,7 +378,24 @@ def _is_directive(comment: str) -> bool:
 
 
 def _bounded(description: str, limit: int) -> str:
-    return description if len(description) <= limit else description[: limit - 1] + "…"
+    """``description`` cut so that its size in the request, ASCII-escaped as ``serialized_chars``
+    measures it, is at most ``limit``: a non-ASCII character costs its whole escape."""
+    if _escaped_chars(description) <= limit:
+        return description
+    room = limit - _escaped_chars(CUT_MARK)
+    if room < 0:
+        return ""
+    kept: list[str] = []
+    for character in description:
+        room -= _escaped_chars(character)
+        if room < 0:
+            break
+        kept.append(character)
+    return "".join(kept) + CUT_MARK
+
+
+def _escaped_chars(text: str) -> int:
+    return serialized_chars(text) - serialized_chars("")
 
 
 def _source_spans(index: CodeIndex, file: str, mask: Mask) -> tuple[_SpanEntry, ...]:

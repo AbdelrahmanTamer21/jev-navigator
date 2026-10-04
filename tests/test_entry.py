@@ -396,3 +396,20 @@ def test_a_secret_shaped_file_name_is_masked_in_the_request_and_in_the_descripti
     assert name not in json.dumps(client.requests)
     assert any("[MASKED]" in text for text in descriptions)
     assert not any(name in text for text in descriptions)
+
+
+def test_options_with_non_ascii_docs_and_names_keep_every_request_inside_the_box(tmp_path: Path) -> None:
+    # Arrange: a non-ASCII character costs its whole escape in the request, six characters
+    doc = "计算一组概率的集中程度并返回置信度" * 8
+    files = {
+        f"mod{number:03d}.py": f'"""{doc}"""\ndef 函数_{number:03d}():\n    pass\n' for number in range(200)
+    }
+    client = ScriptedJevClient()
+
+    # Act
+    choose_initial_candidates(_index(tmp_path, files), Judge(client), TARGET)
+
+    # Assert
+    assert client.requests
+    for state, questions in client.requests:
+        assert not request_exceeds_input_budget(state, questions)
