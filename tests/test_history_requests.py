@@ -20,7 +20,7 @@ from jev_navigator.directives.find_code import SearchBudget, StopRule, find_code
 from jev_navigator.directives.places import MOVES, function_place, place_for_line
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import Judge
-from jev_navigator.judgments.store import JsonlAnswerStore
+from jev_navigator.judgments.store import JsonlAnswerStore, SqliteAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
 
@@ -119,9 +119,10 @@ def opened_split(tmp_path: Path, judge, async_search: bool):
     return next(step for step in result.history.steps if step.operation == "open")
 
 
+@pytest.mark.parametrize("store_kind", [JsonlAnswerStore, SqliteAnswerStore])
 @pytest.mark.parametrize("async_search", [False, True])
 def test_a_split_opening_joins_each_judgment_to_its_own_sub_request_also_when_replayed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, async_search: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, async_search: bool, store_kind: type
 ) -> None:
     # Arrange
     pytest.importorskip("typesafe_sdk")
@@ -131,13 +132,13 @@ def test_a_split_opening_joins_each_judgment_to_its_own_sub_request_also_when_re
     monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
     monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
     client = TypeSafeJevClient()
-    store = tmp_path / "answers.jsonl"
-    live = Judge(client, store=JsonlAnswerStore(store), journal=JsonlJournal(tmp_path / "journal.jsonl"))
+    store = tmp_path / "answers.store"
+    live = Judge(client, store=store_kind(store), journal=JsonlJournal(tmp_path / "journal.jsonl"))
 
     # Act
     try:
         first = opened_split(tmp_path / "first", live, async_search)
-        replaying = Judge(client, store=JsonlAnswerStore(store), served_model=live.served_model)
+        replaying = Judge(client, store=store_kind(store), served_model=live.served_model)
         replayed = opened_split(tmp_path / "second", replaying, async_search)
     finally:
         client.close()
