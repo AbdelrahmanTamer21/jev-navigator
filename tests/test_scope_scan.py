@@ -869,6 +869,29 @@ def test_a_namespace_member_is_a_definition_inside_its_own_namespace(tmp_path: P
     }
 
 
+def test_a_var_in_a_namespace_is_a_member_of_that_namespace(tmp_path: Path) -> None:
+    """A `var` directly in a namespace body is that namespace's member like a `const`: inside the
+    namespace its name binds to it, and at module level it is no definition."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/legacy.ts": (
+                "namespace Legacy {\n  var count = 1;\n  export function read() { return count; }\n}\n"
+                "export function outside() { return count; }\n"
+            ),
+        },
+    )
+
+    # Act
+    inside = index.binding_of("src/legacy.ts", 3, "count", None, "return")
+    outside = index.binding_of("src/legacy.ts", 5, "count", None, "return")
+
+    # Assert
+    assert (inside.status.value, inside.target) == ("resolved", Span("src/legacy.ts", 2, 2, "count"))
+    assert (outside.status.value, outside.target) == ("candidate", None), outside
+
+
 def test_a_namespace_member_comes_before_an_import_and_after_a_functions_own_name(tmp_path: Path) -> None:
     """Inside a namespace its own `config` hides the module's import of `config`, while a parameter
     `config` hides the member. A function or constant a namespace exports is no export of its
