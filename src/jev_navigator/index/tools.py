@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 AST_GREP = "ast-grep"
 RIPGREP = "rg"
 _NO_MATCHES_EXIT = 1
+_SCANNED_FILE_PREFIX = "sg: entity|file|"
 NEUTRAL_AST_GREP_CONFIG = "ruleDirs: []\n"
 """The smallest sgconfig ast-grep accepts. Passed with ``--config`` it replaces the discovery of the
 analysed repository's own sgconfig.yml, which is customer content: its ``languageGlobs`` would change
@@ -127,9 +128,9 @@ def _skipped_files(chunk: Sequence[str], inspection: str, cwd: Path) -> dict[str
     """The non-empty files of ``chunk`` that ast-grep's ``--inspect=entity`` output does not list as
     scanned. ast-grep lists no empty file either, and an empty file has nothing to find."""
     scanned = {
-        line.removeprefix("sg: entity|file|").rsplit(": language=", 1)[0]
+        line.removeprefix(_SCANNED_FILE_PREFIX).rsplit(": language=", 1)[0]
         for line in inspection.splitlines()
-        if line.startswith("sg: entity|file|")
+        if line.startswith(_SCANNED_FILE_PREFIX)
     }
     return {
         file: _not_parsed_reason(cwd / file)
@@ -181,7 +182,11 @@ def _json_object(line: str, process: subprocess.Popen, errors: IO[bytes], tool: 
 
 
 def _tool_failed(tool: str, returncode: int, errors: IO[bytes]) -> ToolFailedError:
-    return ToolFailedError(f"{tool} exited {returncode}: {_stderr_text(errors).strip()}")
+    """The failure with the command's own error text, without ``--inspect=entity``'s list of scanned
+    files, which can run to one line per file of the scope."""
+    lines = _stderr_text(errors).splitlines()
+    message = "\n".join(line for line in lines if not line.startswith(_SCANNED_FILE_PREFIX))
+    return ToolFailedError(f"{tool} exited {returncode}: {message.strip()}")
 
 
 def _stderr_text(errors: IO[bytes]) -> str:

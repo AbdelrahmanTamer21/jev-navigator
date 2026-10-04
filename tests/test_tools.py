@@ -132,3 +132,22 @@ def test_a_file_whose_name_starts_with_a_dash_is_scanned_as_a_file(tmp_path: Pat
 
     # Assert
     assert [match["file"] for match in matches] == ["-x.py"]
+
+
+def test_a_failed_scan_reports_ast_grep_s_error_without_its_scanned_file_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: ast-grep lists the files it scanned on stderr, then dies
+    for name in ("a.py", "b.py"):
+        (tmp_path / name).write_text("def f():\n    return 1\n")
+    stand_in_ast_grep(
+        tmp_path,
+        monkeypatch,
+        "for file in files:\n    print(f'sg: entity|file|{file}: language=Python', file=sys.stderr)\n"
+        "print('ast-grep: out of memory', file=sys.stderr)\nsys.exit(137)\n",
+    )
+
+    # Act / Assert
+    with pytest.raises(tools.ToolFailedError) as failure:
+        list(tools.ast_grep_rules(VALID_RULE, ["a.py", "b.py"], tmp_path, refused={}))
+    assert str(failure.value) == f"{tools.AST_GREP} exited 137: ast-grep: out of memory"
