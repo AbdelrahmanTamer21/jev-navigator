@@ -198,13 +198,16 @@ def _same_lines_as_a_named_symbol(symbols: set[Span]) -> set[Span]:
 
 
 def _calls_from_matches(matches) -> tuple[CallMatch, ...]:
+    """In source order. ast-grep runs its rules in parallel, so its own order differs between scans
+    for calls that different rules match, such as `new Date(merge(a))`."""
     found = []
     for match in matches:
         expression = match["metaVariables"]["single"]["CALLEE"]["text"]
         name = last_identifier(expression)
         if name:
-            found.append(CallMatch(match["file"], _line_of(match), name, receiver_of(expression)))
-    return tuple(sorted(found, key=lambda call: (call.file, call.line)))
+            call = CallMatch(match["file"], _line_of(match), name, receiver_of(expression))
+            found.append((call.file, match["range"]["byteOffset"]["start"], call))
+    return tuple(call for _, _, call in sorted(found, key=lambda entry: entry[:2]))
 
 
 def _references_from_matches(matches) -> tuple[ReferenceMatch, ...]:
