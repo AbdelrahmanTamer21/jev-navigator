@@ -386,7 +386,8 @@ index first read, the text its SHA-256 names, never in its new form. The index k
 first read compressed for the run, about 2 MB per 1,000 files of Heedvane's web app. Each call
 site's binding is computed once, and `search_text` and `co_changed_files` each run their tool once
 per argument for the life of the index. The index keeps the lines of a bounded number of recently
-read files (`LINE_CACHE_FILES`). There is no default file-count refusal or parser timeout, and no requested file is silently
+read files (`LINE_CACHE_FILES`). Every cache an index keeps lives in the index itself and none holds
+it back, so a dropped index, with its facts and first reads, is freed at once. There is no default file-count refusal or parser timeout, and no requested file is silently
 omitted.
 
 Before that pass, `.js` files whose leading comments (before any code, after an optional byte-order

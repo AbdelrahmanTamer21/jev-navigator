@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import subprocess
 import sys
 import tracemalloc
+import weakref
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
@@ -112,6 +114,50 @@ def test_a_file_list_longer_than_the_argument_limit_is_split_across_processes(
     assert split == together
 
 
+def every_cache_filled(index: CodeIndex) -> frozenset[str]:
+    """Uses every lookup that caches, so each per-index cache holds an entry."""
+    for name in ("check", "place", "handle", "LIMIT", "absent"):
+        index.find_definition(name)
+        index.find_callers(name)
+        index.find_references(name)
+        index.call_site_count(name)
+    for file in index.files:
+        index.lines(file)
+        index.imports(file)
+        index.functions_in(file)
+        index.co_changed_files(file)
+    index.search_text("order")
+    return index.unparsed_files
+
+
+@pytest.fixture
+def no_cycle_collector():
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.enable()
+
+
+@pytest.mark.parametrize("build", ["from_git", "from_directory"])
+def test_a_dropped_index_is_freed_at_once_without_the_cycle_collector(
+    tmp_path: Path, build: str, no_cycle_collector: None
+) -> None:
+    # Arrange: an index whose facts, lines, name rows and every cache have been filled
+    commit_files(tmp_path, MIXED_SCOPE)
+    index = getattr(CodeIndex, build)(tmp_path, fact_cache_dir=tmp_path.parent / "facts")
+    every_cache_filled(index)
+    alive = weakref.ref(index)
+    sources_alive = weakref.ref(index._sources)
+
+    # Act
+    del index
+
+    # Assert: the index and its reader, which holds the compressed first reads, are both gone
+    assert alive() is None
+    assert sources_alive() is None
+
+
 def test_the_line_cache_holds_at_most_its_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Arrange: three files read through a two-file line cache, then the first and last edited
     monkeypatch.setattr(code_index, "LINE_CACHE_FILES", 2)
@@ -128,6 +174,27 @@ def test_the_line_cache_holds_at_most_its_bound(tmp_path: Path, monkeypatch: pyt
     # Assert
     assert again == {"c.py": first["c.py"], "a.py": first["a.py"]}
     assert set(index.unavailable_files) == {"a.py"}
+
+
+def test_the_line_cache_evicts_the_least_recently_read_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: a two-file line cache reads a.py, b.py, a.py again, then c.py; then a.py and b.py change
+    monkeypatch.setattr(code_index, "LINE_CACHE_FILES", 2)
+    for name in ("a.py", "b.py", "c.py"):
+        (tmp_path / name).write_text(f"def {name[0]}():\n    return 1\n")
+    index = CodeIndex(tmp_path, ["a.py", "b.py", "c.py"])
+    for file in ("a.py", "b.py", "a.py", "c.py"):
+        index.lines(file)
+    for name in ("a.py", "b.py"):
+        (tmp_path / name).write_text("def edited():\n    return 2\n")
+
+    # Act: a.py was read more recently than b.py, so only b.py goes back to the disk
+    for file in ("a.py", "b.py"):
+        index.lines(file)
+
+    # Assert
+    assert set(index.unavailable_files) == {"b.py"}
 
 
 def test_a_repeated_text_search_starts_no_second_process(sample_index: CodeIndex, spawned) -> None:
