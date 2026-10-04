@@ -70,10 +70,20 @@ def test_the_legacy_config_fills_what_both_left_open(tmp_path, monkeypatch):
     assert LEGACY_CONFIG  # the real default stays importable
 
 
-def test_a_missing_key_everywhere_raises_with_every_source_named(tmp_path, monkeypatch):
-    monkeypatch.setattr("jev_navigator.environment.LEGACY_CONFIG", tmp_path / "absent-legacy-env")
-    with pytest.raises(RuntimeError, match=r"\.env|jvn/env"):
-        load_typesafe_environment(root=tmp_path)
+@pytest.mark.parametrize("has_checkout", [True, False], ids=["run-from-a-checkout", "installed"])
+def test_a_missing_key_points_only_at_the_files_jvn_reads(tmp_path, monkeypatch, has_checkout: bool):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    legacy = tmp_path / "absent-legacy-env"
+    monkeypatch.setattr(environment, "checkout_root", lambda: checkout if has_checkout else None)
+
+    with pytest.raises(RuntimeError) as raised:
+        load_typesafe_environment({}, legacy=legacy)
+
+    message = str(raised.value)
+    assert str(legacy) in message
+    assert (str(checkout / ".env") in message) is has_checkout
+    assert (".env.example" in message) is has_checkout
 
 
 def test_a_checkout_env_file_is_read_through_checkout_root(tmp_path, monkeypatch):

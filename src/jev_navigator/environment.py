@@ -61,8 +61,9 @@ def load_typesafe_environment(
     """
     environment = os.environ if environment is None else environment
     root = checkout_root() if root is None else root
+    legacy = legacy or LEGACY_CONFIG
     contributed: dict[str, str] = {}
-    sources = ([root / ".env"] if root is not None else []) + [legacy or LEGACY_CONFIG]
+    sources = ([root / ".env"] if root is not None else []) + [legacy]
     for source in sources:
         for name, value in _env_file(source).items():
             if not _is_setting(name):
@@ -71,15 +72,18 @@ def load_typesafe_environment(
                 environment[name] = value
                 contributed[name] = value
     if not environment.get("TYPESAFE_API_KEY", "").strip():
-        raise RuntimeError(
-            "TYPESAFE_API_KEY is unset: export it, or set it in the checkout's .env "
-            f"(see .env.example) or {LEGACY_CONFIG}"
-        )
+        raise RuntimeError(_missing_key_message(root, legacy))
     return contributed
 
 
 def _is_setting(name: str) -> bool:
     return name.startswith(SETTING_PREFIXES)
+
+
+def _missing_key_message(root: Path | None, legacy: Path) -> str:
+    """Where to put the key: only the files this run reads, the checkout `.env` when there is one."""
+    checkout = f"{root / '.env'} (see .env.example) or " if root is not None else ""
+    return f"TYPESAFE_API_KEY is unset: export it, or set it in {checkout}{legacy}"
 
 
 def _names_this_project(pyproject: Path) -> bool:
