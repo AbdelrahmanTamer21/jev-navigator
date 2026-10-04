@@ -172,8 +172,8 @@ def _stop_twice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *resumed_option
     unsure = ScriptedJevClient(nouls=lambda _question_id, _question, _state: 0.5)
     unsure.close = lambda: None
     clients = iter([unsure, unsure])
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", lambda: next(clients))
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: next(clients))
     first, second = tmp_path / "first", tmp_path / "second"
 
     def jvn_find(output: Path, *options: str) -> list[str]:

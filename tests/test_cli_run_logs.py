@@ -271,8 +271,8 @@ def test_the_json_request_field_keep_requests_reaches_the_run_folder(
         instance.close = lambda: None
         return instance
 
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", client)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: client())
     request = {
         "target": TARGET,
         "repo": str(repository),
