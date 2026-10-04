@@ -10,10 +10,13 @@ from conftest import BudgetedClient
 from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer
 from jev_navigator.judgments.client import (
     JEV_INPUT_BOX_CHARS,
+    JEV_REQUEST_TOKEN_LIMIT,
+    JEV_STATE_TOKEN_LIMIT,
     MAX_REQUEST_CHARS,
     InputBudgetExceededError,
     MissingAnswerError,
     ReplayOnlyClient,
+    chars_for_tokens,
 )
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import (
@@ -752,6 +755,12 @@ def test_non_ascii_state_is_measured_as_the_escaped_body_the_engine_measures() -
 
     assert len(json.dumps(state, ensure_ascii=False)) < JEV_INPUT_BOX_CHARS
     assert request_exceeds_input_budget(state, {"q": {"ask": "x"}})
+
+
+def test_every_box_derives_from_the_one_characters_per_token_constant() -> None:
+    assert chars_for_tokens(JEV_STATE_TOKEN_LIMIT) == JEV_INPUT_BOX_CHARS == 76_800
+    assert chars_for_tokens(JEV_REQUEST_TOKEN_LIMIT) == MAX_REQUEST_CHARS == 153_600
+    assert chars_for_tokens(8_192) == 19_660
 
 
 def test_serialized_chars_counts_every_escaped_character() -> None:
