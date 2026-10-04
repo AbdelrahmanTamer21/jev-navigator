@@ -6,13 +6,12 @@ policy only; the index has no default refusal and never drops files from a reque
 
 from __future__ import annotations
 
-import hashlib
 import re
 import tempfile
 import threading
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
-from functools import cache, lru_cache
+from functools import cache
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
@@ -31,10 +30,10 @@ from .languages import (
     declares_type,
     declares_value,
     language_of,
-    split_lines,
 )
 from .packages import Packages
 from .scope_scan import FileFacts, FileStructure, ReferenceMatch, Unparsed, scan_facts
+from .source_files import DISAPPEARED, SourceFiles, SourceMemory
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
 
@@ -95,12 +94,11 @@ class CodeIndex:
         _require_inside(self.root, self.files)
         self._scope = frozenset(self.files)
         self._code_files = tuple(path for path in self.files if language_of(path))
-        self._lines_of = lru_cache(maxsize=LINE_CACHE_FILES)(self._read_lines)
-        self._sha256: dict[str, str] = {}
+        self._unavailable: dict[str, str] = {}
+        self._sources = SourceFiles(self.root, self._unavailable, LINE_CACHE_FILES)
         self._script_paths_in = cache(self._read_script_paths)
         self._packages = cache(self._read_packages)
         self._unparsed = Unparsed()
-        self._unavailable: dict[str, str] = {}
         self._facts: dict[str, FileFacts] = {}
         self._fact_files_by_name: dict[str, set[str]] = {}
         self._facts_lock = threading.RLock()
@@ -246,8 +244,8 @@ class CodeIndex:
 
     @property
     def unavailable_files(self) -> dict[str, str]:
-        """Files this index cannot read facts from, each with the reason: an inventory entry that disappeared
-        after the index was created, or a file too large to parse safely."""
+        """Files this index cannot read facts from, each with the reason: an inventory entry that disappeared,
+        or changed after the index first read it, or a file too large to parse safely."""
         return dict(self._unavailable)
 
     @property
@@ -472,11 +470,10 @@ class CodeIndex:
     def _discover(self, names: Iterable[str]) -> None:
         with self._facts_lock:
             new = [name for name in dict.fromkeys(names) if name not in self._discovered]
-            remaining = tuple(
-                file for file in self._code_files if file not in self._facts and file not in self._unavailable
-            )
-        if not new:
-            return
+            if not new:
+                return
+            unparsed = tuple(file for file in self._code_files if file not in self._facts)
+        remaining = self._available_files(unparsed)
         mentioning = self._on_available(remaining, lambda files: tools.ripgrep_files(new, files, self.root))
         found = self._files_by_name(new, mentioning)
         with self._facts_lock:
@@ -542,7 +539,7 @@ class CodeIndex:
         The caller holds the facts lock."""
         to_parse: dict[str, bytes] = {}
         for file in files:
-            if language_of(file) is None or file in self._facts or file in self._unavailable:
+            if language_of(file) is None or file in self._facts:
                 continue
             content = self._read_bytes(file)
             if content is None:
@@ -654,9 +651,9 @@ class CodeIndex:
         return self._text_hits(text, max_hits)
 
     def _search_text(self, text: str, max_hits: int) -> tuple[TextHit, ...]:
-        readable = tuple(file for file in self.files if file not in self._unavailable)
         found = self._on_available(
-            readable, lambda files: tools.ripgrep_fixed(text, files, self.root, max_hits)
+            self._available_files(self.files),
+            lambda files: tools.ripgrep_fixed(text, files, self.root, max_hits),
         )
         hits = sorted(hit for hit in found if hit.file in self._scope)
         return tuple(hits[:max_hits])
@@ -741,42 +738,38 @@ class CodeIndex:
         """The package.json files of the folders holding scope files, read once, on first use."""
         return Packages(self.root, self.files)
 
-    def _read_lines(self, file: str) -> tuple[str, ...]:
+    def _lines_of(self, file: str) -> tuple[str, ...]:
+        """The file's lines as the index first read it."""
         self._require_in_scope(file)
-        content = self._read_bytes(file)
-        return split_lines(content.decode(errors="replace")) if content is not None else ()
+        return self._sources.lines(file)
 
     def _file_sha256(self, file: str) -> str:
-        """The SHA-256 of the bytes the index first read from ``file``."""
         self._require_in_scope(file)
-        if file not in self._sha256:
-            self._read_bytes(file)
-        return self._sha256.get(file, "")
+        return self._sources.sha256(file)
 
     def _read_bytes(self, file: str) -> bytes | None:
-        """The file's bytes, every read checked against the first: once a file changes on disk, its
-        facts and lines no longer agree, so it is reported unavailable instead of read."""
-        try:
-            content = (self.root / file).read_bytes()
-        except FileNotFoundError:
-            self._unavailable[file] = "disappeared after inventory"
-            return None
-        digest = hashlib.sha256(content).hexdigest()
-        if self._sha256.setdefault(file, digest) != digest:
-            self._unavailable[file] = "changed on disk after the index first read it"
-            return None
-        return content
+        """The file's bytes while they equal its first read, so facts are only built from them."""
+        return self._sources.current(file)
+
+    @property
+    def source_memory(self) -> SourceMemory:
+        """What the index holds of the files it read: compressed first reads and cached lines."""
+        return self._sources.memory
 
     def _available_files(self, files: Sequence[str]) -> tuple[str, ...]:
+        """The ``files`` still readable as the index first read them: neither reported unavailable
+        before nor gone from disk now."""
         available = []
         for file in files:
+            if file in self._unavailable:
+                continue
             try:
                 if (self.root / file).is_file():
                     available.append(file)
                 else:
-                    self._unavailable[file] = "disappeared after inventory"
+                    self._unavailable[file] = DISAPPEARED
             except FileNotFoundError:
-                self._unavailable[file] = "disappeared after inventory"
+                self._unavailable[file] = DISAPPEARED
         return tuple(available)
 
     def _require_in_scope(self, file: str) -> None:

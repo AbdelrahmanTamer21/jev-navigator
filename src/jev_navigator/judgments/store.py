@@ -1,8 +1,9 @@
 """Every Jev answer is kept: by request hash for replay, and by item content for reuse on the next scan.
 
 A record holds hashes, question ids (each with its wording hash), raw answers, the served model, the
-thresholds in force, and the source (file, line range, commit) of every code item it judged, so the
-request can be rebuilt from the repository at that commit. It holds no request text unless
+thresholds in force, and the source (file, line range, commit) of every code item it judged, so a
+request can be rebuilt from the repository at that commit, exactly unless its items carried a field
+that can quote code, which is withheld (see ``rebuild``). It holds no request text unless
 ``keep_requests`` is set, because a request carries code the library cannot know the owner of; set
 it only for your own or open-source code.
 
@@ -23,7 +24,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import sqlite3
 import threading
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..cache_root import cache_root
+from ..shared_database import open_shared_database
 from .answers import Answer, JevResponse, answer_from_json
 from .relations import without_quoted_code
 
@@ -87,7 +88,7 @@ class StoredItemAnswer:
 
 
 class AnswerStore(Protocol):
-    def by_request(self, request_sha256: str) -> AnswerRecord | None: ...
+    def by_request(self, request_sha256: str, served_model: str | None) -> AnswerRecord | None: ...
 
     def by_item(self, item_key: str, served_model: str | None) -> StoredItemAnswer | None: ...
 
@@ -107,17 +108,21 @@ class JsonlAnswerStore:
     def __init__(self, path: Path, *, keep_requests: bool = False) -> None:
         self.path = Path(path)
         self.keep_requests = keep_requests
-        self._records: dict[str, AnswerRecord] = {}
+        self._records: dict[str, dict[str, AnswerRecord]] = {}
         self._items: dict[str, dict[str, StoredItemAnswer]] = {}
         self._refusals: set[tuple[str, str, int]] = set()
         self._write_lock = threading.Lock()
         self._load()
 
-    def by_request(self, request_sha256: str) -> AnswerRecord | None:
-        return self._records.get(request_sha256)
+    def by_request(self, request_sha256: str, served_model: str | None) -> AnswerRecord | None:
+        """``served_model`` None accepts a record from any model (replay), the newest first."""
+        by_model = self._records.get(request_sha256, {})
+        if served_model is None:
+            return next(reversed(by_model.values()), None)
+        return by_model.get(served_model)
 
     def records(self) -> tuple[AnswerRecord, ...]:
-        return tuple(self._records.values())
+        return tuple(record for by_model in self._records.values() for record in by_model.values())
 
     def by_item(self, item_key: str, served_model: str | None) -> StoredItemAnswer | None:
         """``served_model`` None accepts an answer from any model (replay)."""
@@ -163,7 +168,9 @@ class JsonlAnswerStore:
                 self._index(_record_from_json(raw))
 
     def _index(self, record: AnswerRecord) -> None:
-        self._records[record.request_sha256] = record
+        by_model = self._records.setdefault(record.request_sha256, {})
+        by_model.pop(record.model, None)
+        by_model[record.model] = record
         for item_key, question_id in record.item_keys.items():
             by_model = self._items.setdefault(item_key, {})
             by_model[record.model] = StoredItemAnswer(
@@ -180,16 +187,14 @@ class UnsupportedAnswerStoreError(RuntimeError):
 
 
 _SCHEMA = """
-create table if not exists answers (request_sha256 text not null, model text not null, record text not null);
-create index if not exists answers_by_request on answers (request_sha256, model);
-create table if not exists item_answers (
+create table answers (request_sha256 text not null, model text not null, record text not null);
+create index answers_by_request on answers (request_sha256, model);
+create table item_answers (
     item_key text not null, model text not null, request_sha256 text not null, answer text not null
 );
-create index if not exists item_answers_by_key on item_answers (item_key, model);
-create table if not exists refusals (
-    request_sha256 text not null, route text not null, input_box integer not null
-);
-create index if not exists refusals_by_request on refusals (request_sha256, route, input_box);
+create index item_answers_by_key on item_answers (item_key, model);
+create table refusals (request_sha256 text not null, route text not null, input_box integer not null);
+create index refusals_by_request on refusals (request_sha256, route, input_box);
 """
 
 
@@ -205,39 +210,29 @@ class SqliteAnswerStore:
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._db = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
-        self._db.execute("pragma journal_mode=wal")
-        self._open_current_layout()
+        self._db = open_shared_database(self.path, _SCHEMA, SHARED_STORE_VERSION)
+        self._refuse_another_layout()
 
-    def _open_current_layout(self) -> None:
-        """Create the layout in a new file; refuse a file written in any other layout."""
+    def _refuse_another_layout(self) -> None:
+        """A new file is created whole in the current layout (see ``open_shared_database``), so any
+        other version is a file written by another JVN, never one still being created."""
         version = self._db.execute("pragma user_version").fetchone()[0]
-        if version == 0 and not self._db.execute("select name from sqlite_master").fetchall():
-            self._db.executescript(_SCHEMA)
-            self._db.execute(f"pragma user_version = {SHARED_STORE_VERSION}")
-            return
         if version != SHARED_STORE_VERSION:
             self._db.close()
             raise UnsupportedAnswerStoreError(
-                f"{self.path} holds answer store version {version}, this JVN reads version "
-                f"{SHARED_STORE_VERSION}; delete {self.path} and its -wal and -shm files, or point "
-                "--answer-store at a new file"
+                f"{self.path} holds answer store version {version}, and this JVN reads version "
+                f"{SHARED_STORE_VERSION}; point --answer-store or {SHARED_STORE_VARIABLE} at a new file"
             )
 
-    def by_request(self, request_sha256: str) -> AnswerRecord | None:
-        row = self._one(
-            "select record from answers where request_sha256 = ? order by rowid desc limit 1",
-            (request_sha256,),
-        )
-        return _record_from_json(json.loads(row[0])) if row else None
-
-    def record_for(self, request_sha256: str, model: str) -> AnswerRecord | None:
-        row = self._one(
-            "select record from answers where request_sha256 = ? and model = ? order by rowid desc limit 1",
-            (request_sha256, model),
-        )
+    def by_request(self, request_sha256: str, served_model: str | None) -> AnswerRecord | None:
+        """``served_model`` None accepts a record from any model (replay), the newest first."""
+        if served_model is None:
+            query, parameters = "select record from answers where request_sha256 = ?", (request_sha256,)
+        else:
+            query = "select record from answers where request_sha256 = ? and model = ?"
+            parameters = (request_sha256, served_model)
+        row = self._one(f"{query} order by rowid desc limit 1", parameters)
         return _record_from_json(json.loads(row[0])) if row else None
 
     def records(self) -> tuple[AnswerRecord, ...]:
@@ -293,11 +288,11 @@ class LayeredAnswerStore:
         self.run = run
         self.shared = shared
 
-    def by_request(self, request_sha256: str) -> AnswerRecord | None:
-        found = self.run.by_request(request_sha256)
+    def by_request(self, request_sha256: str, served_model: str | None) -> AnswerRecord | None:
+        found = self.run.by_request(request_sha256, served_model)
         if found is not None:
             return found
-        shared = self.shared.by_request(request_sha256)
+        shared = self.shared.by_request(request_sha256, served_model)
         if shared is not None:
             self.run.put(shared)
         return shared
@@ -307,8 +302,8 @@ class LayeredAnswerStore:
         if found is not None:
             return found
         shared = self.shared.by_item(item_key, served_model)
-        if shared is not None and self.run.by_request(shared.request_sha256) is None:
-            self.run.put(self.shared.record_for(shared.request_sha256, shared.model))
+        if shared is not None and self.run.by_request(shared.request_sha256, shared.model) is None:
+            self.run.put(self.shared.by_request(shared.request_sha256, shared.model))
         return shared
 
     def records(self) -> tuple[AnswerRecord, ...]:
