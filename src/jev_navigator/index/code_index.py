@@ -99,7 +99,7 @@ class CodeIndex:
         self._code_files = tuple(path for path in self.files if language_of(path))
         self._unavailable: dict[str, str] = {}
         self._refused: dict[str, str] = {}
-        self._sources = SourceFiles(self.root, self._unavailable, LINE_CACHE_FILES, self._first_read_stands)
+        self._sources = SourceFiles(self.root, self._unavailable, LINE_CACHE_FILES, self._standing_first_read)
         self._script_paths_in = cache(self._read_script_paths)
         self._packages = cache(self._read_packages)
         self._unparsed = Unparsed()
@@ -833,22 +833,24 @@ class CodeIndex:
         from them."""
         return self._sources.current(file)
 
-    def _first_read_stands(self, file: str, content: bytes) -> bool:
-        """Whether the first bytes read from ``file`` can stand. Bytes that differ from the blob the
-        Git listing named (a checkout that converts line endings, or an edit since the listing) are
-        keyed by their own hash instead, unless table rows of the listed blob were already answered
-        for the file."""
+    def _standing_first_read(self, file: str, content: bytes | None) -> bytes | None:
+        """The bytes that stand as ``file``'s first read, given what the disk holds now (``None`` when
+        the file is gone). Once table rows of its listed blob were answered for the file, that blob is
+        what the index read, whatever the disk holds now. Otherwise the disk's bytes stand, and bytes
+        that differ from the listed blob (a checkout that converts line endings, or an edit since the
+        listing) are keyed by their own hash."""
         listed = self._listed_blobs.get(file)
         if listed is None:
-            return True
-        actual = git_blob_id(content)
+            return content
+        actual = git_blob_id(content) if content is not None else None
         if actual == listed:
-            return True
+            return content
         if self._entries is not None and file in self._entries:
-            return False
-        del self._listed_blobs[file]
-        self._blobs[file] = actual
-        return True
+            return tools.git_blob(self.root, listed)
+        if actual is not None:
+            del self._listed_blobs[file]
+            self._blobs[file] = actual
+        return content
 
     def _available_files(self, files: Sequence[str]) -> tuple[str, ...]:
         """The ``files`` still readable as the index first read them: neither reported unavailable

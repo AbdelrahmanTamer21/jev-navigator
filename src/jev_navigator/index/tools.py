@@ -6,7 +6,7 @@ import base64
 import json
 import subprocess
 import tempfile
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from functools import cache
 from pathlib import Path
@@ -212,7 +212,19 @@ def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) 
     that would leave ``destination`` and an object git does not have both raise ``ToolFailedError``."""
     if not blobs:
         return
-    requests = "".join(f"{object_id}\n" for object_id in blobs.values()).encode()
+    for path, content in zip(blobs, _cat_file_batch(repository, blobs.values()), strict=True):
+        _write_inside(destination, path, content)
+
+
+def git_blob(repository: Path, object_id: str) -> bytes:
+    """The bytes of one blob, asked for by object id; an object git does not have raises
+    ``ToolFailedError``."""
+    (content,) = _cat_file_batch(repository, [object_id])
+    return content
+
+
+def _cat_file_batch(repository: Path, object_ids: Iterable[str]) -> list[bytes]:
+    requests = "".join(f"{object_id}\n" for object_id in object_ids).encode()
     completed = subprocess.run(
         ["git", "cat-file", "--batch"],
         cwd=repository,
@@ -223,8 +235,7 @@ def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) 
         raise ToolFailedError(
             f"git cat-file exited {completed.returncode}: {completed.stderr.decode()[:300]}"
         )
-    for path, content in zip(blobs, _batch_contents(completed.stdout), strict=True):
-        _write_inside(destination, path, content)
+    return _batch_contents(completed.stdout)
 
 
 def _batch_contents(output: bytes) -> list[bytes]:
