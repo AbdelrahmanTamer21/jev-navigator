@@ -565,14 +565,21 @@ class Judge:
     ) -> JevResponse:
         response = dispatched.response
         with self._bookkeeping:
-            for judge in self._chain():
-                judge.served_model = response.model
-                judge.input_total.add(response.input_tokens)
-            _refuse_unanswered(prepared.questions, response)
             self._record(
                 prepared, dispatched, thresholds, item_keys or {}, sources or {}, skeleton or {}, batch or {}
             )
         return JevResponse(response.answers, response.model, response.input_tokens, prepared.request_hash)
+
+    def _accepted(self, prepared: _Prepared, dispatched: _Dispatched) -> _Dispatched:
+        """Counts the served model and the tokens a parsed response cost, then refuses one that left
+        out an asked answer, so the send's failure handling journals it like any failed response."""
+        response = dispatched.response
+        with self._bookkeeping:
+            for judge in self._chain():
+                judge.served_model = response.model
+                judge.input_total.add(response.input_tokens)
+        _refuse_unanswered(prepared.questions, response)
+        return dispatched
 
     def _count_replayed(self, answers: int) -> None:
         with self._bookkeeping:
@@ -601,10 +608,11 @@ class Judge:
             if hasattr(self.client, "send"):
                 raw = self._send_with_attempt_callback(prepared, request_id)
                 self._journal_response(request_id, raw)
-                return _Dispatched.from_raw(self.client.parse(raw), raw, prepared)
+                return self._accepted(prepared, _Dispatched.from_raw(self.client.parse(raw), raw, prepared))
             response = self.client.ask(prepared.state, prepared.questions)
-            self._journal_response(request_id, RawResponse.from_decoded(response_to_raw(response)))
-            return _Dispatched(response, prepared.body, sent_exact=False)
+            raw = RawResponse.from_decoded(response_to_raw(response))
+            self._journal_response(request_id, raw)
+            return self._accepted(prepared, _Dispatched(response, prepared.body, sent_exact=False))
         except Exception as error:
             if isinstance(error, AttemptJournalCallbackError):
                 self._propagate_attempt_journal_error(request_id, error, raw)
@@ -625,10 +633,11 @@ class Judge:
                 else:
                     raw = await _awaited(self.client.send, prepared.state, prepared.questions)
                 self._journal_response(request_id, raw)
-                return _Dispatched.from_raw(self.client.parse(raw), raw, prepared)
+                return self._accepted(prepared, _Dispatched.from_raw(self.client.parse(raw), raw, prepared))
             response = await _awaited(self.client.ask, prepared.state, prepared.questions)
-            self._journal_response(request_id, RawResponse.from_decoded(response_to_raw(response)))
-            return _Dispatched(response, prepared.body, sent_exact=False)
+            raw = RawResponse.from_decoded(response_to_raw(response))
+            self._journal_response(request_id, raw)
+            return self._accepted(prepared, _Dispatched(response, prepared.body, sent_exact=False))
         except Exception as error:
             if isinstance(error, AttemptJournalCallbackError):
                 self._propagate_attempt_journal_error(request_id, error, raw)
@@ -940,8 +949,6 @@ class Judge:
 
 
 def _refuse_unanswered(questions: Mapping, response: JevResponse) -> None:
-    """A response that leaves out an asked answer is refused before anything is recorded; the
-    tokens it cost are already counted."""
     unanswered = [question_id for question_id in questions if question_id not in response.answers]
     if unanswered:
         raise UnansweredQuestionError(f"{response.model} returned no answer for {', '.join(unanswered)}")
