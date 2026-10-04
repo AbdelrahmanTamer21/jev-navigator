@@ -728,7 +728,8 @@ def test_a_property_assignment_names_no_module_name_but_a_commonjs_export_stays_
     """`foo.bar = function () {}` and `exports.other = () => 3` give their module no name `bar` or
     `other`, so a bare call in that file is no proof. `exports.other`, `module.exports.stop` and the
     members of `module.exports = {...}` are the module's exports, so importing them stays proven,
-    while importing `bar` does not."""
+    while importing `bar` does not. `x.other()` through `const x = require('./x')` is proven too;
+    `require('./x').stop()` names no module alias and stays a candidate."""
     # Arrange
     files = {
         "x.js": (
@@ -772,7 +773,7 @@ def test_a_property_assignment_names_no_module_name_but_a_commonjs_export_stays_
         ("viaImport", "run"): ("resolved", "y.js:2-2"),
         ("viaImport", "walk"): ("resolved", "y.js:3-3"),
     }
-    assert required == {3: "candidate", 4: "candidate"}
+    assert required == {3: "resolved", 4: "candidate"}
 
 
 @pytest.mark.parametrize(

@@ -12,6 +12,7 @@ from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.imports import (
     imported_modules,
     imported_names,
+    module_aliases,
     reexported_names,
 )
 from jev_navigator.index.spans import Span
@@ -76,6 +77,28 @@ import { ignored } from "./ignored";
         (frozenset({"refund", "placeOrder"}), "./commands"),
     )
     assert reexported_names("from .orders import create_order", "app/__init__.py") == ()
+
+
+def test_a_module_alias_is_a_name_holding_a_whole_script_module() -> None:
+    """A namespace import or a plain require holds the module; a member read off a require, a call of
+    it, a name imported by name, a namespace re-export and commented-out code hold none."""
+    # Arrange
+    source = """\
+import * as jwt from "./jwt";
+const db = require('./db');
+const verify = require("./jwt").verify;
+const app = require("./app")(options);
+import { sign } from "./jwt";
+export * as tools from "./tools";
+// const old = require("./old");
+"""
+
+    # Act
+    aliases = module_aliases(source, "src/main.ts")
+
+    # Assert
+    assert aliases == {"jwt": "./jwt", "db": "./db"}
+    assert module_aliases("import app.jobs as jobs", "app/main.py") == {}
 
 
 def test_the_export_surface_is_the_ast_grep_statement_nodes(tmp_path: Path) -> None:

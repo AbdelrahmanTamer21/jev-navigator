@@ -16,12 +16,13 @@ from functools import cache
 from pathlib import Path, PurePosixPath
 
 from . import tools
-from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts
+from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts, binding_through_module
 from .fact_cache import FactCache
 from .imports import (
     ImportFact,
     imported_modules,
     imported_names,
+    module_aliases,
     module_imports,
     reexported_names,
     resolve_import,
@@ -105,6 +106,7 @@ class CodeIndex:
         self._module_scope_in = cache(self._module_scope_spans)
         self._importable_in = cache(self._importable_spans)
         self._names_imported = cache(self._read_imported_names)
+        self._module_aliases = cache(self._read_module_aliases)
         self._binding = cache(self._compute_binding)
         self._unread_names = cache(self._read_unread_names)
 
@@ -367,6 +369,9 @@ class CodeIndex:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
                 return injected
+        through_module = self._binding_through_module(file, name, receiver, role)
+        if through_module is not None:
+            return through_module
         definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
         facts = CallFacts(
             file,
@@ -537,10 +542,43 @@ class CodeIndex:
             if not any(other.start < span.start <= other.end for other in structure.symbols)
         )
 
+    def _binding_through_module(
+        self, file: str, name: str, receiver: str | None, role: str | None
+    ) -> Binding | None:
+        """The binding of ``receiver.name`` when ``receiver`` holds a whole module of the scope
+        (``import * as receiver``, ``const receiver = require(...)``), read from that module's own
+        facts and those of the modules it re-exports ``name`` from, never from a search of the scope.
+        None when ``receiver`` holds no module or the module defines no such ``name``."""
+        specifier = self._module_aliases(file).get(receiver) if receiver else None
+        if specifier is None:
+            return None
+        for exporter in self._exporters(file, specifier, name):
+            definition = self._importable_definition(exporter.path, name, role)
+            if definition is not None:
+                return binding_through_module(receiver, definition, exporter)
+        return None
+
+    def _importable_definition(self, file: str, name: str, role: str | None) -> Span | None:
+        """The first definition of ``name`` in ``file`` that another module can import, symbols
+        before declarations as ``find_definition`` orders them."""
+        structure = self._file_structure(file)
+        importable = self._importable_in(file)
+        return next(
+            (
+                span
+                for span in (*structure.symbols, *structure.declarations)
+                if span.name == name and span in importable and self._can_name(role, span)
+            ),
+            None,
+        )
+
     def _imported_from(self, file: str, name: str) -> tuple[ImportFact, ...]:
         specifier = self._names_imported(file).get(name)
-        if specifier is None:
-            return ()
+        return () if specifier is None else self._exporters(file, specifier, name)
+
+    def _exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
+        """The module ``file``'s import of ``specifier`` resolves to, then each module it re-exports
+        ``name`` from, with the evidence for each."""
         resolved = resolve_import(specifier, file, self._scope, self._script_paths(file), self._packages())
         if resolved is None:
             return ()
@@ -580,6 +618,9 @@ class CodeIndex:
 
     def _read_imported_names(self, file: str) -> dict[str, str]:
         return imported_names("\n".join(self._lines_of(file)), file)
+
+    def _read_module_aliases(self, file: str) -> dict[str, str]:
+        return module_aliases("\n".join(self._lines_of(file)), file)
 
     def read_slice(self, span: Span, origin: str = "") -> CodeSlice:
         lines = self._lines_of(span.file)

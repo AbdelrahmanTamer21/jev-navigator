@@ -754,6 +754,42 @@ def test_a_flow_typed_class_keeps_its_methods(tmp_path: Path) -> None:
     assert site.binding.status == "candidate"
 
 
+def test_a_call_through_a_whole_module_import_reads_only_that_module(tmp_path: Path, ast_grep_runs) -> None:
+    """`jwt.verify()` after `import * as jwt from './jwt'` or `const jwt = require('./jwt')` calls the
+    `verify` that module defines or re-exports. It is read from that module's own facts, so another
+    file defining a `verify` is never parsed to bind it."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/jwt.ts": "export function verify(token: string) {\n  return token;\n}\n",
+            "src/index.ts": "export * from './jwt';\n",
+            "src/unrelated.ts": "export function verify() {\n  return 0;\n}\n",
+            "src/esm.ts": (
+                "import * as jwt from './jwt';\nimport * as utils from './index';\n\n"
+                "export function direct(token: string) {\n  return jwt.verify(token);\n}\n\n"
+                "export function reexported(token: string) {\n  return utils.verify(token);\n}\n"
+            ),
+            "src/cjs.js": (
+                "const jwt = require('./jwt');\n\nfunction check(token) {\n  return jwt.verify(token);\n}\n"
+            ),
+        },
+    )
+    callers = [
+        next(span for span in index.functions_in(file) if span.name == name)
+        for file, name in (("src/esm.ts", "direct"), ("src/esm.ts", "reexported"), ("src/cjs.js", "check"))
+    ]
+
+    # Act
+    bindings = [edge.binding for caller in callers for edge in index.callee_edges(caller)]
+    scanned = {file for _, _, files in ast_grep_runs for file in files}
+
+    # Assert
+    verify = Span("src/jwt.ts", 1, 3, "verify")
+    assert [(binding.status.value, binding.target) for binding in bindings] == [("resolved", verify)] * 3
+    assert "src/unrelated.ts" not in scanned
+
+
 def test_the_flow_partition_is_scanned_on_its_own(tmp_path: Path, ast_grep_runs) -> None:
     """The `languageGlobs` config is global per invocation, so `@flow` files are scanned in their own
     invocation and plain JavaScript keeps the JavaScript grammar byte for byte."""
