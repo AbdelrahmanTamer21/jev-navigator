@@ -104,6 +104,61 @@ def test_a_function_whose_default_value_is_an_arrow_keeps_its_name_in_the_entry_
     assert _option_for(options, "file retry.ts") == "file retry.ts: Symbols: retry, attempt"
 
 
+@pytest.mark.parametrize(
+    ("file", "source", "symbols"),
+    [
+        (
+            "api.ts",
+            "export const api = {\n  list() {\n    return [];\n  },\n  get: (id) => id,\n};\n\n"
+            "export function helper() {\n  return api.list();\n}\n",
+            "helper, api.list, api.get",
+        ),
+        (
+            "typed.ts",
+            "export const handlers: Handlers = {\n  open: async (event) => event,\n};\n"
+            "const routes = {\n  home: () => 1,\n} satisfies Routes;\n",
+            "handlers.open, routes.home",
+        ),
+        (
+            "api.js",
+            "const api = {\n  list() {\n    return [];\n  },\n};\n\nmodule.exports = api;\n",
+            "api.list",
+        ),
+        ("exported.js", "module.exports = {\n  list() {\n    return [];\n  },\n};\n", "list"),
+        (
+            "tools.ts",
+            "namespace Tools {\n  export function run() {\n    return 1;\n  }\n}\n\n"
+            "function main() {\n  return Tools.run();\n}\n",
+            "main, run",
+        ),
+        ("trpc.ts", "const t = create({\n  errorFormatter() {\n    return 1;\n  },\n});\n", "errorFormatter"),
+    ],
+    ids=[
+        "an exported object beside a function",
+        "objects with a type",
+        "a CommonJS module exporting its object",
+        "a CommonJS exports object",
+        "a namespace member",
+        "only a call's callback",
+    ],
+)
+def test_the_entry_text_lists_what_the_module_names_then_its_objects_members(
+    tmp_path: Path, file: str, source: str, symbols: str
+) -> None:
+    """The functions and classes the module names come first. A function of an object a module-level
+    variable holds follows under the object's name, the same for ESM and CommonJS; a member of a
+    CommonJS exports object and of a namespace under its own. A module naming none of these still
+    lists the functions no other function holds, so no file is left without names."""
+    # Arrange
+    index = _index(tmp_path, {file: source, "util/x.py": "x = 1\n"})
+
+    # Act
+    options = _root_options(index)
+
+    # Assert
+    assert _option_for(options, f"file {file}") == f"file {file}: Symbols: {symbols}"
+
+
 def test_the_option_set_is_the_same_directories_and_files_as_before(tmp_path: Path) -> None:
     options = _root_options(_index(tmp_path, {**LIBRARY, "setup.py": "def setup():\n    pass\n"}))
 
@@ -118,13 +173,13 @@ def test_files_are_read_one_per_option_first_then_round_robin_up_to_the_read_bud
     folders = {f"area{number:02d}/mod.py": f"def thing_{number:02d}():\n    pass\n" for number in range(40)}
     index = _index(tmp_path, folders)
     read: list[str] = []
-    original = CodeIndex.top_level_symbols
+    original = CodeIndex.module_names
 
     def counting(self: CodeIndex, file: str):
         read.append(file)
         return original(self, file)
 
-    monkeypatch.setattr(CodeIndex, "top_level_symbols", counting)
+    monkeypatch.setattr(CodeIndex, "module_names", counting)
 
     reads_for_the_root_request: list[int] = []
 

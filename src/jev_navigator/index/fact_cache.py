@@ -22,6 +22,7 @@ from .scope_scan import (
     LocalName,
     ModuleAlias,
     NamespaceMember,
+    ObjectMember,
     ReferenceMatch,
     fact_rules,
 )
@@ -175,6 +176,10 @@ def _encode(facts: FileFacts) -> dict:
                 [member.first, member.last, asdict(member.span)]
                 for member in facts.structure.namespace_members
             ],
+            "object_members": [
+                [member.owner, asdict(member.span)] for member in facts.structure.object_members
+            ],
+            "outer_symbols": [asdict(span) for span in facts.structure.outer_symbols],
         },
         "calls": [asdict(call) for call in facts.calls],
         "references": [asdict(reference) for reference in facts.references],
@@ -203,6 +208,8 @@ def _decode(file: str, raw: dict) -> FileFacts:
                 NamespaceMember(int(first), int(last), _span(file, span))
                 for first, last, span in structure["namespace_members"]
             ),
+            tuple(ObjectMember(owner, _span(file, span)) for owner, span in structure["object_members"]),
+            tuple(_span(file, span) for span in structure["outer_symbols"]),
         ),
         tuple(CallMatch(file, call["line"], call["name"], call.get("receiver")) for call in raw["calls"]),
         tuple(

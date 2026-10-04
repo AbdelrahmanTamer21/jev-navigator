@@ -31,6 +31,7 @@ from .languages import (
     FUNCTION_KINDS,
     LOCAL_NAME_RULES,
     MODULE_ALIAS_RULES,
+    MODULE_VARIABLE,
     NAME_HOLDERS,
     NAME_WRAPPERS,
     NAMESPACE_KINDS,
@@ -89,6 +90,14 @@ class NamespaceMember(NamedTuple):
     span: Span
 
 
+class ObjectMember(NamedTuple):
+    """``span`` is a function or class of the object literal the module-level variable ``owner``
+    holds: a method, or a property's value (``const api = { list() {}, get: (id) => id }``)."""
+
+    owner: str
+    span: Span
+
+
 @dataclass(frozen=True)
 class FileStructure:
     """``module_symbols`` are the symbols their module names: one of their syntax nodes no function,
@@ -101,7 +110,9 @@ class FileStructure:
     ``type_declarations`` and ``value_declarations`` are the declarations a type use and a value
     use may name, decided by each declaration's own syntax node. ``local_names`` are the names each
     function binds for its own body (see ``LOCAL_NAME_RULES``); a name a module-level block binds
-    is not among them."""
+    is not among them. ``object_members`` are the functions and classes of the objects module-level
+    variables hold (see ``ObjectMember``), and ``outer_symbols`` the symbols no function, class or
+    namespace holds, whatever value or property holds them."""
 
     functions: tuple[Span, ...]
     symbols: tuple[Span, ...]
@@ -112,6 +123,8 @@ class FileStructure:
     value_declarations: tuple[Span, ...]
     local_names: tuple[LocalName, ...] = ()
     namespace_members: tuple[NamespaceMember, ...] = ()
+    object_members: tuple[ObjectMember, ...] = ()
+    outer_symbols: tuple[Span, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -209,6 +222,8 @@ class _FileFound:
         default_factory=lambda: {rule: set() for rule in _MARK_RULES}
     )
     namespaces: list[_Namespace] = field(default_factory=list)
+    # The byte offset and the name of each module-level variable whose value is an object.
+    object_owners: list[tuple[int, str]] = field(default_factory=list)
     declaration_nodes: list[_Declaration] = field(default_factory=list)
     declared_names: list[tuple[int, str]] = field(default_factory=list)
     bound_names: list[tuple[int, str]] = field(default_factory=list)
@@ -274,6 +289,8 @@ class _FileFound:
             _sorted(span for span, declaration in declared if declaration.kind.named_by_values),
             _local_names(self.ranges, self.classes, self.bound_names),
             nodes.namespace_members(declared),
+            _object_members(self.ranges, self.marks[_OBJECT_MEMBER_RULE], self.object_owners),
+            _ordered(symbols & nodes.outermost(), positions),
         )
 
     def _references(self) -> tuple[ReferenceMatch, ...]:
@@ -291,6 +308,8 @@ class _FileFound:
             self.marks[rule].add((offsets["start"], offsets["end"]))
         elif rule == _NAMESPACE_RULE:
             self.namespaces.append(_Namespace(offsets["start"], offsets["end"], start, end))
+        elif rule == _OBJECT_OWNER_RULE:
+            self.object_owners.append((offsets["start"], match["text"]))
         elif rule == _DECLARED_NAME_RULE:
             self.declared_names.append((offsets["start"], match["text"]))
         elif rule == _LOCAL_NAME_RULE:
@@ -438,6 +457,21 @@ def _marked(ranges: list[tuple[int, int, Span]], marked: set[tuple[int, int]]) -
     return {span for start, end, span in ranges if (start, end) in marked}
 
 
+def _object_members(
+    ranges: list[tuple[int, int, Span]], marked: set[tuple[int, int]], owners: list[tuple[int, str]]
+) -> tuple[ObjectMember, ...]:
+    """Each marked member with the module-level variable whose object holds it: the last one named
+    before it, since module-level variables never nest."""
+    ordered = sorted(owners)
+    starts = [start for start, _ in ordered]
+    members = {
+        ObjectMember(ordered[index - 1][1], span)
+        for start, end, span in ranges
+        if (start, end) in marked and (index := bisect_right(starts, start)) > 0
+    }
+    return tuple(sorted(members, key=lambda member: member.span))
+
+
 @dataclass(frozen=True)
 class _Namespace:
     """A namespace node's byte range, end exclusive, and its first and last line."""
@@ -470,6 +504,11 @@ class _Nodes:
             for start, end, span, holder in self._sweep(())
             if holder is None and isinstance(span, Span) and (start, end) not in self.owned
         }
+
+    def outermost(self) -> set[Span]:
+        """The spans no other function, class or namespace holds, whatever value or property holds
+        them: `errorFormatter` in `const t = create({ errorFormatter() {} })`."""
+        return {span for _, _, span, holder in self._sweep(()) if holder is None and isinstance(span, Span)}
 
     def namespace_members(self, declared: Iterable[tuple[Span, _Declaration]]) -> tuple[NamespaceMember, ...]:
         """Each function, class and declaration whose innermost holder is a namespace, with that
@@ -594,7 +633,9 @@ _MODULE_ALIAS_RULE = "module_alias"
 _PROPERTY_VALUE_RULE = "property_value"
 _SELF_NAMED_RULE = "self_named"
 _MODULE_EXPORT_RULE = "module_export"
-_MARK_RULES = (_HELD_RULE, _PROPERTY_VALUE_RULE, _MODULE_EXPORT_RULE, _SELF_NAMED_RULE)
+_OBJECT_MEMBER_RULE = "object_member"
+_OBJECT_OWNER_RULE = "object_owner"
+_MARK_RULES = (_HELD_RULE, _PROPERTY_VALUE_RULE, _MODULE_EXPORT_RULE, _SELF_NAMED_RULE, _OBJECT_MEMBER_RULE)
 _STRUCTURE_RULE_IDS = frozenset(
     {
         "function",
@@ -604,6 +645,7 @@ _STRUCTURE_RULE_IDS = frozenset(
         _LOCAL_NAME_RULE,
         *_MARK_RULES,
         _NAMESPACE_RULE,
+        _OBJECT_OWNER_RULE,
         _ERROR_RULE,
     }
 )
@@ -654,6 +696,7 @@ def _structure_rules(languages: Sequence[str]) -> str:
         if VALUE_KINDS[language]:
             documents.append(_held_rule(language))
             documents += _property_rules(language)
+            documents += _object_member_rules(language)
             documents.append(_self_named_rule(language))
         if NAMESPACE_KINDS[language]:
             documents.append(
@@ -685,6 +728,30 @@ def _property_rules(language: str) -> list[str]:
             f"  any: {symbols}\n  {_held_past_wrappers(language, PROPERTY_TARGET)}",
         ),
         _rule_document(_MODULE_EXPORT_RULE, language, export),
+    ]
+
+
+def _object_member_rules(language: str) -> list[str]:
+    """Every function and class that is a method or a property value of an object literal a
+    module-level variable holds, past wrappers such as `satisfies`, and the name of every
+    module-level variable whose value is an object (see ``ObjectMember``)."""
+    symbol_kinds = (*FUNCTION_KINDS[language], *CLASS_KINDS[language])
+    expressions = _kinds([kind for kind in symbol_kinds if kind in EXPRESSION_KINDS])
+    held_object = (
+        f"{{kind: object, inside: {{stopBy: {_past_wrappers(language)}, any: [{MODULE_VARIABLE}]}}}}"
+    )
+    held_pair = f"{{kind: pair, inside: {held_object}}}"
+    member = (
+        "  any:\n"
+        f"    - {{kind: method_definition, not: {{not: {{inside: {held_object}}}}}}}\n"
+        f"    - {{any: {expressions}, {_held_past_wrappers(language, held_pair)}}}"
+    )
+    values = _kinds(("object", *NAME_WRAPPERS[grammar_of(language)]))
+    variable = f"{{field: name, all: [{MODULE_VARIABLE}, {{has: {{field: value, any: {values}}}}}]}}"
+    owner = f"  kind: identifier\n  not: {{not: {{inside: {variable}}}}}"
+    return [
+        _rule_document(_OBJECT_MEMBER_RULE, language, member),
+        _rule_document(_OBJECT_OWNER_RULE, language, owner),
     ]
 
 

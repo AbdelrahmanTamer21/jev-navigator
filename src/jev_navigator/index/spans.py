@@ -20,6 +20,11 @@ class Span:
     def key(self) -> str:
         return f"{self.file}:{self.start}-{self.end}"
 
+    @property
+    def is_named(self) -> bool:
+        """Whether the syntax gave the span a name: an anonymous function's is `<anonymous>`."""
+        return bool(self.name) and not self.name.startswith("<")
+
     def contains(self, line: int) -> bool:
         return self.start <= line <= self.end
 

@@ -90,13 +90,13 @@ def test_roundtrip_rebinds_paths_without_retaining_source(tmp_path, example):
 
 def test_roundtrip_keeps_every_fact_a_script_module_records(tmp_path):
     """Each fact the scan records comes back from the cache unchanged: a function's own names,
-    module aliases, exported values, CommonJS exports, declarations, the export surface and the
-    exports under another name."""
+    module aliases, exported values, CommonJS exports, declarations, the export surface, the
+    exports under another name, an object's members and the symbols nothing holds."""
     content = (
         b"const db = require('./db');\nimport * as jwt from './jwt';\n"
         b"function run(task, { retries }) {\n  const done = db.save(task);\n  return done;\n}\n"
         b"exports.run = run;\nexports.stop = function () { return 0; };\nexport const LIMIT = 3;\n"
-        b"export { run as start };\n"
+        b"export { run as start };\nconst api = { list() { return []; } };\n"
     )
     (tmp_path / "module.js").write_bytes(content)
     facts = scan_facts(["module.js"], tmp_path, Unparsed())["module.js"]
@@ -107,6 +107,7 @@ def test_roundtrip_keeps_every_fact_a_script_module_records(tmp_path):
 
     assert facts.structure.local_names and facts.module_aliases and facts.exported_values
     assert facts.structure.commonjs_exports and facts.export_names and facts.renamed_exports
+    assert facts.structure.object_members and facts.structure.outer_symbols
     assert restored == facts
 
 

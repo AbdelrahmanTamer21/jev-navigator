@@ -365,12 +365,23 @@ class CodeIndex:
         """Functions and classes."""
         return self._file_structure(file).symbols
 
-    def top_level_symbols(self, file: str) -> tuple[Span, ...]:
-        """The functions and classes the module names (see ``FileStructure.module_symbols``) or
-        assigns to its CommonJS exports, in file order."""
+    def module_names(self, file: str) -> tuple[str, ...]:
+        """The names a reader finds ``file``'s code by, best first: the functions and classes the
+        module names (see ``FileStructure.module_symbols``) or assigns to its CommonJS exports, then
+        each function of an object a module-level variable holds, as `api.list`, and each function
+        or class of a namespace, each group in file order. A module offering none of these lists the
+        symbols no function, class or namespace holds, so a file of callbacks still shows them."""
         structure = self._file_structure(file)
-        exported = (span for span in structure.commonjs_exports if span not in structure.module_symbols)
-        return tuple(sorted((*structure.module_symbols, *exported), key=lambda span: (span.start, -span.end)))
+        symbols = set(structure.symbols)
+        own = [(span, span.name) for span in (*structure.module_symbols, *structure.commonjs_exports)]
+        held = [(member.span, f"{member.owner}.{member.span.name}") for member in structure.object_members]
+        held += [
+            (member.span, member.span.name)
+            for member in structure.namespace_members
+            if member.span in symbols
+        ]
+        names = dict.fromkeys((*_named_in_file_order(own), *_named_in_file_order(held)))
+        return tuple(names) or _named_in_file_order((span, span.name) for span in structure.outer_symbols)
 
     def declarations_in(self, file: str) -> tuple[Span, ...]:
         """Constants, assignments, types, interfaces and enums at module level or directly in a
@@ -1141,6 +1152,12 @@ def _regular_blobs(listing: str) -> dict[str, str]:
         if fields[0] in _REGULAR_FILE_MODES:
             blobs.setdefault(path, fields[1] if fields[1] != "blob" else fields[2])
     return blobs
+
+
+def _named_in_file_order(spans_and_names: Iterable[tuple[Span, str]]) -> tuple[str, ...]:
+    """The names of the named spans, outer first where spans start together, each name once."""
+    ordered = sorted(spans_and_names, key=lambda entry: (entry[0].start, -entry[0].end))
+    return tuple(dict.fromkeys(name for span, name in ordered if span.is_named))
 
 
 def _commits(log: str) -> list[set[str]]:

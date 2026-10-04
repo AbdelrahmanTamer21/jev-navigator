@@ -1032,18 +1032,19 @@ def test_a_scope_path_that_leaves_the_root_is_refused(tmp_path: Path, scope_path
         CodeIndex(root, [scope_path])
 
 
-def test_top_level_symbols_are_the_functions_and_classes_no_other_symbol_contains(
-    sample_index: CodeIndex,
-) -> None:
-    top_level = [span.name for span in sample_index.top_level_symbols("app/orders.py")]
+def test_a_module_names_its_functions_and_classes_but_not_their_methods(sample_index: CodeIndex) -> None:
+    names = sample_index.module_names("app/orders.py")
 
-    assert top_level == ["OrderService", "cancel"]
+    assert names == ("OrderService", "cancel")
     assert "place" in [span.name for span in sample_index.symbols_in("app/orders.py")]
 
 
-def test_top_level_symbols_are_the_ones_the_module_names_or_exports(tmp_path: Path) -> None:
-    """A one-line function keeps its place beside the named arrow its default value holds. A method of
-    an object literal is the object's, not the module's, and a CommonJS export is the module's own."""
+def test_module_names_list_what_the_module_names_or_exports_before_its_objects_members(
+    tmp_path: Path,
+) -> None:
+    """A one-line function keeps its place beside the named arrow its default value holds, and a
+    CommonJS export is the module's own. A method of an object literal is the object's, so it follows
+    under the object's name."""
     # Arrange
     (tmp_path / "retry.js").write_text(
         "function retry(again = () => 1) { return attempt(); }\n"
@@ -1054,10 +1055,10 @@ def test_top_level_symbols_are_the_ones_the_module_names_or_exports(tmp_path: Pa
     index = CodeIndex(tmp_path, ("retry.js",), fact_cache_dir=tmp_path / "cache")
 
     # Act
-    top_level = [span.name for span in index.top_level_symbols("retry.js")]
+    names = index.module_names("retry.js")
 
     # Assert
-    assert top_level == ["retry", "attempt", "run"]
+    assert names == ("retry", "attempt", "run", "api.list")
 
 
 def test_a_rendered_component_is_a_call_and_a_platform_element_is_not(tmp_path: Path) -> None:
