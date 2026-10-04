@@ -11,6 +11,7 @@ names they may hide.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,7 @@ from .imports import _local
 from .languages import (
     CLASS_KINDS,
     DECLARATION_RULES,
+    DECLARED_NAME_RULES,
     EXPRESSION_KINDS,
     FLOW_LANGUAGE,
     FLOW_SGCONFIG,
@@ -27,7 +29,6 @@ from .languages import (
     NAME_HOLDERS,
     NAME_WRAPPERS,
     OBJECT_KINDS,
-    declared_name,
     export_rules,
     grammar_of,
     language_for,
@@ -163,7 +164,8 @@ def _unparsed_lines_from_matches(matches) -> dict[str, tuple[tuple[int, int], ..
 def _structure_from_matches(files, unparsed, matches):
     functions: dict[str, set[Span]] = {file: set() for file in files}
     classes: dict[str, set[Span]] = {file: set() for file in files}
-    declarations: dict[str, set[Span]] = {file: set() for file in files}
+    declaration_nodes: dict[str, list[_Node]] = {file: [] for file in files}
+    declared_names: dict[str, list[tuple[int, str]]] = {file: [] for file in files}
     ranges: dict[str, list[tuple[int, int, Span]]] = {file: [] for file in files}
     object_members: dict[str, set[tuple[int, int]]] = {file: set() for file in files}
     for match in matches:
@@ -176,9 +178,10 @@ def _structure_from_matches(files, unparsed, matches):
         offsets = match["range"]["byteOffset"]
         if match["ruleId"] == _OBJECT_MEMBER_RULE:
             object_members[file].add((offsets["start"], offsets["end"]))
+        elif match["ruleId"] == _DECLARED_NAME_RULE:
+            declared_names[file].append((offsets["start"], match["text"]))
         elif match["ruleId"] == "declaration":
-            # Named from its own text: a declaration may start after other code on its line.
-            declarations[file].add(Span(file, start, end, declared_name(match["text"])))
+            declaration_nodes[file].append(_Node(offsets["start"], offsets["end"], start, end))
         else:
             target = functions if match["ruleId"] == "function" else classes
             # The syntax tree names the symbol, never a physical line: a method on a one-line class
@@ -194,13 +197,44 @@ def _structure_from_matches(files, unparsed, matches):
         file: FileStructure(
             _ordered(functions[file], positions),
             _ordered(functions[file] | classes[file], positions),
-            tuple(sorted(declarations[file])),
+            tuple(sorted(_declarations(file, declaration_nodes[file], declared_names[file]))),
             _ordered(
                 (functions[file] | classes[file]) - _held(ranges[file], object_members[file]), positions
             ),
         )
         for file in files
     }
+
+
+@dataclass(frozen=True, order=True)
+class _Node:
+    """A syntax node's byte range, end exclusive, and its first and last line."""
+
+    start: int
+    end: int
+    first_line: int
+    last_line: int
+
+
+def _declarations(file: str, nodes: list[_Node], names: list[tuple[int, str]]) -> set[Span]:
+    """One span per name a declaration binds, over the lines of the innermost declaration holding
+    the name at ``offset``."""
+    ordered = sorted(nodes)
+    starts = [node.start for node in ordered]
+    return {
+        Span(file, holder.first_line, holder.last_line, name)
+        for offset, name in names
+        if (holder := _innermost(ordered, starts, offset)) is not None
+    }
+
+
+def _innermost(ordered: list[_Node], starts: list[int], offset: int) -> _Node | None:
+    """Nodes nest or are disjoint, so the latest-starting node that reaches past ``offset`` holds it
+    most closely."""
+    for node in reversed(ordered[: bisect_right(starts, offset)]):
+        if offset < node.end:
+            return node
+    return None
 
 
 def _source_positions(ranges: Iterable[tuple[int, int, Span]]) -> dict[Span, int]:
@@ -289,7 +323,10 @@ def _captured_name(match: dict) -> str:
 
 _ERROR_RULE = "parse_error"
 _OBJECT_MEMBER_RULE = "object_member"
-_STRUCTURE_RULE_IDS = frozenset({"function", "class", "declaration", _OBJECT_MEMBER_RULE, _ERROR_RULE})
+_DECLARED_NAME_RULE = "declared_name"
+_STRUCTURE_RULE_IDS = frozenset(
+    {"function", "class", "declaration", _DECLARED_NAME_RULE, _OBJECT_MEMBER_RULE, _ERROR_RULE}
+)
 _EXPORT_STATEMENT_RULE = "export_surface"
 _EXPORT_SPECIFIER_RULE = "export_specifier"
 _EXPORT_RULE_IDS = (_EXPORT_STATEMENT_RULE, _EXPORT_SPECIFIER_RULE)
@@ -310,22 +347,24 @@ def _structure_rules(languages: Sequence[str]) -> str:
     for language in languages:
         documents.append(_kind_rule("function", language, FUNCTION_KINDS[language]))
         documents.append(_kind_rule("class", language, CLASS_KINDS[language]))
-        documents.append(
-            f"id: declaration\nlanguage: {grammar_of(language)}\nrule:\n{DECLARATION_RULES[language]}"
-        )
-        documents.append(f"id: {_ERROR_RULE}\nlanguage: {grammar_of(language)}\nrule:\n  kind: ERROR")
+        documents.append(_rule_document("declaration", language, DECLARATION_RULES[language]))
+        documents.append(_rule_document(_DECLARED_NAME_RULE, language, DECLARED_NAME_RULES[language]))
+        documents.append(_rule_document(_ERROR_RULE, language, "  kind: ERROR"))
         if OBJECT_KINDS[language]:
             documents.append(_object_member_rule(language))
     return "\n---\n".join(documents)
+
+
+def _rule_document(rule_id: str, language: str, rule: str) -> str:
+    return f"id: {rule_id}\nlanguage: {grammar_of(language)}\nrule:\n{rule}"
 
 
 def _object_member_rule(language: str) -> str:
     """Every function and class anywhere inside an object literal (see ``OBJECT_KINDS``)."""
     symbols = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language]))
     objects = _kinds(OBJECT_KINDS[language])
-    return (
-        f"id: {_OBJECT_MEMBER_RULE}\nlanguage: {grammar_of(language)}\nrule:\n"
-        f"  any: {symbols}\n  inside:\n    stopBy: end\n    any: {objects}"
+    return _rule_document(
+        _OBJECT_MEMBER_RULE, language, f"  any: {symbols}\n  inside:\n    stopBy: end\n    any: {objects}"
     )
 
 

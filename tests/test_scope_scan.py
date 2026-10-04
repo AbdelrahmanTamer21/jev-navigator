@@ -433,6 +433,62 @@ def test_a_declaration_that_starts_mid_line_is_named_from_its_own_column(tmp_pat
     }
 
 
+def test_a_declaration_names_every_name_it_binds(tmp_path: Path) -> None:
+    """`const a = 1, b = 2` binds `a` and `b`, a destructuring binds each name it pulls out, and
+    `first, second = 1, 2` binds both. A name declared inside the value is not the declaration's,
+    and an attribute or item assignment binds no name at all."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/values.ts": (
+                "export const a = 1, b = 2;\n"
+                "export const { c, d: e, [key]: k, ...rest } = source;\n"
+                "const [f, [g], h = fallback] = list;\n"
+                "export type Id = string;\n"
+                "const make = function () { const inner = 1; return inner; };\n"
+            ),
+            "src/values.js": "const a = 1, b = 2;\nconst { c, d: e } = require('./source');\n",
+            "app/settings.py": (
+                "first, second = 1, 2\n*head, last = [1, 2]\napp.debug = True\nconfig['x'] = 1\n"
+                "TIMEOUT = RETRIES = 3\n"
+            ),
+        },
+    )
+
+    # Act
+    declared = {
+        file: [(span.start, span.name) for span in index.declarations_in(file)]
+        for file in ("src/values.ts", "src/values.js", "app/settings.py")
+    }
+
+    # Assert
+    assert declared == {
+        "src/values.ts": [
+            (1, "a"),
+            (1, "b"),
+            (2, "c"),
+            (2, "e"),
+            (2, "k"),
+            (2, "rest"),
+            (3, "f"),
+            (3, "g"),
+            (3, "h"),
+            (4, "Id"),
+            (5, "make"),
+        ],
+        "src/values.js": [(1, "a"), (1, "b"), (2, "c"), (2, "e")],
+        "app/settings.py": [
+            (1, "first"),
+            (1, "second"),
+            (2, "head"),
+            (2, "last"),
+            (5, "RETRIES"),
+            (5, "TIMEOUT"),
+        ],
+    }
+
+
 def test_a_function_given_as_a_default_value_is_named_by_the_name_it_defaults(tmp_path: Path) -> None:
     """`onError = () => {}` in a parameter list is the function a call `onError()` may reach, so it
     is named `onError`, also as a destructured default. On a one-line function it shares the
