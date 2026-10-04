@@ -195,7 +195,7 @@ Without a start, `jvn` uses typed Jev judgments to select entry candidates from 
 
 Every live call is a paid request, so `--max-calls` defaults to 24 for the whole run, choosing an entry
 point included; a search that reaches it ends with outcome `budget` and a resumable `not_inspected`
-frontier (or a saved entry-selection stage if the cap arrives earlier). Resume with another `jvn find`
+frontier (or a saved entry-selection stage if the cap, Ctrl-C or a failed request arrives earlier). Resume with another `jvn find`
 invocation using `--resume /path/to/previous-pack`; it gets a fresh call allowance and writes a new pack
 while keeping the earlier evidence. `--max-calls none` lifts the cap. Depth and step limits are unset by default. If you want an
 explicit allowance for a particular search, you can supply one:

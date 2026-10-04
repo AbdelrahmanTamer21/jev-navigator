@@ -543,14 +543,18 @@ class _Failed:
     error: Exception
 
 
-def _failed(error: Exception) -> _Failed:
-    """Every error a round's request or the stop check raises gets resume state: the search ends
-    ``failed`` holding this same error, and the CLI re-raises it after saving, so its edge still
-    decides between one line and a traceback. Only a send the abort stopped is re-raised, to count
-    as cancelled."""
+def search_failure(error: Exception) -> Exception:
+    """The one rule for what ends a search ``failed``: every error a request raises gets resume
+    state, the search holding this same error, and the CLI re-raises it after saving, so its edge
+    still decides between one line and a traceback. Only a send the abort stopped is re-raised, to
+    count as cancelled. Find, entry selection and Find All all apply it."""
     if isinstance(error, ABORTED_SEND_ERRORS):
         raise error
-    return _Failed(error)
+    return error
+
+
+def _failed(error: Exception) -> _Failed:
+    return _Failed(search_failure(error))
 
 
 @contextmanager
@@ -630,7 +634,7 @@ def _apply_stop_rule(judge: Judge, search: _Search) -> None:
         )
     except CallCapReachedError:
         search.cap_reached = True
-    except Exception as error:  # noqa: BLE001 - _failed owns which errors end the search failed
+    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
         search.failure = _failed(_named_stop_failure(rule, error)).error
 
 
@@ -644,7 +648,7 @@ async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:
         )
     except CallCapReachedError:
         search.cap_reached = True
-    except Exception as error:  # noqa: BLE001 - _failed owns which errors end the search failed
+    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
         search.failure = _failed(_named_stop_failure(rule, error)).error
 
 
@@ -807,7 +811,7 @@ def _ask_within_cap(judge: Judge, search: _Search, opening: _Opening):
     except CallCapReachedError:
         search.cap_reached = True
         return _Unanswered.BUDGET
-    except Exception as error:  # noqa: BLE001 - _failed owns which errors end the search failed
+    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
         return _failed(error)
 
 
@@ -826,7 +830,7 @@ async def _ask_within_cap_async(judge: Judge, search: _Search, opening: _Opening
     except CallCapReachedError:
         search.cap_reached = True
         return _Unanswered.BUDGET
-    except Exception as error:  # noqa: BLE001 - _failed owns which errors end the search failed
+    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
         return _failed(error)
 
 

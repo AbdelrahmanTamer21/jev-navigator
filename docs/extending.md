@@ -137,7 +137,9 @@ only for the same source bytes, scope, target, Check and thresholds; the CLI ver
 in its saved pack. Completed positive, negative and uncertain judgments retain their original
 request hashes and are not sent again. Static graph reconstruction does not consume model calls.
 Cancellation keeps coverage partial and reporting does not trigger scans of untouched files.
-Provider errors propagate; retained journal receipts describe the work actually performed.
+Ctrl-C during judging ends it `cancelled`, and a failed request ends it `failed` with `failure` holding
+the same error; both keep every answer that arrived in `judged`, so `completed=` resumes it. Retained
+journal receipts describe the work actually performed.
 
 The CLI composes entry selection and `find_code` with this function. A seed-search miss still permits
 the disconnected fallback. Use `jvn findall "functions that enforce the order item limit"` or
