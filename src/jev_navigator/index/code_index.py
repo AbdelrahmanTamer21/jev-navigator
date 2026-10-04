@@ -33,7 +33,7 @@ from .languages import (
 )
 from .packages import Packages
 from .scope_scan import FileFacts, FileStructure, ReferenceMatch, Unparsed, scan_facts
-from .source_files import DISAPPEARED, SourceFiles, SourceMemory
+from .source_files import DISAPPEARED, SourceFiles
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
 
@@ -746,11 +746,6 @@ class CodeIndex:
     def _read_bytes(self, file: str) -> bytes | None:
         """The file's bytes while they equal its first read, so facts are only built from them."""
         return self._sources.current(file)
-
-    @property
-    def source_memory(self) -> SourceMemory:
-        """What the index holds of the files it read: compressed first reads and cached lines."""
-        return self._sources.memory
 
     def _available_files(self, files: Sequence[str]) -> tuple[str, ...]:
         """The ``files`` still readable as the index first read them: neither reported unavailable
