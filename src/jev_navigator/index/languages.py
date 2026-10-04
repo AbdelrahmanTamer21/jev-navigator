@@ -380,6 +380,37 @@ LOCAL_NAME_RULES = {
 # defines (those are ``FileStructure.module_symbols``), one match per binding: in Python a
 # statement's target outside every function, class and lambda (a comprehension's names stay its
 # own), a deletion, and every name a function declares `global`, which it may bind for the module.
+# In a script, a declaration or loop variable outside every function, except the module alias a
+# `const name = require('module')` declares (see ``MODULE_ALIAS_RULES``), and every assignment,
+# since a function assigning a name it does not declare assigns the module's. A block's own
+# `let` or `const` counts too.
+_SCRIPT_REQUIRE_ALIAS = f"""{{field: name, kind: variable_declarator, \
+has: {{field: value, kind: call_expression, all: [{{has: {{field: function, regex: '^require$'}}}}, \
+{{has: {{field: arguments, has: {{kind: string}}}}}}]}}, inside: {{{_ANY_VARIABLES}, {_IN_MODULE}}}}}"""
+
+
+def _script_module_bindings(language: str, exclusions: str) -> str:
+    functions = ", ".join(f"{{kind: {kind}}}" for kind in FUNCTION_KINDS[language])
+    return f"""  any: [{_SCRIPT_NAME_KINDS}]
+  all:
+    - not:
+        not:
+          any:
+            - inside:
+                stopBy: end
+                field: left
+                any: [{{kind: assignment_expression}}, {{kind: augmented_assignment_expression}}]
+            - all:
+                - any:
+                    - inside: {{stopBy: end, field: name, kind: variable_declarator}}
+                    - inside: {{stopBy: end, field: left, kind: for_in_statement}}
+                - not: {{inside: {{stopBy: end, any: [{functions}]}}}}
+    - not: {{inside: {_SCRIPT_REQUIRE_ALIAS}}}
+  not:
+    any:
+{exclusions}"""
+
+
 MODULE_BINDING_RULES = {
     "python": f"""  kind: identifier
   all:
@@ -394,6 +425,9 @@ MODULE_BINDING_RULES = {
         - not: {{not: {{inside: {{kind: global_statement}}}}}}
   not:
     {_PYTHON_NOT_A_NAME}""",
+    "typescript": _script_module_bindings("typescript", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
+    "tsx": _script_module_bindings("tsx", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
+    "javascript": _script_module_bindings("javascript", _SCRIPT_LOCAL_EXCLUSIONS),
 }
 
 # The installed ast-grep supports tsx but not Flow. Route marked files through tsx;
@@ -409,6 +443,7 @@ TYPE_AND_VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_ENUMS
 DECLARED_NAME_RULES[FLOW_LANGUAGE] = _TYPED_SCRIPT_DECLARED_NAMES
 MODULE_ALIAS_RULES[FLOW_LANGUAGE] = _SCRIPT_MODULE_ALIASES
 LOCAL_NAME_RULES[FLOW_LANGUAGE] = LOCAL_NAME_RULES["tsx"]
+MODULE_BINDING_RULES[FLOW_LANGUAGE] = MODULE_BINDING_RULES["tsx"]
 
 # ast-grep reads `languageGlobs` only from a config file: a scan of flow files passes this sgconfig,
 # which parses every JavaScript suffix with the tsx grammar. Plain-JS files are scanned in their own

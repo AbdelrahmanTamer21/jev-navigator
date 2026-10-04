@@ -1533,6 +1533,55 @@ def test_a_dotted_python_import_holds_its_module_only_while_nothing_else_binds_i
     assert statuses == {"kept.py": "resolved", "rebound.py": "candidate"}
 
 
+def test_a_script_module_alias_holds_its_module_only_where_module_code_binds_the_name_once(
+    tmp_path: Path,
+) -> None:
+    """`db.query()` reads db.js only while the require or namespace import is the module's one binding
+    of `db`. Assigning `db` anywhere, declaring it again (a require inside a block declares no alias),
+    or a module-level function named `db` may leave it holding something else, so the call stays a
+    candidate. A name another function declares for itself is that function's own."""
+    # Arrange
+    cases = {
+        "a const require": ("const db = require('./db');\n", "resolved"),
+        "a namespace import": ("import * as db from './db';\n", "resolved"),
+        "another function's own db": (
+            "const db = require('./db');\nfunction other() { const db = 1; return db; }\n",
+            "resolved",
+        ),
+        "an assignment": ("let db = require('./db');\ndb = make();\n", "candidate"),
+        "an assignment in a function": (
+            "let db = require('./db');\nfunction reset() { db = make(); }\n",
+            "candidate",
+        ),
+        "a second declaration": ("var db = require('./db');\nvar db = wrap(db);\n", "candidate"),
+        "a function": ("var db = require('./db');\nfunction db() { return 0; }\n", "candidate"),
+        "a loop": ("var db = require('./db');\nfor (db of pools) {}\n", "candidate"),
+        "a require in a block": (
+            "var db = require('./db');\nif (legacy) {\n  var db = require('./fake');\n}\n",
+            "candidate",
+        ),
+    }
+    use = "function use() {\n  return db.query();\n}\n"
+    files = {f"use_{number}.js": head + use for number, (head, _) in enumerate(cases.values())}
+    index = committed(
+        tmp_path,
+        {
+            "db.js": "function query() { return 1; }\nmodule.exports = { query };\n",
+            "fake.js": "function query() { return 2; }\nmodule.exports = { query };\n",
+            **files,
+        },
+    )
+
+    # Act
+    statuses = {
+        case: index.binding_of(file, files[file].count("\n") - 1, "query", "db").status.value
+        for case, file in zip(cases, files, strict=True)
+    }
+
+    # Assert
+    assert statuses == {case: status for case, (_, status) in cases.items()}
+
+
 def test_an_import_alias_replaced_by_a_local_name_binds_nothing_through_the_import(tmp_path: Path) -> None:
     """A parameter or local variable with an alias's name replaces the import inside its function:
     `halt()` there is not the module's `stop`, in TypeScript or Python, nor `cls()` after

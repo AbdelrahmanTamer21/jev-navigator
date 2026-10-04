@@ -404,7 +404,9 @@ has no star import and no lost line that mentions it; otherwise `jwt.verify()` s
 In Python the alias must also be its module's one binding of the name: module-level code that
 assigns `jwt`, defines a function or class `jwt`, loops, opens or catches into it, or deletes it, or a
 function that declares it `global`, leaves `jwt.verify()` a `candidate`; after `import app.jwt` the
-name is `app`. A name a function binds for its own body (a parameter, a local
+name is `app`. A script module alias is held the same way: a second declaration of `jwt` outside every
+function (a `require` inside a block included), a loop over it, a module-level function `jwt`, or an
+assignment to it anywhere leaves the call a `candidate`. A name a function binds for its own body (a parameter, a local
 variable, a caught error or a loop variable) replaces any module-level definition or import of that
 name inside the function: `db.query()` with a parameter `db`, or `stop()` with a parameter `stop`,
 binds to no import; it is a `candidate` whose local value is not resolved. A function counts from its
