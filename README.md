@@ -297,9 +297,14 @@ Calls are found by name in the syntax tree, which is not a resolved binding. Eve
 `Binding(status, reason, target)`: `resolved` when a module-level definition in the same file, or one
 an import names, proves the target, `candidate` when only the name matches (a method on an unknown receiver, or a
 definition elsewhere with no import), `unresolved` when nothing in scope defines it, and `unknown` when
-the definition may sit in lines the index could not parse. A call `jwt.verify()` where `jwt` holds a
-whole module of the scope (`import * as jwt`, `const jwt = require(...)`) binds to the `verify` that
-module, or one it re-exports from, defines; only that module's facts are read. A call `halt()` where
+the definition may sit in lines the index could not parse. A call `jwt.verify()` where module-level
+code binds `jwt` to a whole module of the scope (`import * as jwt`, `const jwt = require('./jwt')`,
+read from the syntax tree) binds to the `verify` that module, or one it re-exports from, defines; only
+that module's facts are read. A name a function binds for its own body (a parameter, a local
+variable, a caught error or a loop variable) replaces any module-level definition or import of that
+name inside the function: `db.query()` with a parameter `db`, or `stop()` with a parameter `stop`,
+binds to no import and is at most a `candidate`. Types are looked up apart from values, so a local
+value never replaces a type. A call `halt()` where
 `halt` imports a definition under another name (`import { stop as halt }`, `const { stop: halt } =
 require(...)`, `from m import stop as halt`) binds the same way to `stop`, unless the file defines
 `halt` itself; it is `unknown` when that module could not be parsed where it mentions `stop`. A

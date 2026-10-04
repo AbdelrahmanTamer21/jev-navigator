@@ -219,6 +219,101 @@ DECLARED_NAME_RULES = {
     "javascript": _SCRIPT_DECLARED_NAMES,
 }
 
+# A name module-level code binds to a whole script module, with the module captured as `$SPEC`:
+# `const jwt = require('./jwt')` and `import * as jwt from './jwt'`. A require inside a function,
+# `require('./jwt').verify`, `require('./jwt')(options)` and a require of a computed or template
+# string bind none. A pattern captures its metavariables without printing the nodes it matched them
+# in, so the conditions on those nodes sit under a double negation too.
+_ANY_VARIABLES = "any: [{kind: lexical_declaration}, {kind: variable_declaration}]"
+_SCRIPT_MODULE_ALIASES = (
+    f"""  pattern: {{context: 'var $NAME = require($SPEC)', selector: variable_declarator}}
+  all:
+    - not: {{not: {{has: {{field: name, kind: identifier}}}}}}
+    - not: {{not: {{has: {{field: value, has: {{field: arguments, has: {{kind: string}}}}}}}}}}
+    - not: {{not: {{inside: {{{_ANY_VARIABLES}, {_IN_MODULE}}}}}}}""",
+    """  kind: import_statement
+  any:
+    - pattern: import * as $NAME from $SPEC
+    - pattern: import $DEFAULT, * as $NAME from $SPEC
+  not: {not: {inside: {kind: program}}}""",
+)
+MODULE_ALIAS_RULES = {
+    "python": (),
+    "typescript": _SCRIPT_MODULE_ALIASES,
+    "tsx": _SCRIPT_MODULE_ALIASES,
+    "javascript": _SCRIPT_MODULE_ALIASES,
+}
+
+# The names a function binds for its own body, one match per name: its parameters, the names its
+# declarations and destructurings bind, a caught error, a loop variable, and in Python each
+# assignment target. A default value, a computed key, a type annotation, a decorator, an attribute or
+# an item binds no name. Block scopes count as the whole function's, and a lambda's parameters as
+# its enclosing function's. A nested function's or class's own name is no local name.
+_SCRIPT_LOCAL_POSITIONS = """            - inside: {stopBy: end, field: name, kind: variable_declarator}
+            - inside: {stopBy: end, kind: formal_parameters}
+            - inside: {field: parameter, kind: arrow_function}
+            - inside: {stopBy: end, field: parameter, kind: catch_clause}
+            - inside: {stopBy: end, field: left, kind: for_in_statement}"""
+_SCRIPT_LOCAL_EXCLUSIONS = """      - inside:
+          stopBy: end
+          field: right
+          any: [{kind: assignment_pattern}, {kind: object_assignment_pattern}]
+      - inside: {stopBy: end, kind: computed_property_name}
+      - inside: {stopBy: end, any: [{kind: member_expression}, {kind: subscript_expression}]}
+      - inside: {stopBy: end, kind: decorator}"""
+_TYPED_SCRIPT_LOCAL_EXCLUSIONS = f"""{_SCRIPT_LOCAL_EXCLUSIONS}
+      - inside: {{stopBy: end, kind: type_annotation}}
+      - inside:
+          stopBy: end
+          field: value
+          any: [{{kind: required_parameter}}, {{kind: optional_parameter}}]"""
+
+
+def _script_local_names(language: str, exclusions: str) -> str:
+    functions = ", ".join(f"{{kind: {kind}}}" for kind in FUNCTION_KINDS[language])
+    return f"""  any: [{_SCRIPT_NAME_KINDS}]
+  all:
+    - not:
+        not:
+          any:
+{_SCRIPT_LOCAL_POSITIONS}
+    - not: {{not: {{inside: {{stopBy: end, any: [{functions}]}}}}}}
+  not:
+    any:
+{exclusions}"""
+
+
+LOCAL_NAME_RULES = {
+    "python": """  kind: identifier
+  all:
+    - not:
+        not:
+          any:
+            - inside: {any: [{kind: parameters}, {kind: lambda_parameters}, {kind: typed_parameter}]}
+            - inside:
+                field: name
+                any: [{kind: default_parameter}, {kind: typed_default_parameter}]
+            - inside:
+                any: [{kind: list_splat_pattern}, {kind: dictionary_splat_pattern}]
+                inside: {any: [{kind: parameters}, {kind: lambda_parameters}, {kind: typed_parameter}]}
+            - inside:
+                stopBy: end
+                field: left
+                any:
+                  - kind: assignment
+                  - kind: augmented_assignment
+                  - kind: for_statement
+                  - kind: for_in_clause
+            - inside: {field: name, kind: named_expression}
+            - inside: {kind: as_pattern_target}
+    - not: {not: {inside: {stopBy: end, kind: function_definition}}}
+  not:
+    inside: {stopBy: end, any: [{kind: attribute}, {kind: subscript}, {kind: type}]}""",
+    "typescript": _script_local_names("typescript", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
+    "tsx": _script_local_names("tsx", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
+    "javascript": _script_local_names("javascript", _SCRIPT_LOCAL_EXCLUSIONS),
+}
+
 # The installed ast-grep supports tsx but not Flow. Route marked files through tsx;
 # unsupported Flow constructs remain visible through ERROR nodes.
 FLOW_LANGUAGE = "flow"
@@ -230,6 +325,8 @@ TYPE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_TYPES
 VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_VALUES
 TYPE_AND_VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_ENUMS
 DECLARED_NAME_RULES[FLOW_LANGUAGE] = _TYPED_SCRIPT_DECLARED_NAMES
+MODULE_ALIAS_RULES[FLOW_LANGUAGE] = _SCRIPT_MODULE_ALIASES
+LOCAL_NAME_RULES[FLOW_LANGUAGE] = LOCAL_NAME_RULES["tsx"]
 
 # ast-grep reads `languageGlobs` only from a config file: a scan of flow files passes this sgconfig,
 # which parses every JavaScript suffix with the tsx grammar. Plain-JS files are scanned in their own

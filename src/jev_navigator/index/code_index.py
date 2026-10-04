@@ -12,6 +12,7 @@ import tempfile
 import threading
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import replace
 from functools import cache
 from pathlib import Path, PurePosixPath
 
@@ -30,7 +31,6 @@ from .imports import (
     ImportFact,
     imported_modules,
     imported_names,
-    module_aliases,
     module_imports,
     reexported_names,
     resolve_import,
@@ -39,7 +39,7 @@ from .languages import (
     language_of,
 )
 from .packages import Packages
-from .scope_scan import FileFacts, FileStructure, ReferenceMatch, Unparsed, scan_facts
+from .scope_scan import FileFacts, FileStructure, ReferenceMatch, Unparsed, first_identifier, scan_facts
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
 
@@ -114,7 +114,7 @@ class CodeIndex:
         self._module_scope_in = cache(self._module_scope_spans)
         self._importable_in = cache(self._importable_spans)
         self._names_imported = cache(self._read_imported_names)
-        self._module_aliases = cache(self._read_module_aliases)
+        self._local_scopes = cache(self._read_local_scopes)
         self._binding = cache(self._compute_binding)
         self._unread_names = cache(self._read_unread_names)
 
@@ -377,6 +377,9 @@ class CodeIndex:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
                 return injected
+        if self._names_a_local(file, line, name, receiver, role):
+            facts = self._call_facts(file, name, receiver, role)
+            return binding_from_facts(replace(facts, module_scope=(), importable=(), imported_from=()))
         through_import = (
             self._binding_through_alias(file, name, role)
             if receiver is None
@@ -384,8 +387,11 @@ class CodeIndex:
         )
         if through_import is not None:
             return through_import
+        return binding_from_facts(self._call_facts(file, name, receiver, role))
+
+    def _call_facts(self, file: str, name: str, receiver: str | None, role: str | None) -> CallFacts:
         definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
-        facts = CallFacts(
+        return CallFacts(
             file,
             name,
             receiver,
@@ -395,7 +401,22 @@ class CodeIndex:
             self._imported_from(file, name),
             self._files_hiding(name),
         )
-        return binding_from_facts(facts)
+
+    def _names_a_local(self, file: str, line: int, name: str, receiver: str | None, role: str | None) -> bool:
+        """Whether a function holding ``line`` binds the name the use looks up first (``db`` in
+        ``db.query()``) for its own body. The use then names that local value, never a definition or
+        import of its module. A type is looked up among types, which no local value replaces, and an
+        export names module-level code."""
+        if role in ("type", "export"):
+            return False
+        looked_up = name if receiver is None else first_identifier(receiver)
+        return any(first <= line <= last for first, last in self._local_scopes(file).get(looked_up, ()))
+
+    def _read_local_scopes(self, file: str) -> dict[str, tuple[tuple[int, int], ...]]:
+        scopes: dict[str, list[tuple[int, int]]] = {}
+        for local in self._file_structure(file).local_names:
+            scopes.setdefault(local.name, []).append((local.first, local.last))
+        return {name: tuple(lines) for name, lines in scopes.items()}
 
     def _files_hiding(self, name: str) -> frozenset[str]:
         """Where a definition of ``name`` could sit unseen: a file gone from the disk, or an unparsed
@@ -561,7 +582,7 @@ class CodeIndex:
         (``import * as receiver``, ``const receiver = require(...)``), read from that module's own
         facts and those of the modules it re-exports ``name`` from, never from a search of the scope.
         None when ``receiver`` holds no module or the module defines no such ``name``."""
-        specifier = self._module_aliases(file).get(receiver)
+        specifier = self._module_alias(file, receiver)
         if specifier is None:
             return None
         for exporter in self._exporters(file, specifier, name):
@@ -654,8 +675,11 @@ class CodeIndex:
     def _read_imported_names(self, file: str) -> dict[str, ImportedName]:
         return imported_names("\n".join(self._lines_of(file)), file)
 
-    def _read_module_aliases(self, file: str) -> dict[str, str]:
-        return module_aliases("\n".join(self._lines_of(file)), file)
+    def _module_alias(self, file: str, name: str) -> str | None:
+        """The module ``name`` holds when module-level code binds it to one whole module (see
+        ``ModuleAlias``); None when it binds it to none or to two."""
+        specifiers = {alias.specifier for alias in self._facts_in(file).module_aliases if alias.name == name}
+        return specifiers.pop() if len(specifiers) == 1 else None
 
     def read_slice(self, span: Span, origin: str = "") -> CodeSlice:
         lines = self._lines_of(span.file)

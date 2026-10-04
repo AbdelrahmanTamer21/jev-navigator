@@ -251,24 +251,44 @@ def _many(template: str, count: int = 300) -> str:
     return "".join(template.format(n=n) for n in range(count))
 
 
+def _wide_script_function() -> str:
+    """A function with many parameters whose loop and catch bodies bind many locals."""
+    parameters = _many("  p{n},\n")
+    body = _many("    const l{n} = p{n};\n")
+    return (
+        f"function wide(\n{parameters}) {{\n  for (const item of items) {{\n{body}  }}\n"
+        f"  try {{ run(); }} catch (error) {{\n{body}  }}\n}}\n"
+    )
+
+
 @pytest.mark.parametrize(
     ("file", "source"),
     [
         (
             "module.ts",
             _many("const a{n} = {n}, b{n} = {n};\nexport type T{n} = string;\n")
+            + _many("const r{n} = require('./r{n}');\nimport * as ns{n} from './ns{n}';\n")
             + "const api = {\n"
             + _many("  m{n}() {{ return {n}; }},\n")
-            + "};\n",
+            + "};\n"
+            + _wide_script_function(),
         ),
         (
             "module.js",
             _many("const {{ c{n} }} = settings;\nfoo.p{n} = function () {{ return {n}; }};\n")
             + "module.exports = {\n"
             + _many("  e{n}() {{ return {n}; }},\n")
-            + "};\n",
+            + "};\n"
+            + _wide_script_function(),
         ),
-        ("module.py", _many("first{n}, second{n} = {n}, {n}\napp.debug{n} = True\n")),
+        (
+            "module.py",
+            _many("first{n}, second{n} = {n}, {n}\napp.debug{n} = True\n")
+            + "def wide(\n"
+            + _many("    p{n},\n")
+            + "):\n    for item in items:\n"
+            + _many("        l{n} = p{n}\n"),
+        ),
     ],
     ids=["typescript", "javascript", "python"],
 )
@@ -277,7 +297,8 @@ def test_no_fact_rule_prints_more_than_the_node_it_matched(
 ) -> None:
     """ast-grep prints every node a rule's relations match. A relation to a large ancestor, such as
     the program, a module statement or an object literal, printed that ancestor once per match, so
-    the parser's output and memory grew with matches times file size."""
+    the parser's output and memory grew with matches times file size. A match prints its own node
+    three times (its text, its lines and its primary label), each as JSON."""
     # Arrange
     (tmp_path / file).write_text(source)
     printed: list[dict] = []
@@ -295,7 +316,9 @@ def test_no_fact_rule_prints_more_than_the_node_it_matched(
 
     # Assert
     oversized = {
-        match["ruleId"] for match in printed if len(json.dumps(match)) > 2_000 + 3 * len(match["text"])
+        match["ruleId"]
+        for match in printed
+        if len(json.dumps(match)) > 2_000 + 3 * len(json.dumps(match["text"]))
     }
     assert printed
     assert oversized == set()
@@ -810,6 +833,165 @@ def test_a_call_through_a_whole_module_import_reads_only_that_module(tmp_path: P
     verify = Span("src/jwt.ts", 1, 3, "verify")
     assert [(binding.status.value, binding.target) for binding in bindings] == [("resolved", verify)] * 3
     assert "src/unrelated.ts" not in scanned
+
+
+def test_a_module_alias_is_read_from_module_level_code_only(tmp_path: Path) -> None:
+    """A name holds a whole module when module-level code binds it to `require('m')` or `import * as`.
+    A require inside a function, a member read off a require, a call of one, a require of a computed
+    name, a re-export, a template string and a comment hold none."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/main.ts": (
+                "import * as jwt from './jwt';\nimport { sign } from './jwt';\n"
+                "export * as tools from './tools';\n"
+                "const db = require('./db');\nvar legacy = require(\"./legacy\");\n"
+                "const verify = require('./jwt').verify;\nconst app = require('./app')(options);\n"
+                "const dynamic = require(name);\n"
+                "const template = `const fake = require('./fake');`;\n// const old = require('./old');\n"
+                "function local() {\n  const store = require('./store');\n  return store;\n}\n"
+            ),
+        },
+    )
+
+    # Act
+    aliases = index._facts_in("src/main.ts").module_aliases
+
+    # Assert
+    assert dict(aliases) == {"jwt": "./jwt", "db": "./db", "legacy": "./legacy"}
+
+
+def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_it(tmp_path: Path) -> None:
+    """`db.query()` binds to db.js's `query` where `db` is the module-level alias; a parameter `db`, a
+    `const store = require(...)` inside a function, or an alias that only a template string spells,
+    leave the call a candidate."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "db.js": "exports.query = function () { return 1; };\n",
+            "fake.js": "exports.query = function () { return 2; };\n",
+            "handler.js": (
+                "const db = require('./db');\nfunction useReal() { return db.query(); }\n"
+                "function useInjected(db) { return db.query(); }\n"
+            ),
+            "two.js": (
+                "function a() { const store = require('./db'); return store.query(); }\n"
+                "function b() { const store = require('./fake'); return store.query(); }\n"
+            ),
+            "gen.js": (
+                "const template = `const api = require('./db');`;\n"
+                "function emit(api) { return api.query(); }\n"
+            ),
+        },
+    )
+    sites = {
+        "handler.js": ((2, "db"), (3, "db")),
+        "two.js": ((1, "store"), (2, "store")),
+        "gen.js": ((2, "api"),),
+    }
+
+    # Act
+    bindings = {
+        (file, line): index.binding_of(file, line, "query", receiver).status.value
+        for file, found in sites.items()
+        for line, receiver in found
+    }
+    real = index.binding_of("handler.js", 2, "query", "db")
+
+    # Assert
+    assert (real.status.value, real.target) == ("resolved", Span("db.js", 1, 1, "query"))
+    assert bindings == {
+        ("handler.js", 2): "resolved",
+        ("handler.js", 3): "candidate",
+        ("two.js", 1): "candidate",
+        ("two.js", 2): "candidate",
+        ("gen.js", 2): "candidate",
+    }
+
+
+def test_an_import_alias_replaced_by_a_local_name_binds_nothing_through_the_import(tmp_path: Path) -> None:
+    """A parameter or local variable with an alias's name replaces the import inside its function:
+    `halt()` there is not the module's `stop`, in TypeScript or Python, nor `cls()` after
+    `cls = self.client_class` and a fallback import `as cls`."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/x.ts": "export function stop(code: number) {\n  return code;\n}\n",
+            "src/param.ts": (
+                "import { stop as halt } from './x';\n\n"
+                "export function quit(halt: () => number) {\n  return halt();\n}\n"
+            ),
+            "src/local.ts": (
+                "import { stop as halt } from './x';\n\nexport function quit() {\n  const halt = () => 0;\n"
+                "  return halt();\n}\n"
+            ),
+            "app/__init__.py": "",
+            "app/jobs.py": "def refund(order):\n    return order\n\n\nclass Client:\n    pass\n",
+            "app/routes.py": (
+                "from app.jobs import refund as give_back\n\n\ndef undo(give_back):\n    return give_back()\n"
+            ),
+            "app/factory.py": (
+                "def make(self):\n    cls = self.client_class\n    if cls is None:\n"
+                "        from app.jobs import Client as cls\n    return cls()\n"
+            ),
+        },
+    )
+    sites = (("src/param.ts", 4, "halt"), ("src/local.ts", 5, "halt"), ("app/routes.py", 5, "give_back"))
+
+    # Act
+    targets = {file: index.binding_of(file, line, name, None).target for file, line, name in sites}
+    cls = index.binding_of("app/factory.py", 5, "cls", None)
+
+    # Assert
+    assert Span("src/x.ts", 1, 3, "stop") not in targets.values(), targets
+    assert targets["app/routes.py"] != Span("app/jobs.py", 1, 2, "refund")
+    assert cls.status.value != "resolved", cls
+
+
+def test_a_local_name_replaces_an_import_for_values_and_never_for_types(tmp_path: Path) -> None:
+    """A parameter `stop` replaces `import { stop }` inside its own function only: a call there names
+    the local value, a call in the next function the import. A class body's name reaches none of its
+    methods. A type is looked up among types, so `cfg: Config` beside a parameter `Config` still names
+    the interface."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/x.ts": "export function stop(code: number) {\n  return code;\n}\n",
+            "src/main.ts": (
+                "import { stop } from './x';\n\n"
+                "export function quit(stop: () => number) {\n  return stop();\n}\n\n"
+                "export function close() {\n  return stop(0);\n}\n"
+            ),
+            "src/same.ts": (
+                "export interface Config {\n  depth: number;\n}\n"
+                "export function make(Config: number) {\n"
+                "  const cfg: Config = { depth: Config };\n  return cfg;\n}\n"
+            ),
+            "app/__init__.py": "",
+            "app/jobs.py": "def refund(order):\n    return order\n",
+            "app/orders.py": (
+                "from app.jobs import refund as give_back\n\n\ndef build():\n    class Orders:\n"
+                "        give_back = None\n\n"
+                "        def undo(self, order):\n            return give_back(order)\n"
+            ),
+        },
+    )
+
+    # Act
+    shadowed = index.binding_of("src/main.ts", 4, "stop", None)
+    imported = index.binding_of("src/main.ts", 8, "stop", None)
+    typed = index.binding_of("src/same.ts", 5, "Config", None, "type")
+    method = index.binding_of("app/orders.py", 9, "give_back", None)
+
+    # Assert
+    assert (shadowed.status.value, shadowed.target) == ("candidate", None)
+    assert (method.status.value, method.target) == ("resolved", Span("app/jobs.py", 1, 2, "refund"))
+    assert (imported.status.value, imported.target) == ("resolved", Span("src/x.ts", 1, 3, "stop"))
+    assert (typed.status.value, typed.target) == ("resolved", Span("src/same.ts", 1, 3, "Config"))
 
 
 def test_a_name_imported_under_an_alias_binds_to_the_exported_definition(

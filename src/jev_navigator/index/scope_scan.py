@@ -15,6 +15,7 @@ from bisect import bisect_right
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple, Protocol, TypeVar
 
 from . import tools
 from .imports import _local
@@ -28,6 +29,8 @@ from .languages import (
     FLOW_LANGUAGE,
     FLOW_SGCONFIG,
     FUNCTION_KINDS,
+    LOCAL_NAME_RULES,
+    MODULE_ALIAS_RULES,
     NAME_HOLDERS,
     NAME_WRAPPERS,
     NAMESPACE_KINDS,
@@ -64,6 +67,21 @@ class Unparsed:
         return frozenset(file for files in self.files_by_scan.values() for file in files)
 
 
+class LocalName(NamedTuple):
+    """``name`` is bound by the function on lines ``first`` to ``last`` for its own body."""
+
+    first: int
+    last: int
+    name: str
+
+
+class ModuleAlias(NamedTuple):
+    """``name`` holds the whole script module ``specifier`` names, bound by module-level code."""
+
+    name: str
+    specifier: str
+
+
 @dataclass(frozen=True)
 class FileStructure:
     """``module_symbols`` are the symbols their module names: no function, class or object literal
@@ -71,7 +89,9 @@ class FileStructure:
     each hold the other's first line, so lines alone cannot tell. ``importable_symbols`` adds the
     CommonJS exports, which another module imports by name but their own module never names.
     ``type_declarations`` and ``value_declarations`` are the declarations a type use and a value
-    use may name, decided by each declaration's own syntax node."""
+    use may name, decided by each declaration's own syntax node. ``local_names`` are the names each
+    function binds for its own body (see ``LOCAL_NAME_RULES``); a name a module-level block binds
+    is not among them."""
 
     functions: tuple[Span, ...]
     symbols: tuple[Span, ...]
@@ -80,6 +100,7 @@ class FileStructure:
     importable_symbols: tuple[Span, ...]
     type_declarations: tuple[Span, ...]
     value_declarations: tuple[Span, ...]
+    local_names: tuple[LocalName, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -111,6 +132,7 @@ class FileFacts:
     export_names: tuple[str, ...] = ()
     # The first and last line of each stretch the grammar's ERROR nodes span, in file order.
     unparsed_lines: tuple[tuple[int, int], ...] = ()
+    module_aliases: tuple[ModuleAlias, ...] = ()
 
 
 def scan_facts(
@@ -127,6 +149,7 @@ def scan_facts(
                 _call_rules(languages),
                 reference_rules(languages),
                 export_rules(languages),
+                _module_alias_rules(languages),
             )
             if part
         )
@@ -141,7 +164,12 @@ def scan_facts(
     )
     calls = _calls_from_matches(match for match in matches if match["ruleId"] == "call")
     references = _references_from_matches(
-        match for match in matches if match["ruleId"] not in {*_STRUCTURE_RULE_IDS, "call", *_EXPORT_RULE_IDS}
+        match
+        for match in matches
+        if match["ruleId"] not in {*_STRUCTURE_RULE_IDS, "call", *_EXPORT_RULE_IDS, _MODULE_ALIAS_RULE}
+    )
+    aliases = _module_aliases_from_matches(
+        match for match in matches if match["ruleId"] == _MODULE_ALIAS_RULE
     )
     surface = _export_names_from_matches(match for match in matches if match["ruleId"] in _EXPORT_RULE_IDS)
     unread = _unparsed_lines_from_matches(match for match in matches if match["ruleId"] == _ERROR_RULE)
@@ -153,6 +181,7 @@ def scan_facts(
             file in unparsed.files,
             surface.get(file, ()),
             unread.get(file, ()),
+            aliases.get(file, ()),
         )
         for file in files
     }
@@ -180,6 +209,7 @@ def _structure_from_matches(files, unparsed, matches):
     classes: dict[str, set[Span]] = {file: set() for file in files}
     declaration_nodes: dict[str, list[_Declaration]] = {file: [] for file in files}
     declared_names: dict[str, list[tuple[int, str]]] = {file: [] for file in files}
+    bound_names: dict[str, list[tuple[int, str]]] = {file: [] for file in files}
     ranges: dict[str, list[tuple[int, int, Span]]] = {file: [] for file in files}
     marks: dict[str, dict[str, set[tuple[int, int]]]] = {
         file: {rule: set() for rule in _MARK_RULES} for file in files
@@ -196,6 +226,8 @@ def _structure_from_matches(files, unparsed, matches):
             marks[file][match["ruleId"]].add((offsets["start"], offsets["end"]))
         elif match["ruleId"] == _DECLARED_NAME_RULE:
             declared_names[file].append((offsets["start"], match["text"]))
+        elif match["ruleId"] == _LOCAL_NAME_RULE:
+            bound_names[file].append((offsets["start"], match["text"]))
         elif match["ruleId"] in _DECLARATION_BY_RULE:
             kind = _DECLARATION_BY_RULE[match["ruleId"]]
             declaration_nodes[file].append(_Declaration(offsets["start"], offsets["end"], start, end, kind))
@@ -224,8 +256,33 @@ def _structure_from_matches(files, unparsed, matches):
             _ordered(module_symbols | _marked(ranges[file], marks[file][_MODULE_EXPORT_RULE]), positions),
             _sorted(span for span, kind in declared if kind.named_by_types),
             _sorted(span for span, kind in declared if kind.named_by_values),
+            _local_names(ranges[file], classes[file], bound_names[file]),
         )
     return structures
+
+
+def _local_names(
+    ranges: list[tuple[int, int, Span]], classes: set[Span], names: list[tuple[int, str]]
+) -> tuple[LocalName, ...]:
+    """Each bound name with the lines of the innermost function holding it. A name a class body binds
+    (a Python class attribute) reaches none of its methods, so it is no function's local name."""
+    ordered = sorted((_Node(start, end, span) for start, end, span in ranges), key=lambda node: node.start)
+    starts = [node.start for node in ordered]
+    found = {
+        LocalName(holder.span.start, holder.span.end, name)
+        for offset, name in names
+        if (holder := _innermost(ordered, starts, offset)) is not None and holder.span not in classes
+    }
+    return tuple(sorted(found))
+
+
+@dataclass(frozen=True)
+class _Node:
+    """A function's or class's byte range, end exclusive."""
+
+    start: int
+    end: int
+    span: Span
 
 
 @dataclass(frozen=True)
@@ -274,7 +331,15 @@ def _sorted(spans: Iterable[Span]) -> tuple[Span, ...]:
     return tuple(sorted(set(spans)))
 
 
-def _innermost(ordered: list[_Declaration], starts: list[int], offset: int) -> _Declaration | None:
+class _ByteRange(Protocol):
+    @property
+    def end(self) -> int: ...
+
+
+_Range = TypeVar("_Range", bound=_ByteRange)
+
+
+def _innermost(ordered: Sequence[_Range], starts: list[int], offset: int) -> _Range | None:
     """Nodes nest or are disjoint, so the latest-starting node that reaches past ``offset`` holds it
     most closely."""
     for node in reversed(ordered[: bisect_right(starts, offset)]):
@@ -363,6 +428,13 @@ def last_identifier(expression: str) -> str:
     return tail if tail.isidentifier() else ""
 
 
+def first_identifier(expression: str) -> str:
+    """The name ``expression`` starts from: ``db`` in ``db.pool``; empty when it starts from a call
+    or an item (``getDb().pool``)."""
+    head = expression.replace("?.", ".").split(".")[0].strip()
+    return head if head.isidentifier() else ""
+
+
 def symbol_name(captured: str) -> str:
     """The name a captured name node gives a symbol: ``save`` for ``save``, ``this.save``,
     ``exports.save``, ``#save`` and the key ``"save"``. A computed key, a string key that is no
@@ -379,11 +451,21 @@ def _captured_name(match: dict) -> str:
 _ERROR_RULE = "parse_error"
 _HELD_RULE = "held"
 _DECLARED_NAME_RULE = "declared_name"
+_LOCAL_NAME_RULE = "local_name"
+_MODULE_ALIAS_RULE = "module_alias"
 _PROPERTY_VALUE_RULE = "property_value"
 _MODULE_EXPORT_RULE = "module_export"
 _MARK_RULES = (_HELD_RULE, _PROPERTY_VALUE_RULE, _MODULE_EXPORT_RULE)
 _STRUCTURE_RULE_IDS = frozenset(
-    {"function", "class", *_DECLARATION_BY_RULE, _DECLARED_NAME_RULE, *_MARK_RULES, _ERROR_RULE}
+    {
+        "function",
+        "class",
+        *_DECLARATION_BY_RULE,
+        _DECLARED_NAME_RULE,
+        _LOCAL_NAME_RULE,
+        *_MARK_RULES,
+        _ERROR_RULE,
+    }
 )
 _EXPORT_STATEMENT_RULE = "export_surface"
 _EXPORT_SPECIFIER_RULE = "export_specifier"
@@ -400,6 +482,25 @@ def _export_names_from_matches(matches) -> dict[str, tuple[str, ...]]:
     return {file: tuple(sorted(found)) for file, found in names.items()}
 
 
+def _module_aliases_from_matches(matches) -> dict[str, tuple[ModuleAlias, ...]]:
+    """Each file's module aliases in source order; the module is the captured string without its
+    quotes."""
+    aliases: dict[str, list[tuple[int, ModuleAlias]]] = {}
+    for match in matches:
+        captured = match["metaVariables"]["single"]
+        alias = ModuleAlias(captured["NAME"]["text"], captured["SPEC"]["text"][1:-1])
+        aliases.setdefault(match["file"], []).append((match["range"]["byteOffset"]["start"], alias))
+    return {file: tuple(alias for _, alias in sorted(found)) for file, found in aliases.items()}
+
+
+def _module_alias_rules(languages: Sequence[str]) -> str:
+    return "\n---\n".join(
+        _rule_document(_MODULE_ALIAS_RULE, language, rule)
+        for language in languages
+        for rule in MODULE_ALIAS_RULES[language]
+    )
+
+
 def _structure_rules(languages: Sequence[str]) -> str:
     documents = []
     for language in languages:
@@ -411,6 +512,7 @@ def _structure_rules(languages: Sequence[str]) -> str:
             if language in rules
         ]
         documents.append(_rule_document(_DECLARED_NAME_RULE, language, DECLARED_NAME_RULES[language]))
+        documents.append(_rule_document(_LOCAL_NAME_RULE, language, LOCAL_NAME_RULES[language]))
         documents.append(_rule_document(_ERROR_RULE, language, "  kind: ERROR"))
         if VALUE_KINDS[language] or NAMESPACE_KINDS[language]:
             documents.append(_held_rule(language))
