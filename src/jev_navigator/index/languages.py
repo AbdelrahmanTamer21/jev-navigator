@@ -534,9 +534,8 @@ EXPORTED_NAMES = {
 }
 
 # The names a module exports as values rather than by an export statement over their declaration,
-# captured as `$NAME`: its default export (`export default build`, `export default function make`,
-# `module.exports = build`) and its CommonJS exports of a definition under its own name
-# (`exports.query = query`, `module.exports = { log, run: run }`).
+# captured as `$NAME`: its CommonJS exports of a definition under its own name (`exports.query =
+# query`, `module.exports = { log, run: run }`).
 _COMMONJS_OBJECT = (
     "not: {not: {inside: {kind: object, inside: {field: right, kind: assignment_expression, "
     "has: {field: left, regex: '^module[.]exports$'}}}}}"
@@ -545,26 +544,33 @@ _EXPORTED_VALUES = (
     """  any:
     - pattern: exports.$NAME = $NAME
     - pattern: module.exports.$NAME = $NAME
-    - pattern: module.exports = $NAME
-    - pattern: export default $NAME
-  not: {not: {any: [{has: {field: right, kind: identifier}}, {has: {field: value, kind: identifier}}]}}""",
+  not: {not: {has: {field: right, kind: identifier}}}""",
     f"""  pattern: {{context: '({{ $NAME: $NAME }})', selector: pair}}
   {_COMMONJS_OBJECT}""",
     f"""  kind: shorthand_property_identifier
   pattern: $NAME
   {_COMMONJS_OBJECT}""",
 )
+EXPORTED_VALUES = {"typescript": _EXPORTED_VALUES, "tsx": _EXPORTED_VALUES, "javascript": _EXPORTED_VALUES}
+
+# The name of the definition a module exports as its default, captured as `$NAME`: `export default
+# build`, `export default function make`, and `module.exports = build`, which a whole-module
+# `require` takes.
+_DEFAULT_VALUE = """  any:
+    - pattern: module.exports = $NAME
+    - pattern: export default $NAME
+  not: {not: {any: [{has: {field: right, kind: identifier}}, {has: {field: value, kind: identifier}}]}}"""
 _DEFAULT_EXPORT = "{field: declaration, kind: export_statement, has: {regex: '^default$'}}"
 _DEFAULT_DECLARATION_NAME = f"""  pattern: $NAME
   not: {{not: {{inside: {{field: name, inside: {_DEFAULT_EXPORT}}}}}}}"""
-_TYPED_EXPORTED_VALUES = (
-    *_EXPORTED_VALUES,
+_TYPED_DEFAULT_EXPORTS = (
+    _DEFAULT_VALUE,
     f"  any: [{{kind: identifier}}, {{kind: type_identifier}}]\n{_DEFAULT_DECLARATION_NAME}",
 )
-EXPORTED_VALUES = {
-    "typescript": _TYPED_EXPORTED_VALUES,
-    "tsx": _TYPED_EXPORTED_VALUES,
-    "javascript": (*_EXPORTED_VALUES, f"  kind: identifier\n{_DEFAULT_DECLARATION_NAME}"),
+DEFAULT_EXPORTS = {
+    "typescript": _TYPED_DEFAULT_EXPORTS,
+    "tsx": _TYPED_DEFAULT_EXPORTS,
+    "javascript": (_DEFAULT_VALUE, f"  kind: identifier\n{_DEFAULT_DECLARATION_NAME}"),
 }
 
 
@@ -579,8 +585,9 @@ OWN_EXPORT_SPECIFIERS = (
 
 def export_rules(languages: Iterable[str]) -> str:
     """ast-grep rules for the script export surface: the names exported declarations make, the
-    entries of the module's own ``{ ... }`` lists, and the names exported as values (see
-    ``EXPORTED_VALUES``). Python has no such kinds, so it contributes no rules."""
+    entries of the module's own ``{ ... }`` lists, the names exported as values (see
+    ``EXPORTED_VALUES``) and the default export's (see ``DEFAULT_EXPORTS``). Python has no such
+    kinds, so it contributes no rules."""
     documents = []
     for language in languages:
         if language == "python":
@@ -590,6 +597,9 @@ def export_rules(languages: Iterable[str]) -> str:
         documents.append(f"id: export_specifier\nlanguage: {grammar}\nrule:\n{OWN_EXPORT_SPECIFIERS}")
         documents += [
             f"id: exported_value\nlanguage: {grammar}\nrule:\n{rule}" for rule in EXPORTED_VALUES[grammar]
+        ]
+        documents += [
+            f"id: default_export\nlanguage: {grammar}\nrule:\n{rule}" for rule in DEFAULT_EXPORTS[grammar]
         ]
     return "\n---\n".join(documents)
 

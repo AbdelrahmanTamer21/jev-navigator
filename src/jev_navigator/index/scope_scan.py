@@ -146,11 +146,12 @@ class FileFacts:
     # The first and last line of each stretch the grammar's ERROR nodes span, in file order.
     unparsed_lines: tuple[tuple[int, int], ...] = ()
     module_aliases: tuple[ModuleAlias, ...] = ()
-    # The names a script module exports as values: its default export and its CommonJS exports of a
-    # definition under its own name (see ``EXPORTED_VALUES``).
+    # The names a script module exports as values: its CommonJS exports of a definition under its
+    # own name (see ``EXPORTED_VALUES``).
     exported_values: tuple[str, ...] = ()
-    # Each name a script module's own export list gives a definition of another name, with that
-    # name: ("outer", "inner") for `export { inner as outer }`.
+    # Each name a script module exports a definition of another name under, with that name:
+    # ("outer", "inner") for `export { inner as outer }`, and ("default", "build") for its default
+    # export, `export default build` or `module.exports = build` (see ``DEFAULT_EXPORTS``).
     renamed_exports: tuple[tuple[str, str], ...] = ()
 
 
@@ -186,7 +187,14 @@ def scan_facts(
         match
         for match in matches
         if match["ruleId"]
-        not in {*_STRUCTURE_RULE_IDS, "call", *_EXPORT_RULE_IDS, _EXPORTED_VALUE_RULE, _MODULE_ALIAS_RULE}
+        not in {
+            *_STRUCTURE_RULE_IDS,
+            "call",
+            *_EXPORT_RULE_IDS,
+            _EXPORTED_VALUE_RULE,
+            _DEFAULT_EXPORT_RULE,
+            _MODULE_ALIAS_RULE,
+        }
     )
     aliases = _module_aliases_from_matches(
         match for match in matches if match["ruleId"] == _MODULE_ALIAS_RULE
@@ -194,7 +202,7 @@ def scan_facts(
     surface = _export_names_from_matches(match for match in matches if match["ruleId"] in _EXPORT_RULE_IDS)
     values = _captured_names_by_file(match for match in matches if match["ruleId"] == _EXPORTED_VALUE_RULE)
     renamed = _renamed_exports_from_matches(
-        match for match in matches if match["ruleId"] == _EXPORT_SPECIFIER_RULE
+        match for match in matches if match["ruleId"] in (_EXPORT_SPECIFIER_RULE, _DEFAULT_EXPORT_RULE)
     )
     unread = _unparsed_lines_from_matches(match for match in matches if match["ruleId"] == _ERROR_RULE)
     return {
@@ -558,6 +566,7 @@ _EXPORT_STATEMENT_RULE = "export_surface"
 _EXPORT_SPECIFIER_RULE = "export_specifier"
 _EXPORT_RULE_IDS = (_EXPORT_STATEMENT_RULE, _EXPORT_SPECIFIER_RULE)
 _EXPORTED_VALUE_RULE = "exported_value"
+_DEFAULT_EXPORT_RULE = "default_export"
 
 
 def _export_names_from_matches(matches) -> dict[str, tuple[str, ...]]:
@@ -572,10 +581,14 @@ def _export_names_from_matches(matches) -> dict[str, tuple[str, ...]]:
 
 def _renamed_exports_from_matches(matches) -> dict[str, tuple[tuple[str, str], ...]]:
     """Each file's own export list entries that export a definition under another name, as the
-    exported name and the definition's: ``outer`` and ``inner`` for ``inner as outer``."""
+    exported name and the definition's (``outer`` and ``inner`` for ``inner as outer``), and its
+    default export, as ``default`` and the definition's name."""
     pairs: dict[str, set[tuple[str, str]]] = {}
     for match in matches:
-        exported, own = _local(match["text"]), _exported(match["text"])
+        if match["ruleId"] == _DEFAULT_EXPORT_RULE:
+            exported, own = "default", _captured_name(match)
+        else:
+            exported, own = _local(match["text"]), _exported(match["text"])
         if exported != own:
             pairs.setdefault(match["file"], set()).add((exported, own))
     return {file: tuple(sorted(found)) for file, found in pairs.items()}

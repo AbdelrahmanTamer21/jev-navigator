@@ -99,8 +99,9 @@ const { app } = require("./app")(options);
 
 def test_the_export_surface_is_the_ast_grep_statement_nodes(tmp_path: Path) -> None:
     """The surface names real statements only, and only the module's own definitions: a private
-    definition, a default export, a re-export and a template-literal body contribute nothing, and
-    an export list entry under another name records the definition it exports."""
+    definition, a default export, a re-export and a template-literal body contribute nothing. An
+    export list entry under another name and the default export record the definition each
+    exports."""
     # Arrange
     index = indexed(
         tmp_path,
@@ -124,7 +125,7 @@ def test_the_export_surface_is_the_ast_grep_statement_nodes(tmp_path: Path) -> N
 
     # Assert
     assert facts.export_names == ("READY", "publicLocal", "run")
-    assert facts.renamed_exports == (("publicLocal", "local"),)
+    assert facts.renamed_exports == (("default", "defaultRun"), ("publicLocal", "local"))
 
 
 def test_a_template_literal_body_is_not_part_of_the_export_surface(tmp_path: Path) -> None:

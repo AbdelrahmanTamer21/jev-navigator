@@ -613,13 +613,13 @@ class CodeIndex:
     def _binding_through_import(self, file: str, name: str, role: str | None) -> Binding | None:
         """The binding of ``name()`` when ``file`` imports ``name``: by that name or under another
         (``import { stop as name }``, ``const { stop: name } = require(...)``, ``from m import stop as
-        name``), or as a default import, looked up by its local name. Decided from the module the
+        name``), or as a default import, which takes the module's default export. Decided from the module the
         import names (see ``_binding_through_exporters``). None when nothing imports ``name``, when
         ``file`` defines ``name`` itself, or when the import names no module of the scope."""
         imported = self._names_imported(file).get(name)
         if imported is None or self._defines(file, name, role):
             return None
-        return self._binding_through_exporters(file, imported.specifier, imported.exported or name, role)
+        return self._binding_through_exporters(file, imported.specifier, imported.exported or "default", role)
 
     def _binding_through_exporters(
         self, file: str, specifier: str, name: str, role: str | None
@@ -652,8 +652,8 @@ class CodeIndex:
         name or the one an export list gives it (`export { inner as outer }`), and the functions and
         classes it assigns to CommonJS exports."""
         structure = self._file_structure(file)
-        own_name = name if language_of(file) == "python" else self._export_names_in(file).get(name)
-        exported = {span for span in self._module_scope_in(file) if span.name == own_name}
+        own_names = {name} if language_of(file) == "python" else self._export_names_in(file).get(name, set())
+        exported = {span for span in self._module_scope_in(file) if span.name in own_names}
         exported |= {span for span in structure.commonjs_exports if span.name == name}
         return tuple(
             span
@@ -661,11 +661,16 @@ class CodeIndex:
             if span in exported and self._can_name(role, span)
         )
 
-    def _export_names_in(self, file: str) -> dict[str, str]:
-        """Each name script module ``file`` exports, with the name of the definition it exports."""
+    def _export_names_in(self, file: str) -> dict[str, set[str]]:
+        """Each name script module ``file`` exports from its own definitions, ``default`` for its
+        default export, with the names of the definitions it may export under it: a module that
+        assigns `module.exports` twice has two."""
         facts = self._facts_in(file)
-        own_names = {name: name for name in (*facts.export_names, *facts.exported_values)}
-        return own_names | dict(facts.renamed_exports)
+        renamed: dict[str, set[str]] = {}
+        for exported, own in facts.renamed_exports:
+            renamed.setdefault(exported, set()).add(own)
+        own_names = {name: {name} for name in (*facts.export_names, *facts.exported_values)}
+        return own_names | renamed
 
     def _exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
         """The module ``file``'s import of ``specifier`` resolves to, then each module it re-exports
@@ -700,7 +705,7 @@ class CodeIndex:
                 if identity in seen:
                     continue
                 seen.add(identity)
-                if name in self._facts_in(inherited.path).export_names:
+                if name in self._export_names_in(inherited.path):
                     prior = found.get(inherited.path)
                     if prior is None or inherited.proven:
                         found[inherited.path] = inherited

@@ -1186,6 +1186,66 @@ def test_an_export_list_entry_under_another_name_exports_its_own_definition(tmp_
     assert (reexported.status.value, reexported.target) == ("candidate", None), reexported
 
 
+def test_a_default_export_is_imported_only_as_the_default(tmp_path: Path) -> None:
+    """A default import takes the module's default export under any local name, and `{ default as
+    entry }` is one too. The default export's own name is no named export: `import { make }`, a
+    member `defaults.make()` of the whole module, and `const { solo } = require(...)` of a module that
+    assigns `module.exports = solo` reach nothing, and an import named like a private function never
+    reaches it. A re-export passes the default on, and a module that assigns `module.exports` twice
+    leaves it open."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "defaults.ts": "export default function make() {\n  return 1;\n}\n",
+            "jobs.ts": "function run() { return 0; }\nexport default function start() { return run(); }\n",
+            "single.js": "function solo() {\n  return 4;\n}\nmodule.exports = solo;\n",
+            "main.ts": (
+                "import begin from './defaults';\nimport { default as entry } from './defaults';\n"
+                "import { make } from './defaults';\nimport * as defaults from './defaults';\n"
+                "import run from './jobs';\n"
+                "begin();\nentry();\nmake();\ndefaults.make();\nrun();\n"
+            ),
+            "app.js": "const { solo } = require('./single');\nsolo();\n",
+            "barrel.ts": "export { default } from './defaults';\n",
+            "through.ts": "import made from './barrel';\nmade();\n",
+            "twice.js": "function a() {}\nfunction b() {}\nmodule.exports = a;\nmodule.exports = b;\n",
+            "esm.js": "import either from './twice';\neither();\n",
+        },
+    )
+    sites = {
+        "a default import under another name": ("main.ts", 6, "begin", None),
+        "default as entry": ("main.ts", 7, "entry", None),
+        "the default's own name by name": ("main.ts", 8, "make", None),
+        "the default's own name on the module": ("main.ts", 9, "make", "defaults"),
+        "a default import named like a private function": ("main.ts", 10, "run", None),
+        "a destructured require of module.exports": ("app.js", 2, "solo", None),
+        "a default passed on by a re-export": ("through.ts", 2, "made", None),
+        "a default assigned twice": ("esm.js", 2, "either", None),
+    }
+
+    # Act
+    bindings = {
+        site: index.binding_of(file, line, name, receiver)
+        for site, (file, line, name, receiver) in sites.items()
+    }
+
+    # Assert
+    assert {
+        site: (binding.status.value, binding.target and binding.target.key)
+        for site, binding in bindings.items()
+    } == {
+        "a default import under another name": ("resolved", "defaults.ts:1-3"),
+        "default as entry": ("resolved", "defaults.ts:1-3"),
+        "the default's own name by name": ("candidate", None),
+        "the default's own name on the module": ("candidate", None),
+        "a default import named like a private function": ("resolved", "jobs.ts:2-2"),
+        "a destructured require of module.exports": ("candidate", None),
+        "a default passed on by a re-export": ("resolved", "defaults.ts:1-3"),
+        "a default assigned twice": ("candidate", None),
+    }
+
+
 def test_only_what_a_script_module_exports_is_importable(tmp_path: Path) -> None:
     """A script module's own functions are importable only where it exports them: by an `export`
     statement or list, as its default export, or as a CommonJS export (`exports.x = x`, a function
