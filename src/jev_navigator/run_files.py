@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 from .index.code_index import CodeIndex
 from .judgments.relations import without_quoted_code
@@ -30,11 +31,24 @@ def place_location(place_key: str) -> str:
 def place_label(index: CodeIndex, place_key: str) -> str:
     """``path:line name``, or ``path:line`` where no symbol encloses that line or the index holds no
     facts of the file yet. A label shows only facts already in memory, so writing the journal or the
-    evidence pack starts no parse that JVN's memory limit could refuse."""
+    evidence pack starts no parse, which could fail."""
     location = place_location(place_key)
     file, _, line = location.rpartition(":")
     symbol = index.known_enclosing_symbol(file, int(line)) if line.isdigit() else None
     return f"{location} {symbol.name}" if symbol is not None and symbol.name else location
+
+
+@dataclass(frozen=True)
+class PlaceLabels:
+    """The labels one run writes. A place an earlier save labelled keeps that label: the earlier save
+    owns it, and a resumed run may never parse the place's file. Any other place gets ``place_label``."""
+
+    index: CodeIndex
+    saved: Mapping[str, str] = field(default_factory=dict)
+
+    def __call__(self, place_key: str) -> str:
+        saved = self.saved.get(place_key)
+        return saved if saved is not None else place_label(self.index, place_key)
 
 
 def relation_shown(relation: str, place_key: str) -> str:

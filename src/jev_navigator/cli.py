@@ -13,7 +13,6 @@ import sys
 from collections.abc import MutableMapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
-from functools import partial
 from pathlib import Path
 from time import monotonic
 
@@ -44,7 +43,7 @@ from .judgments.store import (
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
-from .run_files import place_label, source_shown, step_shown
+from .run_files import PlaceLabels, source_shown, step_shown
 from .usage_receipt import usage_receipt, usage_report_lines
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
@@ -311,7 +310,6 @@ def create_evidence_pack(
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )
-        journal.place_label = partial(place_label, index)
         if warning := _scope_warning(len(index.files)):
             print(warning, file=sys.stderr)
         checkpoint = SavedSearch(None)
@@ -319,6 +317,8 @@ def create_evidence_pack(
             if previous["source"]["revision"] != index.commit:
                 raise ValueError("repository revision changed since the evidence pack")
             checkpoint = load_resume(resume_from.resolve() / "resume.json", index)
+        labels = PlaceLabels(index, checkpoint.frontier_labels)
+        journal.place_label = labels
         resume = checkpoint.result
         resuming_enumeration = checkpoint.completed is not None
         if resuming_enumeration and checkpoint.check_id != CONTAINS_IMPLEMENTATION.question_id:
@@ -403,6 +403,7 @@ def create_evidence_pack(
                 output / "resume.json",
                 index,
                 result,
+                labels=labels,
                 entry_pending=entry_pending,
                 completed=enumeration.judged if enumeration is not None else None,
                 check_id=CONTAINS_IMPLEMENTATION.question_id if enumeration is not None else None,
@@ -447,7 +448,7 @@ def create_evidence_pack(
         if result.failure is not None:
             manifest["search"]["failure"] = _failure_record(result.failure, judge, journal)
         if not keep_requests:
-            _drop_code(manifest, index)
+            _drop_code(manifest, labels)
         _write_json(output / "manifest.json", manifest)
         (output / "report.md").write_text(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
@@ -1057,38 +1058,38 @@ def _manifest(
     }
 
 
-def _drop_code(manifest: dict, index: CodeIndex) -> None:
+def _drop_code(manifest: dict, labels: PlaceLabels) -> None:
     """Leave each place as its location: the code it held stays in the repository."""
-    _drop_entry_code(manifest.get("entry_selection") or {}, index)
+    _drop_entry_code(manifest.get("entry_selection") or {}, labels)
     for name in ("search", "seed_search"):
-        _drop_search_code(manifest.get(name) or {}, index)
+        _drop_search_code(manifest.get(name) or {}, labels)
 
 
-def _drop_entry_code(entry_selection: dict, index: CodeIndex) -> None:
+def _drop_entry_code(entry_selection: dict, labels: PlaceLabels) -> None:
     for decision in entry_selection.get("decisions", []):
         for option in decision.get("options", []):
             option.pop("description", None)
     for candidate in entry_selection.get("candidates", []):
-        candidate["signature"] = place_label(index, candidate["place"])
+        candidate["signature"] = labels(candidate["place"])
 
 
-def _drop_search_code(search: dict, index: CodeIndex) -> None:
+def _drop_search_code(search: dict, labels: PlaceLabels) -> None:
     visits = [visit for group in ("found", "starts", "searched", "unsure") for visit in search.get(group, [])]
     for visit in visits:
         visit.pop("code", None)
         if "place" in visit:
             visit["source"] = source_shown(visit["source"], visit["place"])
     for entry in search.get("not_inspected", []):
-        entry["signature"] = place_label(index, entry["place"])
-    search["history"] = [_step_without_code(step, index) for step in search.get("history", [])]
+        entry["signature"] = labels(entry["place"])
+    search["history"] = [_step_without_code(step, labels) for step in search.get("history", [])]
 
 
-def _step_without_code(step: dict, index: CodeIndex) -> dict:
+def _step_without_code(step: dict, labels: PlaceLabels) -> dict:
     shown = step_shown(step)
     for fetched in shown["fetched"]:
         fetched.pop("code", None)
     for offered in shown["judgments"].get("could_contain", []):
-        offered["signature"] = place_label(index, offered["place"])
+        offered["signature"] = labels(offered["place"])
     return shown
 
 

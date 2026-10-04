@@ -14,7 +14,7 @@ from .index.code_index import CodeIndex
 from .index.spans import Span
 from .judgments.judge import CheckResult
 from .judgments.thresholds import NoulVerdict
-from .run_files import place_label, relation_shown, relationship_shown
+from .run_files import PlaceLabels, relation_shown, relationship_shown
 
 STATE_VERSION = 1
 
@@ -24,6 +24,13 @@ class SavedSearch:
     result: FindResult | None
     completed: tuple[CheckResult, ...] | None = None
     check_id: str | None = None
+
+    @property
+    def frontier_labels(self) -> dict[str, str]:
+        """The label the earlier save gave each place of the frontier, by place key."""
+        if self.result is None:
+            return {}
+        return {entry.place_key: entry.signature for entry in self.result.not_inspected}
 
 
 def scope_identity(index: CodeIndex) -> tuple[str, dict[str, str]]:
@@ -60,6 +67,7 @@ def save_resume(
     index: CodeIndex,
     result: FindResult,
     *,
+    labels: PlaceLabels,
     entry_pending: bool,
     completed: tuple[CheckResult, ...] | None = None,
     check_id: str | None = None,
@@ -73,7 +81,7 @@ def save_resume(
         "stage": "enumeration" if completed is not None else "entry" if entry_pending else "navigation",
         "check_id": check_id,
         "completed": [asdict(answer) for answer in completed] if completed is not None else None,
-        "result": None if entry_pending else _result_record(result, index),
+        "result": None if entry_pending else _result_record(result, labels),
     }
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
@@ -113,7 +121,7 @@ def load_resume(path: Path, index: CodeIndex) -> SavedSearch:
     return SavedSearch(result, completed, state.get("check_id"))
 
 
-def _result_record(result: FindResult, index: CodeIndex) -> dict:
+def _result_record(result: FindResult, labels: PlaceLabels) -> dict:
     return {
         "outcome": result.outcome,
         "found": [_visit_record(item) for item in result.found],
@@ -124,7 +132,7 @@ def _result_record(result: FindResult, index: CodeIndex) -> dict:
         "searched": [_visit_record(item) for item in result.searched],
         "unsure": [_visit_record(item) for item in result.unsure],
         "starts": [_visit_record(item) for item in result.starts],
-        "not_inspected": [_frontier_record(item, index) for item in result.not_inspected],
+        "not_inspected": [_frontier_record(item, labels) for item in result.not_inspected],
     }
 
 
@@ -153,12 +161,12 @@ def _read_visit(record: dict, index: CodeIndex) -> Visit:
     )
 
 
-def _frontier_record(entry: NotInspected, index: CodeIndex) -> dict:
+def _frontier_record(entry: NotInspected, labels: PlaceLabels) -> dict:
     """A location, never code: no request carries a frontier place's stored signature."""
     code = entry.place.open()
     return {
         "place_key": entry.place_key,
-        "signature": place_label(index, entry.place_key),
+        "signature": labels(entry.place_key),
         "kind": entry.place.kind,
         "span": asdict(code.span),
         "origin": relation_shown(code.origin, entry.place_key),

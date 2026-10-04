@@ -14,12 +14,14 @@ import pytest
 from git_repos import commit_files
 from isolated_jvn import JVN
 
+from jev_navigator import cli
 from jev_navigator.cli_resume import load_resume, save_resume
 from jev_navigator.directives.find_code import SearchBudget, find_code
 from jev_navigator.directives.places import MOVES, function_place
 from jev_navigator.index import tools
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.run_files import PlaceLabels
 from jev_navigator.testing import ScriptedJevClient
 
 
@@ -45,7 +47,7 @@ def test_saved_find_frontier_restores_relationship_binding(tmp_path: Path) -> No
     resume_file = tmp_path / "resume.json"
 
     # Act
-    save_resume(resume_file, index, result, entry_pending=False)
+    save_resume(resume_file, index, result, labels=PlaceLabels(index), entry_pending=False)
     saved = json.loads(resume_file.read_text())
     restored = load_resume(resume_file, index)
 
@@ -64,7 +66,12 @@ def test_saved_find_frontier_restores_relationship_binding(tmp_path: Path) -> No
     assert frontier.place.binding.target.file == "app/target.py"
 
 
-def test_a_resumed_search_that_stops_again_saves_its_frontier_while_the_parser_is_killed(
+def _frontier_labels(resume_file: Path) -> list[tuple[str, str]]:
+    records = json.loads(resume_file.read_text())["result"]["not_inspected"]
+    return [(record["place_key"], record["signature"]) for record in records]
+
+
+def test_a_resumed_search_that_stops_again_keeps_its_frontier_names_while_the_parser_is_killed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Arrange: a stopped search leaves the caller of `check` unopened. A resumed run, whose fact cache
@@ -86,9 +93,9 @@ def test_a_resumed_search_that_stops_again_saves_its_frontier_while_the_parser_i
         moves={"callers": MOVES["callers"]},
         budget=SearchBudget(max_steps=1, beam_width=1),
     )
-    save_resume(tmp_path / "first.json", first, stopped, entry_pending=False)
+    save_resume(tmp_path / "first.json", first, stopped, labels=PlaceLabels(first), entry_pending=False)
     resumed = CodeIndex(repository, list(files), fact_cache_dir=tmp_path / "resumed-facts")
-    restored = load_resume(tmp_path / "first.json", resumed).result
+    checkpoint = load_resume(tmp_path / "first.json", resumed)
     killed = tmp_path / "killed-bin"
     killed.mkdir()
     (killed / tools.AST_GREP).write_text("#!/bin/sh\nkill -9 $$\n")
@@ -96,13 +103,60 @@ def test_a_resumed_search_that_stops_again_saves_its_frontier_while_the_parser_i
     monkeypatch.setenv("PATH", f"{killed}{os.pathsep}{os.environ['PATH']}")
 
     # Act
-    save_resume(tmp_path / "second.json", resumed, restored, entry_pending=False)
+    save_resume(
+        tmp_path / "second.json",
+        resumed,
+        checkpoint.result,
+        labels=PlaceLabels(resumed, checkpoint.frontier_labels),
+        entry_pending=False,
+    )
 
-    # Assert: the frontier is saved again, labelled from what the resumed index read, which is no facts.
-    saved = json.loads((tmp_path / "second.json").read_text())["result"]["not_inspected"]
-    assert [(record["place_key"], record["signature"]) for record in saved] == [
-        ("app/entry.py:4-5", "app/entry.py:4")
-    ]
+    # Assert: the frontier is saved again with the name the first save wrote, though the resumed index
+    # never parsed the caller's file. A place no save labelled shows only its location, never parsing.
+    assert _frontier_labels(tmp_path / "second.json") == _frontier_labels(tmp_path / "first.json")
+    assert _frontier_labels(tmp_path / "first.json") == [("app/entry.py:4-5", "app/entry.py:4 handle")]
+    assert PlaceLabels(resumed)("app/entry.py:4-5") == "app/entry.py:4"
+    assert "app/entry.py" not in resumed.parsed_files
+
+
+def test_a_resumed_jvn_find_that_stops_again_keeps_every_carried_over_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: six callers of `admit` fill the frontier of a search started at it, and no answer is
+    # sure enough to stop it, so each run opens one place and stops on its budget.
+    calls_admit = "from .policy import admit\n\n\ndef call{}(item):\n    return admit(item)\n"
+    callers = {f"app/caller{number}.py": calls_admit.format(number) for number in range(6)}
+    repository = tmp_path / "repository"
+    commit_files(repository, {"app/policy.py": "def admit(item):\n    return len(item) <= 3\n", **callers})
+    unsure = ScriptedJevClient(nouls=lambda _question_id, _question, _state: 0.5)
+    unsure.close = lambda: None
+    clients = iter([unsure, unsure])
+    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "TypeSafeJevClient", lambda: next(clients))
+    first, second = tmp_path / "first", tmp_path / "second"
+
+    def jvn_find(output: Path, *options: str) -> list[str]:
+        command = ["find", "the item limit", "--repo", str(repository), "--start", "app/policy.py:2"]
+        return [*command, "--max-calls", "1", "--out", str(output), *options]
+
+    assert cli.main(jvn_find(first)) == 0
+
+    # Act
+    status = cli.main(jvn_find(second, "--resume", str(first)))
+
+    # Assert: every place carried over and still unopened keeps the label its first save wrote, in the
+    # resume state and in the manifest, and each caller's label names its function.
+    first_labels = dict(_frontier_labels(first / "resume.json"))
+    resumed_labels = dict(_frontier_labels(second / "resume.json"))
+    manifest = json.loads((second / "manifest.json").read_text())
+    shown = {entry["place"]: entry["signature"] for entry in manifest["search"]["not_inspected"]}
+    carried = first_labels.keys() & resumed_labels.keys()
+    functions = [key for key in carried if key.endswith(":4-5")]
+    assert status == 0
+    assert len(functions) >= 4
+    assert all(" call" in first_labels[key] for key in functions)
+    assert {key: resumed_labels[key] for key in carried} == {key: first_labels[key] for key in carried}
+    assert {key: shown[key] for key in carried} == {key: first_labels[key] for key in carried}
 
 
 @pytest.mark.parametrize("workflow", ["find", "findall"])
