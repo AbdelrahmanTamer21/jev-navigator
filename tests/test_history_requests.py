@@ -81,7 +81,15 @@ def test_each_judgment_of_an_open_step_joins_to_the_answer_that_decided_it(tmp_p
     # Assert
     steps = [record["step"] for record in records if record["kind"] == "history_step"]
     opens = [step for step in steps if step["operation"] == "open"]
-    assert opens
+    picks = [
+        step["judgments"]["open_first"]
+        for step in opens
+        if "choice" in step["judgments"].get("open_first", {})
+    ]
+    assert opens and picks
+    for pick in picks:
+        response = journal_response(records, pick["answered_by"])
+        assert response["answers"][pick["answered_by"]["question_id"]]["confidence"] == pick["confidence"]
     for step in opens:
         contains = step["judgments"]["contains_target"]
         assert answered_probability(records, contains["answered_by"]) == contains["probability"]
@@ -281,3 +289,42 @@ def answered_choice(records: list[dict], source: dict) -> dict:
     """The option probabilities the journal's response holds for ``source``'s Choice question."""
     response = journal_response(records, source)
     return response["answers"][source["question_id"]]["probabilities"]
+
+
+@pytest.mark.parametrize("section", ["decisions", "history"])
+def test_a_stop_rule_reading_the_history_replays_without_a_live_request(
+    sample_index, tmp_path: Path, section: str
+) -> None:
+    # Arrange: the answer sources differ between a live run and its replay (from_store), so Jev
+    # must never see them, or the replayed stop check becomes a new request
+    def answer(question_id: str, question: dict, state: dict) -> float:
+        return 0.2 if section in state else 0.3
+
+    rule = StopRule(FETCHED_HOLDS_LIMIT, sections=(section,))
+    start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
+    store = tmp_path / "answers.jsonl"
+    client = ScriptedJevClient(nouls=answer)
+    live = Judge(client, store=JsonlAnswerStore(store))
+    find_code(
+        sample_index,
+        live,
+        "the item limit check",
+        start,
+        budget=SearchBudget(beam_width=1, max_steps=3),
+        stop_rule=rule,
+    )
+
+    # Act
+    replaying = Judge(client, store=JsonlAnswerStore(store), served_model=live.served_model)
+    find_code(
+        sample_index,
+        replaying,
+        "the item limit check",
+        start,
+        budget=SearchBudget(beam_width=1, max_steps=3),
+        stop_rule=rule,
+    )
+
+    # Assert
+    assert live.calls > 0
+    assert replaying.calls == 0
