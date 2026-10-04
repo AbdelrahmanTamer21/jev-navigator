@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -53,3 +55,47 @@ def test_export_fails_loudly_when_git_lacks_an_object(tmp_path: Path) -> None:
     # Act and assert
     with pytest.raises(tools.ToolFailedError, match=MISSING_OBJECT):
         tools.export_blobs(repository, {"gone.py": MISSING_OBJECT}, tmp_path / "export")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX preprocessor script")
+@pytest.mark.parametrize(
+    "search",
+    [
+        lambda repository: tools.ripgrep_files("needle", ("a.py",), repository),
+        lambda repository: tuple(hit.file for hit in tools.ripgrep_fixed("needle", ("a.py",), repository, 5)),
+    ],
+    ids=["ripgrep_files", "ripgrep_fixed"],
+)
+def test_ripgrep_ignores_a_configured_preprocessor(tmp_path: Path, monkeypatch, search) -> None:
+    # A ripgrep config in the environment (RIPGREP_CONFIG_PATH) can name `--pre=<program>`, which
+    # ripgrep runs for each searched file. Over an untrusted repository that is code execution, so
+    # jvn's searches must ignore the config entirely.
+    marker = tmp_path / "preprocessor-ran"
+    preprocessor = tmp_path / "pre.sh"
+    preprocessor.write_text(f'#!/bin/sh\n: > "{marker}"\ncat "$1"\n')
+    preprocessor.chmod(preprocessor.stat().st_mode | stat.S_IXUSR)
+    config = tmp_path / "rg.conf"
+    config.write_text(f"--pre={preprocessor}\n")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "a.py").write_text("needle = 1\n")
+
+    found = search(repository)
+
+    assert found == ("a.py",)  # the search still works
+    assert not marker.exists()  # but the configured preprocessor never ran
+
+
+def test_listing_outside_git_ignores_a_configured_ripgrep_filter(tmp_path: Path, monkeypatch) -> None:
+    # Outside a Git worktree the file inventory comes from `rg --files`; a ripgrep config must not
+    # change which files the index sees there either.
+    config = tmp_path / "rg.conf"
+    config.write_text("--glob=!a.py\n")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
+    directory = tmp_path / "plain"
+    directory.mkdir()
+    (directory / "a.py").write_text("needle = 1\n")
+
+    assert tools.listed_files(directory) == ("a.py",)

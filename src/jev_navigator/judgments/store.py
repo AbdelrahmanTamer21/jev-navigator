@@ -32,7 +32,7 @@ class AnswerRecord:
     question_ids: tuple[str, ...]
     answers: Mapping[str, dict]
     model: str
-    input_tokens: int
+    input_tokens: int | None
     thresholds: Mapping[str, float]
     item_keys: Mapping[str, str] = field(default_factory=dict)
     sources: Mapping[str, Mapping] = field(default_factory=dict)
@@ -44,7 +44,7 @@ class AnswerRecord:
 
     def response(self) -> JevResponse:
         answers = {question_id: answer_from_json(raw) for question_id, raw in self.answers.items()}
-        return JevResponse(answers, self.model, 0, self.request_sha256, from_store=True)
+        return JevResponse(answers, self.model, None, self.request_sha256, from_store=True)
 
     def sent_request(self) -> tuple[dict, dict]:
         """The state and questions as they were sent, every key in its sent order."""

@@ -21,26 +21,26 @@ import os
 import signal
 import threading
 from collections.abc import Mapping, Sequence
-from concurrent.futures import CancelledError, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import IntEnum, StrEnum
 
 from ..history import (
-    DEFAULT_QUESTION_RESERVE,
     DEFAULT_STOP_SECTIONS,
     FetchedSpan,
     History,
     HistoryJudgment,
     HistoryOutcome,
     HistoryStep,
+    HistoryTooLargeError,
     judge_history,
     judge_history_async,
 )
 from ..index.code_index import CodeIndex
 from ..index.spans import CodeSlice
 from ..judgments.answers import JevResponse, NoulAnswer
-from ..judgments.client import JEV_STATE_TOKEN_LIMIT, InputBudgetExceededError
+from ..judgments.client import JEV_INPUT_BOX_CHARS, QUESTION_RESERVE_CHARS, InputBudgetExceededError
 from ..judgments.judge import (
     CODE_FIELD,
     CallCapReachedError,
@@ -266,6 +266,9 @@ class _Search:
     steps: int = 0
     cap_reached: bool = False
     counter: itertools.count = field(default_factory=itertools.count)
+    unmerged: list[_Opening] = field(default_factory=list)
+    """The places a round opened and has not merged yet; a caller interrupt returns them to the
+    frontier, wherever in the round it arrives."""
 
     def push(
         self,
@@ -343,11 +346,13 @@ def find_code(
             responses, cancelled = _ask_round(judge, search, opened)
             with _defer_keyboard_interrupts():
                 _merge_round(search, opened, responses)
+                search.unmerged = []
             if cancelled:
                 stop = Outcome.CANCELLED
                 break
             _apply_stop_rule(judge, search)
     except KeyboardInterrupt:
+        _restore_unmerged(search)
         stop = Outcome.CANCELLED
     assert stop is not None
     return _result(search, stop, judge, index)
@@ -443,6 +448,8 @@ def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Openin
             if opening := _open(index, search, item):
                 opened.append(opening)
             processed += 1
+        with _defer_keyboard_interrupts():
+            search.unmerged = opened
         return opened
     except BaseException:
         for opening in opened:
@@ -451,31 +458,49 @@ def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Openin
         for item in beam[processed:]:
             search.visited.discard(item.place.key)
             heapq.heappush(search.queue, item)
+        search.unmerged = []
         raise
+
+
+def _restore_unmerged(search: _Search) -> None:
+    for opening in search.unmerged:
+        _restore_opening(search, opening)
+        heapq.heappush(search.queue, opening.item)
+    search.unmerged = []
 
 
 def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[list, bool]:
     """Ask one beam concurrently. A caller interrupt stops future rounds after the already-sent
     requests settle; successful responses still count and interrupted places return to the frontier."""
     with ThreadPoolExecutor(max_workers=len(opened)) as pool:
-        futures = [pool.submit(_ask_within_cap, judge, search, opening) for opening in opened]
+        futures: list[Future] = []
         try:
+            for opening in opened:
+                futures.append(pool.submit(_ask_within_cap, judge, search, opening))
             return [future.result() for future in futures], False
         except KeyboardInterrupt:
+            settled_before_cancel = {future for future in futures if future.done()}
             with _defer_keyboard_interrupts(re_raise=False):
                 judge.cancel()
                 for future in futures:
                     future.cancel()
                 wait(futures)
-                responses = []
-                for future in futures:
-                    try:
-                        responses.append(future.result())
-                    except (CancelledError, KeyboardInterrupt):
-                        responses.append(_Unanswered.CANCELLED)
-                    except Exception:
-                        responses.append(_Unanswered.CANCELLED)
-            return responses, True
+                responses = [_settled_response(future, future in settled_before_cancel) for future in futures]
+            unsubmitted = len(opened) - len(futures)
+            return [*responses, *[_Unanswered.CANCELLED] * unsubmitted], True
+
+
+def _settled_response(future: Future, settled_before_cancel: bool):
+    """The future's answer. An error that had already settled before the cancel is a real failure and
+    is raised; only a request that ended because of the cancel counts as cancelled."""
+    try:
+        return future.result()
+    except Exception:
+        if settled_before_cancel:
+            raise
+        return _Unanswered.CANCELLED
+    except KeyboardInterrupt:
+        return _Unanswered.CANCELLED
 
 
 def _merge_round(search: _Search, opened: list[_Opening], responses: list) -> None:
@@ -534,12 +559,20 @@ class StopRule:
 
     check: Check
     shared: Mapping = field(default_factory=dict)
-    budget_tokens: int = JEV_STATE_TOKEN_LIMIT - DEFAULT_QUESTION_RESERVE
+    budget_chars: int = JEV_INPUT_BOX_CHARS - QUESTION_RESERVE_CHARS
     sections: tuple[str, ...] = DEFAULT_STOP_SECTIONS
     context: Mapping[str, object] = field(default_factory=dict)
 
     def new_history(self, subject: Mapping) -> History:
-        return History(budget_tokens=self.budget_tokens, sections={SUBJECT: subject, **self.context})
+        return History(budget_chars=self.budget_chars, sections={SUBJECT: subject, **self.context})
+
+
+class StopRuleTooLargeError(RuntimeError):
+    """The stop rule's request cannot fit Jev's input box, so the search cannot judge whether to stop.
+    The caller sizes its rule (``budget_chars``, ``shared``, ``sections``); the search does not guess."""
+
+    def __init__(self, rule: StopRule, cause: Exception) -> None:
+        super().__init__(f"the stop rule {rule.check.name} cannot fit Jev's input: {cause}")
 
 
 def _apply_stop_rule(judge: Judge, search: _Search) -> None:
@@ -552,6 +585,8 @@ def _apply_stop_rule(judge: Judge, search: _Search) -> None:
         )
     except CallCapReachedError:
         search.cap_reached = True
+    except (HistoryTooLargeError, InputBudgetExceededError) as error:
+        raise StopRuleTooLargeError(rule, error) from error
 
 
 async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:
@@ -564,6 +599,8 @@ async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:
         )
     except CallCapReachedError:
         search.cap_reached = True
+    except (HistoryTooLargeError, InputBudgetExceededError) as error:
+        raise StopRuleTooLargeError(rule, error) from error
 
 
 def _restore(search: _Search, previous: FindResult) -> None:
@@ -870,7 +907,7 @@ def _combine_opening_answers(
         },
         **(priority.answers if priority is not None else {}),
     }
-    combined = JevResponse(answers, judge.served_model or found.model, judge.input_tokens)
+    combined = JevResponse(answers, judge.served_model or found.model)
     return _priority_diagnostic(combined, unavailable)
 
 

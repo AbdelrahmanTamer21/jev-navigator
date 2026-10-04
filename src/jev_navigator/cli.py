@@ -26,12 +26,14 @@ from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find
 from .directives.places import Place, place_for_line
 from .index.code_index import CodeIndex
 from .index.languages import language_of
+from .judgments.answers import TokenTotal
 from .judgments.client import JevClient
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import JsonlAnswerStore
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
+from .usage_receipt import usage_receipt, usage_report_lines
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
@@ -378,7 +380,8 @@ def create_evidence_pack(
             result,
             requested_model=getattr(client, "model", "unknown"),
             served_model=judge.served_model,
-            input_tokens=judge.input_tokens,
+            input_total=judge.input_total,
+            unanswered_requests=judge.unanswered_requests,
             duration_seconds=seed_duration_seconds,
             total_calls=seed_calls,
             entry_selection=selection,
@@ -826,8 +829,9 @@ def _load_typesafe_environment(
     environment: MutableMapping[str, str],
     path: Path | None = None,
 ) -> None:
-    """Load official TypeSafe SDK settings: process environment, then checkout `.env`,
-    then the legacy `~/.config/jvn/env`; a process value always takes precedence."""
+    """Load official TypeSafe SDK settings: process environment, then this tool's checkout `.env`
+    (never a repository under analysis), then the legacy `~/.config/jvn/env`; a process value always
+    takes precedence."""
     from .environment import load_typesafe_environment
 
     load_typesafe_environment(environment, legacy=path)
@@ -858,7 +862,8 @@ def _manifest(
     *,
     requested_model: str,
     served_model: str | None,
-    input_tokens: int,
+    input_total: TokenTotal,
+    unanswered_requests: int,
     duration_seconds: float,
     total_calls: int,
     entry_selection: EntrySelection | None,
@@ -890,7 +895,8 @@ def _manifest(
         "provider": {
             "requested_model": requested_model,
             "served_model": served_model,
-            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_tokens,
+            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_total.reported,
+            **usage_receipt(previous, input_total, unanswered_requests),
         },
         "search": {
             "outcome": result.outcome,
@@ -1073,6 +1079,7 @@ _FRONTIER_REASONS = {
 def _report(manifest: dict) -> str:
     source = manifest["source"]
     search = manifest["search"]
+    provider = manifest["provider"]
     lines = [
         "# Jev navigator evidence pack",
         "",
@@ -1085,8 +1092,8 @@ def _report(manifest: dict) -> str:
         f"- Outcome: **{search['outcome']}**",
         *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
-        f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
-        f"`{manifest['provider']['served_model']}`",
+        f"- Provider: requested `{provider['requested_model']}`, served `{provider['served_model']}`",
+        *usage_report_lines(provider),
         f"- Navigation elapsed: {search['duration_seconds']:.3f} seconds "
         "(indexing and entry selection excluded)",
         f"- Coverage caveat: {len(search['not_inspected'])} candidates were not independently opened; "

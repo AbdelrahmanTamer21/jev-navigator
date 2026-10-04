@@ -389,13 +389,23 @@ def _same_lines_as_a_named_symbol(symbols: set[Span]) -> set[Span]:
 
 
 def _calls_from_matches(matches) -> tuple[CallMatch, ...]:
+    """In source order, and of two calls starting at one place, such as `new Foo(a)` and
+    `new Foo(a).bar()`, the outer first. ast-grep runs its rules in parallel, so its own order
+    differs between scans for calls that different rules match."""
     found = []
     for match in matches:
         expression = match["metaVariables"]["single"]["CALLEE"]["text"]
         name = last_identifier(expression)
         if name:
-            found.append(CallMatch(match["file"], _line_of(match), name, receiver_of(expression)))
-    return tuple(sorted(found, key=lambda call: (call.file, call.line)))
+            call = CallMatch(match["file"], _line_of(match), name, receiver_of(expression))
+            found.append((_outer_first(match), call))
+    return tuple(call for _, call in sorted(found, key=lambda entry: entry[0]))
+
+
+def _outer_first(match: dict) -> tuple[str, int, int]:
+    """A match's place in its file, ordering the outer of two matches that start together first."""
+    offsets = match["range"]["byteOffset"]
+    return match["file"], offsets["start"], -offsets["end"]
 
 
 def _references_from_matches(matches) -> tuple[ReferenceMatch, ...]:
