@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tomllib
 from collections.abc import MutableMapping
 from pathlib import Path
 
@@ -36,17 +35,21 @@ LEGACY_CONFIG = Path.home() / ".config/jvn/env"
 
 
 def checkout_root() -> Path | None:
-    """This tool's own source checkout, the first directory above this file whose `pyproject.toml`
-    names the `jev-navigator` project, or None when `jvn` is installed outside such a checkout.
+    """This tool's own source checkout: the directory whose `src/jev_navigator/` holds this module
+    and which has a `pyproject.toml`, as with `uv run jvn` in the checkout or an editable install.
+    A jvn installed into site-packages (`uv tool install`, `pipx`, a non-editable `pip install`)
+    has no checkout.
 
-    The `.env` is trusted only from here. Returning None rather than the current directory is what
-    stops an arbitrary working directory's `.env` from configuring the tool.
+    The module's location alone decides; nothing walks up the tree and no file is read. A
+    repository under analysis controls its own `pyproject.toml` and can claim any project name,
+    but this module sits in its `src/` only if that repository is running its own code. The `.env`
+    is trusted only from here, so returning None rather than the current directory is what stops an
+    arbitrary working directory's `.env` from configuring the tool.
     """
-    for parent in Path(__file__).resolve().parents:
-        pyproject = parent / "pyproject.toml"
-        if pyproject.is_file() and _names_this_project(pyproject):
-            return parent
-    return None
+    package = Path(__file__).resolve().parent
+    root = package.parent.parent
+    in_a_source_tree = package.name == "jev_navigator" and package.parent.name == "src"
+    return root if in_a_source_tree and (root / "pyproject.toml").is_file() else None
 
 
 def load_typesafe_environment(
@@ -108,17 +111,6 @@ def _missing_key_message(root: Path | None, legacy: Path) -> str:
     """Where to put the key: only the files this run reads, the checkout `.env` when there is one."""
     checkout = f"{root / '.env'} (see .env.example) or " if root is not None else ""
     return f"TYPESAFE_API_KEY is unset: export it, or set it in {checkout}{legacy}"
-
-
-def _names_this_project(pyproject: Path) -> bool:
-    """Whether ``pyproject``'s own `[project]` name is jev-navigator, so a parent project's
-    `pyproject.toml` (and its `.env`) higher up the tree is never taken for the tool's checkout. A
-    file that cannot be read or parsed as TOML, which must be UTF-8, names no project."""
-    try:
-        project = tomllib.loads(pyproject.read_bytes().decode()).get("project")
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-        return False
-    return isinstance(project, dict) and project.get("name") == "jev-navigator"
 
 
 def _env_file(path: Path) -> dict[str, str]:

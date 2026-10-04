@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -96,13 +97,17 @@ def test_a_checkout_env_file_is_read_through_checkout_root(tmp_path, monkeypatch
     assert os.environ["TYPESAFE_API_KEY"] == "checkout-key"
 
 
-def test_a_dotenv_outside_a_checkout_is_never_read(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "project_name", ["their-app", "jev-navigator"], ids=["their-own-name", "claiming-jev-navigator"]
+)
+def test_a_dotenv_outside_a_checkout_is_never_read(tmp_path, monkeypatch, project_name: str):
     # `jvn` installed in the virtual environment of a repository it searches, which ships its own
     # `pyproject.toml` and `.env`: neither the working directory nor that project above the
-    # installed module is jev-navigator's checkout, so the repository's `.env` must not configure jvn.
+    # installed module is jev-navigator's checkout, so the repository's `.env` must not configure jvn,
+    # whatever name the repository gives itself.
     repository = tmp_path / "repository"
     repository.mkdir()
-    (repository / "pyproject.toml").write_text('[project]\nname = "their-app"\n')
+    (repository / "pyproject.toml").write_text(f'[project]\nname = "{project_name}"\n')
     (repository / ".env").write_text("TYPESAFE_API_KEY=attacker-key\nTYPESAFE_BASE_URL=http://attacker\n")
     installed = repository / ".venv/lib/site-packages/jev_navigator/environment.py"
     monkeypatch.chdir(repository)
@@ -207,33 +212,28 @@ def test_the_search_thresholds_and_budget_are_still_honoured_from_a_file(tmp_pat
 
 
 @pytest.mark.parametrize(
-    ("pyproject", "is_checkout"),
+    ("package", "has_pyproject", "is_checkout"),
     [
-        pytest.param(b'[project]\nname = "jev-navigator"\nversion = "0.1.0"\n', True, id="this-project"),
-        pytest.param(b'[project]\nname = "some-other-tool"\n', False, id="another-project"),
-        pytest.param(
-            b'[project]\nname = "analysis-engine"\n\n[[tool.uv.index]]\nname = "jev-navigator"\n',
-            False,
-            id="another-project-naming-jev-navigator-elsewhere",
-        ),
-        pytest.param(b'[project\nname = "jev-navigator"\n', False, id="unparseable-pyproject"),
-        pytest.param(b'[project]\nname = "jev-navigator"\n# caf\xe9\n', False, id="pyproject-not-utf-8"),
+        pytest.param("src/jev_navigator", True, True, id="editable-checkout"),
+        pytest.param("src/jev_navigator", False, False, id="src-without-pyproject"),
+        pytest.param("lib/jev_navigator", True, False, id="not-under-src"),
     ],
 )
-def test_checkout_root_is_a_project_whose_own_name_is_jev_navigator(
-    tmp_path, monkeypatch, pyproject: bytes, is_checkout: bool
+def test_the_checkout_is_the_project_whose_src_holds_jvns_module(
+    tmp_path, monkeypatch, package: str, has_pyproject: bool, is_checkout: bool
 ):
-    # `jvn` installed in a virtual environment inside a project that ships its own `.env`: only
-    # jev-navigator's own `[project]` name, in a file that parses as TOML, makes that project the
-    # tool's checkout.
     project = tmp_path / "project"
-    installed = project / ".venv/lib/site-packages/jev_navigator/environment.py"
-    installed.parent.mkdir(parents=True)
-    (project / "pyproject.toml").write_bytes(pyproject)
-    (project / ".env").write_text("TYPESAFE_BASE_URL=http://attacker\n")
-    monkeypatch.setattr(environment, "__file__", str(installed))
+    (project / package).mkdir(parents=True)
+    if has_pyproject:
+        (project / "pyproject.toml").write_text('[project]\nname = "jev-navigator"\n')
+    monkeypatch.setattr(environment, "__file__", str(project / package / "environment.py"))
 
     assert checkout_root() == (project if is_checkout else None)
+
+
+def test_the_checkout_these_tests_run_from_is_found():
+    # The suite runs from an editable install of this checkout, so the real lookup must find it.
+    assert checkout_root() == Path(__file__).resolve().parents[1]
 
 
 def test_an_installed_jvn_has_no_checkout_whatever_directory_it_runs_in(tmp_path, monkeypatch):
