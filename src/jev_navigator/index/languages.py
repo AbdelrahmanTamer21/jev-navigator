@@ -242,6 +242,7 @@ _PYTHON_ROLES = (
         "argument",
         ("kind: argument_list", "kind: keyword_argument\nfield: value"),
         kind="attribute",
+        not_inside=(_PYTHON_SUPERCLASSES,),
     ),
     ReferenceRole("decorator", ("kind: decorator",)),
     ReferenceRole("collection", ("kind: pair\nfield: value", "kind: list", "kind: tuple", "kind: set")),
@@ -250,6 +251,7 @@ _PYTHON_ROLES = (
     ReferenceRole("receiver", ("kind: attribute\nfield: object",), not_regex="^(self|cls)$"),
     ReferenceRole("type", ("kind: type\nstopBy: end",)),
     ReferenceRole("base", (_PYTHON_SUPERCLASSES,)),
+    ReferenceRole("base", (_PYTHON_SUPERCLASSES,), kind="attribute"),
     ReferenceRole(
         "condition",
         (
@@ -278,6 +280,7 @@ _SCRIPT_ROLES = (
     ReferenceRole("return", ("kind: return_statement",)),
     ReferenceRole("receiver", ("kind: member_expression\nfield: object",)),
     ReferenceRole("base", ("kind: class_heritage",)),
+    ReferenceRole("base", ("kind: class_heritage",), kind="member_expression"),
     ReferenceRole(
         "condition",
         (
@@ -293,6 +296,7 @@ _SCRIPT_ROLES = (
 _TYPED_SCRIPT_ROLES = (
     *_SCRIPT_ROLES,
     ReferenceRole("base", ("kind: extends_clause",)),
+    ReferenceRole("base", ("kind: extends_clause",), kind="member_expression"),
     ReferenceRole(
         "type",
         kind="type_identifier",

@@ -254,12 +254,17 @@ def _references_from_matches(matches) -> tuple[ReferenceMatch, ...]:
     )
 
 
+# Roles whose node may be a qualified name, `x.name` or `pkg.mod.Name`: named by its last part, with
+# the rest as its receiver.
+_QUALIFIED_ROLES = frozenset({"argument", "base"})
+
+
 def _reference_name(role: str, text: str) -> str:
-    return last_identifier(text) if role == "argument" else text
+    return last_identifier(text) if role in _QUALIFIED_ROLES else text
 
 
 def _reference_receiver(role: str, text: str) -> str | None:
-    return receiver_of(text) if role == "argument" else None
+    return receiver_of(text) if role in _QUALIFIED_ROLES else None
 
 
 def receiver_of(expression: str) -> str | None:

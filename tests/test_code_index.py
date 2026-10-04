@@ -475,6 +475,10 @@ SCRIPT_BASE_AND_SUBCLASS = (
     "export class Base {}\n",
     'import { Base } from "./base";\n\n\nexport class Sub extends Base {}\n',
 )
+SCRIPT_BASE_AND_QUALIFIED_SUBCLASS = (
+    "export class Base {}\n",
+    'import * as base from "./base";\n\n\nexport class Sub extends base.Base {}\n',
+)
 
 
 @pytest.mark.parametrize(
@@ -483,6 +487,17 @@ SCRIPT_BASE_AND_SUBCLASS = (
         (".py", "class Base:\n    pass\n", "from base import Base\n\n\nclass Sub(Base):\n    pass\n"),
         (".ts", *SCRIPT_BASE_AND_SUBCLASS),
         (".js", *SCRIPT_BASE_AND_SUBCLASS),
+        (".py", "class Base:\n    pass\n", "import base\n\n\nclass Sub(base.Base):\n    pass\n"),
+        (".ts", *SCRIPT_BASE_AND_QUALIFIED_SUBCLASS),
+        (".js", *SCRIPT_BASE_AND_QUALIFIED_SUBCLASS),
+    ],
+    ids=[
+        "python",
+        "typescript",
+        "javascript",
+        "qualified-python",
+        "qualified-typescript",
+        "qualified-javascript",
     ],
 )
 def test_a_class_s_base_is_recorded_once_as_its_base(

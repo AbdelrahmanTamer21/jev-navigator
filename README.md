@@ -432,7 +432,8 @@ contain the code described in `target.description`?" and, per neighbour code lis
 callers in test files after the others; callees, proven production targets first and then the ones
 called from fewest places; code that
 refers to it or that it passes on without a call, as an argument, collection entry, assignment,
-decorator, export, return, method receiver, type or base class; the modules it imports, re-exports
+decorator, export, return, method receiver, type or base class (also a qualified one, `pkg.Base`); the
+modules it imports, re-exports
 or requires (module-level code takes its whole file's imports): the definitions of the names it
 takes from each, and the start of a module it takes whole or takes names from that it does not
 define itself; the other functions of its file, nearest first; lines anywhere in scope (docs and
