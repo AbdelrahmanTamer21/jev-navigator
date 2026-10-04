@@ -41,6 +41,7 @@ from ..index.languages import language_of
 from ..index.spans import CodeSlice
 from ..judgments.answers import AnswerSource, JevResponse, NoulAnswer, answered_by, scored_by
 from ..judgments.client import InputBudgetExceededError
+from ..judgments.journal import error_message
 from ..judgments.judge import (
     ABORTED_SEND_ERRORS,
     CODE_FIELD,
@@ -1239,7 +1240,10 @@ def _stop_step(
 ) -> HistoryStep:
     judgments: dict[str, object] = {"not_inspected": [_frontier_entry(entry) for entry in not_inspected]}
     if search.failure is not None:
-        judgments["failure"] = f"{type(search.failure).__name__}: {search.failure}"
+        judgments["failure"] = {
+            "type": type(search.failure).__name__,
+            "message": error_message(search.failure),
+        }
     if unparsed:
         judgments["unparsed_files"] = sorted(unparsed)
     judgments["parser_scans"] = {
