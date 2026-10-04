@@ -119,15 +119,56 @@ def test_a_resumed_search_that_stops_again_keeps_its_frontier_names_while_the_pa
     assert "app/entry.py" not in resumed.parsed_files
 
 
-def test_a_resumed_jvn_find_that_stops_again_keeps_every_carried_over_name(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Arrange: six callers of `admit` fill the frontier of a search started at it, and no answer is
-    # sure enough to stop it, so each run opens one place and stops on its budget.
+def test_a_restored_place_set_aside_again_carries_its_code_signature(tmp_path: Path) -> None:
+    # Arrange: a stopped search leaves the caller of `check` unopened; its resumption opens that
+    # caller and is interrupted at its first request, which sets the caller aside again.
+    files = {
+        "app/target.py": "def check():\n    return True\n",
+        "app/entry.py": "from app.target import check\n\n\ndef handle():\n    return check()\n",
+    }
+    repository = tmp_path / "repository"
+    commit_files(repository, files)
+    index = CodeIndex(repository, list(files))
+    start = function_place(index, index.find_definition("check")[0])
+    moves = {"callers": MOVES["callers"]}
+    unsure = ScriptedJevClient(nouls=lambda _question_id, _question, _state: 0.5)
+    budget = SearchBudget(max_steps=1, beam_width=1)
+    stopped = find_code(index, Judge(unsure), "the check function", [start], moves=moves, budget=budget)
+    save_resume(tmp_path / "resume.json", index, stopped, labels=PlaceLabels(index), entry_pending=False)
+    restored = load_resume(tmp_path / "resume.json", index).result
+
+    class InterruptingClient:
+        model = "interrupting"
+
+        def ask(self, state, questions):
+            del state, questions
+            raise KeyboardInterrupt
+
+    # Act
+    cancelled = find_code(
+        index, Judge(InterruptingClient()), "the check function", [], moves=moves, resume=restored
+    )
+
+    # Assert: the caller keeps the code signature the first search gave it, not the saved label.
+    (caller,) = stopped.not_inspected
+    (set_aside,) = cancelled.not_inspected
+    assert (set_aside.place_key, set_aside.reason) == ("app/entry.py:4-5", "cancelled")
+    assert set_aside.signature == set_aside.place.signature == caller.signature
+    assert caller.signature.startswith("app/entry.py:4 `def handle():`")
+
+
+def _callers_repository(root: Path) -> Path:
+    """Six callers of `admit`, which fill the frontier of a search started at it."""
     calls_admit = "from .policy import admit\n\n\ndef call{}(item):\n    return admit(item)\n"
     callers = {f"app/caller{number}.py": calls_admit.format(number) for number in range(6)}
-    repository = tmp_path / "repository"
-    commit_files(repository, {"app/policy.py": "def admit(item):\n    return len(item) <= 3\n", **callers})
+    commit_files(root, {"app/policy.py": "def admit(item):\n    return len(item) <= 3\n", **callers})
+    return root
+
+
+def _stop_twice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *resumed_options: str) -> tuple[Path, Path]:
+    """Two `jvn find` runs at `admit`, the second resuming the first. No answer is sure enough to stop
+    either, so each opens one place and stops on its budget."""
+    repository = _callers_repository(tmp_path / "repository")
     unsure = ScriptedJevClient(nouls=lambda _question_id, _question, _state: 0.5)
     unsure.close = lambda: None
     clients = iter([unsure, unsure])
@@ -140,23 +181,47 @@ def test_a_resumed_jvn_find_that_stops_again_keeps_every_carried_over_name(
         return [*command, "--max-calls", "1", "--out", str(output), *options]
 
     assert cli.main(jvn_find(first)) == 0
+    assert cli.main(jvn_find(second, "--resume", str(first), *resumed_options)) == 0
+    return first, second
 
+
+def _manifest_frontier(pack: Path) -> dict[str, str]:
+    manifest = json.loads((pack / "manifest.json").read_text())
+    return {entry["place"]: entry["signature"] for entry in manifest["search"]["not_inspected"]}
+
+
+def test_a_resumed_jvn_find_that_stops_again_keeps_every_carried_over_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Act
-    status = cli.main(jvn_find(second, "--resume", str(first)))
+    first, second = _stop_twice(tmp_path, monkeypatch)
 
     # Assert: every place carried over and still unopened keeps the label its first save wrote, in the
     # resume state and in the manifest, and each caller's label names its function.
     first_labels = dict(_frontier_labels(first / "resume.json"))
     resumed_labels = dict(_frontier_labels(second / "resume.json"))
-    manifest = json.loads((second / "manifest.json").read_text())
-    shown = {entry["place"]: entry["signature"] for entry in manifest["search"]["not_inspected"]}
+    shown = _manifest_frontier(second)
     carried = first_labels.keys() & resumed_labels.keys()
-    functions = [key for key in carried if key.endswith(":4-5")]
-    assert status == 0
+    functions = carried & {f"app/caller{number}.py:4-5" for number in range(6)}
     assert len(functions) >= 4
     assert all(" call" in first_labels[key] for key in functions)
     assert {key: resumed_labels[key] for key in carried} == {key: first_labels[key] for key in carried}
     assert {key: shown[key] for key in carried} == {key: first_labels[key] for key in carried}
+
+
+def test_with_keep_requests_a_carried_over_place_shows_its_code_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Act
+    first, second = _stop_twice(tmp_path, monkeypatch, "--keep-requests")
+
+    # Assert: --keep-requests keeps each frontier place's signature, the code line Jev would read,
+    # for a place the earlier run found as for one this run found.
+    shown = _manifest_frontier(second)
+    code_lines = {f"app/caller{number}.py:4-5": f"`def call{number}(item):`" for number in range(6)}
+    functions = dict(_frontier_labels(first / "resume.json")).keys() & shown.keys() & code_lines.keys()
+    assert len(functions) >= 4
+    assert all(shown[key].startswith(f"{key.removesuffix('-5')} {code_lines[key]}") for key in functions)
 
 
 @pytest.mark.parametrize("workflow", ["find", "findall"])

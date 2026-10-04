@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .directives.find_code import FindResult, NotInspected, Outcome, QueueTier, Visit
-from .directives.places import Place, place_relationship
+from .directives.places import Place, place_relationship, restored_signature
 from .index.bindings import Binding
 from .index.code_index import CodeIndex
 from .index.spans import Span
@@ -21,16 +21,13 @@ STATE_VERSION = 1
 
 @dataclass(frozen=True)
 class SavedSearch:
+    """``frontier_labels``: the label the earlier save wrote for each place of the frontier, by place
+    key. A restored place's own ``signature`` is its code signature, rebuilt from the code."""
+
     result: FindResult | None
     completed: tuple[CheckResult, ...] | None = None
     check_id: str | None = None
-
-    @property
-    def frontier_labels(self) -> dict[str, str]:
-        """The label the earlier save gave each place of the frontier, by place key."""
-        if self.result is None:
-            return {}
-        return {entry.place_key: entry.signature for entry in self.result.not_inspected}
+    frontier_labels: dict[str, str] = field(default_factory=dict)
 
 
 def scope_identity(index: CodeIndex) -> tuple[str, dict[str, str]]:
@@ -118,7 +115,8 @@ def load_resume(path: Path, index: CodeIndex) -> SavedSearch:
         completed = tuple(
             CheckResult(**{**item, "verdict": NoulVerdict(item["verdict"])}) for item in state["completed"]
         )
-    return SavedSearch(result, completed, state.get("check_id"))
+    labels = {item["place_key"]: item["signature"] for item in record["not_inspected"]}
+    return SavedSearch(result, completed, state.get("check_id"), labels)
 
 
 def _result_record(result: FindResult, labels: PlaceLabels) -> dict:
@@ -190,18 +188,20 @@ def _read_frontier(record: dict, index: CodeIndex) -> NotInspected:
         binding = Binding(
             binding_record["status"], binding_record["reason"], Span(**target) if target is not None else None
         )
+    relation = relationship.get("relation")
+    signature = restored_signature(index, record["place_key"], record["kind"], span, relation, binding)
     place = Place(
         record["place_key"],
         record["kind"],
-        record["signature"],
+        signature,
         lambda: index.read_slice(span, origin=origin),
-        relationship.get("relation"),
+        relation,
         binding,
         relationship.get("move"),
     )
     return NotInspected(
         record["place_key"],
-        record["signature"],
+        signature,
         record["reason"],
         record["priority"],
         record["depth"],
