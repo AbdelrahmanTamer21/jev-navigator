@@ -4,6 +4,7 @@ and every test's isolation from the developer's own decision-model settings."""
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 from collections import Counter
 from collections.abc import Mapping
@@ -118,6 +119,15 @@ class Basket:
 SECRET_CONFIG = """\
 API_TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 """
+
+
+@pytest.fixture
+def python_sigint_handler():
+    """Python's own Ctrl-C handler for a test that sends SIGINT. A suite started as a background job
+    (``cmd &``) inherits SIGINT as ignored, so without this the signal never arrives."""
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    yield
+    signal.signal(signal.SIGINT, previous)
 
 
 @pytest.fixture
