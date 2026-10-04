@@ -116,11 +116,12 @@ def _matches(pattern: re.Pattern[str], hides: Callable[[re.Match[str]], bool] = 
 
 def _quoted_spans(text: str) -> list[Span]:
     """A quoted value runs to its closing quote across escapes and lines, or to the end of the text
-    when it never closes; letters glued to the closing quote belong to it."""
+    when it never closes; letters glued to the closing quote belong to it. A "value" that starts with
+    whitespace is the rest of a string the key sat in (``'GitLab token: ' GITLAB_TOKEN``), not a value."""
     return [
         (match.start("value"), match.end("tail") if match["tail"] else match.end("value"))
         for match in _QUOTED_VALUE.finditer(text)
-        if match["value"] and _keyed_value(match, is_literal(match["value"], match["quote"]))
+        if match["value"][:1].strip() and _keyed_value(match, is_literal(match["value"], match["quote"]))
     ]
 
 

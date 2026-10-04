@@ -204,6 +204,7 @@ CODE_REFERENCES = [
     "clientSecret: `GITLAB_INTEGRATION_CLIENT_SECRET_${slug}`,",
     "const gitSecretName = `inv-${input.inventoryId}-${input.generation}-git`;",
     'need = isCredential(name) ? "must use valueFrom.secretKeyRef" : "is not an approved literal";',
+    "return `read -rsp 'GitLab token: ' GITLAB_TOKEN && printf '\\n' && export GITLAB_TOKEN && ` +",
 ]
 
 
