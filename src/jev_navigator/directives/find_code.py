@@ -350,19 +350,22 @@ def find_code(
     )
     search, judge = _begin(index, judge, target_description, start, options)
     stop = None
+    unmerged: list[_Opening] = []
     try:
         while (stop := _stop_reason(search, index)) is None:
-            opened = _open_round(index, search, judge)
-            if not opened:
+            unmerged = _open_round(index, search, judge)
+            if not unmerged:
                 continue
-            responses, cancelled = _ask_round(judge, search, opened)
+            responses, cancelled = _ask_round(judge, search, unmerged)
             with _defer_keyboard_interrupts():
-                _merge_round(search, opened, responses)
+                _merge_round(search, unmerged, responses)
+                unmerged = []
             if cancelled:
                 stop = Outcome.CANCELLED
                 break
             _apply_stop_rule(judge, search)
     except KeyboardInterrupt:
+        _set_aside_cancelled(search, unmerged)
         stop = Outcome.CANCELLED
     assert stop is not None
     return _result(search, stop, judge, index)
@@ -913,6 +916,14 @@ def _priority_diagnostic(response: JevResponse, unavailable: str | None) -> JevR
 def _set_aside_unasked(search: _Search, opening: _Opening, reason: str) -> None:
     _restore_opening(search, opening)
     _set_aside(search, opening.item, reason)
+
+
+def _set_aside_cancelled(search: _Search, unmerged: list[_Opening]) -> None:
+    """A Ctrl-C between a round's answers arriving and their merge, such as while the round's pool
+    shuts down, leaves its places opened but unrecorded; they go back to the frontier, and Resume
+    replays their stored answers."""
+    for opening in unmerged:
+        _set_aside_unasked(search, opening, "cancelled")
 
 
 def _restore_opening(search: _Search, opening: _Opening) -> None:
