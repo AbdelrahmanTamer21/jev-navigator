@@ -100,6 +100,21 @@ Explicit `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` process values win independe
 file or print the values. `TYPESAFE_BASE_URL` is the API root before `/v1/systemone`, such as
 `http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
 
+### Decision-model routes
+
+`SYSTEM_ONE_ROUTES` names the decision models `jvn` asks, in order. With
+`SYSTEM_ONE_ROUTES=drex,jev`, every request goes to Drex first, and to Jev only when Drex fails; the
+journal records each attempt with the route that made it. A size refusal is not a failure: it goes back
+to the judge, which splits the request, because the next route would get the same request. Each route
+reads `SYSTEM_ONE_<NAME>_ENDPOINT`, `SYSTEM_ONE_<NAME>_MODEL` and `SYSTEM_ONE_<NAME>_API_KEY`
+(`TYPESAFE_API_KEY` when unset); `drex` and `jev` also take `SYSTEM_ONE_<NAME>=1` for their hosted
+endpoint and model. A route missing its endpoint or model stops the command before any request, naming
+the route. Without `SYSTEM_ONE_ROUTES`, `jvn` uses the default Jev client described above.
+
+One difference under routes: Ctrl-C cannot abort a request already in flight, so the command waits for
+those requests to finish, keeps their answers, and then stops with a resumable pack. Without routes,
+Ctrl-C aborts requests in flight.
+
 ### JSON input for agents and pipelines
 
 Put a request in `request.json`:

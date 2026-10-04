@@ -222,7 +222,9 @@ class Judge:
         instead lets the requests in flight settle and keeps their answers. Known and accepted: a
         Ctrl-C that lands while a caller handles a yielded answer closes the batch generator, which
         cannot tell it from an ordinary early stop, so the requests in flight finish first and only
-        the exit is delayed."""
+        the exit is delayed. Also accepted: a client without ``cancel``, such as the routed client
+        `SYSTEM_ONE_ROUTES` builds, cannot abort a request in flight, so an interrupt waits for those
+        requests to finish and keeps their answers."""
         self.cancel()
         for future in futures:
             future.cancel()
