@@ -852,8 +852,9 @@ def _load_typesafe_environment(
     environment: MutableMapping[str, str],
     path: Path | None = None,
 ) -> None:
-    """Load official TypeSafe SDK settings: process environment, then checkout `.env`,
-    then the legacy `~/.config/jvn/env`; a process value always takes precedence."""
+    """Load official TypeSafe SDK settings: process environment, then this tool's checkout `.env`
+    (never a repository under analysis), then the legacy `~/.config/jvn/env`; a process value always
+    takes precedence."""
     from .environment import load_typesafe_environment
 
     load_typesafe_environment(environment, legacy=path)
