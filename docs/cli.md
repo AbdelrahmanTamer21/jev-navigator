@@ -211,7 +211,7 @@ covers the `jvn` command and every program that imports `jev_navigator`.
   tool, counting the ast-grep, ripgrep and git processes it runs. Over it, JVN stops those processes
   and raises `MemoryLimitReachedError`, which names the allowance, the memory in use and that baseline.
   ast-grep parses only as many files at once as the allowance affords: 3 at the default.
-- **Ceiling:** 4,096 MB, so four slots of 1,024 MB. A process takes a slot when it first starts a
+- **Ceiling:** 8,192 MB, so eight slots of 1,024 MB. A process takes a slot when it first starts a
   tool and keeps it until it exits. When every slot is held, it waits up to 120 seconds for one, then
   raises `MemoryLimitReachedError`, which names the processes holding the slots. The slots are files
   in `/tmp/jev-navigator-memory-<uid>`, and the operating system frees a slot when its process ends,
@@ -224,7 +224,7 @@ covers the `jvn` command and every program that imports `jev_navigator`.
 | Variable | Default | Meaning |
 |---|---|---|
 | `JEV_NAVIGATOR_MEMORY_ALLOWANCE_MB` | `1024` | What one JVN process may grow by, its tools included. |
-| `JEV_NAVIGATOR_MEMORY_CEILING_MB` | `4096` | What all JVN processes on the machine may hold; slots are ceiling divided by allowance. |
+| `JEV_NAVIGATOR_MEMORY_CEILING_MB` | `8192` | What all JVN processes on the machine may hold; slots are ceiling divided by allowance. |
 | `JEV_NAVIGATOR_MEMORY_WAIT_SECONDS` | `120` | How long a process waits for a free slot. |
 | `JEV_NAVIGATOR_MEMORY_SLOTS_DIR` | `/tmp/jev-navigator-memory-<uid>` | The slot folder. It must be a folder of this user, never a link. |
 

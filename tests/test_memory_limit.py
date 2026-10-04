@@ -310,22 +310,30 @@ def test_a_killed_holder_leaves_no_stale_slot(tmp_path: Path) -> None:
     assert output.startswith("took a slot after ") and float(output.split()[4]) < 1
 
 
-def test_the_ceiling_admits_as_many_processes_as_it_has_slots(tmp_path: Path) -> None:
-    # Arrange: two slots of 512 MB.
-    slots = tmp_path / "slots"
-    two_slots = {"allowance_mb": "512", "ceiling_mb": "1024"}
-    first = _jvn_process(TAKES_A_SLOT_AND_HOLDS_IT, slots, **two_slots)
-    assert first.stdout.readline() == "holding\n"
+def test_the_ceiling_admits_as_many_processes_as_its_settings_give_slots_and_no_more(tmp_path: Path) -> None:
+    # Arrange: the slot count comes from the settings, never from the test.
+    slots_dir = tmp_path / "slots"
+    settings = {"allowance_mb": "512", "ceiling_mb": "1536"}
+    slots = MemoryLimit.from_env(
+        {f"JEV_NAVIGATOR_MEMORY_{name.upper()}": value for name, value in settings.items()}
+    ).slots
+    holders = [_jvn_process(TAKES_A_SLOT_AND_HOLDS_IT, slots_dir, **settings) for _ in range(slots)]
 
     # Act
-    second = _jvn_process(TAKES_A_SLOT, slots, wait_seconds="0", **two_slots)
-    output, errors = second.communicate(timeout=30)
-    first.kill()
-    first.wait()
+    try:
+        admitted = [holder.stdout.readline() for holder in holders]
+        one_more = _jvn_process(TAKES_A_SLOT, slots_dir, wait_seconds="0", **settings)
+        _, refusal = one_more.communicate(timeout=30)
+    finally:
+        for holder in holders:
+            holder.kill()
+            holder.wait()
 
     # Assert
-    assert second.returncode == 0, errors
-    assert output.startswith("took a slot after ") and float(output.split()[4]) < 1
+    assert admitted == ["holding\n"] * slots
+    assert one_more.returncode == 1
+    assert f"hold its {slots} slots of 512 MB each" in refusal
+    assert all(str(holder.pid) in refusal for holder in holders)
 
 
 def test_a_holder_whose_slot_file_was_deleted_takes_a_slot_again_before_more_work(
@@ -487,10 +495,10 @@ def test_a_ceiling_below_the_allowance_is_refused() -> None:
         )
 
 
-def test_the_defaults_are_a_gigabyte_per_process_four_slots_and_two_minutes() -> None:
+def test_the_defaults_are_a_gigabyte_per_process_eight_slots_and_two_minutes() -> None:
     limit = MemoryLimit.from_env({})
 
-    assert (limit.allowance_mb, limit.ceiling_mb, limit.slots, limit.wait_seconds) == (1024, 4096, 4, 120.0)
+    assert (limit.allowance_mb, limit.ceiling_mb, limit.slots, limit.wait_seconds) == (1024, 8192, 8, 120.0)
 
 
 @pytest.mark.parametrize("entry", ["sync", "async"])

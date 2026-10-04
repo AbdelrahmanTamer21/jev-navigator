@@ -43,9 +43,10 @@ parser (#50) and the declaration-rule fix (#72), parsing every file of an app-si
 measured, saleor/graphql with 15.6 MB of code, peaked at 333 MB, and the worst, Heedvane's
 packages/protocol with generated bundles parsed side by side, at 471 MB."""
 
-CEILING_MB = 4096
-"""What all JVN processes on one machine may hold together. All agent work on the machine shares 10 to
-15 GB (André, 04.10.2026), so JVN's share is 4 GB: four slots at the default allowance."""
+CEILING_MB = 8192
+"""What all JVN processes on one machine may hold together: eight slots at the default allowance. All
+agent work on the machine shares 10 to 15 GB, and André chose 8 GB for JVN (04.10.2026) because a slot
+is a reservation: with four, a fifth run waited while four runs of about 300 MB used only 1.2 GB."""
 
 WAIT_SECONDS = 120.0
 """How long a process waits for a free slot before it refuses (André, 04.10.2026)."""

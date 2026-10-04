@@ -75,7 +75,7 @@ offline.
 
 JVN limits its own memory, for the command and for every program that imports the library. Each
 process may grow by 1,024 MB, its ast-grep, ripgrep and git processes included, and all JVN processes
-on a machine share 4,096 MB; a process waits up to two minutes for room, then stops with
+on a machine share 8,192 MB; a process waits up to two minutes for room, then stops with
 `MemoryLimitReachedError`. See [Memory limit](docs/cli.md#memory-limit) for what a refusal does and
 the settings.
 
