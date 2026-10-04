@@ -8,6 +8,7 @@ the code contains the target.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -16,7 +17,7 @@ from ..index.languages import language_of
 from ..index.spans import Span
 from ..judgments.client import JEV_INPUT_BOX_CHARS
 from ..judgments.judge import Judge, PickResult
-from ..judgments.questions import Pick
+from ..judgments.questions import Pick, serialized_chars
 from .places import Place, function_place, range_place
 
 MAX_OPTIONS = 200
@@ -29,9 +30,12 @@ FILE_READ_CAP = 30
 DOC_LINE_CHARS = 120
 DOC_SCAN_LINES = 40
 DESCRIPTION_CHARS = 2_000
-REQUEST_RESERVE_CHARS = 4_000
+OPTION_OVERHEAD_CHARS = serialized_chars({"199": ""})
+"""What one option adds to a question beyond its description: its key, quotes, colon and comma."""
 _DIRECTIVE_MARKERS = ("eslint", "noqa", "@ts-", "prettier-ignore", "pylint:", "type: ignore", "ruff:")
-_DOC_MARKERS = ('"""', "'''", "/**", "//", "#", "*")
+_BLOCK_CLOSERS = {'"""': '"""', "'''": "'''", "/**": "*/", "/*": "*/"}
+_LINE_OPENERS = ("//", "#")
+Mask = Callable[[str], str]
 
 CHOOSE_PATH = Pick(
     name="automatic_entry_path",
@@ -120,8 +124,9 @@ def choose_initial_candidates(index: CodeIndex, judge: Judge, target: str) -> En
         raise ValueError("the repository scope contains no supported code files")
     decisions: list[EntryDecision] = []
     parent = ""
+    mask = _mask_of(judge)
     while True:
-        entries = _path_entries(index, files, parent)
+        entries = _path_entries(index, files, parent, mask)
         chosen, decision = _choose_path(judge, target, parent, entries)
         decisions += decision
         if chosen.kind == "file":
@@ -129,7 +134,7 @@ def choose_initial_candidates(index: CodeIndex, judge: Judge, target: str) -> En
             break
         parent = chosen.path
 
-    spans = _source_spans(index, selected_file)
+    spans = _source_spans(index, selected_file, mask)
     if not spans:
         end = min(40, len(index.lines(selected_file)))
         candidate = EntryCandidate(
@@ -152,7 +157,14 @@ def choose_initial_candidates(index: CodeIndex, judge: Judge, target: str) -> En
     return EntrySelection(selected_file, candidates, tuple(decisions))
 
 
-def _path_entries(index: CodeIndex, files: tuple[str, ...], parent: str) -> tuple[_PathEntry, ...]:
+def _mask_of(judge: Judge) -> Mask:
+    """The judge's own masker, so what the receipt shows is what the request offers."""
+    return judge.masker.mask if judge.masker is not None else str
+
+
+def _path_entries(
+    index: CodeIndex, files: tuple[str, ...], parent: str, mask: Mask
+) -> tuple[_PathEntry, ...]:
     prefix = PurePosixPath(parent).parts
     grouped: dict[tuple[str, str], list[str]] = {}
     for file in files:
@@ -167,17 +179,26 @@ def _path_entries(index: CodeIndex, files: tuple[str, ...], parent: str) -> tupl
             grouped.setdefault(("directory", path), []).append(file)
     ordered = sorted(grouped.items())
     symbols = _symbols_of_main_files(index, [(kind, path, paths) for (kind, path), paths in ordered])
-    limit = _description_limit(len(ordered))
     return tuple(
-        _PathEntry(kind, path, tuple(paths), _path_description(index, kind, path, paths, symbols, limit))
+        _PathEntry(kind, path, tuple(paths), _path_description(index, kind, path, paths, symbols, mask))
         for (kind, path), paths in ordered
     )
 
 
-def _description_limit(option_count: int) -> int:
-    """Each option's share of the request box, so the options together always fit it."""
-    share = (JEV_INPUT_BOX_CHARS - REQUEST_RESERVE_CHARS) // max(option_count, 1)
-    return min(DESCRIPTION_CHARS, share)
+def _description_limit(question: Pick, state: dict, option_count: int) -> int:
+    """Each option's share of the request box once the state and the question are paid for, so the
+    options together always fit it."""
+    fixed = serialized_chars(state) + serialized_chars(question.to_question({}))
+    share = (JEV_INPUT_BOX_CHARS - fixed) // max(option_count, 1) - OPTION_OVERHEAD_CHARS
+    return max(1, min(DESCRIPTION_CHARS, share))
+
+
+def _offered(judge: Judge, question: Pick, state: dict, descriptions: Sequence[str]) -> list[str]:
+    """The descriptions as the request carries them and the receipt records them: masked first, then
+    cut, so a cut can never split a secret the masker would have recognised."""
+    mask = _mask_of(judge)
+    limit = _description_limit(question, state, len(descriptions))
+    return [_bounded(mask(description), limit) for description in descriptions]
 
 
 def _main_files(kind: str, path: str, files: list[str]) -> list[str]:
@@ -216,28 +237,25 @@ def _display_root(path: str, files: list[str]) -> str:
 def _symbols_of_main_files(
     index: CodeIndex, entries: list[tuple[str, str, list[str]]]
 ) -> dict[str, tuple[str, ...]]:
-    """Top-level symbol names per file, reading at most ``FILE_READ_CAP`` files for the whole request,
-    one main file of every option per round so no option takes the budget from the others."""
+    """Top-level symbol names per file. Every option gets its first main file read; the rest of the
+    ``FILE_READ_CAP`` budget goes round-robin, one main file of every option per round, so no option
+    takes the budget from the others. The files are parsed in one batch."""
     queues = [_main_files(*entry) for entry in entries]
-    symbols: dict[str, tuple[str, ...]] = {}
+    files = _round_robin(queues)[: max(FILE_READ_CAP, len(entries))]
+    index.functions_in_files(files)
+    return {file: _top_level_names(index, file) for file in files}
+
+
+def _round_robin(queues: list[list[str]]) -> list[str]:
+    ordered = []
     for round_number in range(max((len(queue) for queue in queues), default=0)):
-        for queue in queues:
-            if len(symbols) >= FILE_READ_CAP:
-                return symbols
-            if round_number < len(queue):
-                symbols[queue[round_number]] = _top_level_names(index, queue[round_number])
-    return symbols
+        ordered += [queue[round_number] for queue in queues if round_number < len(queue)]
+    return list(dict.fromkeys(ordered))
 
 
 def _top_level_names(index: CodeIndex, file: str) -> tuple[str, ...]:
-    names: list[str] = []
-    outer_end = 0
-    for span in sorted(index.symbols_in(file), key=lambda span: (span.start, -span.end)):
-        if span.start <= outer_end or not _is_named(span.name) or span.name in names:
-            continue
-        names.append(span.name)
-        outer_end = span.end
-    return tuple(names[:SYMBOLS_PER_FILE])
+    names = dict.fromkeys(span.name for span in index.top_level_symbols(file) if _is_named(span.name))
+    return tuple(list(names)[:SYMBOLS_PER_FILE])
 
 
 def _is_named(name: str) -> bool:
@@ -250,15 +268,15 @@ def _path_description(
     path: str,
     files: list[str],
     symbols: dict[str, tuple[str, ...]],
-    limit: int,
+    mask: Mask,
 ) -> str:
     if kind == "file":
-        return _bounded(_file_description(index, path, symbols), limit)
-    return _bounded(_directory_description(path, files, symbols), limit)
+        return _file_description(index, path, symbols, mask)
+    return _directory_description(path, files, symbols)
 
 
-def _file_description(index: CodeIndex, path: str, symbols: dict[str, tuple[str, ...]]) -> str:
-    doc = _first_doc_line(index.lines(path)[:DOC_SCAN_LINES])
+def _file_description(index: CodeIndex, path: str, symbols: dict[str, tuple[str, ...]], mask: Mask) -> str:
+    doc = _first_doc_line(_masked_lines(index.lines(path)[:DOC_SCAN_LINES], mask))
     names = symbols.get(path)
     parts = [f"file {path}:"]
     if doc:
@@ -306,17 +324,46 @@ def _listed(items: list[str]) -> str:
     return shown if len(items) <= LISTED_PATHS else f"{shown} (+{len(items) - LISTED_PATHS} more)"
 
 
-def _first_doc_line(lines: tuple[str, ...]) -> str:
+def _masked_lines(lines: Sequence[str], mask: Mask) -> list[str]:
+    """The lines masked as one text, before any of them is cut: a secret can span lines or be
+    longer than what a later cut keeps."""
+    return mask("\n".join(lines)).split("\n")
+
+
+def _first_doc_line(lines: Sequence[str]) -> str:
     """The first line of the first docstring or comment among the file's opening lines, without its
     markers. Imports may come first; tool directives such as ``eslint-disable`` or ``noqa`` are not docs."""
+    closer: str | None = None
     for line in lines:
-        stripped = line.strip()
-        if not stripped.startswith(_DOC_MARKERS) or stripped.startswith("#!") or _is_directive(stripped):
-            continue
-        text = stripped.strip("\"'/#* ").strip()
+        text, closer = _comment_text(line.strip(), closer)
         if text and not _is_directive(text):
             return text[:DOC_LINE_CHARS]
     return ""
+
+
+def _comment_text(line: str, closer: str | None) -> tuple[str | None, str | None]:
+    """The text of one line of a comment and the closer of the block it leaves open. Markers are
+    removed only where they belong: an opener at the start, a matching closer at the end."""
+    if closer is not None:
+        return _block_line(line, closer)
+    if line.startswith("#!"):
+        return None, None
+    for opener in _BLOCK_CLOSERS:
+        if line.startswith(opener):
+            return _block_line(line[len(opener) :], _BLOCK_CLOSERS[opener])
+    for opener in _LINE_OPENERS:
+        if line.startswith(opener):
+            return line.lstrip(opener[0]).strip(), None
+    return None, None
+
+
+def _block_line(text: str, closer: str) -> tuple[str, str | None]:
+    text = text.strip()
+    if closer == "*/":
+        text = text.lstrip("*").strip()
+    if closer in text:
+        return text.split(closer, 1)[0].strip(), None
+    return text, closer
 
 
 def _is_directive(comment: str) -> bool:
@@ -327,20 +374,20 @@ def _bounded(description: str, limit: int) -> str:
     return description if len(description) <= limit else description[: limit - 1] + "…"
 
 
-def _source_spans(index: CodeIndex, file: str) -> tuple[_SpanEntry, ...]:
+def _source_spans(index: CodeIndex, file: str, mask: Mask) -> tuple[_SpanEntry, ...]:
     unique = {
-        span.key: _SpanEntry(span, _span_description(index, span))
+        span.key: _SpanEntry(span, _span_description(index, span, mask))
         for span in (*index.symbols_in(file), *index.declarations_in(file))
     }
     return tuple(unique[key] for key in sorted(unique, key=lambda key: (unique[key].span.start, key)))
 
 
-def _span_description(index: CodeIndex, span: Span) -> str:
-    return f"{span.key}: {_preview(index, span.file, span.start)}"
+def _span_description(index: CodeIndex, span: Span, mask: Mask) -> str:
+    return f"{span.key}: {_preview(index, span.file, span.start, mask)}"
 
 
-def _preview(index: CodeIndex, file: str, start: int) -> str:
-    lines = index.lines(file)[start - 1 : start - 1 + SPAN_PREVIEW_LINES]
+def _preview(index: CodeIndex, file: str, start: int, mask: Mask) -> str:
+    lines = _masked_lines(index.lines(file)[start - 1 : start - 1 + SPAN_PREVIEW_LINES], mask)
     return " ".join(line.strip() for line in lines if line.strip())[:360]
 
 
@@ -407,6 +454,7 @@ def _choose(judge, question, target, level, parent, entries, describe, identify)
         remaining = chosen_group
     if len(remaining) == 1:
         only = remaining[0]
+        (shown,) = _offered(judge, question, _state(target, parent), [describe(only)])
         decision = EntryDecision(
             level,
             parent,
@@ -414,7 +462,7 @@ def _choose(judge, question, target, level, parent, entries, describe, identify)
             None,
             {},
             None,
-            ({"id": "0", "entry": identify(only), "description": describe(only)},),
+            ({"id": "0", "entry": identify(only), "description": shown},),
         )
         return only, [*decisions, decision], {}
     chosen, decision, probabilities = _pick(
@@ -433,13 +481,15 @@ def _choose(judge, question, target, level, parent, entries, describe, identify)
     return chosen, [*decisions, decision], by_entry
 
 
+def _state(target: str, parent: str) -> dict:
+    return {"target": {"description": target}, "current": parent}
+
+
 def _pick(judge, question, target, level, parent, entries, descriptions, identify):
+    state = _state(target, parent)
+    descriptions = _offered(judge, question, state, descriptions)
     options = {str(position): description for position, description in enumerate(descriptions)}
-    result: PickResult | None = judge.pick(
-        question,
-        options,
-        {"target": {"description": target}, "current": parent},
-    )
+    result: PickResult | None = judge.pick(question, options, state)
     if result is None:
         raise RuntimeError(f"automatic entry selection had no safe {level} options")
     position = int(result.choice)

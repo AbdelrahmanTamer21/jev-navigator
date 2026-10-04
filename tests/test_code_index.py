@@ -905,3 +905,12 @@ def test_a_scope_path_that_leaves_the_root_is_refused(tmp_path: Path, scope_path
     # Act and assert
     with pytest.raises(UnsafePathError, match=scope_path.replace(".", r"\.")):
         CodeIndex(root, [scope_path])
+
+
+def test_top_level_symbols_are_the_functions_and_classes_no_other_symbol_contains(
+    sample_index: CodeIndex,
+) -> None:
+    top_level = [span.name for span in sample_index.top_level_symbols("app/orders.py")]
+
+    assert top_level == ["OrderService", "cancel"]
+    assert "place" in [span.name for span in sample_index.symbols_in("app/orders.py")]

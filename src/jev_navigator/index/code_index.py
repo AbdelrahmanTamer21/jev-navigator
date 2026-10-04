@@ -278,6 +278,10 @@ class CodeIndex:
         """Functions and classes."""
         return self._file_structure(file).symbols
 
+    def top_level_symbols(self, file: str) -> tuple[Span, ...]:
+        """The functions and classes no other function or class of the file contains, in file order."""
+        return tuple(sorted(_outermost(self.symbols_in(file)), key=lambda span: (span.start, -span.end)))
+
     def declarations_in(self, file: str) -> tuple[Span, ...]:
         """Module-level constants, assignments, types, interfaces and enums."""
         return self._file_structure(file).declarations
@@ -521,11 +525,7 @@ class CodeIndex:
         """Symbols and declarations of ``file`` that no class or other function contains. A function
         starting on a declaration's first line is the value it declares, not its container."""
         symbols = self.symbols_in(file)
-        top_symbols = (
-            span
-            for span in symbols
-            if not any(other != span and other.contains(span.start) for other in symbols)
-        )
+        top_symbols = _outermost(symbols)
         top_declarations = (
             span
             for span in self.declarations_in(file)
@@ -792,3 +792,9 @@ def _regular_files(listing: str) -> list[str]:
 def _commits(log: str) -> list[set[str]]:
     blocks = log.split(_COMMIT_MARK)
     return [{line.strip() for line in block.split("\n") if line.strip()} for block in blocks if block.strip()]
+
+
+def _outermost(symbols: Sequence[Span]) -> list[Span]:
+    return [
+        span for span in symbols if not any(other != span and other.contains(span.start) for other in symbols)
+    ]

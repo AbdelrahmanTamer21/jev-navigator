@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ from git_repos import commit_files
 from jev_navigator.directives.entry import FILE_READ_CAP, choose_initial_candidates
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS
-from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.judge import Judge, request_exceeds_input_budget
 from jev_navigator.testing import ScriptedJevClient
 
 TARGET = "the function that computes how concentrated a set of probabilities is"
@@ -86,19 +87,19 @@ def test_the_option_set_is_the_same_directories_and_files_as_before(tmp_path: Pa
     assert kinds_and_paths == ["directory src/", "directory tests/", "file setup.py"]
 
 
-def test_symbols_are_read_for_at_most_the_file_read_cap_per_request_shared_round_robin(
+def test_files_are_read_one_per_option_first_then_round_robin_up_to_the_read_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     folders = {f"area{number:02d}/mod.py": f"def thing_{number:02d}():\n    pass\n" for number in range(40)}
     index = _index(tmp_path, folders)
     read: list[str] = []
-    original = CodeIndex.symbols_in
+    original = CodeIndex.top_level_symbols
 
     def counting(self: CodeIndex, file: str):
         read.append(file)
         return original(self, file)
 
-    monkeypatch.setattr(CodeIndex, "symbols_in", counting)
+    monkeypatch.setattr(CodeIndex, "top_level_symbols", counting)
 
     reads_for_the_root_request: list[int] = []
 
@@ -111,11 +112,8 @@ def test_symbols_are_read_for_at_most_the_file_read_cap_per_request_shared_round
     choose_initial_candidates(index, Judge(client), TARGET)
     options = dict(next(iter(client.requests[0][1].values()))["criteria"])
 
-    assert reads_for_the_root_request[0] == FILE_READ_CAP
-    with_symbols = [text for text in options.values() if "thing_" in text]
-    assert len(with_symbols) == FILE_READ_CAP
-    assert "thing_00" in _option_for(options, "directory area00/")
-    assert "thing_39" not in _option_for(options, "directory area39/")
+    assert reads_for_the_root_request[0] == max(FILE_READ_CAP, len(options)) == 40
+    assert all("thing_" in text for text in options.values()), "every option gets its first main file read"
 
 
 def test_a_directory_option_shows_one_main_file_for_every_subfolder_not_only_the_alphabetical_first(
@@ -198,3 +196,136 @@ def test_tool_directives_are_not_taken_for_a_doc_line(tmp_path: Path, directive:
     code = _option_for(_root_options(index), "file code.ts")
 
     assert code == "file code.ts: Symbols: real"
+
+
+SECRET = "Zq9xK2mP7vL4nB8wR3tY6uH1"
+
+
+def _sent_and_recorded(index: CodeIndex, target: str = TARGET) -> tuple[ScriptedJevClient, dict]:
+    client = ScriptedJevClient()
+    selection = choose_initial_candidates(index, Judge(client), target)
+    return client, selection.to_json()
+
+
+def _assert_secret_nowhere(client: ScriptedJevClient, receipt: dict) -> None:
+    assert client.requests, "the scenario must send a request"
+    assert SECRET not in json.dumps(client.requests)
+    assert SECRET not in json.dumps(receipt)
+    assert SECRET[:12] not in json.dumps(client.requests)
+    assert SECRET[:12] not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize(
+    "first_lines",
+    [
+        f'# api_token = "{SECRET}"\n',
+        f"// password = '{SECRET}'\n",
+        f'/* secret = "{SECRET}" */\n',
+        f'"""api_token = "{SECRET}""""\n',
+        f'# {"n" * 90} api_token = "{SECRET}"\n',
+        f'"""\napi_key = "{SECRET}"\n"""\n',
+    ],
+    ids=["hash", "slashes", "block", "docstring", "cut-inside-the-token", "docstring-next-line"],
+)
+def test_a_commented_credential_never_reaches_the_request_or_the_receipt(
+    tmp_path: Path, first_lines: str
+) -> None:
+    index = _index(
+        tmp_path, {"config.py": f"{first_lines}def load():\n    return 1\n", "other/readme.py": "x = 1\n"}
+    )
+
+    client, receipt = _sent_and_recorded(index)
+
+    _assert_secret_nowhere(client, receipt)
+
+
+def test_a_credential_cut_by_the_span_preview_never_reaches_the_request_or_the_receipt(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "def load():\n"
+        f'    padding = "{"p" * 300}"\n'
+        f'    api_token = "{SECRET}"\n'
+        "\n\ndef other():\n    return 2\n"
+    )
+    index = _index(tmp_path, {"config.py": source})
+
+    client, receipt = _sent_and_recorded(index)
+
+    _assert_secret_nowhere(client, receipt)
+
+
+def test_the_closing_quote_of_a_comment_is_kept_and_only_a_matching_closer_is_removed(
+    tmp_path: Path,
+) -> None:
+    index = _index(
+        tmp_path,
+        {
+            "quoted.py": """# note: 'a' and "b"\ndef f():\n    return 1\n""",
+            "block.ts": "/* Header comment */\nexport function g() { return 1 }\n",
+            "triple.py": '"""Say "hi" now"""\n\ndef h():\n    return 1\n',
+            "other/readme.py": "x = 1\n",
+        },
+    )
+
+    options = _root_options(index)
+
+    assert _option_for(options, "file quoted.py").startswith("""file quoted.py: note: 'a' and "b" """)
+    assert _option_for(options, "file block.ts").startswith("file block.ts: Header comment Symbols")
+    assert _option_for(options, "file triple.py").startswith('file triple.py: Say "hi" now Symbols')
+
+
+def test_a_docstring_that_starts_on_the_line_after_the_quotes_is_the_doc_line(tmp_path: Path) -> None:
+    source = '"""\nDistribution confidence for choice answers.\n"""\n\ndef f():\n    return 1\n'
+    index = _index(tmp_path, {"answers.py": source, "other/readme.py": "x = 1\n"})
+
+    answers = _option_for(_root_options(index), "file answers.py")
+
+    assert answers == "file answers.py: Distribution confidence for choice answers. Symbols: f"
+
+
+def test_every_option_of_a_crowded_request_still_gets_symbols_from_its_main_file(tmp_path: Path) -> None:
+    folders = {f"area{number:02d}/mod.py": f"def thing_{number:02d}():\n    pass\n" for number in range(40)}
+    index = _index(tmp_path, folders)
+
+    options = _root_options(index)
+
+    assert len(options) == 40
+    assert all("thing_" in text for text in options.values())
+
+
+def test_the_options_of_a_request_shrink_by_the_options_shown_not_by_every_entry(tmp_path: Path) -> None:
+    doc = "d" * 110
+    files = {
+        f"mod{number:03d}.py": f"# {doc}\ndef function_{number:03d}():\n    pass\n" for number in range(600)
+    }
+    index = _index(tmp_path, files)
+    client = ScriptedJevClient()
+
+    choose_initial_candidates(index, Judge(client), TARGET)
+
+    descriptions = [
+        text
+        for _, questions in client.requests
+        for question in questions.values()
+        for text in question["criteria"].values()
+        if text.startswith("file mod")
+    ]
+    assert descriptions, "the 200-option request must be sent"
+    assert max(len(text) for text in descriptions) > 140, "600 entries must not shrink the 200 shown"
+
+
+def test_a_long_target_leaves_the_request_inside_the_character_box(tmp_path: Path) -> None:
+    files = {
+        f"area{number:03d}/{'module' * 6}{file}.py": f"def {'symbol' * 5}{file}():\n    pass\n"
+        for number in range(150)
+        for file in range(8)
+    }
+    index = _index(tmp_path, files)
+    client = ScriptedJevClient()
+
+    choose_initial_candidates(index, Judge(client), "t" * 20_000)
+
+    assert client.requests
+    for state, questions in client.requests:
+        assert not request_exceeds_input_budget(state, questions)
