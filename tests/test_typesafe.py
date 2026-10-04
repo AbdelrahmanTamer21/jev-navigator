@@ -487,7 +487,9 @@ def test_cancel_aborts_an_active_official_sdk_request(monkeypatch: pytest.Monkey
 def test_sigint_returns_the_active_http_place_as_resumable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deliver: str
 ) -> None:
-    """The installed sync search and official SDK share one prompt cancellation boundary."""
+    """The installed sync search and official SDK share one prompt cancellation boundary. The local
+    server never answers until the test ends, so only the cancel can make the search return within
+    seconds of the interrupt; without it, the SDK's own timeout ends the requests after about 30."""
     pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
@@ -526,8 +528,11 @@ def test_sigint_returns_the_active_http_place_as_resumable(
 
     main_thread = threading.get_ident()
 
+    interrupted_at: list[float] = []
+
     def interrupt_when_sent() -> None:
         all_entered.wait()
+        interrupted_at.append(time.monotonic())
         if deliver == "main_thread":
             signal.pthread_kill(main_thread, signal.SIGINT)
         else:
@@ -536,7 +541,6 @@ def test_sigint_returns_the_active_http_place_as_resumable(
     interrupter = threading.Thread(target=interrupt_when_sent)
     interrupter.start()
     try:
-        started = time.monotonic()
         result = find_code(
             index,
             Judge(client),
@@ -546,8 +550,9 @@ def test_sigint_returns_the_active_http_place_as_resumable(
             moves={},
             initial_candidates=[(place, 1.0) for place in places],
         )
+        returned_after = time.monotonic() - interrupted_at[0]
 
-        assert time.monotonic() - started < 5, "the sent requests were left to the 30 s transport timeout"
+        assert returned_after < 5, "the sent requests were left to the 30 s transport timeout"
         assert result.outcome == Outcome.CANCELLED
         assert {entry.place_key for entry in result.not_inspected} == {place.key for place in places}
         assert {entry.reason for entry in result.not_inspected} == {"cancelled"}

@@ -16,9 +16,9 @@ from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from time import monotonic
+from typing import TYPE_CHECKING
 
 from .adapters.routes import RoutedJevClient, system_one_client
-from .adapters.typesafe import TypeSafeJevClient
 from .cache_root import cache_root
 from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
 from .cli_resume import SavedSearch, load_resume, save_resume
@@ -47,6 +47,9 @@ from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
 from .run_files import place_label, source_shown, step_shown
 from .usage_receipt import usage_receipt, usage_report_lines
+
+if TYPE_CHECKING:
+    from .adapters.typesafe import TypeSafeJevClient
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 KEEP_REQUESTS_HELP = (
