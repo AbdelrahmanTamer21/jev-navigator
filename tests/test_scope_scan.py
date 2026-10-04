@@ -4,14 +4,14 @@ import json
 from pathlib import Path
 
 import pytest
-from git_repos import commit_files
+from git_repos import commit_files, write_files
 
 from jev_navigator.directives.find_code import Outcome, find_code
 from jev_navigator.directives.places import neighbours_and_omissions, place_for_line
-from jev_navigator.index import tools
+from jev_navigator.index import scope_scan, tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.index.languages import has_flow_pragma
+from jev_navigator.index.languages import has_flow_pragma, language_of
 from jev_navigator.index.scope_scan import OPAQUE_RECEIVER, FileFacts, FileStructure, Unparsed, scan_facts
 from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
@@ -25,9 +25,9 @@ def ast_grep_runs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str | None
     runs: list[tuple[str, str | None, list[str]]] = []
     original_rules = tools.ast_grep_rules
 
-    def counted_rules(rules: str, files, cwd, config=None, *, refused):
+    def counted_rules(rules: str, files, cwd, config=None, **keywords):
         runs.append((rules.split("\n", 1)[0], config, list(files)))
-        return original_rules(rules, files, cwd, config=config, refused=refused)
+        return original_rules(rules, files, cwd, config=config, **keywords)
 
     monkeypatch.setattr(tools, "ast_grep_rules", counted_rules)
     return runs
@@ -219,8 +219,7 @@ def test_an_external_parser_failure_is_not_relabelled_as_incomplete(
 ) -> None:
     (tmp_path / "module.py").write_text("def run():\n    return 1\n")
 
-    def fail_parser(rules, files, cwd, config=None, *, refused):
-        del rules, files, cwd, config, refused
+    def fail_parser(*arguments, **options):
         raise tools.ToolFailedError("ast-grep failed for a real tool reason")
 
     monkeypatch.setattr(tools, "ast_grep_rules", fail_parser)
@@ -234,7 +233,7 @@ def test_scan_facts_skips_unsupported_files_and_still_parses_supported_files(tmp
     (tmp_path / "notes.md").write_text("# notes\n")
     (tmp_path / "module.py").write_text("def greet(): return 1\n")
 
-    empty = FileFacts(FileStructure((), (), (), (), (), (), ()), (), ())
+    empty = FileFacts(FileStructure(), (), ())
 
     unsupported = scan_facts(["notes.md"], tmp_path, Unparsed())
     mixed = scan_facts(["module.py", "notes.md"], tmp_path, Unparsed())
@@ -256,6 +255,54 @@ def _wide_script_function() -> str:
         f"function wide(\n{parameters}) {{\n  for (const item of items) {{\n{body}  }}\n"
         f"  try {{ run(); }} catch (error) {{\n{body}  }}\n}}\n"
     )
+
+
+PANEL = """\
+import { useState } from 'react';
+
+export interface PanelProps { title: string; rows: Row[] }
+export type Row = { id: string };
+export enum Mode { Open, Closed }
+
+export const Panel = ({ title, rows }: PanelProps) => {
+  const [mode, setMode] = useState<Mode>(Mode.Open);
+  const visible = rows.filter((row) => row.id !== '' && mode === Mode.Open);
+  return <section onClick={() => setMode(Mode.Closed)}>{title}{visible.length}</section>;
+};
+
+export default class Store {
+  #rows = new Map<string, Row>();
+  add(row: Row) { this.#rows.set(row.id, row); return this; }
+}
+"""
+
+
+def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
+    sample_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scan decodes only the match fields its facts are built from. Built from every field of
+    the parser's output instead, every file's facts are the same, so no field the facts read is
+    skipped: Python, TypeScript, TSX, plain JavaScript, Flow and a file the grammar cannot recover."""
+    write_files(
+        sample_repo,
+        {
+            "web/panel.tsx": PANEL,
+            "js/postgres.js": FLOW_ADAPTER,
+            "js/RootTag.js": ROOT_TAG,
+            "js/memory.js": MEMORY_ADAPTER,
+            "js/auth.js": AUTH_MIDDLEWARE,
+            "js/index.js": ADAPTER_CALLER,
+        },
+    )
+    files = [file for file in tools.listed_files(sample_repo) if language_of(file)]
+
+    narrow = scan_facts(files, sample_repo, Unparsed())
+    monkeypatch.setattr(scope_scan, "decode_match", json.loads)
+    whole = scan_facts(files, sample_repo, Unparsed())
+
+    assert {language_of(file) for file in files} == {"python", "typescript", "tsx", "javascript"}
+    assert any(facts.incomplete for facts in whole.values())
+    assert narrow == whole
 
 
 @pytest.mark.parametrize(
@@ -294,15 +341,17 @@ def test_no_fact_rule_prints_more_than_the_node_it_matched(
 ) -> None:
     """ast-grep prints every node a rule's relations match. A relation to a large ancestor, such as
     the program, a module statement or an object literal, printed that ancestor once per match, so
-    the parser's output and memory grew with matches times file size. A match prints its own node
-    three times (its text, its lines and its primary label), each as JSON."""
+    the parser's output and memory grew with matches times file size: 1.2 MB of ordinary code
+    peaked over 2.5 GB. A match prints its own node three times (its text, its lines and its primary
+    label), each as JSON. The matches are recorded as printed, every field decoded, because the
+    scan's own decoder skips the related nodes the whole file was printed in."""
     # Arrange
     (tmp_path / file).write_text(source)
     printed: list[dict] = []
     original_rules = tools.ast_grep_rules
 
     def recorded_rules(*arguments, **options):
-        for match in original_rules(*arguments, **options):
+        for match in original_rules(*arguments, **options | {"decode": json.loads}):
             printed.append(match)
             yield match
 

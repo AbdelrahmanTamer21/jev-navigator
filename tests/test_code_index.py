@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 from git_repos import commit_all, git, write_files
 
-from jev_navigator.index.code_index import CodeIndex, ScopeTooWideError, UnsafePathError
+from jev_navigator.index import tools
+from jev_navigator.index.code_index import (
+    CodeIndex,
+    ScopeTooWideError,
+    UnsafePathError,
+    _working_git_metadata,
+)
 from jev_navigator.index.spans import Span, TextHit
 
 
@@ -1059,3 +1065,27 @@ def test_a_rendered_component_is_a_call_and_a_platform_element_is_not(tmp_path: 
     assert calls == [("basket.tsx", 3, "Basket"), ("basket.tsx", 6, "Page")]
     assert [site.line for site in index.find_callers("Frame")] == [6]
     assert index.find_callers("div") == ()
+
+
+def test_working_tree_metadata_raises_when_git_refuses_the_repository(tmp_path: Path, monkeypatch) -> None:
+    # Arrange
+    write_files(tmp_path, {"a.py": "x = 1\n"})
+    commit_all(tmp_path)
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+
+    # Act and assert: a refused repository is never read as a plain folder with no revision
+    with pytest.raises(tools.ToolFailedError, match="dubious ownership"):
+        _working_git_metadata(tmp_path, ())
+
+
+def test_a_repository_without_commits_indexes_its_files_with_no_revision(tmp_path: Path) -> None:
+    # Arrange
+    git(tmp_path, "init", "-q")
+    write_files(tmp_path, {"a.py": "def first():\n    return 1\n"})
+
+    # Act
+    index = CodeIndex.from_directory(tmp_path, fact_cache_dir=tmp_path / ".cache")
+
+    # Assert
+    assert index.commit == ""
+    assert "a.py" in index.files

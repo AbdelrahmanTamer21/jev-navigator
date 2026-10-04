@@ -12,7 +12,7 @@ from jev_navigator.directives.find_code import Outcome, SearchBudget, StopRule, 
 from jev_navigator.directives.places import place_for_line
 from jev_navigator.history import History, judge_history_async
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS, MAX_REQUEST_CHARS
+from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import CallCapReachedError, CallOffer, Judge
 from jev_navigator.judgments.questions import Check, Criterion, Pick, Rate
@@ -45,7 +45,7 @@ def run(coroutine):
     return asyncio.run(coroutine)
 
 
-BIG_ITEM = "1" * (JEV_INPUT_BOX_CHARS * 3 // 5)
+BIG_ITEM = "1" * (JEV_INPUT_LIMITS.box_chars * 3 // 5)
 """Too big for two to share a request, small enough to send alone."""
 THREE_BATCH_ITEMS = [{"code": f"x{index} = {BIG_ITEM}"} for index in range(3)]
 
@@ -397,7 +397,7 @@ class _AsyncBudgetedClient:
 
 def test_the_async_path_splits_a_batch_over_the_character_box_before_sending_it() -> None:
     # Arrange
-    budgeted = BudgetedClient(MAX_REQUEST_CHARS, input_box=JEV_INPUT_BOX_CHARS)
+    budgeted = BudgetedClient(JEV_INPUT_LIMITS.request_chars, input_box=JEV_INPUT_LIMITS.box_chars)
     judge = Judge(_AsyncBudgetedClient(budgeted))
     items = [{"file": f"part{index}.py", "code": "y" * 19_300} for index in range(4)]
 
