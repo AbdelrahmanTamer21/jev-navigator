@@ -113,7 +113,32 @@ export * as tools from "./tools";
 
     # Assert
     assert aliases == {"jwt": "./jwt", "db": "./db"}
-    assert module_aliases("import app.jobs as jobs", "app/main.py") == {}
+
+
+def test_a_python_import_statement_holds_each_module_it_imports() -> None:
+    """`import a.b as n` binds `n` to `a.b`; `import a.b` makes `a` and `a.b` reachable, each by its
+    own dotted name; one statement may import several modules. A name imported from a module and
+    commented-out code hold none."""
+    # Arrange
+    source = """\
+import app.jobs as jobs
+import app.mail  # sends receipts
+import json, app.billing as billing
+from app import tools
+# import app.old as old
+"""
+
+    # Act
+    aliases = module_aliases(source, "app/main.py")
+
+    # Assert
+    assert aliases == {
+        "jobs": "app.jobs",
+        "app": "app",
+        "app.mail": "app.mail",
+        "json": "json",
+        "billing": "app.billing",
+    }
 
 
 def test_the_export_surface_is_the_ast_grep_statement_nodes(tmp_path: Path) -> None:

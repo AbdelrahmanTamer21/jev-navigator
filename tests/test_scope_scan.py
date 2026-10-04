@@ -781,6 +781,38 @@ def test_a_call_through_a_whole_module_import_reads_only_that_module(tmp_path: P
     assert "src/unrelated.ts" not in scanned
 
 
+def test_a_call_through_a_python_module_import_reads_only_that_module(tmp_path: Path, ast_grep_runs) -> None:
+    """`jobs.run()` after `import app.jobs as jobs`, and `app.jobs.run()` after `import app.jobs`,
+    call the `run` that module defines, read from its own facts like a script module import."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "app/__init__.py": "",
+            "app/jobs.py": "def run(task):\n    return task\n",
+            "app/unrelated.py": "def run():\n    return 0\n",
+            "app/worker.py": (
+                "import app.jobs as jobs\nimport app.jobs\n\n\n"
+                "def aliased(task):\n    return jobs.run(task)\n\n\n"
+                "def dotted(task):\n    return app.jobs.run(task)\n"
+            ),
+        },
+    )
+    callers = [
+        next(span for span in index.functions_in("app/worker.py") if span.name == name)
+        for name in ("aliased", "dotted")
+    ]
+
+    # Act
+    bindings = [edge.binding for caller in callers for edge in index.callee_edges(caller)]
+    scanned = {file for _, _, files in ast_grep_runs for file in files}
+
+    # Assert
+    run = Span("app/jobs.py", 1, 2, "run")
+    assert [(binding.status.value, binding.target) for binding in bindings] == [("resolved", run)] * 2
+    assert "app/unrelated.py" not in scanned
+
+
 def test_the_flow_partition_is_scanned_on_its_own(tmp_path: Path, ast_grep_runs) -> None:
     """The `languageGlobs` config is global per invocation, so `@flow` files are scanned in their own
     invocation and plain JavaScript keeps the JavaScript grammar byte for byte."""

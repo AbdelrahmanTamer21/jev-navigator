@@ -284,10 +284,11 @@ def imported_names(source: str, path: str) -> dict[str, str]:
 
 
 def module_aliases(source: str, path: str) -> dict[str, str]:
-    """Local name to module specifier, for names that hold a whole script module:
-    ``import * as jwt from "./jwt"`` and ``const jwt = require("./jwt")``."""
+    """Local name to module specifier, for names that hold a whole module: ``import * as jwt from
+    "./jwt"`` and ``const jwt = require("./jwt")``; in Python ``import app.jwt as jwt``, and
+    ``import app.jwt``, which makes ``app`` and ``app.jwt`` hold the modules of those dotted names."""
     if path.endswith(".py"):
-        return {}
+        return _python_module_aliases(source)
     code = _without_script_comments(source)
     aliases = {match.group(1): match.group(2) for match in _SCRIPT_REQUIRED_MODULE.finditer(code)}
     for match in _SCRIPT_FROM.finditer(code):
@@ -296,6 +297,22 @@ def module_aliases(source: str, path: str) -> dict[str, str]:
         if namespace:
             aliases[namespace.group(1)] = specifier
     return aliases
+
+
+def _python_module_aliases(source: str) -> dict[str, str]:
+    aliases = {}
+    for _, module, alias in _python_imports(source):
+        if alias:
+            aliases[alias] = module
+        else:
+            aliases.update((prefix, prefix) for prefix in _dotted_prefixes(module))
+    return aliases
+
+
+def _dotted_prefixes(module: str) -> list[str]:
+    """``app``, ``app.jobs`` for ``app.jobs``."""
+    parts = module.split(".")
+    return [".".join(parts[:count]) for count in range(1, len(parts) + 1)]
 
 
 def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
