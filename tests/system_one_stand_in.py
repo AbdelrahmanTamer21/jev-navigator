@@ -16,11 +16,13 @@ SIZE_REFUSAL = {"detail": {"error_type": "max_tokens_exceeded"}}
 
 @dataclass
 class StandIn:
-    """A local System One server's address, the request bodies it received, and two gates: ``arrived``
+    """A local System One server's address, the request bodies and Authorization headers it received,
+    and two gates: ``arrived``
     is set when a request comes in, and a held server answers only once ``release`` is set."""
 
     url: str
     received: list[dict] = field(default_factory=list)
+    authorizations: list[str | None] = field(default_factory=list)
     arrived: Event = field(default_factory=Event)
     release: Event = field(default_factory=Event)
     throttled: int = 0
@@ -68,6 +70,7 @@ def _handler(
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             payload = json.loads(self.rfile.read(int(self.headers["content-length"])))
             serving.received.append(payload)
+            serving.authorizations.append(self.headers.get("authorization"))
             serving.arrived.set()
             serving.release.wait()
             admitted = _enter(serving, max_in_flight)

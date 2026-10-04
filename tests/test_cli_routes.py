@@ -40,6 +40,8 @@ def find_command(tmp_path: Path, settings: Mapping[str, str]) -> tuple[list[str]
         name: value for name, value in os.environ.items() if not name.startswith(("SYSTEM_ONE_", "TYPESAFE_"))
     }
     environment |= {"HOME": str(home), "TYPESAFE_API_KEY": "local-test-key"}
+    environment |= {"SYSTEM_ONE_DREX_API_KEY": "local-drex-key"}
+    environment |= {"SYSTEM_ONE_DECIDER_API_KEY": "local-decider-key"}
     environment |= {"TYPESAFE_BASE_URL": DEAD_ENDPOINT, **settings}
     program = (
         "import signal; signal.signal(signal.SIGINT, signal.default_int_handler); "

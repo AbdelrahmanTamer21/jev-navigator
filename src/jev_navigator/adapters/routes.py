@@ -3,10 +3,12 @@ analysis-engine proven on its System One seats.
 
 `SYSTEM_ONE_ROUTES` orders named routes (``drex,jev`` makes Drex primary and Jev its
 fallback); each route reads `SYSTEM_ONE_<NAME>_ENDPOINT`, `SYSTEM_ONE_<NAME>_API_KEY` and
-`SYSTEM_ONE_<NAME>_MODEL`. A known route name with `SYSTEM_ONE_<NAME>=1` uses the hosted
-defaults, so one flag per service is enough when the defaults apply. The first route is
-primary; on a failed call the next route is asked, and so on. The finetuned decider is just
-another route: `SYSTEM_ONE_ROUTES=decider,jev` with its endpoint, key, model,
+`SYSTEM_ONE_<NAME>_MODEL`. Only the jev route may use `TYPESAFE_API_KEY` when it has no key of its
+own: every other route is another company's or the user's own server, and must never receive the
+TypeSafe key, so a route without its own key is refused before any request. A known route name
+with `SYSTEM_ONE_<NAME>=1` uses the hosted defaults, so one flag per service is enough when the
+defaults apply. The first route is primary; on a failed call the next route is asked, and so on.
+The finetuned decider is just another route: `SYSTEM_ONE_ROUTES=decider,jev` with its endpoint, key, model,
 `SYSTEM_ONE_DECIDER_INPUT_TOKENS` and `SYSTEM_ONE_DECIDER_CONCURRENCY` set. Every route declares its
 input limits, and the routed client packs to the tightest of them, so whichever route answers can
 take the request. Concurrency stays per route: each route's client sends at most its own number of
@@ -41,6 +43,8 @@ if TYPE_CHECKING:
     from .typesafe import TypeSafeJevClient
 
 ROUTES_ENV = "SYSTEM_ONE_ROUTES"
+JEV_ROUTE = "jev"
+TYPESAFE_KEY_SETTING = "TYPESAFE_API_KEY"
 
 DREX_INPUT_LIMITS = InputLimits.from_tokens(8_192)
 """Drex's limit: 8,192 tokens for the state plus the longest question, which Analysis Engine measured
@@ -67,8 +71,8 @@ class KnownRoute:
 
 
 # Known hosted shorthand routes: `SYSTEM_ONE_<NAME>=1` selects endpoint+model without
-# spelling them out. Keys always come from `SYSTEM_ONE_<NAME>_API_KEY`, falling back to
-# `TYPESAFE_API_KEY` for single-route setups.
+# spelling them out. Keys come from `SYSTEM_ONE_<NAME>_API_KEY`; only jev falls back to
+# `TYPESAFE_API_KEY`.
 KNOWN_ROUTES: dict[str, KnownRoute] = {
     "jev": KnownRoute("https://api.typesafe.ai", LATEST_JEV, JEV_INPUT_LIMITS, JEV_CONCURRENCY),
     "drex": KnownRoute("https://drex.nace.ai", "drex-latest", DREX_INPUT_LIMITS, DREX_CONCURRENCY),
@@ -100,8 +104,8 @@ def routes_from_env(environment: Mapping[str, str], transport=None) -> tuple[Rou
     `SYSTEM_ONE_ROUTES=drex,jev` builds one client per name. A known name with
     `SYSTEM_ONE_<NAME>=1` and no explicit settings uses the hosted shorthand. Unknown names
     require endpoint and model; every route resolves its key eagerly (per-route
-    `SYSTEM_ONE_<NAME>_API_KEY`, else `TYPESAFE_API_KEY`), so a misconfigured route fails at
-    resolution instead of mid-run.
+    `SYSTEM_ONE_<NAME>_API_KEY`, and for jev alone `TYPESAFE_API_KEY`), so a misconfigured route
+    fails at resolution instead of mid-run.
     """
     names = tuple(name.strip().lower() for name in environment.get(ROUTES_ENV, "").split(",") if name.strip())
     if not names:
@@ -117,7 +121,6 @@ def _route(environment: Mapping[str, str], name: str, transport=None) -> Route:
 
     endpoint = setting("ENDPOINT")
     model = setting("MODEL")
-    api_key = setting("API_KEY") or str(environment.get("TYPESAFE_API_KEY", "")).strip() or None
     known = KNOWN_ROUTES.get(name)
     if known is not None and environment.get(f"SYSTEM_ONE_{upper}", "").strip():
         endpoint = endpoint or known.endpoint
@@ -130,15 +133,27 @@ def _route(environment: Mapping[str, str], name: str, transport=None) -> Route:
             + (f" (or SYSTEM_ONE_{upper}=1 for the hosted {name} defaults)" if name in KNOWN_ROUTES else "")
         )
 
+    input_limits = _input_limits(environment, name, known)
+    max_concurrency = _concurrency(environment, name, known)
     client = SystemOneClient(
         model=model,
-        api_key=api_key,
+        api_key=_route_key(environment, name),
         base_url=endpoint,
         transport=transport,
-        input_limits=_input_limits(environment, name, known),
-        max_concurrency=_concurrency(environment, name, known),
+        input_limits=input_limits,
+        max_concurrency=max_concurrency,
     )
     return Route(name=name, client=client)
+
+
+def _route_key(environment: Mapping[str, str], name: str) -> str:
+    """The route's own `SYSTEM_ONE_<NAME>_API_KEY`; the jev route alone may use `TYPESAFE_API_KEY`."""
+    own = f"SYSTEM_ONE_{name.upper()}_API_KEY"
+    accepted = (own, TYPESAFE_KEY_SETTING) if name == JEV_ROUTE else (own,)
+    for setting in accepted:
+        if key := str(environment.get(setting, "")).strip():
+            return key
+    raise ValueError(f"route {name!r} has no key: set {' or '.join(accepted)}")
 
 
 def _input_limits(environment: Mapping[str, str], name: str, known: KnownRoute | None) -> InputLimits:
@@ -187,7 +202,7 @@ class SystemOneClient:
         self,
         model: str | None = None,
         *,
-        api_key: str | None = None,
+        api_key: str,
         base_url: str | None = None,
         transport=None,
         input_limits: InputLimits,
@@ -201,7 +216,7 @@ class SystemOneClient:
         self._capture = CapturingTransport(transport or httpx2.HTTPTransport())
         self._sdk = TypeSafeClient(
             model=model or "system-one",
-            api_key=api_key or None,
+            api_key=api_key,
             base_url=base_url or None,
             transport=self._capture,
         )

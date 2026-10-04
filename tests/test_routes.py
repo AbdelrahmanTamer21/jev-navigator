@@ -9,6 +9,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+from system_one_stand_in import stand_in
 
 from jev_navigator.adapters.routes import (
     JEV_CONCURRENCY,
@@ -36,7 +37,7 @@ def test_unknown_route_needs_endpoint_and_model():
 def test_known_route_shorthand_needs_only_the_flag():
     _requires_typesafe()
     routes = routes_from_env(
-        {"SYSTEM_ONE_ROUTES": "drex", "SYSTEM_ONE_DREX": "1", "TYPESAFE_API_KEY": "test-key"}
+        {"SYSTEM_ONE_ROUTES": "drex", "SYSTEM_ONE_DREX": "1", "SYSTEM_ONE_DREX_API_KEY": "test-key"}
     )
     assert routes[0].name == "drex"
     assert routes[0].client.model == "drex-latest"
@@ -49,10 +50,80 @@ def test_per_route_settings_beat_the_shorthand():
             "SYSTEM_ONE_ROUTES": "drex",
             "SYSTEM_ONE_DREX": "1",
             "SYSTEM_ONE_DREX_MODEL": "drex-v1.1",
-            "TYPESAFE_API_KEY": "test-key",
+            "SYSTEM_ONE_DREX_API_KEY": "test-key",
         }
     )
     assert routes[0].client.model == "drex-v1.1"
+
+
+TYPESAFE_KEY = "tsk-FAKE-typesafe-key"
+CUSTOM_DECIDER = {
+    "SYSTEM_ONE_DECIDER_ENDPOINT": "http://127.0.0.1:9",
+    "SYSTEM_ONE_DECIDER_MODEL": "decider-4b",
+    "SYSTEM_ONE_DECIDER_INPUT_TOKENS": "4096",
+    "SYSTEM_ONE_DECIDER_CONCURRENCY": "2",
+}
+
+
+@pytest.mark.parametrize(
+    ("name", "settings"), [("drex", {"SYSTEM_ONE_DREX": "1"}), ("decider", CUSTOM_DECIDER)]
+)
+def test_a_route_other_than_jev_without_its_own_key_is_refused_naming_the_setting(name, settings):
+    # Arrange
+    environment = {"SYSTEM_ONE_ROUTES": name, "TYPESAFE_API_KEY": TYPESAFE_KEY, **settings}
+
+    # Act and Assert
+    with pytest.raises(ValueError, match=f"route '{name}' has no key: set SYSTEM_ONE_{name.upper()}_API_KEY"):
+        routes_from_env(environment)
+
+
+def test_a_drex_route_without_its_own_key_sends_drex_nothing_on_the_wire(monkeypatch):
+    # Arrange: the TypeSafe key is in the settings and in the process environment the SDK reads
+    _requires_typesafe()
+    monkeypatch.setenv("TYPESAFE_API_KEY", TYPESAFE_KEY)
+    with stand_in("drex-test", status=500) as drex:
+        environment = {
+            "SYSTEM_ONE_ROUTES": "drex",
+            "SYSTEM_ONE_DREX": "1",
+            "SYSTEM_ONE_DREX_ENDPOINT": drex.url,
+            "TYPESAFE_API_KEY": TYPESAFE_KEY,
+        }
+
+        # Act and Assert
+        with pytest.raises(ValueError, match="set SYSTEM_ONE_DREX_API_KEY"):
+            RoutedJevClient(routes_from_env(environment)).ask(
+                {"case": "x"}, {"q": {"type": "noul", "instructions": "y?"}}
+            )
+
+    # Assert
+    assert drex.authorizations == []
+
+
+def test_the_typesafe_key_reaches_only_the_jev_route_on_the_wire(monkeypatch):
+    # Arrange: Drex fails, so the request also goes to Jev; the process environment holds the key too
+    _requires_typesafe()
+    monkeypatch.setenv("TYPESAFE_API_KEY", TYPESAFE_KEY)
+    with stand_in("drex-test", status=500) as drex, stand_in("jev-test") as jev:
+        environment = {
+            "SYSTEM_ONE_ROUTES": "drex,jev",
+            "SYSTEM_ONE_DREX_ENDPOINT": drex.url,
+            "SYSTEM_ONE_DREX_MODEL": "drex-test",
+            "SYSTEM_ONE_DREX_API_KEY": "nace-FAKE-drex-key",
+            "SYSTEM_ONE_JEV_ENDPOINT": jev.url,
+            "SYSTEM_ONE_JEV_MODEL": "jev-test",
+            "TYPESAFE_API_KEY": TYPESAFE_KEY,
+        }
+        routed = RoutedJevClient(routes_from_env(environment))
+
+        # Act
+        try:
+            routed.ask({"case": "x"}, {"q": {"type": "noul", "instructions": "y?"}})
+        finally:
+            routed.close()
+
+    # Assert
+    assert drex.authorizations and set(drex.authorizations) == {"Bearer nace-FAKE-drex-key"}
+    assert set(jev.authorizations) == {f"Bearer {TYPESAFE_KEY}"}
 
 
 def test_the_first_route_answers_and_the_second_never_runs():

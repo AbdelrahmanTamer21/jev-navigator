@@ -39,7 +39,11 @@ DESCRIBES = Check(
     no=Criterion("The code does something else, or only calls it."),
 )
 SHARED = {"doc": {"sentence": "s"}}
-KEY = {"TYPESAFE_API_KEY": "local-test-key"}
+KEY = {
+    "TYPESAFE_API_KEY": "local-test-key",
+    "SYSTEM_ONE_DREX_API_KEY": "local-drex-key",
+    "SYSTEM_ONE_DECIDER_API_KEY": "local-decider-key",
+}
 ONE_ROUND = SearchBudget(max_calls=4, beam_width=1, max_depth=1)
 
 

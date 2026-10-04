@@ -106,10 +106,11 @@ file or print the values. `TYPESAFE_BASE_URL` is the API root before `/v1/system
 `SYSTEM_ONE_ROUTES=drex,jev`, every request goes to Drex first, and to Jev only when Drex fails; the
 journal records each attempt with the route that made it. A size refusal is not a failure: it goes back
 to the judge, which splits the request, because the next route would get the same request. Each route
-reads `SYSTEM_ONE_<NAME>_ENDPOINT`, `SYSTEM_ONE_<NAME>_MODEL` and `SYSTEM_ONE_<NAME>_API_KEY`
-(`TYPESAFE_API_KEY` when unset); `drex` and `jev` also take `SYSTEM_ONE_<NAME>=1` for their hosted
-endpoint and model. A route missing its endpoint or model stops the command before any request, naming
-the route. Without `SYSTEM_ONE_ROUTES`, `jvn` uses the default Jev client described above.
+reads `SYSTEM_ONE_<NAME>_ENDPOINT`, `SYSTEM_ONE_<NAME>_MODEL` and `SYSTEM_ONE_<NAME>_API_KEY`; `drex`
+and `jev` also take `SYSTEM_ONE_<NAME>=1` for their hosted endpoint and model. Only the `jev` route
+falls back to `TYPESAFE_API_KEY`: every other route needs its own key, so your TypeSafe key never goes
+to Drex or to a server you configured. A route missing its endpoint, model or key stops the command
+before any request, naming the route and the setting. Without `SYSTEM_ONE_ROUTES`, `jvn` uses the default Jev client described above.
 
 Each route has an input limit for the state plus the longest question: Drex accepts 8,192 tokens and
 Jev 32,000, as Analysis Engine measured them; `jvn` turns tokens into characters at the one rate
