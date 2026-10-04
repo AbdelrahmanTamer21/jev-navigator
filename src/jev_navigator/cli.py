@@ -18,6 +18,7 @@ from pathlib import Path
 from time import monotonic
 
 from .adapters.typesafe import TypeSafeJevClient
+from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
 from .cli_trace import create_trace_evidence_pack
@@ -26,6 +27,7 @@ from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
 from .directives.places import Place, place_for_line
+from .housekeeping import FINISHED_RUN_DAYS, RESUMABLE_RUN_DAYS
 from .index.code_index import CodeIndex
 from .index.languages import language_of
 from .judgments.answers import TokenTotal
@@ -47,7 +49,11 @@ POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
-OUT_HELP = "New or empty output directory (default: a unique run under $XDG_DATA_HOME/jev-navigator/runs)"
+OUT_HELP = (
+    "New or empty output directory, never pruned (default: a unique run under "
+    f"$XDG_DATA_HOME/jev-navigator/runs, pruned after {FINISHED_RUN_DAYS} days, {RESUMABLE_RUN_DAYS} "
+    "while resumable)"
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -59,8 +65,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser = _parser()
         (_command_parser(parser, args.topic) if args.topic else parser).print_help()
         return 0
-    if args.command == "stats":
-        return _run_statistics(args)
+    if args.command == "cache":
+        return run_cache_command(args.action)
+    status = _run_statistics(args) if args.command == "stats" else _run_search(args)
+    tidy_after_run()
+    return status
+
+
+def _run_search(args: argparse.Namespace) -> int:
     if args.command not in ("find", "findall", "trace"):
         raise AssertionError(f"unhandled command: {args.command}")
     budget = SearchBudget(
@@ -487,7 +499,19 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
         "topic", choices=("find", "findall", "trace", "stats"), help="command whose request schema to show"
     )
     help_command = commands.add_parser("help", help="show general or command-specific help")
-    help_command.add_argument("topic", nargs="?", choices=("find", "findall", "trace", "stats", "schema"))
+    help_command.add_argument(
+        "topic", nargs="?", choices=("find", "findall", "trace", "stats", "schema", "cache")
+    )
+    cache = commands.add_parser(
+        "cache",
+        help="show or prune what JVN keeps on disk (no model calls)",
+        description="Show what JVN's caches and run folders hold, or run the housekeeping rules now.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="jvn cache status\njvn cache prune\n"
+        "Every find, findall, trace and stats run also prunes, at most once a day.\n"
+        "Rules: README.md, section 'Where JVN keeps runs and caches'.",
+    )
+    cache.add_argument("action", choices=CACHE_ACTIONS, help="status shows, prune deletes now")
     _add_search_arguments(find)
     find.add_argument(
         "--resume",

@@ -63,7 +63,7 @@ class NameRow:
 
 class NameTable:
     def __init__(self, root: Path | None = None) -> None:
-        self.path = (root or cache_root() / "names") / f"{table_identity()}.sqlite"
+        self.path = table_path(root)
         self._lock = threading.Lock()
         self._db = open_shared_database(self.path, _SCHEMA)
 
@@ -167,6 +167,16 @@ class NameTable:
             (blob, int(facts.incomplete), stretches, today()),
         )
         return added.rowcount == 1
+
+
+def table_path(root: Path | None = None) -> Path:
+    """The table file this JVN reads, in ``root`` or else in ``user_name_tables()``."""
+    return (root or user_name_tables()) / f"{table_identity()}.sqlite"
+
+
+def user_name_tables() -> Path:
+    """The folder of the name tables every index on this machine shares, one per table identity."""
+    return cache_root() / "names"
 
 
 @cache

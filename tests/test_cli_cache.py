@@ -1,0 +1,105 @@
+"""``jvn cache`` shows and prunes JVN's folders, and every search or stats run tidies them as it ends,
+without a housekeeping failure ever failing the run."""
+
+from __future__ import annotations
+
+import os
+import time
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+from git_repos import commit_files
+
+from jev_navigator.cli import main
+from jev_navigator.data_root import default_run_folder, runs_root
+from jev_navigator.index.fact_cache import user_fact_cache
+
+
+def days_ago(path: Path, days: float) -> None:
+    stamp = time.time() - days * 86_400
+    os.utime(path, (stamp, stamp))
+
+
+def expired_run() -> Path:
+    folder = default_run_folder(Path("shop"), datetime.now(UTC) - timedelta(days=20))
+    folder.mkdir(parents=True)
+    (folder / "manifest.json").write_text("{}")
+    return folder
+
+
+def unused_identity() -> Path:
+    folder = user_fact_cache() / "python" / ("a" * 64)
+    folder.mkdir(parents=True)
+    (folder / f"{'0' * 64}.json").write_text("{}")
+    days_ago(folder, 4)
+    return folder
+
+
+def test_cache_status_reports_each_store_and_removes_nothing(capsys: pytest.CaptureFixture[str]) -> None:
+    # Arrange
+    run, identity = expired_run(), unused_identity()
+
+    # Act
+    exit_code = main(["cache", "status"])
+
+    # Assert
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "facts: 0 entries" in output and "1 from other JVN versions (1 unused for 3 days)" in output
+    assert "runs: 1 run" in output and "1 past retention" in output
+    assert "budget 5.0 GB" in output
+    assert run.exists() and identity.exists()
+
+
+def test_cache_prune_removes_what_the_rules_name_and_says_so(capsys: pytest.CaptureFixture[str]) -> None:
+    # Arrange
+    run, identity = expired_run(), unused_identity()
+
+    # Act
+    exit_code = main(["cache", "prune"])
+
+    # Assert
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "removed 2 files" in output
+    assert not run.exists() and not identity.exists()
+
+
+def test_a_stats_run_tidies_jvns_folders_as_it_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Arrange
+    commit_files(tmp_path / "repo", {"app.py": "def f():\n    return 1\n"})
+    monkeypatch.chdir(tmp_path / "repo")
+    run = expired_run()
+
+    # Act
+    exit_code = main(["stats"])
+
+    # Assert
+    assert exit_code == 0
+    assert not run.exists()
+    assert len(list(runs_root().iterdir())) == 1
+
+
+def test_a_housekeeping_failure_never_fails_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    private_cache_root: Path,
+) -> None:
+    # Arrange: the trash is a file, so the unused identity cannot be moved into it
+    commit_files(tmp_path / "repo", {"app.py": "def f():\n    return 1\n"})
+    monkeypatch.chdir(tmp_path / "repo")
+    unused_identity()
+    (private_cache_root / ".trash").write_text("not a folder")
+
+    # Act
+    exit_code = main(["stats"])
+
+    # Assert
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "statistics pack:" in captured.out
+    assert "jvn: housekeeping skipped:" in captured.err and ".trash" in captured.err

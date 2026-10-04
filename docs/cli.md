@@ -17,6 +17,7 @@ that are absent from the source?” rather than “find everything important”.
 - [Find All function search](#find-all-function-search)
 - [Workflow trace](#workflow-trace)
 - [Structural measurements](#structural-measurements)
+- [Disk use and housekeeping](#disk-use-and-housekeeping)
 
 ## Start with one command
 
@@ -306,3 +307,27 @@ claim that unsupported or malformed code was completely understood. Inspect `cov
 
 These are explicit structural commands. `find` still accepts a semantic target; it does not yet
 route arbitrary natural-language arithmetic questions into `stats` automatically.
+
+## Disk use and housekeeping
+
+```sh
+jvn cache status    # what each cache and the run folders hold, and what each rule would remove
+jvn cache prune     # apply every rule now
+```
+
+Run folders live in `$XDG_DATA_HOME/jev-navigator/runs/` and caches in `$XDG_CACHE_HOME/jev-navigator/`
+(`~/.local/share` and `~/.cache` when unset); JVN writes nothing into the directory it searches unless
+you name one with `--out`. Each `find`, `findall`, `trace` and `stats` run applies the housekeeping
+rules as it ends, at most once a day and deleting at most 2,000 files per run:
+
+| What | Goes when |
+|---|---|
+| Another JVN version's fact folder, name table or default answer store layout | no JVN version used it for 3 days |
+| A file's cached facts, or its rows in the name table | no run met that exact file content for 30 days |
+| An answer in the default shared store, with its item answers and refusals | no run reused it for 30 days |
+| A run folder JVN named | 14 days after its run started; 30 days while it holds `resume.json` |
+| Anything above the disk budget (`JEV_NAVIGATOR_DISK_BUDGET`, default `5GB`) | run folders first, oldest first; then other versions' caches; then facts and names; answers last |
+
+A store named with `--answer-store` or `JEV_NAVIGATOR_ANSWER_STORE` and a folder named with `--out`
+are never touched. A cleanup that fails prints `jvn: housekeeping skipped: <reason>` on stderr and
+leaves the run's exit status as it was.

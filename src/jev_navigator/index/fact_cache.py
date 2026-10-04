@@ -78,7 +78,7 @@ class FactCache:
         current = set(self.current_folders())
         loose = [path for path in _children(self.root) if not path.is_dir()]
         held = [path for language in self._language_folders() for path in _children(language)]
-        return sorted([*loose, *(path for path in held if path not in current)])
+        return [*loose, *(path for path in held if path not in current)]
 
     def _language_folders(self) -> list[Path]:
         return [path for path in _children(self.root) if path.is_dir()]

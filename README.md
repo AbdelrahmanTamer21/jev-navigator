@@ -205,6 +205,28 @@ folder with `--out`. Without `--out`, a run's evidence pack goes to its own run 
 `$XDG_DATA_HOME/jev-navigator/runs/<directory>-<timestamp>` (`~/.local/share` when the variable is
 unset), and the run prints that path.
 
+Caches live in `$XDG_CACHE_HOME/jev-navigator` (`~/.cache` when unset): the fact cache (`facts/`), the
+name table (`names/`) and the shared answer store (`answers-v2.sqlite`). Caches are the data JVN
+values most, but only while they represent real files, so JVN cleans up after itself:
+
+- A cache another JVN version wrote, which this version can never read, goes once no JVN version
+  has used it for 3 days. Versions in use side by side keep theirs.
+- A cached file's facts or names go once no run has met that exact file content for 30 days.
+- An answer in the default shared store goes once no run has reused it for 30 days, with its item
+  answers and refusals. A store you name with `--answer-store` or `JEV_NAVIGATOR_ANSWER_STORE` keeps
+  every answer and is never touched.
+- A run folder goes 14 days after its run started, or 30 days while it can still be resumed (it holds
+  `resume.json`). A folder you name with `--out` is never touched.
+- Above the disk budget, 5 GB unless `JEV_NAVIGATOR_DISK_BUDGET` says otherwise (`750MB`, `20GB` or
+  plain bytes), the oldest run folders go first, then other versions' caches, then the least recently
+  confirmed facts and names, and answers last.
+
+Every `find`, `findall`, `trace` and `stats` run applies these rules as it ends, at most once a day,
+deleting at most 2,000 files per run; a failure to clean up is a notice on stderr and never fails the
+run. Nothing outside these two folders is ever deleted, and links are never followed.
+`jvn cache status` shows what each store holds and what each rule would remove; `jvn cache prune`
+applies every rule now.
+
 ## Layer 1: index, operations and comments (no model)
 
 ```python

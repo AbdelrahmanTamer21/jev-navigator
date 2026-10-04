@@ -82,6 +82,8 @@ use. `jvn trace` reports `replayed_answers` beside its live `calls`.
 The first search in a scope parses every file in it once and records each name and its lines in the
 name table under the same cache folder; later searches over unchanged files look names up there
 without searching or parsing. The table holds names and line numbers, never code or string literals.
+JVN prunes its own caches and run folders as runs end (rules: `docs/cli.md`, Disk use and
+housekeeping); `jvn cache status` shows disk use. Copy a run folder you want to keep, or use `--out`.
 
 Live searches send source to the configured provider: reuse the user's source and spend authorization,
 and never print credentials (environment or `~/.config/jvn/env`). Progress is stderr, JSON stdout.

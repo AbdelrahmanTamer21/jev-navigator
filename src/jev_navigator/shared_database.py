@@ -8,6 +8,8 @@ import tempfile
 from contextlib import closing, suppress
 from pathlib import Path
 
+_SIDE_FILE_SUFFIXES = ("-wal", "-shm")
+
 
 def open_shared_database(path: Path, schema: str, version: int = 0) -> sqlite3.Connection:
     """A connection to the file at ``path``, created first when it is missing. A new file is built
@@ -21,6 +23,14 @@ def open_shared_database(path: Path, schema: str, version: int = 0) -> sqlite3.C
     database = sqlite3.connect(path, timeout=30, check_same_thread=False)
     os.utime(path)
     return database
+
+
+def database_base(path: Path) -> Path:
+    """The database file a SQLite side file (its write-ahead log or shared memory) belongs to."""
+    for suffix in _SIDE_FILE_SUFFIXES:
+        if path.name.endswith(suffix):
+            return path.with_name(path.name.removesuffix(suffix))
+    return path
 
 
 def release_free_pages(database: sqlite3.Connection) -> None:
