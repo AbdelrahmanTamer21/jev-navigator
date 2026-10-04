@@ -9,12 +9,13 @@ import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import ExitStack
+from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 from typing import IO
 
 from .. import memory_limit
-from .file_shape import refusal_of
+from .file_shape import Placement, placement_of
 from .spans import TextHit
 
 AST_GREP = "ast-grep"
@@ -65,51 +66,55 @@ def ast_grep_rules(
     refused: dict[str, str],
 ) -> Iterator[dict]:
     """The matches of ``rules_yaml`` over ``files``, one at a time as ast-grep prints them, so no
-    process's whole output is ever held. Every parse passes through here: a file whose estimated parse
-    peak is over the bound (``file_shape.MAX_PARSE_PEAK_MB``) is never handed to ast-grep. Each such
-    file is added to ``refused`` with its reason when the iteration starts, so read ``refused`` after
-    the matches. ast-grep always runs with a JVN-owned sgconfig: ``config``, when given, is sgconfig
-    YAML text (a ``languageGlobs`` remapping, say), otherwise ``NEUTRAL_AST_GREP_CONFIG``. It is
-    written to a temporary file outside every repository and passed with ``--config``, so the
-    repository being analysed never configures the parser. One scan runs at a time in a process
-    (``memory_limit.parsing``), parsing at most as many files at once as JVN's memory allowance
-    affords."""
-    parseable, skipped = _split_by_parse_peak(files, cwd)
-    refused.update(skipped)
-    if not parseable:
+    process's whole output is ever held. Every parse passes through here, placed by its estimated parse
+    peak (``file_shape``) against JVN's memory settings (``memory_limit.MemoryLimit``): files within
+    ``MAX_PARSE_PEAK_MB`` are parsed side by side, as many at once as the allowance affords; a file over
+    it but within ``single_parse_mb`` is parsed alone, on one thread, one at a time, after them; a file
+    over that is never handed to ast-grep and is added to ``refused`` with its reason when the iteration
+    starts, so read ``refused`` after the matches. One scan runs at a time in a process
+    (``memory_limit.parsing``). ast-grep always runs with a JVN-owned sgconfig: ``config``, when given,
+    is sgconfig YAML text (a ``languageGlobs`` remapping, say), otherwise ``NEUTRAL_AST_GREP_CONFIG``. It
+    is written to a temporary file outside every repository and passed with ``--config``, so the
+    repository being analysed never configures the parser."""
+    limit = memory_limit.process_guard().limit
+    placed = _placed(files, cwd, limit.single_parse_mb)
+    refused.update(placed.refused)
+    if not placed.side_by_side and not placed.alone:
         return
     with ExitStack() as resources:
         directory = resources.enter_context(tempfile.TemporaryDirectory(prefix="jev-navigator-sgconfig-"))
         path = Path(directory) / "sgconfig.yml"
         path.write_text(NEUTRAL_AST_GREP_CONFIG if config is None else config)
-        threads = resources.enter_context(memory_limit.parsing())
-        command = [
-            AST_GREP,
-            "scan",
-            "--threads",
-            str(threads),
-            "--inline-rules",
-            rules_yaml,
-            "--config",
-            str(path),
-        ]
-        for chunk in file_chunks(parseable):
-            yield from _json_lines([*command, "--json=stream", "--", *chunk], cwd)
+        resources.enter_context(memory_limit.parsing())
+        command = [AST_GREP, "scan", "--inline-rules", rules_yaml, "--config", str(path)]
+        side_by_side = [*command, "--threads", str(limit.parse_threads)]
+        for chunk in file_chunks(placed.side_by_side):
+            yield from _json_lines([*side_by_side, "--json=stream", "--", *chunk], cwd)
+        for file in placed.alone:
+            yield from _json_lines([*command, "--threads", "1", "--json=stream", "--", file], cwd)
 
 
-def _split_by_parse_peak(files: Sequence[str], cwd: Path) -> tuple[list[str], dict[str, str]]:
-    parseable: list[str] = []
-    refused: dict[str, str] = {}
+@dataclass
+class _Placed:
+    side_by_side: list[str] = field(default_factory=list)
+    alone: list[str] = field(default_factory=list)
+    refused: dict[str, str] = field(default_factory=dict)
+
+
+def _placed(files: Sequence[str], cwd: Path, single_parse_limit: float) -> _Placed:
+    placed = _Placed()
     for file in files:
         try:
-            reason = refusal_of(cwd, file)
+            placement, reason = placement_of(cwd, file, single_parse_limit)
         except OSError as error:
-            reason = f"could not be measured: {type(error).__name__}: {error}"
-        if reason is None:
-            parseable.append(file)
+            placement, reason = Placement.REFUSED, f"could not be measured: {type(error).__name__}: {error}"
+        if placement is Placement.SIDE_BY_SIDE:
+            placed.side_by_side.append(file)
+        elif placement is Placement.ALONE:
+            placed.alone.append(file)
         else:
-            refused[file] = reason
-    return parseable, refused
+            placed.refused[file] = reason
+    return placed
 
 
 def file_chunks(files: Sequence[str]) -> Iterator[Sequence[str]]:

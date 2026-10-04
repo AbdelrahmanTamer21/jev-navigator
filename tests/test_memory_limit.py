@@ -245,11 +245,11 @@ def test_a_reader_that_stops_early_does_not_wait_for_its_child(
 def test_a_real_parse_over_the_allowance_is_stopped_and_caches_no_facts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Arrange: one line of 66,000 characters is under the parse guard's estimate, so ast-grep parses
-    # it, and its real parse peak is far over a 40 MB allowance.
+    # Arrange: one line of 39,000 characters is within the parse guard's side-by-side share, so
+    # ast-grep parses it, and its real parse peak is far over a 40 MB allowance.
     bundle = "dist/bundle.js"
     commit_files(
-        tmp_path / "repo", {bundle: (STATEMENT * 2000)[:66_000], "src/small.py": "def a():\n    return 1\n"}
+        tmp_path / "repo", {bundle: (STATEMENT * 2000)[:39_000], "src/small.py": "def a():\n    return 1\n"}
     )
     facts = tmp_path / "facts"
     _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=40, ceiling_mb=40)

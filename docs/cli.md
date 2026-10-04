@@ -221,7 +221,9 @@ covers the `jvn` command and every program that imports `jev_navigator`.
   separate program the user names, so JVN neither counts nor stops its memory.
 - **One parse at a time:** a process runs one ast-grep scan at a time, and ast-grep parses only as
   many files at once as the allowance affords: 3 at the default. Scans started in parallel threads
-  take turns instead of outgrowing the allowance together.
+  take turns instead of outgrowing the allowance together. A file too big to parse beside others is
+  parsed alone on one thread, up to the allowance less Python's 270 MB share (754 MB at the default);
+  a file estimated above that is refused and named.
 - **Ceiling:** 8,192 MB, so eight slots of 1,024 MB. A process takes a slot when it first starts a
   tool and keeps it until it exits. When every slot is held, it waits up to 120 seconds for one, then
   raises `MemoryLimitReachedError`, which names the processes holding the slots. The slots are files
