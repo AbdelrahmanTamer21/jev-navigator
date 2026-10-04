@@ -454,17 +454,29 @@ def _failure_record(error: BaseException, judge: Judge, journal: ProgressJournal
     }
 
 
+def _failure_lines(search: dict, bullet: str) -> list[str]:
+    failure = search.get("failure")
+    return [f"{bullet}Failure: {failure['type']}: {failure['message']}"] if failure else []
+
+
 def _error_fields(error: BaseException) -> dict:
     return {"type": type(error).__name__, "message": str(error)}
 
 
 def _causes(error: BaseException) -> list[BaseException]:
     causes = []
-    cause = error.__cause__
+    cause = _cause_of(error)
     while cause is not None:
         causes.append(cause)
-        cause = cause.__cause__
+        cause = _cause_of(cause)
     return causes
+
+
+def _cause_of(error: BaseException) -> BaseException | None:
+    """The explicit cause, else the error being handled when this one was raised without ``from``."""
+    if error.__cause__ is not None or error.__suppress_context__:
+        return error.__cause__
+    return error.__context__
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1085,6 +1097,7 @@ def _find_all_report(manifest: dict) -> str:
         f"Target: {manifest['target']}",
         "",
         f"Outcome: **{search['outcome']}**. Coverage: **{search['coverage']}**.",
+        *_failure_lines(search, ""),
         f"{search['calls']} live requests; "
         f"{search['duration_seconds']:.3f}s for seed search and enumeration.",
         "",
@@ -1207,7 +1220,7 @@ _FRONTIER_REASONS = {
     "budget": "Configured search limit reached",
     "depth": "Configured depth limit reached",
     "cancelled": "Search cancelled",
-    "failed": "A request failed; Resume asks it again",
+    "failed": "Search stopped on a failed request; Resume opens this place",
     "stop_rule": "Caller stop condition met",
     "scope_incomplete": "Source scope incomplete",
     "neighbours_per_kind": "Configured neighbour limit reached",
@@ -1232,6 +1245,7 @@ def _report(manifest: dict) -> str:
         f"- Scope: {', '.join(f'`{prefix}`' for prefix in source['prefixes']) or 'whole directory'}",
         f"- Target: {manifest['target']}",
         f"- Outcome: **{_outcome_summary(search)}**",
+        *_failure_lines(search, "- "),
         *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{manifest['provider']['requested_model']}`, served "

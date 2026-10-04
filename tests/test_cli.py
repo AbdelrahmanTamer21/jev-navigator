@@ -623,6 +623,11 @@ def test_a_full_disk_during_ctrl_c_exits_1_with_that_error_and_its_resume_finish
     assert "No space left on device" in failed_stderr
     assert failed["search"]["outcome"] == "failed"
     assert failed["search"]["failure"]["type"] == "OSError"
+    steps = [json.loads(line) for line in (first / "journal.jsonl").read_text().splitlines()]
+    failures = [
+        record["step"]["judgments"].get("failure") for record in steps if record["kind"] == "history_step"
+    ]
+    assert "OSError: [Errno 28] No space left on device" in failures
     assert (first / "resume.json").is_file()
     assert resumed_status == 0
     assert resumed["search"]["outcome"] == uninterrupted["search"]["outcome"]

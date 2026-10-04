@@ -1354,7 +1354,7 @@ def test_an_interrupt_after_a_round_is_merged_keeps_its_place_merged_once(tmp_pa
     (tmp_path / "places.txt").write_text("first\nsecond\n")
     index = CodeIndex(tmp_path, ["places.txt"])
     places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
-    stop_rule = StopRule(Check("is_done", "Is the search done?", Criterion("Yes."), Criterion("No.")))
+    stop_rule = IS_DONE
 
     class InterruptedAtTheStopCheck:
         model = "interrupted-at-the-stop-check"
@@ -1381,6 +1381,84 @@ def test_an_interrupt_after_a_round_is_merged_keeps_its_place_merged_once(tmp_pa
     assert [visit.place_key for visit in cancelled.searched] == [places[0].key]
     assert [entry.place_key for entry in cancelled.not_inspected] == [places[1].key]
     assert cancelled.steps == 1
+
+
+IS_DONE = StopRule(Check("is_done", "Is the search done?", Criterion("Yes."), Criterion("No.")))
+
+
+class FailsOnEveryRequest:
+    """A provider that is down: every request fails, the stop check's included."""
+
+    model = "down"
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.questions: list[Mapping] = []
+
+    def ask(self, state, questions):
+        del state
+        self.questions.append(questions)
+        raise self.error
+
+
+def test_a_failed_round_ends_the_search_failed_without_asking_the_stop_rule(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "places.txt").write_text("first\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    place = range_place(index, "places.txt", 1, 1, "candidate")
+    error = ProviderError("Jev answered 503")
+    client = FailsOnEveryRequest(error)
+
+    # Act
+    failed = find_code(
+        index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        initial_candidates=[(place, 1.0)],
+        stop_rule=IS_DONE,
+    )
+
+    # Assert
+    assert failed.outcome == Outcome.FAILED
+    assert failed.failure is error
+    assert not any(question_id.startswith("is_done") for asked in client.questions for question_id in asked)
+
+
+def test_a_failed_stop_check_ends_the_search_failed_with_its_error(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "places.txt").write_text("first\nsecond\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
+    error = ProviderError("Jev answered 503")
+
+    class FailsAtTheStopCheck:
+        model = "fails-at-the-stop-check"
+
+        def ask(self, state, questions):
+            if any(question_id.startswith("is_done") for question_id in questions):
+                raise error
+            return ScriptedJevClient(default_noul=0.05).ask(state, questions)
+
+    # Act
+    failed = find_code(
+        index,
+        Judge(FailsAtTheStopCheck()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        initial_candidates=[(place, 1.0) for place in places],
+        stop_rule=IS_DONE,
+    )
+
+    # Assert
+    assert failed.outcome == Outcome.FAILED
+    assert failed.failure is error
+    assert [visit.place_key for visit in failed.searched] == [places[0].key]
+    assert [entry.place_key for entry in failed.not_inspected] == [places[1].key]
 
 
 def test_the_result_and_the_stop_step_name_the_moves_the_search_used(sample_index: CodeIndex) -> None:

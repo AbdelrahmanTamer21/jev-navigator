@@ -348,7 +348,8 @@ def find_code(
     move frontier. Explicit ``start`` places retain their caller-known semantics and never count as
     finds. ``moves`` chooses how neighbours are listed (default ``places.MOVES``); pass a
     subset, or add a move of your own. Each round's places are asked concurrently in threads;
-    ``find_code_async`` is the same search for an async client."""
+    ``find_code_async`` is the same search for an async client, except that a failed request
+    raises its error there instead of ending the search ``failed``."""
     options = _SearchOptions(
         budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
     )
@@ -391,7 +392,8 @@ async def find_code_async(
     initial_candidates: Sequence[tuple[Place, float]] = (),
 ) -> FindResult:
     """``find_code`` with each round's places sent concurrently with ``asyncio.gather``; budgets,
-    masking, the store, the journal and the history work exactly as in ``find_code``. Opening places
+    masking, the store, the journal and the history work exactly as in ``find_code``, but a failed
+    request raises its error instead of ending the search ``failed``. Opening places
     runs ripgrep, git and the parser, so it runs in a worker thread and the event loop stays free."""
     options = _SearchOptions(
         budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
@@ -587,8 +589,10 @@ class StopRule:
 
 
 def _apply_stop_rule(judge: Judge, search: _Search) -> None:
+    """Skipped after a failed round, which already ends the search; a failed stop check ends it
+    ``failed`` too."""
     rule = search.stop_rule
-    if rule is None:
+    if rule is None or search.failure is not None:
         return
     try:
         search.stop_judgment = judge_history(
@@ -596,6 +600,10 @@ def _apply_stop_rule(judge: Judge, search: _Search) -> None:
         )
     except CallCapReachedError:
         search.cap_reached = True
+    except ABORTED_SEND_ERRORS:
+        raise
+    except Exception as error:  # noqa: BLE001 - as in _ask_within_cap: the search ends failed holding this same error, and the CLI re-raises it after saving
+        search.failure = error
 
 
 async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:

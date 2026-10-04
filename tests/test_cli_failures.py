@@ -21,18 +21,30 @@ from jev_navigator.testing import ScriptedJevClient
 START = "app/entry.py:5"
 
 
+def second_request(position: int, state: Mapping) -> bool:
+    del state
+    return position == 2
+
+
+def import_line(position: int, state: Mapping) -> bool:
+    del position
+    return state["slice"]["code"].startswith("from .policy import admit")
+
+
 class ProviderError(RuntimeError):
     """A failure the provider reports, such as a 503."""
 
 
 class FailsOnRequest:
-    """Answers like ``script``, except that request number ``failing`` raises ``error`` once; a
-    sibling sent in the same round is still answered. It records every request it receives,
-    answered or not."""
+    """Answers like ``script``, except that the requests ``fails`` picks, by position and state,
+    raise ``error``; a sibling sent in the same round is still answered. It records every request it
+    receives, answered or not."""
 
-    def __init__(self, script: ScriptedJevClient, failing: int, error: Exception) -> None:
+    def __init__(
+        self, script: ScriptedJevClient, fails: Callable[[int, Mapping], bool], error: Exception
+    ) -> None:
         self.script = script
-        self.failing = failing
+        self.fails = fails
         self.error = error
         self.received: list[tuple[Mapping, Mapping]] = []
         self.model = script.model
@@ -42,7 +54,7 @@ class FailsOnRequest:
         with self._counting:
             self.received.append((state, questions))
             position = len(self.received)
-        if position == self.failing:
+        if self.fails(position, state):
             raise self.error
         return self.script.ask(state, questions)
 
@@ -106,7 +118,7 @@ def test_a_failed_find_exits_1_with_the_error_and_its_resume_reaches_the_uninter
     repository = marked_repository(tmp_path / "repository")
     whole, expected = uninterrupted_requests(repository, tmp_path)
     store = tmp_path / "answers.sqlite"
-    failing = FailsOnRequest(limit_client(), failing=2, error=provider_error())
+    failing = FailsOnRequest(limit_client(), second_request, provider_error())
     resuming = closable(limit_client())
     use_clients(monkeypatch, iter([failing, resuming]))
     first, second = tmp_path / "first", tmp_path / "second"
@@ -135,7 +147,7 @@ def test_a_failed_find_exits_1_with_the_error_and_its_resume_reaches_the_uninter
     assert resumed["search"]["outcome"] == whole["search"]["outcome"] == "found"
     assert resumed["search"]["found"] == whole["search"]["found"]
     sent = hashes(failing.received)
-    failed_request = sent.pop(failing.failing - 1)
+    failed_request = sent.pop(1)
     assert sorted(sent + hashes(resuming.requests)) == sorted(expected)
     assert failed_request in hashes(resuming.requests)
 
@@ -146,7 +158,7 @@ def test_a_new_find_after_a_failed_one_runs_as_usual(tmp_path: Path, monkeypatch
     store = tmp_path / "answers.sqlite"
     use_clients(
         monkeypatch,
-        iter([FailsOnRequest(limit_client(), failing=2, error=provider_error()), closable(limit_client())]),
+        iter([FailsOnRequest(limit_client(), second_request, provider_error()), closable(limit_client())]),
     )
     cli.main(find_command(repository, tmp_path / "failed", store))
 
@@ -202,6 +214,44 @@ def test_a_failed_request_on_a_route_names_that_route_in_the_manifest(
     assert manifest_of(tmp_path / "routed")["search"]["failure"]["route"] == "backup"
 
 
+def test_a_find_that_finds_its_target_while_a_sibling_fails_reports_both_and_exits_0(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    use_clients(monkeypatch, iter([FailsOnRequest(limit_client(), import_line, provider_error())]))
+    output = tmp_path / "found"
+
+    # Act
+    status = cli.main(find_command(repository, output, tmp_path / "answers.sqlite"))
+
+    # Assert
+    manifest = manifest_of(output)
+    assert status == 0
+    assert manifest["search"]["outcome"] == "found"
+    assert manifest["search"]["found"][0]["source"]["file"] == "app/policy.py"
+    assert manifest["search"]["failure"]["message"] == "Jev answered 503"
+    assert "- Failure: ProviderError: Jev answered 503" in (output / "report.md").read_text()
+
+
+def test_a_failure_raised_while_handling_another_error_lists_that_error_as_its_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    error = ProviderError("Jev answered 503")
+    error.__context__ = TimeoutError("read timed out")
+    use_clients(monkeypatch, iter([FailsOnRequest(limit_client(), second_request, error)]))
+
+    # Act
+    cli.main(find_command(repository, tmp_path / "failed", tmp_path / "answers.sqlite"))
+
+    # Assert
+    assert manifest_of(tmp_path / "failed")["search"]["failure"]["causes"] == [
+        {"type": "TimeoutError", "message": "read timed out"}
+    ]
+
+
 def asks(question_id: str) -> Callable[[tuple[Mapping, Mapping]], bool]:
     return lambda request: any(asked.startswith(question_id) for asked in request[1])
 
@@ -211,7 +261,7 @@ def test_a_find_all_whose_seed_search_fails_never_starts_its_enumeration(
 ) -> None:
     # Arrange
     repository = marked_repository(tmp_path / "repository")
-    failing = FailsOnRequest(limit_client(), failing=2, error=provider_error())
+    failing = FailsOnRequest(limit_client(), second_request, provider_error())
     use_clients(monkeypatch, iter([failing]))
     command = find_command(repository, tmp_path / "findall", tmp_path / "answers.sqlite")
     command[0] = "findall"
