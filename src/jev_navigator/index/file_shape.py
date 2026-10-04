@@ -20,7 +20,7 @@ MAX_PARSE_PEAK_MB = 250.0
 of about 70,000 characters. The largest parse measured under it peaked at 122 MB, and ast-grep scans
 files in parallel, so several can be in memory at once."""
 
-PARSEABLE_BELOW_BYTES = int(
+PARSEABLE_UP_TO_BYTES = int(
     1000 * ((MAX_PARSE_PEAK_MB - BASE_PEAK_MB) / PEAK_MB_PER_SQUARED_THOUSAND_CHARACTERS) ** 0.5
 )
 """A file this small can never be over the bound, whatever its lines: the sum of the squared line
@@ -95,7 +95,7 @@ def shape_of(root: Path, path: str) -> FileShape:
 def refusal_of(root: Path, path: str) -> str | None:
     """Why the file must not be parsed, or None. A file small enough to be safe by size is not read."""
     file = root / path
-    if file.stat().st_size <= PARSEABLE_BELOW_BYTES:
+    if file.stat().st_size <= PARSEABLE_UP_TO_BYTES:
         return None
     return measure(file.read_bytes()).refusal
 

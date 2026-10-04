@@ -10,7 +10,7 @@ from jev_navigator.index.file_shape import (
     LARGE_FILE_BYTES,
     LONG_LINE_CHARS,
     MAX_PARSE_PEAK_MB,
-    PARSEABLE_BELOW_BYTES,
+    PARSEABLE_UP_TO_BYTES,
     Trigger,
     measure,
     refusal_of,
@@ -150,8 +150,8 @@ def test_shape_of_reads_one_file_given_the_repository_folder_and_the_path(tmp_pa
 
 
 def test_the_stat_shortcut_is_exact_a_file_up_to_the_safe_size_can_never_be_over_the_bound() -> None:
-    assert not measure(_one_line(PARSEABLE_BELOW_BYTES)).too_large_to_parse
-    assert measure(_one_line(PARSEABLE_BELOW_BYTES + 1)).too_large_to_parse
+    assert not measure(_one_line(PARSEABLE_UP_TO_BYTES)).too_large_to_parse
+    assert measure(_one_line(PARSEABLE_UP_TO_BYTES + 1)).too_large_to_parse
 
 
 def test_a_small_file_is_cleared_from_its_size_without_reading_it(
