@@ -3,16 +3,18 @@
 Caches are the most valuable data JVN keeps, but only while they represent real files (André,
 04.10.2026). Each store stamps its own entries and deletes them on request; this module decides:
 
-1. Dead by rules: another JVN version's fact identity folder, name table or default answer store
-   layout goes once no JVN version used it for ``IDENTITY_UNUSED_DAYS``.
+1. Dead by rules: another JVN version's fact identity folder or name table goes once no JVN version
+   used it for ``IDENTITY_UNUSED_DAYS``. An older layout of the default answer store holds paid-for
+   answers, so it follows the answer rule: it goes once unused for ``UNCONFIRMED_DAYS``.
 2. Dead by content: a fact entry or a name table file content no run confirmed against a real file
    for ``UNCONFIRMED_DAYS`` goes.
 3. Answers in the default shared store no run reused for ``UNCONFIRMED_DAYS`` go, with their item
    answers and refusals. A store at a path the user names is never opened.
 4. Run folders JVN named itself in ``runs_root()`` go after ``FINISHED_RUN_DAYS``, or
    ``RESUMABLE_RUN_DAYS`` while they hold ``resume.json``. A folder the user named is never touched.
-5. Over the disk budget, run folders go first, oldest first; then retired caches, least recently used
-   first; then fact entries, name table rows and last answers, least recently confirmed first.
+5. Over the disk budget, run folders go first, oldest first; then other versions' facts and name
+   tables, least recently used first; then fact entries and name table rows, least recently confirmed
+   first. Answers go last: older layouts of the default store, then its least recently used answers.
 
 Housekeeping deletes only inside ``cache_root()`` and ``runs_root()`` and never follows a link. A
 folder it deletes first moves into a ``.trash`` folder in its root, so the decision is made at once
@@ -74,6 +76,7 @@ class CacheStatus:
     retired: int
     retired_unused: int
     retired_bytes: int
+    retired_after_days: int
 
 
 @dataclass(frozen=True)
@@ -112,10 +115,14 @@ def status() -> Status:
     """What each store holds and what each rule would remove; removes nothing."""
     now, held = time.time(), _Holdings.now()
     facts = _cache_status(
-        _total(held.entries), _fact_confirmations(held.entries, now), held.retired_facts, now
+        _total(held.entries),
+        _fact_confirmations(held.entries, now),
+        held.retired_facts,
+        IDENTITY_UNUSED_DAYS,
+        now,
     )
     names, answers = (
-        _cache_status(_store_bytes(store), _confirmations(store), retired, now)
+        _cache_status(_store_bytes(store), _confirmations(store), retired, store.retired_after_days, now)
         for store, retired in ((_NAMES, held.retired_names), (_ANSWERS, held.retired_answers))
     )
     expired = [run for run in held.runs if run.expired(now)]
@@ -162,13 +169,15 @@ class _Run:
 
 @dataclass(frozen=True)
 class _Store:
-    """A shared SQLite store housekeeping looks after: its current file and its retired layouts."""
+    """A shared SQLite store housekeeping looks after: its current file, and its retired layouts, which
+    go once unused for ``retired_after_days``."""
 
     name: str
     folder: Callable[[], Path]
     current: Callable[[], Path]
     belongs: Callable[[str], bool]
     open: Callable[[], NameTable | SqliteAnswerStore]
+    retired_after_days: int
 
     def groups(self) -> dict[Path, list[Path]]:
         """Each database file in the store's folder with its side files, keyed by the database."""
@@ -191,8 +200,10 @@ def _open_default_store() -> SqliteAnswerStore:
     return SqliteAnswerStore(default_shared_store())
 
 
-_NAMES = _Store("names", user_name_tables, table_path, _is_table_file, NameTable)
-_ANSWERS = _Store("answers", cache_root, default_shared_store, is_default_store_file, _open_default_store)
+_NAMES = _Store("names", user_name_tables, table_path, _is_table_file, NameTable, IDENTITY_UNUSED_DAYS)
+_ANSWERS = _Store(
+    "answers", cache_root, default_shared_store, is_default_store_file, _open_default_store, UNCONFIRMED_DAYS
+)
 
 
 @dataclass(frozen=True)
@@ -261,22 +272,21 @@ def _sweep(allowance: _Allowance) -> Sweep:
 
 def _apply_rules(held: _Holdings, now: float, allowance: _Allowance) -> _Holdings:
     """Rules 1 to 4; returns what they left."""
-
-    def unused(item: _Item) -> bool:
-        return now - item.touched > IDENTITY_UNUSED_DAYS * SECONDS_PER_DAY
-
-    def unconfirmed(item: _Item) -> bool:
-        return now - item.touched > UNCONFIRMED_DAYS * SECONDS_PER_DAY
-
-    retired = [
-        _kept(items, unused, allowance)
-        for items in (held.retired_facts, held.retired_names, held.retired_answers)
-    ]
-    entries = _kept(held.entries, unconfirmed, allowance)
+    retired_facts = _kept(held.retired_facts, _older_than(IDENTITY_UNUSED_DAYS, now), allowance)
+    retired_names, retired_answers = (
+        _kept(items, _older_than(store.retired_after_days, now), allowance)
+        for store, items in ((_NAMES, held.retired_names), (_ANSWERS, held.retired_answers))
+    )
+    entries = _kept(held.entries, _older_than(UNCONFIRMED_DAYS, now), allowance)
     for store in (_NAMES, _ANSWERS):
         _forget_unconfirmed(store, today() - UNCONFIRMED_DAYS, allowance)
     runs = [run for run in held.runs if not (run.expired(now) and _removed(run.item, allowance))]
-    return _Holdings(entries, *retired, runs, held.trash)
+    return _Holdings(entries, retired_facts, retired_names, retired_answers, runs, held.trash)
+
+
+def _older_than(days: int, now: float) -> Callable[[_Item], bool]:
+    """Whether an item was last used or confirmed more than ``days`` before ``now``."""
+    return lambda item: now - item.touched > days * SECONDS_PER_DAY
 
 
 def _kept(items: list[_Item], doomed: Callable[[_Item], bool], allowance: _Allowance) -> list[_Item]:
@@ -284,26 +294,46 @@ def _kept(items: list[_Item], doomed: Callable[[_Item], bool], allowance: _Allow
 
 
 def _keep_to_budget(held: _Holdings, allowance: _Allowance) -> None:
+    """Rule 5: everything ahead of the answers, then name rows, then older answer layouts, and the
+    default store's answers last."""
     excess = held.used() - disk_budget()
     if excess <= 0:
         return
-    for item in _eviction_order(held):
+    excess = _evicted(_ahead_of_answers(held), excess, allowance)
+    excess = _forgotten(_NAMES, excess, allowance)
+    excess = _evicted(_least_recently_used(held.retired_answers), excess, allowance)
+    _forgotten(_ANSWERS, excess, allowance)
+
+
+def _ahead_of_answers(held: _Holdings) -> Iterator[_Item]:
+    yield from (run.item for run in sorted(held.runs, key=lambda run: run.started))
+    yield from _least_recently_used([*held.retired_facts, *held.retired_names])
+    yield from _least_recently_used(held.entries)
+
+
+def _least_recently_used(items: list[_Item]) -> list[_Item]:
+    return sorted(items, key=lambda item: item.touched)
+
+
+def _evicted(items: Iterable[_Item], excess: int, allowance: _Allowance) -> int:
+    """Removes ``items`` in order while JVN is over its budget; returns the bytes still over it."""
+    for item in items:
         if excess <= 0 or allowance.exhausted:
-            return
+            break
         if _removed(item, allowance):
             excess -= item.bytes
-    for store in (_NAMES, _ANSWERS):
-        while excess > 0 and not allowance.exhausted:
-            before = _store_bytes(store)
-            if not _forget_unconfirmed(store, today() + 1, allowance, step=_FORGET_STEP):
-                break
-            excess -= before - _store_bytes(store)
+    return excess
 
 
-def _eviction_order(held: _Holdings) -> Iterator[_Item]:
-    yield from (run.item for run in sorted(held.runs, key=lambda run: run.started))
-    yield from sorted(held.retired, key=lambda item: item.touched)
-    yield from sorted(held.entries, key=lambda item: item.touched)
+def _forgotten(store: _Store, excess: int, allowance: _Allowance) -> int:
+    """Forgets ``store``'s least recently confirmed rows while JVN is over its budget; returns the bytes
+    still over it."""
+    while excess > 0 and not allowance.exhausted:
+        before = _store_bytes(store)
+        if not _forget_unconfirmed(store, today() + 1, allowance, step=_FORGET_STEP):
+            break
+        excess -= before - _store_bytes(store)
+    return excess
 
 
 def _removed(item: _Item, allowance: _Allowance) -> bool:
@@ -386,22 +416,24 @@ def _confirmations(store: _Store) -> Confirmations:
 
 def _fact_confirmations(entries: list[_Item], now: float) -> Confirmations:
     oldest = min((item.touched for item in entries), default=None)
-    unconfirmed = sum(now - item.touched > UNCONFIRMED_DAYS * SECONDS_PER_DAY for item in entries)
+    unconfirmed = sum(map(_older_than(UNCONFIRMED_DAYS, now), entries))
     return Confirmations(
         len(entries), unconfirmed, None if oldest is None else int(oldest // SECONDS_PER_DAY)
     )
 
 
-def _cache_status(size: int, confirmations: Confirmations, retired: list[_Item], now: float) -> CacheStatus:
-    unused = [item for item in retired if now - item.touched > IDENTITY_UNUSED_DAYS * SECONDS_PER_DAY]
+def _cache_status(
+    size: int, confirmations: Confirmations, retired: list[_Item], retired_after_days: int, now: float
+) -> CacheStatus:
     return CacheStatus(
         size,
         confirmations.held,
         confirmations.unconfirmed,
         confirmations.oldest,
         len(retired),
-        len(unused),
+        sum(map(_older_than(retired_after_days, now), retired)),
         _total(retired),
+        retired_after_days,
     )
 
 

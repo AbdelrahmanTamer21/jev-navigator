@@ -48,7 +48,9 @@ def test_cache_status_reports_each_store_and_removes_nothing(capsys: pytest.Capt
     # Assert
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert "facts: 0 entries" in output and "1 from other JVN versions (1 unused for 3 days)" in output
+    [facts, answers] = (line for line in output.splitlines() if line.startswith(("facts:", "answers:")))
+    assert facts.startswith("facts: 0 entries") and "1 from other JVN versions (1 unused for 3 days)" in facts
+    assert "0 from other JVN versions (0 unused for 30 days)" in answers
     assert "runs: 1 run" in output and "1 past retention" in output
     assert "budget 5.0 GB" in output
     assert run.exists() and identity.exists()

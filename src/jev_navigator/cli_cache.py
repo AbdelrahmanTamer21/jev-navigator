@@ -63,7 +63,7 @@ def _cache_line(name: str, cache: CacheStatus, singular: str, plural: str) -> st
         f"{name}: {_count(cache.held, singular, plural)}, {_size(cache.bytes)}, "
         f"{cache.unconfirmed:,} unconfirmed for {housekeeping.UNCONFIRMED_DAYS} days{oldest}; "
         f"{cache.retired:,} from other JVN versions "
-        f"({cache.retired_unused:,} unused for {housekeeping.IDENTITY_UNUSED_DAYS} days), "
+        f"({cache.retired_unused:,} unused for {cache.retired_after_days} days), "
         f"{_size(cache.retired_bytes)}"
     )
 

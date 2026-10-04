@@ -227,21 +227,23 @@ def test_a_store_the_user_names_is_never_opened(tmp_path: Path, monkeypatch: pyt
     assert (named.read_bytes(), named.stat().st_mtime) == before
 
 
-def test_a_retired_default_store_layout_goes_after_three_days(private_cache_root: Path) -> None:
-    # Arrange
-    retired = [private_cache_root / "answers.sqlite", private_cache_root / "answers.sqlite-shm"]
-    named_by_user = private_cache_root / "answers-of-my-eval.sqlite"
+def test_an_older_default_store_layout_follows_the_thirty_day_answer_rule(private_cache_root: Path) -> None:
+    # Arrange: two older layouts' default files, and a file someone put in the cache folder by hand
+    unused = [private_cache_root / "answers.sqlite", private_cache_root / "answers.sqlite-shm"]
+    recent = private_cache_root / "answers-v1.sqlite"
+    put_there_by_hand = private_cache_root / "answers-of-my-eval.sqlite"
     private_cache_root.mkdir(parents=True)
-    for path in (*retired, named_by_user):
+    for path, age in ((unused[0], 31), (unused[1], 31), (recent, 29), (put_there_by_hand, 31)):
         path.write_bytes(b"old layout")
-        days_ago(path, 4)
+        days_ago(path, age)
 
     # Act
     housekeeping.prune()
 
     # Assert
-    assert not any(path.exists() for path in retired)
-    assert named_by_user.exists()
+    assert not any(path.exists() for path in unused)
+    assert recent.exists()
+    assert put_there_by_hand.exists()
 
 
 def test_finished_runs_go_after_fourteen_days_and_resumable_runs_after_thirty() -> None:
@@ -316,7 +318,8 @@ def test_over_budget_run_folders_go_before_any_cache(tmp_path: Path, monkeypatch
 
 
 def test_over_budget_answers_go_last(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Arrange: a run, another version's facts, current facts and names, and the default store's answers
+    # Arrange: a run, another version's facts, current facts and names, the default store's answers,
+    # and an older layout of the default store, last used before the other version's facts
     indexed(tmp_path / "repo", REPOSITORY)
     run_folder(1, resumable=False, size=50_000)
     retired_folder("a" * 64, files=5, days=1, size=20_000)
@@ -324,7 +327,10 @@ def test_over_budget_answers_go_last(tmp_path: Path, monkeypatch: pytest.MonkeyP
     request = answered(store, [{"code": "x = 1"}])
     with sqlite3.connect(store) as database:
         database.execute("pragma wal_checkpoint(truncate)")
-    answers = sum(path.stat().st_blocks * 512 for path in store.parent.glob(f"{store.name}*"))
+    older_layout = store.parent / "answers.sqlite"
+    older_layout.write_bytes(b"o" * 30_000)
+    days_ago(older_layout, 2)
+    answers = sum(path.stat().st_blocks * 512 for path in store.parent.glob("answers*.sqlite*"))
     monkeypatch.setenv(housekeeping.DISK_BUDGET_VARIABLE, str(answers + 120_000))
 
     # Act
@@ -333,6 +339,26 @@ def test_over_budget_answers_go_last(tmp_path: Path, monkeypatch: pytest.MonkeyP
     # Assert
     assert not any(runs_root().iterdir())
     assert FactCache().retired() == []
+    assert older_layout.exists()
+    assert [record.request_sha256 for record in SqliteAnswerStore(store).records()] == [request]
+
+
+def test_over_budget_an_older_answer_layout_goes_before_the_current_stores_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange: half the older layout's size over the budget, so removing either one would do
+    store = default_shared_store()
+    request = answered(store, [{"code": "x = 1"}])
+    older_layout = store.parent / "answers.sqlite"
+    older_layout.write_bytes(b"o" * 400_000)
+    over_by = older_layout.stat().st_blocks * 512 // 2
+    monkeypatch.setenv(housekeeping.DISK_BUDGET_VARIABLE, str(housekeeping.status().used - over_by))
+
+    # Act
+    housekeeping.prune()
+
+    # Assert
+    assert not older_layout.exists()
     assert [record.request_sha256 for record in SqliteAnswerStore(store).records()] == [request]
 
 
@@ -397,6 +423,9 @@ def test_status_counts_what_each_rule_would_remove(tmp_path: Path) -> None:
     days_ago(next(current.iterdir()), 31)
     run_folder(15, resumable=False)
     run_folder(1, resumable=False)
+    for layout, age in (("answers.sqlite", 4), ("answers-v1.sqlite", 31)):
+        (default_shared_store().parent / layout).write_bytes(b"old layout")
+        days_ago(default_shared_store().parent / layout, age)
 
     # Act
     status = housekeeping.status()
@@ -406,6 +435,7 @@ def test_status_counts_what_each_rule_would_remove(tmp_path: Path) -> None:
     assert (status.facts.retired, status.facts.retired_unused) == (2, 1)
     assert (status.names.held, status.names.unconfirmed) == (len(REPOSITORY), 0)
     assert status.answers.held == 0
+    assert (status.answers.retired, status.answers.retired_unused) == (2, 1)
     assert (status.runs.count, status.runs.expired) == (2, 1)
     assert status.budget == 5_000_000_000
     assert status.used > 0

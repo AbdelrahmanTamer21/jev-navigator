@@ -323,11 +323,12 @@ rules as it ends, at most once a day and deleting at most 2,000 files per run:
 
 | What | Goes when |
 |---|---|
-| Another JVN version's fact folder, name table or default answer store layout | no JVN version used it for 3 days |
+| Another JVN version's fact folder or name table | no JVN version used it for 3 days |
+| The default answer store in an older layout (its answers were paid for) | no JVN version used it for 30 days |
 | A file's cached facts, or its rows in the name table | no run met that exact file content for 30 days |
 | An answer in the default shared store, with its item answers and refusals | no run reused it for 30 days |
 | A run folder JVN named | 14 days after its run started; 30 days while it holds `resume.json` |
-| Anything above the disk budget (`JEV_NAVIGATOR_DISK_BUDGET`, default `5GB`) | run folders first, oldest first; then other versions' caches; then facts and names; answers last |
+| Anything above the disk budget (`JEV_NAVIGATOR_DISK_BUDGET`, default `5GB`) | run folders first, oldest first; then other versions' facts and name tables; then facts and names; answers last, older layouts first |
 
 A store named with `--answer-store` or `JEV_NAVIGATOR_ANSWER_STORE` and a folder named with `--out`
 are never touched; a named store inside the cache folder is refused with exit status 2. A cleanup that fails prints `jvn: housekeeping skipped: <reason>` on stderr and
