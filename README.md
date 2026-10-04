@@ -542,9 +542,10 @@ on its own scope, so searches sharing one judge never use up each other's budget
   shapes, password hashes (bcrypt, argon2), Bearer values, passwords and secret query values in URLs,
   env-file values, quoted, bare and fallback values under secret-named keys, and literal arguments to
   secret-named calls that look like key material, plus high-entropy quoted values in assignments. A
-  secret-named key ends in a secret word (`DB_PASSWORD`, `authToken`, `password_hash`); `max_tokens`
-  and `tokenizer` are not. A key with a naming word after it (`SECRET_ENV`, `token_url`, `secretName`)
-  keeps a value only when it is a name, a path or a URL. A reference stays code: an identifier, dotted
+  key is secret when a secret word is one of its parts (`DB_PASSWORD`, `authToken`, `SECRET_KEY_BASE`,
+  `GH_TOKEN_RO`, `db_pass`, `credentials`); `max_tokens`, `tokenizer` and `bypass` are not. A key with
+  only naming words after it (`SECRET_ENV`, `token_url`, `secretName`) keeps a value only when it is a
+  name, a path or a URL. A long unquoted run of letters and digits is a value, not a reference. A reference stays code: an identifier, dotted
   path, call, a whole `${...}` or `$(...)`, or `$NAME` outside single quotes, so
   `secret: process.env.AUTH_SECRET` reaches Jev unchanged. Every rule scans in time linear in the line
   length. Masking works by content: a value of at least 8 characters hidden in one place is hidden

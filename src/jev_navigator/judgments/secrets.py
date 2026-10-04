@@ -18,6 +18,7 @@ from typing import Protocol
 
 MASK = "[MASKED]"
 BY_CONTENT_MIN_CHARS = 8
+RANDOM_VALUE_MIN_CHARS = 16
 HIGH_ENTROPY_BITS_PER_CHAR = 4.0
 
 _KEY = r"(?<![\w$.-])(?P<key>[A-Za-z_$][\w$.-]*+)"
@@ -50,7 +51,7 @@ _ENV_FILE_VALUE = re.compile(
 )
 _QUOTED_SECRET_VALUE = re.compile(rf"{_KEY}{_SEPARATOR}(?P<quote>[\"'`])(?P<value>[^\"'`\s]++)(?P=quote)")
 _LITERAL_FALLBACK = re.compile(
-    rf"{_KEY}{_SEPARATOR}[^\n,;]*?(?:\|\||\?\?|\bor\b)\s*(?P<quote>[\"'`])(?P<value>[^\"'`\n]+)(?P=quote)"
+    rf"{_KEY}{_SEPARATOR}[^\n,;:=]*?(?:\|\||\?\?|\bor\b)\s*(?P<quote>[\"'`])(?P<value>[^\"'`\n]+)(?P=quote)"
 )
 _BARE_SECRET_VALUE = re.compile(
     rf"{_KEY}{_SEPARATOR}(?P<value>[\w.$@%+/~-][\w.$@%+/~=-]*+)(?=[ \t]*(?:$|[,;}})\]&]|#|//))", re.M
@@ -70,12 +71,13 @@ _SECRET_WORDS = (
     ("secretkey",),
     ("password",),
     ("passwd",),
+    ("pass",),
+    ("credentials",),
     ("pwd",),
     ("secret",),
     ("token",),
     ("credential",),
 )
-_CREDENTIAL_SUFFIXES = frozenset({"hash", "digest", "salt"})
 _NAMING_SUFFIXES = frozenset(
     {
         "name",
@@ -94,10 +96,12 @@ _NAMING_SUFFIXES = frozenset(
         "annotation",
         "mount",
         "env",
+        "endpoint",
+        "host",
     }
 )
 _CODE_REFERENCE = re.compile(
-    r"\$?[A-Za-z_]\w*(?:\.\$?[A-Za-z_]\w*)*|-?(?:0x[\da-fA-F]+|\d[\d_]*(?:\.\d+)*[A-Za-z%]{0,4})"
+    r"\$?[A-Za-z_]\w*(?:\.\$?[A-Za-z_]\w*)*|\d+(?:-\d+)+|-?(?:0x[\da-fA-F]+|\d[\d_]*(?:\.\d+)*[A-Za-z%]{0,4})"
 )
 _INTERPOLATION = re.compile(r"\$\{[^{}]*\}|\$\([^()]*\)")
 _VARIABLE = re.compile(r"\$[A-Za-z_]\w*")
@@ -277,21 +281,24 @@ def _is_key_material(value: str, quote: str) -> bool:
 
 
 def _key_kind(key: str) -> str | None:
-    """The key's kind: "secret" when its last part is a secret word (``DB_PASSWORD``, ``authToken``,
-    ``password_hash``), "naming" when a naming word follows it (``SECRET_ENV``, ``token_url``,
-    ``secretName``), else None (``max_tokens``, ``tokenizer``)."""
+    """The key's kind: "secret" when a secret word is one of its parts (``DB_PASSWORD``, ``authToken``,
+    ``SECRET_KEY_BASE``, ``GH_TOKEN_RO``), "naming" when only naming words follow the last one
+    (``SECRET_ENV``, ``token_url``, ``secretName``), else None (``max_tokens``, ``tokenizer``, ``bypass``)."""
     parts = [part.lower() for piece in re.split(r"[._\-$]+", key) for part in _KEY_PART.findall(piece)]
-    if _ends_with_secret_word(parts):
-        return "secret"
-    if parts and parts[-1] in _CREDENTIAL_SUFFIXES and _ends_with_secret_word(parts[:-1]):
-        return "secret"
-    if parts and parts[-1] in _NAMING_SUFFIXES and _ends_with_secret_word(parts[:-1]):
-        return "naming"
+    end = _last_secret_word_end(parts)
+    if end is None:
+        return None
+    tail = parts[end:]
+    return "naming" if tail and all(part in _NAMING_SUFFIXES for part in tail) else "secret"
+
+
+def _last_secret_word_end(parts: list[str]) -> int | None:
+    """Where the last secret word among the parts ends, or None when no part is one."""
+    for start in range(len(parts) - 1, -1, -1):
+        for word in _SECRET_WORDS:
+            if tuple(parts[start : start + len(word)]) == word:
+                return start + len(word)
     return None
-
-
-def _ends_with_secret_word(parts: list[str]) -> bool:
-    return any(tuple(parts[-len(word) :]) == word for word in _SECRET_WORDS if len(parts) >= len(word))
 
 
 def _keyed_value_hides(kind_holds: Callable[[str], bool]) -> Callable[[re.Match[str]], bool]:
@@ -320,7 +327,20 @@ def _quoted_literal(match: re.Match[str]) -> bool:
 
 def _bare_literal(match: re.Match[str]) -> bool:
     value = match["value"]
-    return any(c.isalnum() for c in value) and not _CODE_REFERENCE.fullmatch(value)
+    return any(c.isalnum() for c in value) and (
+        not _CODE_REFERENCE.fullmatch(value) or _looks_generated(value)
+    )
+
+
+def _looks_generated(value: str) -> bool:
+    """A long undotted run of letters and digits (a hex key, ``whsec_`` plus 32 characters) is a value,
+    even though it parses as an identifier."""
+    return (
+        len(value) >= RANDOM_VALUE_MIN_CHARS
+        and "." not in value
+        and any(c.isdigit() for c in value)
+        and any(c.isalpha() for c in value)
+    )
 
 
 def _env_file_literal(match: re.Match[str]) -> bool:
