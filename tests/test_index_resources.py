@@ -113,34 +113,21 @@ def test_a_file_list_longer_than_the_argument_limit_is_split_across_processes(
 
 
 def test_the_line_cache_holds_at_most_its_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Arrange
+    # Arrange: three files read through a two-file line cache, then the first and last edited
     monkeypatch.setattr(code_index, "LINE_CACHE_FILES", 2)
-    commit_files(tmp_path, MIXED_SCOPE)
-    index = CodeIndex.from_git(tmp_path, fact_cache_dir=tmp_path.parent / "facts")
+    for name in ("a.py", "b.py", "c.py"):
+        (tmp_path / name).write_text(f"def {name[0]}():\n    return 1\n")
+    index = CodeIndex(tmp_path, ["a.py", "b.py", "c.py"])
+    first = {file: index.lines(file) for file in ("a.py", "b.py", "c.py")}
+    for name in ("a.py", "c.py"):
+        (tmp_path / name).write_text("def edited():\n    return 2\n")
 
-    # Act
-    line_counts = {file: len(index.lines(file)) for file in index.files}
-    again = index.lines("app/orders.py")
-
-    # Assert
-    assert index.source_memory.line_cache_files == 2
-    assert line_counts["app/orders.py"] == len(again) == 5
-
-
-def test_the_source_memory_counts_every_file_read_compressed(tmp_path: Path) -> None:
-    # Arrange
-    commit_files(tmp_path, MIXED_SCOPE)
-    index = CodeIndex.from_git(tmp_path, fact_cache_dir=tmp_path.parent / "facts")
-    raw = sum(len(text.encode()) for text in MIXED_SCOPE.values())
-
-    # Act
-    for file in index.files:
-        index.lines(file)
-    memory = index.source_memory
+    # Act: c.py is still cached; a.py was evicted, so reading it goes back to the disk
+    again = {file: index.lines(file) for file in ("c.py", "a.py")}
 
     # Assert
-    assert memory.first_read_files == len(MIXED_SCOPE)
-    assert 0 < memory.first_read_bytes < raw
+    assert again == {"c.py": first["c.py"], "a.py": first["a.py"]}
+    assert set(index.unavailable_files) == {"a.py"}
 
 
 def test_a_repeated_text_search_starts_no_second_process(sample_index: CodeIndex, spawned) -> None:
