@@ -21,7 +21,8 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.11", "3.13"]
-    name: test (Python ${{ matrix.python }})
+        extra: ["", "--extra typesafe"]
+    name: test (Python ${{ matrix.python }} ${{ matrix.extra }})
     steps:
       - uses: actions/checkout@v7
       - name: Install uv, ast-grep and ripgrep
@@ -30,4 +31,4 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/uv" tool install ast-grep-cli
           sudo apt-get update -q && sudo apt-get install -y -q ripgrep
-      - run: uv run --python ${{ matrix.python }} pytest -q -rs
+      - run: uv run --python ${{ matrix.python }} ${{ matrix.extra }} pytest -q -rs

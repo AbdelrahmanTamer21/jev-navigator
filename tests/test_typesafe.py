@@ -178,6 +178,7 @@ def test_seed_search_batches_every_neighbour_at_the_real_input_boundary(
     unavailable_fragment: str | None,
 ) -> None:
     """Oversized openings keep every neighbour judgment while omitting only the optional Choice."""
+    pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     index, previews = _seed_index(tmp_path, neighbours)
@@ -236,6 +237,7 @@ def test_split_seed_resumes_completed_neighbours_without_another_paid_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     index, previews = _seed_index(tmp_path, 159)
@@ -298,6 +300,7 @@ def test_optional_priority_keeps_size_failure_but_propagates_auth_failure(
     monkeypatch: pytest.MonkeyPatch,
     status: int,
 ) -> None:
+    pytest.importorskip("typesafe_sdk")
     from typesafe_sdk import TypeSafeAuthenticationError
 
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
@@ -353,6 +356,7 @@ def test_optional_priority_keeps_size_failure_but_propagates_auth_failure(
 def test_structured_error_type_controls_retry_at_the_sdk_boundary(
     monkeypatch: pytest.MonkeyPatch, async_checks: bool, error_type: str, message: str | None
 ) -> None:
+    pytest.importorskip("typesafe_sdk")
     from typesafe_sdk import TypeSafeBadRequestError
 
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
@@ -387,6 +391,7 @@ def test_structured_error_type_controls_retry_at_the_sdk_boundary(
 def test_input_batches_keep_values_masked_across_request_boundaries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     planted = "order-hook-4f7a1c"
@@ -414,6 +419,7 @@ def test_input_batches_keep_values_masked_across_request_boundaries(
 
 def test_cancel_aborts_an_active_official_sdk_request(monkeypatch: pytest.MonkeyPatch) -> None:
     """The production adapter owns cancellation through the SDK's async HTTP boundary."""
+    pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     entered = threading.Event()
@@ -479,6 +485,7 @@ def test_sigint_returns_the_active_http_place_as_resumable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The installed sync search and official SDK share one prompt cancellation boundary."""
+    pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     all_entered = threading.Event()
@@ -551,6 +558,7 @@ def test_the_production_transport_journals_the_exact_bytes_it_sent_and_received(
     The journal's `exact` flag and the answer store's `sent_exact` flag describe different things: the
     first is the response as received, the second is a kept copy of the request. This pins the first.
     """
+    pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     exchanges: list[tuple[bytes, bytes]] = []
@@ -586,6 +594,7 @@ def test_the_answer_store_keeps_no_request_bytes_by_default_even_after_a_real_ca
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A `sent_exact: false` answer record is the privacy default, not evidence of a lost capture."""
+    pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     exchanges: list[tuple[bytes, bytes]] = []
@@ -629,6 +638,7 @@ def test_a_max_tokens_exceeded_response_is_typed_and_the_batch_splits_at_the_bou
     """The saved trace run's request 5 died on an untyped 400 max_tokens_exceeded. The transport
     owns the provider contract: it translates the refusal, and the batching owner splits the batch
     so the same questions travel in requests the provider accepts. Sanitized fixture, real socket."""
+    pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     refusals: list[bytes] = []
@@ -690,6 +700,7 @@ def test_a_max_tokens_exceeded_response_is_typed_and_the_batch_splits_at_the_bou
 def test_the_journal_retains_each_real_sdk_retry_with_exact_wire_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sync_transport: bool
 ) -> None:
+    pytest.importorskip("typesafe_sdk")
     import httpx2
 
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
@@ -737,6 +748,7 @@ def test_the_journal_retains_each_real_sdk_retry_with_exact_wire_evidence(
 def test_concurrent_async_retries_stay_with_their_logical_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pytest.importorskip("typesafe_sdk")
 
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
@@ -784,6 +796,7 @@ def test_concurrent_async_retries_stay_with_their_logical_request(
 def test_terminal_sdk_failure_keeps_all_attempt_responses_before_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sync_transport: bool
 ) -> None:
+    pytest.importorskip("typesafe_sdk")
     import httpx2
     from typesafe_sdk import TypeSafeInternalServerError
 

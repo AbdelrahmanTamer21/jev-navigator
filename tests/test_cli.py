@@ -543,6 +543,7 @@ def test_user_dotenv_loads_only_settings_and_never_shell_evaluates(tmp_path: Pat
 def test_dotenv_base_url_reaches_the_real_sdk_system_one_endpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     received: list[tuple[str, bytes]] = []
@@ -721,6 +722,7 @@ def test_json_request_errors_fail_before_search(monkeypatch, capsys, request_tex
 
 
 def test_json_pipeline_reaches_sdk_and_preserves_explicit_options(tmp_path):
+    pytest.importorskip("typesafe_sdk")
     repository = tmp_path / "repo"
     repository.mkdir()
     for name in ("first.py", "second.py"):

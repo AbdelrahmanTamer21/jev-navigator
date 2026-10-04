@@ -5,7 +5,6 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
-import httpx2
 import pytest
 
 from jev_navigator.judgments.journal import JournalRequest, JsonlJournal, RawAttempt, RawResponse
@@ -170,6 +169,7 @@ def test_the_typesafe_adapter_journals_the_exact_bytes_it_received(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Arrange
+    httpx2 = pytest.importorskip("httpx2")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-key-for-a-mock-transport")
@@ -240,6 +240,7 @@ def test_a_request_asked_again_from_the_store_sends_the_same_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Arrange
+    httpx2 = pytest.importorskip("httpx2")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-key-for-a-mock-transport")
