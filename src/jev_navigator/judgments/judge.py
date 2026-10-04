@@ -19,11 +19,11 @@ from dataclasses import dataclass, field
 
 from .answers import JevResponse, NoulAnswer, TokenTotal, response_to_raw
 from .client import (
-    JEV_INPUT_BOX_CHARS,
-    MAX_REQUEST_CHARS,
     AsyncJevClient,
     InputBudgetExceededError,
+    InputLimits,
     JevClient,
+    input_limits_of,
 )
 from .journal import AttemptJournalCallbackError, Journal, JournalRequest, RawResponse
 from .questions import (
@@ -34,7 +34,6 @@ from .questions import (
     item_path,
     request_body,
     request_sha256,
-    serialized_chars,
 )
 from .secrets import (
     Masker,
@@ -57,7 +56,7 @@ DEFAULT_ITEMS_PER_REQUEST = 16
 set, 16 per request kept accuracy and cost about half the tokens of one per request)."""
 BATCHING_RULE = "unit-place-order-count-and-box-v1"
 """How batches form: units in file-and-lines order, closed at ``items_per_request`` items or at the
-character box. Recorded on every stored answer; the batch membership hash in the item key already
+client's character box. Recorded on every stored answer; the batch membership hash in the item key already
 tells two batches apart."""
 DEFAULT_MAX_CONCURRENCY = 16
 """How many batches of one synchronous judging call are in flight at once."""
@@ -69,21 +68,6 @@ _DEFAULT_SCANNER = SecretScanner()
 
 class CallCapReachedError(RuntimeError):
     """A call would exceed the ``max_calls`` cap of this judge or of a judge it was scoped from."""
-
-
-def request_exceeds_input_budget(state: Mapping, questions: Mapping) -> bool:
-    """Whether a request is outside the character boxes the batching owner sends within.
-
-    The state plus the longest single question must fit ``JEV_INPUT_BOX_CHARS`` (Jev's documented
-    32,000 tokens), the limit the Engine measured on 27.09.2026 (32,883 tokens pass, about 33,200
-    are refused). The whole body must fit ``MAX_REQUEST_CHARS``, since packing bounds a batch's
-    state but not the questions asked of it. Both boxes measure the serialization the body uses.
-    This is a preflight; a provider's typed refusal remains authoritative.
-    """
-    longest_question = max((serialized_chars(question) for question in questions.values()), default=0)
-    if serialized_chars(state) + longest_question > JEV_INPUT_BOX_CHARS:
-        return True
-    return serialized_chars({"state": state, "questions": questions}) > MAX_REQUEST_CHARS
 
 
 @dataclass(frozen=True)
@@ -178,6 +162,7 @@ class Judge:
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
     ) -> None:
         self.client = client
+        self.input_limits = input_limits_of(client)
         self.masker = masker
         self.scanner = scanner
         self.store = store
@@ -506,12 +491,16 @@ class Judge:
     def _known_refusal(self, prepared: _Prepared) -> bool:
         if prepared.stored is not None or self.store is None:
             return False
-        return self.store.refused(prepared.request_hash, self.client.model, JEV_INPUT_BOX_CHARS)
+        return self.store.refused(prepared.request_hash, self.client.model, self.input_limits.box_chars)
 
     def _record_refusal(self, prepared: _Prepared, error: Exception) -> None:
+        """A size refusal is remembered under the model that refused and its box: the route that
+        refused when the client names it, else this judge's client."""
         if isinstance(error, InputBudgetExceededError) and self.store is not None:
+            model = error.model or self.client.model
+            box_chars = error.box_chars or self.input_limits.box_chars
             with self._bookkeeping:
-                self.store.put_refusal(prepared.request_hash, self.client.model, JEV_INPUT_BOX_CHARS)
+                self.store.put_refusal(prepared.request_hash, model, box_chars)
 
     def _prepare(self, state: Mapping, questions: Mapping, masked: frozenset[str] | None) -> _Prepared:
         if masked is None:
@@ -672,7 +661,7 @@ class Judge:
     ) -> Iterator[tuple[_Batch, JevResponse]]:
         """Send one packed batch of item positions, splitting it when the provider refuses its size.
 
-        Packing already keeps every batch within ``request_exceeds_input_budget``, so a batch is sent
+        Packing already keeps every batch within the client's ``input_limits``, so a batch is sent
         as packed. A provider refusal that names an exceeded input budget (``max_tokens_exceeded``)
         splits it by item and sends the halves. One position whose own request is refused has no
         smaller honest request - its questions name an item path that a partial state would change -
@@ -811,6 +800,7 @@ class Judge:
             hidden,
             thresholds or self.thresholds,
             self.items_per_request,
+            self.input_limits,
             masker=self.masker,
         )
         groups = _batches(plan)
@@ -1044,6 +1034,7 @@ class _CheckPlan:
     hidden: frozenset[str]
     thresholds: Thresholds
     items_per_request: int
+    input_limits: InputLimits
     answered: dict[tuple[int, str], _ItemAnswer] = field(default_factory=dict)
     open: dict[int, dict[str, Check]] = field(default_factory=dict)
     batches: list[_Batch] = field(default_factory=list)
@@ -1240,9 +1231,9 @@ def _batches(plan: _CheckPlan) -> list[list[int]]:
 
 def _fits_in_batch(plan: _CheckPlan, members: list[int]) -> bool:
     """The one size rule of packing: the request that would carry these members, with every check
-    asked of each, within the boxes ``request_exceeds_input_budget`` measures before a send."""
+    asked of each, within the client's input limits."""
     state = {**plan.shared, plan.list_name: [plan.items[position] for position in members]}
     questions = {
         asked: question for slot in range(len(members)) for asked, question in plan.slot_questions(slot)
     }
-    return not request_exceeds_input_budget(state, questions)
+    return not plan.input_limits.exceeded_by(state, questions)

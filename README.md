@@ -111,6 +111,13 @@ reads `SYSTEM_ONE_<NAME>_ENDPOINT`, `SYSTEM_ONE_<NAME>_MODEL` and `SYSTEM_ONE_<N
 endpoint and model. A route missing its endpoint or model stops the command before any request, naming
 the route. Without `SYSTEM_ONE_ROUTES`, `jvn` uses the default Jev client described above.
 
+Each route has an input limit for the state plus the longest question: Drex accepts 8,192 tokens
+(19,660 characters) and Jev 32,000 (76,800 characters), as Analysis Engine measured them. Any other
+route sets its own with `SYSTEM_ONE_<NAME>_INPUT_TOKENS`, or the command stops naming that setting.
+`jvn` packs every request to the smallest limit in the table, so whichever route answers can take it,
+and remembers a size refusal under the limit of the route that refused. Point Drex at `jvn` through
+the route table: the default client always packs to Jev's limit.
+
 One difference under routes: Ctrl-C cannot abort a request already in flight, so the command waits for
 those requests to finish, keeps their answers, and then stops with a resumable pack. Without routes,
 Ctrl-C aborts requests in flight.
@@ -588,13 +595,15 @@ explicitly. An unknown name raises `UnknownSectionError`. Each section has its o
 (newest entries kept, long text cut; defaults in `DEFAULT_LIMITS`), applied before the character budget.
 Text limits also apply inside nested lists and mappings. Rendering a limited view preserves the
 complete code and judgments in the append-only record.
-The budget is a character box, capped at Jev's documented 32,000 tokens for state plus the longest
-question times 2.4 characters per token (the Engine's `REQUEST_CHARS_PER_TOKEN`), 76,800 characters
-(the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026). A whole request
-may reach the documented 64k tokens, 153,600 characters. The batching owner (`check_each`,
-`check_every`) and the `find_code` opening questions measure the same boxes before sending and split
-what would exceed them; a direct `Judge.ask` sends what it is given and relies on the provider's
-refusal. When the selected sections still do not fit, the
+The budget is a character box: the client's input limit for state plus the longest question, less
+room for the question, and within `budget_chars` when the history sets one. Each client declares its
+limits as `input_limits` (`InputLimits`, in characters at 2.4 per token, the Engine's
+`REQUEST_CHARS_PER_TOKEN`); a client that declares none is taken to be Jev, 32,000 tokens or 76,800
+characters for state plus the longest question and 64k tokens or 153,600 characters for a whole
+request (the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026). The
+batching owner (`check_each`, `check_every`) and the `find_code` opening questions measure the same
+limits before sending and split what would exceed them; a direct `Judge.ask` sends what it is given
+and relies on the provider's refusal. When the selected sections still do not fit, the
 pluggable `evict` policy trims them; the default `drop_oldest_code` replaces the oldest code bodies with
 `[evicted]` and records each eviction in `history.evictions`. A check that reads no code never evicts.
 Pass `recorder=` (for example a `JsonlJournal`) to record every appended step; the recorder gets each

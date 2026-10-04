@@ -40,13 +40,12 @@ from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.spans import CodeSlice
 from ..judgments.answers import JevResponse, NoulAnswer
-from ..judgments.client import JEV_INPUT_BOX_CHARS, QUESTION_RESERVE_CHARS, InputBudgetExceededError
+from ..judgments.client import InputBudgetExceededError
 from ..judgments.judge import (
     CODE_FIELD,
     CallCapReachedError,
     CheckResult,
     Judge,
-    request_exceeds_input_budget,
 )
 from ..judgments.questions import ITEM_PLACEHOLDER, MAX_CHOICE_OPTIONS, Check, Criterion, Pick, content_hash
 from ..judgments.thresholds import NoulVerdict, Thresholds
@@ -555,7 +554,7 @@ class StopRule:
 
     check: Check
     shared: Mapping = field(default_factory=dict)
-    budget_chars: int = JEV_INPUT_BOX_CHARS - QUESTION_RESERVE_CHARS
+    budget_chars: int | None = None
     sections: tuple[str, ...] = DEFAULT_STOP_SECTIONS
     context: Mapping[str, object] = field(default_factory=dict)
 
@@ -731,7 +730,7 @@ def _ask_within_cap(judge: Judge, search: _Search, opening: _Opening):
     """None when a judge's global cap, shared with other callers, ran out before this request."""
     request = _opening_request(search, opening)
     try:
-        if not request_exceeds_input_budget(request.state, request.questions):
+        if not judge.input_limits.exceeded_by(request.state, request.questions):
             try:
                 response = judge.ask(
                     request.state, request.questions, thresholds=search.thresholds, sources=request.sources
@@ -748,7 +747,7 @@ def _ask_within_cap(judge: Judge, search: _Search, opening: _Opening):
 async def _ask_within_cap_async(judge: Judge, search: _Search, opening: _Opening):
     request = _opening_request(search, opening)
     try:
-        if not request_exceeds_input_budget(request.state, request.questions):
+        if not judge.input_limits.exceeded_by(request.state, request.questions):
             try:
                 response = await judge.ask_async(
                     request.state, request.questions, thresholds=search.thresholds, sources=request.sources
@@ -803,7 +802,7 @@ def _opening_priority(judge: Judge, search: _Search, request: _OpeningRequest) -
     if pick is None or pick.question_id not in request.questions:
         return {}, request.priority_unavailable
     questions = {pick.question_id: request.questions[pick.question_id]}
-    if request_exceeds_input_budget(request.state, questions):
+    if judge.input_limits.exceeded_by(request.state, questions):
         return (
             {},
             "The global priority hint exceeds the request-size packing estimate; "

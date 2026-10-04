@@ -9,8 +9,7 @@ from pathlib import Path
 import pytest
 from conftest import BudgetedClient
 
-from jev_navigator.judgments import judge as judge_module
-from jev_navigator.judgments.client import ReplayOnlyClient
+from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputLimits, ReplayOnlyClient
 from jev_navigator.judgments.judge import BATCHING_RULE, Judge
 from jev_navigator.judgments.questions import Check, Criterion, Pick
 from jev_navigator.judgments.store import (
@@ -228,15 +227,15 @@ def test_an_answer_replayed_from_a_store_reports_no_token_count(tmp_path: Path, 
     assert (replayed.input_tokens, replayed.from_store) == (None, True)
 
 
-def test_a_size_refusal_under_another_input_box_is_not_honoured(tmp_path: Path, monkeypatch) -> None:
+def test_a_size_refusal_under_another_input_box_is_not_honoured(tmp_path: Path) -> None:
     # Arrange: a refusal recorded while the route's box was different
     shared = tmp_path / "answers.sqlite"
     items = [{"file": f"p{index}.py", "code": "y" * 12_000} for index in range(4)]
     Judge(BudgetedClient(34_000), store=SqliteAnswerStore(shared), served_model="jev-scripted").check_each(
         DESCRIBES, items, SHARED
     )
-    monkeypatch.setattr(judge_module, "JEV_INPUT_BOX_CHARS", judge_module.JEV_INPUT_BOX_CHARS + 1)
     larger = BudgetedClient(200_000)
+    larger.input_limits = InputLimits(JEV_INPUT_LIMITS.box_chars + 1, JEV_INPUT_LIMITS.request_chars)
 
     # Act
     Judge(larger, store=SqliteAnswerStore(shared), served_model="jev-scripted").check_each(

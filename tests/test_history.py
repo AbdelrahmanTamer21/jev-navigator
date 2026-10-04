@@ -22,7 +22,7 @@ from jev_navigator.history import (
     judge_sections,
 )
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS
+from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputLimits
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
@@ -154,16 +154,26 @@ def test_a_check_that_reads_no_code_never_evicts_code() -> None:
     assert history.evictions == []
 
 
-def test_the_budget_is_capped_at_jevs_state_limit_and_overflow_raises() -> None:
+def test_a_history_over_its_own_budget_raises() -> None:
     # Arrange
-    capped = History(budget_chars=10**6)
     tiny = History(budget_chars=5)
     tiny.append(step(1))
 
     # Act and Assert
-    assert capped.budget_chars == JEV_INPUT_BOX_CHARS
     with pytest.raises(HistoryTooLargeError):
         tiny.state_for(["fetched"])
+
+
+def test_a_judge_holds_a_larger_history_budget_within_its_clients_state_limit() -> None:
+    # Arrange: the history allows a million characters, the client's box leaves five for the state
+    client = ScriptedJevClient(default_noul=0.9)
+    client.input_limits = InputLimits(box_chars=JEV_INPUT_LIMITS.box_chars - JEV_INPUT_LIMITS.state_chars + 5)
+    history = History(budget_chars=10**6)
+    history.append(step(1))
+
+    # Act and Assert
+    with pytest.raises(HistoryTooLargeError, match="more than 5 characters"):
+        judge_history(Judge(client), history, FETCHED_HOLDS_LIMIT, sections=("fetched",))
 
 
 def test_every_appended_step_is_journaled(tmp_path: Path) -> None:

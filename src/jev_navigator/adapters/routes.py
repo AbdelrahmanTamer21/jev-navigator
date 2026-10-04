@@ -6,7 +6,9 @@ fallback); each route reads `SYSTEM_ONE_<NAME>_ENDPOINT`, `SYSTEM_ONE_<NAME>_API
 `SYSTEM_ONE_<NAME>_MODEL`. A known route name with `SYSTEM_ONE_<NAME>=1` uses the hosted
 defaults, so one flag per service is enough when the defaults apply. The first route is
 primary; on a failed call the next route is asked, and so on. The finetuned decider is just
-another route: `SYSTEM_ONE_ROUTES=decider,jev` with its endpoint, key and model set.
+another route: `SYSTEM_ONE_ROUTES=decider,jev` with its endpoint, key, model and
+`SYSTEM_ONE_DECIDER_INPUT_TOKENS` set. Every route declares its input limits, and the routed
+client packs to the tightest of them, so whichever route answers can take the request.
 
 Every route runs the same generic `SystemOneClient` over the official TypeSafe SDK: the SDK
 builds, sends and retries the request with exact-byte capture, and the response is decoded
@@ -23,7 +25,13 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from ..judgments.answers import JevResponse, response_from_raw
-from ..judgments.client import LATEST_JEV, InputBudgetExceededError, input_budget_error
+from ..judgments.client import (
+    JEV_INPUT_LIMITS,
+    LATEST_JEV,
+    InputBudgetExceededError,
+    InputLimits,
+    input_budget_error,
+)
 from ..judgments.journal import AttemptJournalCallbackError, RawResponse
 
 if TYPE_CHECKING:
@@ -31,12 +39,27 @@ if TYPE_CHECKING:
 
 ROUTES_ENV = "SYSTEM_ONE_ROUTES"
 
+DREX_INPUT_LIMITS = InputLimits.from_tokens(8_192)
+"""Drex's limit: 8,192 tokens for the state plus the longest question, which Analysis Engine measured
+on 26.09.2026 (``ROUTE_LIMITS`` in ``enginepy/host/system_one.py``: HTTP 422 above it). No bound on
+the whole body is measured, so Drex's own refusal stays the only one."""
+
+
+@dataclass(frozen=True)
+class KnownRoute:
+    """A hosted route's endpoint, model and measured input limits."""
+
+    endpoint: str
+    model: str
+    input_limits: InputLimits
+
+
 # Known hosted shorthand routes: `SYSTEM_ONE_<NAME>=1` selects endpoint+model without
 # spelling them out. Keys always come from `SYSTEM_ONE_<NAME>_API_KEY`, falling back to
 # `TYPESAFE_API_KEY` for single-route setups.
-KNOWN_ROUTES: dict[str, tuple[str, str]] = {
-    "jev": ("https://api.typesafe.ai", LATEST_JEV),
-    "drex": ("https://drex.nace.ai", "drex-latest"),
+KNOWN_ROUTES: dict[str, KnownRoute] = {
+    "jev": KnownRoute("https://api.typesafe.ai", LATEST_JEV, JEV_INPUT_LIMITS),
+    "drex": KnownRoute("https://drex.nace.ai", "drex-latest", DREX_INPUT_LIMITS),
 }
 
 
@@ -83,10 +106,10 @@ def _route(environment: Mapping[str, str], name: str, transport=None) -> Route:
     endpoint = setting("ENDPOINT")
     model = setting("MODEL")
     api_key = setting("API_KEY") or str(environment.get("TYPESAFE_API_KEY", "")).strip() or None
-    if name in KNOWN_ROUTES and environment.get(f"SYSTEM_ONE_{upper}", "").strip():
-        default_endpoint, default_model = KNOWN_ROUTES[name]
-        endpoint = endpoint or default_endpoint
-        model = model or default_model
+    known = KNOWN_ROUTES.get(name)
+    if known is not None and environment.get(f"SYSTEM_ONE_{upper}", "").strip():
+        endpoint = endpoint or known.endpoint
+        model = model or known.model
 
     if not endpoint or not model:
         raise ValueError(
@@ -95,10 +118,26 @@ def _route(environment: Mapping[str, str], name: str, transport=None) -> Route:
             + (f" (or SYSTEM_ONE_{upper}=1 for the hosted {name} defaults)" if name in KNOWN_ROUTES else "")
         )
 
-    return Route(
-        name=name,
-        client=SystemOneClient(model=model, api_key=api_key, base_url=endpoint, transport=transport),
+    input_limits = _input_limits(name, setting("INPUT_TOKENS"), known)
+    client = SystemOneClient(
+        model=model, api_key=api_key, base_url=endpoint, transport=transport, input_limits=input_limits
     )
+    return Route(name=name, client=client)
+
+
+def _input_limits(name: str, input_tokens: str, known: KnownRoute | None) -> InputLimits:
+    """`SYSTEM_ONE_<NAME>_INPUT_TOKENS` when set, else a known route's measured limits; a custom
+    route without it is refused, since packing must know what the route accepts."""
+    setting = f"SYSTEM_ONE_{name.upper()}_INPUT_TOKENS"
+    if input_tokens:
+        if not input_tokens.isdigit() or int(input_tokens) == 0:
+            raise ValueError(f"{setting} must be a positive whole number of tokens, got {input_tokens!r}")
+        return InputLimits.from_tokens(int(input_tokens))
+    if known is None:
+        raise ValueError(
+            f"route {name!r} needs {setting}: the tokens it accepts for the state plus the longest question"
+        )
+    return known.input_limits
 
 
 class SystemOneClient:
@@ -120,6 +159,7 @@ class SystemOneClient:
         api_key: str | None = None,
         base_url: str | None = None,
         transport=None,
+        input_limits: InputLimits,
     ) -> None:
         import httpx2
         from typesafe_sdk import TypeSafeClient
@@ -134,6 +174,7 @@ class SystemOneClient:
             transport=self._capture,
         )
         self.model = self._sdk._config.default_model  # noqa: SLF001 - the config is the env contract
+        self.input_limits = input_limits
 
     def ask(self, state: Mapping, questions: Mapping) -> JevResponse:
         return self.parse(self.send(state, questions))
@@ -210,6 +251,7 @@ class RoutedJevClient:
             raise ValueError("RoutedJevClient needs at least one route")
         self.routes = routes
         self.model = routes[0].client.model
+        self.input_limits = _tightest(route.client.input_limits for route in routes)
 
     def ask(self, state: Mapping, questions: Mapping) -> JevResponse:
         return self.parse(self.send(state, questions))
@@ -238,9 +280,9 @@ class RoutedJevClient:
                 return replace(raw, attempts=tuple(attempts))
             except AttemptJournalCallbackError as error:
                 raise error.original_error from error
-            except InputBudgetExceededError:
+            except InputBudgetExceededError as error:
                 # A size refusal is about this request's input, which failover would resend unchanged.
-                raise
+                raise _refused_by(route, error) from error
             except Exception as error:  # noqa: BLE001 - failover is the point
                 failures.append(f"{route.name}: {error}")
         if not failures:
@@ -254,3 +296,15 @@ class RoutedJevClient:
         """Release every route's client."""
         for route in self.routes:
             route.client.close()
+
+
+def _tightest(limits) -> InputLimits:
+    tightest, *others = limits
+    for other in others:
+        tightest = tightest.tightest(other)
+    return tightest
+
+
+def _refused_by(route: Route, error: InputBudgetExceededError) -> InputBudgetExceededError:
+    client = route.client
+    return InputBudgetExceededError(str(error), model=client.model, box_chars=client.input_limits.box_chars)
