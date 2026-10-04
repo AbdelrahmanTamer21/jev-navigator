@@ -9,13 +9,15 @@ evaluation, ``fit-table-punctuation-5.5.md``): the 13 files that really peak abo
 and a long string of data is parsed. Code also costs by how much of it there is: on 04.10.2026,
 1.2 to 15 MB files of Heedvane TypeScript, saleor Python and dense generated lines peaked at 53 to 75
 MB per MB of code over the base, whatever the length of their lines. So the estimate adds a term per
-byte of code, where code is every byte outside a string literal of ``DATA_STRING_BYTES`` or more on
-one line: such a string is one node however long it is, like documenso's 2.5 MB SVG path.
+byte, every byte counted as code. A long string literal is one node and costs less, but no reading of
+quotes short of the language's own grammar can tell a string from code that sits between two quotes
+the language does not pair (an apostrophe in a template literal, JSX text or a comment), and counting
+such code as data let 4 MB files peaking at 254 MB be estimated at 26. Counting every byte costs no
+real file its place: documenso's 2.5 MB SVG path estimates 226 MB and is still parsed side by side.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -27,11 +29,6 @@ under-counts by at most 1%); 5.5 is the margin."""
 PEAK_MB_PER_MB_OF_CODE = 80.0
 """The largest measured cost is 75 MB per MB (55,000 dense TypeScript lines of 45 operands); 80 is the
 margin. The fit is in ``fit-table-punctuation-5.5.md``."""
-DATA_STRING_BYTES = 1_000
-"""A quoted string on one line at least this long counts as data, not code. A quote inside a comment can
-pair with a later one on its line; only a span of this size is ever left out, so code lines of
-ordinary width are always priced."""
-_ONE_LINE_STRING = re.compile(rb'"[^"\\\n]*(?:\\.[^"\\\n]*)*"|\'[^\'\\\n]*(?:\\.[^\'\\\n]*)*\'')
 PUNCTUATION = frozenset(b"{}();,[]")
 _NOT_PUNCTUATION = bytes(set(range(256)) - PUNCTUATION)
 MAX_PARSE_PEAK_MB = 250.0
@@ -87,7 +84,6 @@ class FileShape:
     line_count: int
     longest_line: int
     squared_thousands_of_punctuation: float
-    code_bytes: int
 
     @property
     def chars_per_line(self) -> float:
@@ -97,7 +93,7 @@ class FileShape:
     def parse_peak_mb(self) -> float:
         return (
             BASE_PEAK_MB
-            + PEAK_MB_PER_MB_OF_CODE * self.code_bytes / 1_000_000
+            + PEAK_MB_PER_MB_OF_CODE * self.size_bytes / 1_000_000
             + PEAK_MB_PER_SQUARED_THOUSAND_PUNCTUATION * self.squared_thousands_of_punctuation
         )
 
@@ -157,13 +153,7 @@ def measure(content: bytes) -> FileShape:
         line_count=len(lines) - 1 if lines[-1] == b"" else len(lines),
         longest_line=max(len(line) for line in lines),
         squared_thousands_of_punctuation=sum(_punctuation_in(line) ** 2 for line in lines) / 1_000_000,
-        code_bytes=len(content) - _data_string_bytes(content),
     )
-
-
-def _data_string_bytes(content: bytes) -> int:
-    spans = (match.end() - match.start() for match in _ONE_LINE_STRING.finditer(content))
-    return sum(length for length in spans if length >= DATA_STRING_BYTES)
 
 
 def _punctuation_in(line: bytes) -> int:
