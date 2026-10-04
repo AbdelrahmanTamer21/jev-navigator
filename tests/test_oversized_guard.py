@@ -62,9 +62,9 @@ def test_a_file_over_the_memory_bound_is_never_parsed_and_is_reported(
     index.functions_in_files(index.files)
 
     assert not ast_grep.received(BUNDLE)
-    assert index.unavailable_files[BUNDLE] == (
-        "too large to parse: estimated parse peak 22 GB, longest line 668,777 bytes"
-    )
+    reason = index.unavailable_files[BUNDLE]
+    assert reason.startswith("too large to parse: estimated parse peak ")
+    assert reason.endswith(", 1 line, longest line 668,777 bytes")
     assert index.parser_scans_pending == ()
 
 
@@ -126,7 +126,7 @@ def test_comment_scanning_never_parses_a_guarded_file(
     found = find_comments(index)
 
     assert not ast_grep.received(BUNDLE)
-    assert found.refused_files[BUNDLE].startswith("too large to parse: estimated parse peak 22 GB")
+    assert found.refused_files[BUNDLE].startswith("too large to parse: estimated parse peak ")
 
 
 def test_the_door_yields_the_matches_of_the_files_it_parsed_and_names_the_ones_it_refused(
@@ -260,6 +260,20 @@ def test_a_config_passed_by_the_caller_replaces_the_repositorys_config_and_is_no
     )
 
     assert [match["file"] for match in matches] == ["a.ts"]
+
+
+def test_a_component_holding_one_huge_image_string_is_parsed_not_refused(tmp_path: Path) -> None:
+    image = "A" * 2_500_000
+    commit_files(
+        tmp_path / "repo",
+        {"background.tsx": f"export function Background() {{\n  return <img src='{image}' />;\n}}\n"},
+    )
+    index = CodeIndex.from_git(tmp_path / "repo", fact_cache_dir=tmp_path / "facts")
+
+    functions = index.functions_in("background.tsx")
+
+    assert [span.name for span in functions] == ["Background"]
+    assert index.unavailable_files == {}
 
 
 REFUSED_CHARACTERS = 200_000
@@ -397,3 +411,160 @@ def test_a_refused_file_is_measured_once_for_the_life_of_the_index(tmp_path: Pat
 
     # Assert
     assert [event for event in scans if event[1] == "started"] == [("facts", "started", 1)]
+
+
+SINGLE_PARSE_LIMIT_MB = 754
+"""The single-file limit at JVN's default memory settings: the allowance less Python's share."""
+REAL_CODE = Path(tools.__file__).with_name("code_index.py").read_text()
+
+
+def _real_code_file(size_bytes: int) -> str:
+    """JVN's own code_index.py repeated to ``size_bytes``: real code of ordinary short lines."""
+    copies = size_bytes // len(REAL_CODE) + 1
+    return REAL_CODE * copies
+
+
+def _with_single_parse_limit(monkeypatch: pytest.MonkeyPatch, megabytes: float) -> None:
+    monkeypatch.setattr(tools, "single_parse_limit_mb", lambda: megabytes)
+
+
+class _AstGrepCommands:
+    """Records the file list of every ast-grep scan and lets the real ast-grep run it."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.scans: list[list[str]] = []
+        real = tools._json_lines
+
+        def recorded(arguments, *rest, **options):
+            if arguments[0] == tools.AST_GREP and "scan" in arguments:
+                self.scans.append(list(arguments))
+            return real(arguments, *rest, **options)
+
+        monkeypatch.setattr(tools, "_json_lines", recorded)
+
+    def scan_of(self, file: str) -> list[str]:
+        (scan,) = [scan for scan in self.scans if file in scan]
+        return scan
+
+
+def test_a_file_over_the_side_by_side_share_is_parsed_alone_and_its_facts_are_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: 4.7 MB of real code is over the 250 MB side-by-side share and under the single-file limit
+    _with_single_parse_limit(monkeypatch, SINGLE_PARSE_LIMIT_MB)
+    ast_grep = _AstGrepCommands(monkeypatch)
+    big = _real_code_file(4_700_000)
+    commit_files(
+        tmp_path / "repo",
+        {"src/big.py": big, "src/one.py": REAL_CODE, "src/small.py": "def small():\n    return 1\n"},
+    )
+    index = CodeIndex.from_git(tmp_path / "repo", fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    index.functions_in_files(index.files)
+
+    # Assert
+    alone = ast_grep.scan_of("src/big.py")
+    assert alone[alone.index("--") + 1 :] == ["src/big.py"]
+    assert alone[alone.index("--threads") + 1] == "1"
+    assert ast_grep.scan_of("src/small.py") == ast_grep.scan_of("src/one.py")
+    copies = big.count(REAL_CODE)
+    assert len(index.functions_in("src/big.py")) == copies * len(index.functions_in("src/one.py"))
+    assert index.refused_files == {}
+
+
+def test_a_file_over_the_single_file_limit_is_refused_and_names_that_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: 55,000 dense lines of 45 operands, 14.7 MB, really peaked at 909 MB alone
+    _with_single_parse_limit(monkeypatch, SINGLE_PARSE_LIMIT_MB)
+    ast_grep = _AstGrepCommands(monkeypatch)
+    dense_line = "v = " + " + ".join(f"a{operand}" for operand in range(45)) + "\n"
+    commit_files(
+        tmp_path / "repo",
+        {"gen/dense_ops.py": dense_line * 55_000, "src/small.py": "def small():\n    return 1\n"},
+    )
+    index = CodeIndex.from_git(tmp_path / "repo", fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    index.functions_in_files(index.files)
+
+    # Assert
+    assert not any("gen/dense_ops.py" in scan for scan in ast_grep.scans)
+    reason = index.refused_files["gen/dense_ops.py"]
+    assert reason.startswith(
+        "too large to parse: estimated parse peak 1 GB, over the 754 MB one file may take"
+    )
+
+
+def test_a_long_string_of_data_is_still_parsed_side_by_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: documenso's background.tsx holds one 2.5 MB SVG path on one line and peaks at 58 MB
+    _with_single_parse_limit(monkeypatch, SINGLE_PARSE_LIMIT_MB)
+    ast_grep = _AstGrepCommands(monkeypatch)
+    path = "M708 195.8c.4-1.5.8-3.5 2-4.7 " * 84_000
+    background = f'export function Background() {{\n  return <path d="{path}" />;\n}}\n'
+    commit_files(
+        tmp_path / "repo",
+        {"src/background.tsx": background, "src/small.tsx": "export function small() { return 1; }\n"},
+    )
+    index = CodeIndex.from_git(tmp_path / "repo", fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    index.functions_in_files(index.files)
+
+    # Assert
+    assert ast_grep.scan_of("src/background.tsx") == ast_grep.scan_of("src/small.tsx")
+    assert [span.name for span in index.functions_in("src/background.tsx")] == ["Background"]
+
+
+ALONE_IN_A_FRESH_PROCESS = """
+import json, resource, sys
+from pathlib import Path
+from jev_navigator.index import tools
+from jev_navigator.index.code_index import CodeIndex
+tools.single_parse_limit_mb = lambda: float(sys.argv[3])
+index = CodeIndex.from_git(Path(sys.argv[1]), fact_cache_dir=Path(sys.argv[2]))
+functions = len(index.functions_in("src/big.py"))
+peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+print(json.dumps({"peak_bytes": peak, "functions": functions, "refused": index.refused_files}))
+"""
+
+
+def test_a_file_parsed_alone_peaks_inside_the_single_file_limit(tmp_path: Path) -> None:
+    # Arrange
+    commit_files(tmp_path / "repo", {"src/big.py": _real_code_file(4_700_000)})
+
+    # Act
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            ALONE_IN_A_FRESH_PROCESS,
+            str(tmp_path / "repo"),
+            str(tmp_path / "facts"),
+            str(SINGLE_PARSE_LIMIT_MB),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    # Assert
+    report = json.loads(completed.stdout)
+    peak_megabytes = report["peak_bytes"] / (1 if sys.platform == "darwin" else 1024) / 1_000_000
+    assert report["refused"] == {} and report["functions"] > 0
+    assert peak_megabytes < SINGLE_PARSE_LIMIT_MB
+
+
+def test_without_a_single_file_limit_a_file_over_the_side_by_side_share_is_refused(tmp_path: Path) -> None:
+    # Arrange: no memory settings name a single-file limit, so nothing may be parsed alone
+    commit_files(tmp_path / "repo", {"src/big.py": _real_code_file(4_700_000)})
+    index = CodeIndex.from_git(tmp_path / "repo", fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    index.functions_in_files(index.files)
+
+    # Assert
+    assert ", over the 250 MB one file may take," in index.refused_files["src/big.py"]
