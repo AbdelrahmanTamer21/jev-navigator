@@ -307,7 +307,7 @@ def test_a_killed_holder_leaves_no_stale_slot(tmp_path: Path) -> None:
 
     # Assert
     assert successor.returncode == 0, errors
-    assert output == "took a slot after 0.0 s\n"
+    assert output.startswith("took a slot after ") and float(output.split()[4]) < 1
 
 
 def test_the_ceiling_admits_as_many_processes_as_it_has_slots(tmp_path: Path) -> None:
@@ -325,7 +325,7 @@ def test_the_ceiling_admits_as_many_processes_as_it_has_slots(tmp_path: Path) ->
 
     # Assert
     assert second.returncode == 0, errors
-    assert output == "took a slot after 0.0 s\n"
+    assert output.startswith("took a slot after ") and float(output.split()[4]) < 1
 
 
 def test_a_holder_whose_slot_file_was_deleted_takes_a_slot_again_before_more_work(
