@@ -6,9 +6,11 @@ fallback); each route reads `SYSTEM_ONE_<NAME>_ENDPOINT`, `SYSTEM_ONE_<NAME>_API
 `SYSTEM_ONE_<NAME>_MODEL`. A known route name with `SYSTEM_ONE_<NAME>=1` uses the hosted
 defaults, so one flag per service is enough when the defaults apply. The first route is
 primary; on a failed call the next route is asked, and so on. The finetuned decider is just
-another route: `SYSTEM_ONE_ROUTES=decider,jev` with its endpoint, key, model and
-`SYSTEM_ONE_DECIDER_INPUT_TOKENS` set. Every route declares its input limits, and the routed
-client packs to the tightest of them, so whichever route answers can take the request.
+another route: `SYSTEM_ONE_ROUTES=decider,jev` with its endpoint, key, model,
+`SYSTEM_ONE_DECIDER_INPUT_TOKENS` and `SYSTEM_ONE_DECIDER_CONCURRENCY` set. Every route declares its
+input limits, and the routed client packs to the tightest of them, so whichever route answers can
+take the request. Concurrency stays per route: each route's client sends at most its own number of
+requests at once, so a slow route never throttles the routes after it.
 
 Every route runs the same generic `SystemOneClient` over the official TypeSafe SDK: the SDK
 builds, sends and retries the request with exact-byte capture, and the response is decoded
@@ -20,6 +22,7 @@ configures routes exactly like the real environment does.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
@@ -44,22 +47,31 @@ DREX_INPUT_LIMITS = InputLimits.from_tokens(8_192)
 on 26.09.2026 (``ROUTE_LIMITS`` in ``enginepy/host/system_one.py``: HTTP 422 above it). No bound on
 the whole body is measured, so Drex's own refusal stays the only one."""
 
+DREX_CONCURRENCY = 2
+"""Requests Drex admits in flight at once: the Engine measured HTTP 429 on the third (26.09.2026,
+``ROUTE_LIMITS``)."""
+
+JEV_CONCURRENCY = 32
+"""Requests sent to Jev at once: the Engine saw no 429 up to 128 and flat latency to 32 (27.09.2026,
+``ROUTE_LIMITS``), so 32 is a latency choice, not a refusal bound."""
+
 
 @dataclass(frozen=True)
 class KnownRoute:
-    """A hosted route's endpoint, model and measured input limits."""
+    """A hosted route's endpoint, model, measured input limits and concurrency."""
 
     endpoint: str
     model: str
     input_limits: InputLimits
+    max_concurrency: int
 
 
 # Known hosted shorthand routes: `SYSTEM_ONE_<NAME>=1` selects endpoint+model without
 # spelling them out. Keys always come from `SYSTEM_ONE_<NAME>_API_KEY`, falling back to
 # `TYPESAFE_API_KEY` for single-route setups.
 KNOWN_ROUTES: dict[str, KnownRoute] = {
-    "jev": KnownRoute("https://api.typesafe.ai", LATEST_JEV, JEV_INPUT_LIMITS),
-    "drex": KnownRoute("https://drex.nace.ai", "drex-latest", DREX_INPUT_LIMITS),
+    "jev": KnownRoute("https://api.typesafe.ai", LATEST_JEV, JEV_INPUT_LIMITS, JEV_CONCURRENCY),
+    "drex": KnownRoute("https://drex.nace.ai", "drex-latest", DREX_INPUT_LIMITS, DREX_CONCURRENCY),
 }
 
 
@@ -118,26 +130,45 @@ def _route(environment: Mapping[str, str], name: str, transport=None) -> Route:
             + (f" (or SYSTEM_ONE_{upper}=1 for the hosted {name} defaults)" if name in KNOWN_ROUTES else "")
         )
 
-    input_limits = _input_limits(name, setting("INPUT_TOKENS"), known)
     client = SystemOneClient(
-        model=model, api_key=api_key, base_url=endpoint, transport=transport, input_limits=input_limits
+        model=model,
+        api_key=api_key,
+        base_url=endpoint,
+        transport=transport,
+        input_limits=_input_limits(environment, name, known),
+        max_concurrency=_concurrency(environment, name, known),
     )
     return Route(name=name, client=client)
 
 
-def _input_limits(name: str, input_tokens: str, known: KnownRoute | None) -> InputLimits:
-    """`SYSTEM_ONE_<NAME>_INPUT_TOKENS` when set, else a known route's measured limits; a custom
-    route without it is refused, since packing must know what the route accepts."""
-    setting = f"SYSTEM_ONE_{name.upper()}_INPUT_TOKENS"
-    if input_tokens:
-        if not input_tokens.isdigit() or int(input_tokens) == 0:
-            raise ValueError(f"{setting} must be a positive whole number of tokens, got {input_tokens!r}")
-        return InputLimits.from_tokens(int(input_tokens))
-    if known is None:
-        raise ValueError(
-            f"route {name!r} needs {setting}: the tokens it accepts for the state plus the longest question"
-        )
-    return known.input_limits
+def _input_limits(environment: Mapping[str, str], name: str, known: KnownRoute | None) -> InputLimits:
+    tokens = _route_number(environment, name, "INPUT_TOKENS", required=known is None)
+    return known.input_limits if tokens is None else InputLimits.from_tokens(tokens)
+
+
+def _concurrency(environment: Mapping[str, str], name: str, known: KnownRoute | None) -> int:
+    slots = _route_number(environment, name, "CONCURRENCY", required=known is None)
+    return known.max_concurrency if slots is None else slots
+
+
+_ROUTE_NUMBERS = {
+    "INPUT_TOKENS": "the tokens it accepts for the state plus the longest question",
+    "CONCURRENCY": "how many requests it admits in flight at once",
+}
+
+
+def _route_number(environment: Mapping[str, str], name: str, suffix: str, *, required: bool) -> int | None:
+    """`SYSTEM_ONE_<NAME>_<SUFFIX>` as a positive whole number, or None when unset; a custom route
+    must set it, since packing and sending must know what the route accepts."""
+    setting = f"SYSTEM_ONE_{name.upper()}_{suffix}"
+    raw = str(environment.get(setting, "")).strip()
+    if not raw:
+        if required:
+            raise ValueError(f"route {name!r} needs {setting}: {_ROUTE_NUMBERS[suffix]}")
+        return None
+    if not raw.isdigit() or int(raw) == 0:
+        raise ValueError(f"{setting} must be a positive whole number, got {raw!r}")
+    return int(raw)
 
 
 class SystemOneClient:
@@ -160,6 +191,7 @@ class SystemOneClient:
         base_url: str | None = None,
         transport=None,
         input_limits: InputLimits,
+        max_concurrency: int,
     ) -> None:
         import httpx2
         from typesafe_sdk import TypeSafeClient
@@ -175,6 +207,7 @@ class SystemOneClient:
         )
         self.model = self._sdk._config.default_model  # noqa: SLF001 - the config is the env contract
         self.input_limits = input_limits
+        self._slots = threading.BoundedSemaphore(max_concurrency)
 
     def ask(self, state: Mapping, questions: Mapping) -> JevResponse:
         return self.parse(self.send(state, questions))
@@ -208,10 +241,13 @@ class SystemOneClient:
 
     def send_with_attempts(self, state: Mapping, questions: Mapping, on_attempt=None) -> RawResponse:
         """The captured response, with a provider input-budget refusal translated to the typed
-        ``InputBudgetExceededError`` so the batching owner can split the batch."""
+        ``InputBudgetExceededError`` so the batching owner can split the batch. Only the send holds
+        one of the route's concurrency slots, so a request waiting for a slot has not started and
+        cannot time out."""
         with self._capture.collecting(on_attempt) as collection:
             try:
-                self._send_raw(state, questions)
+                with self._slots:
+                    self._send_raw(state, questions)
             except Exception as error:
                 typed = input_budget_error(error)
                 if typed is not None:

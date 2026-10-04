@@ -12,7 +12,9 @@ from git_repos import commit_files
 from system_one_stand_in import stand_in
 
 from jev_navigator.adapters.routes import (
+    DREX_CONCURRENCY,
     DREX_INPUT_LIMITS,
+    JEV_CONCURRENCY,
     Route,
     RoutedJevClient,
     SystemOneClient,
@@ -95,6 +97,7 @@ def test_a_custom_route_takes_its_box_from_its_input_tokens() -> None:
         "SYSTEM_ONE_DECIDER_ENDPOINT": "http://127.0.0.1:9",
         "SYSTEM_ONE_DECIDER_MODEL": "decider-4b",
         "SYSTEM_ONE_DECIDER_INPUT_TOKENS": "4096",
+        "SYSTEM_ONE_DECIDER_CONCURRENCY": "4",
     }
 
     # Act
@@ -115,9 +118,14 @@ def test_a_size_refusal_is_recorded_under_the_limits_of_the_route_that_refused(t
             api_key="local-test-key",
             base_url="http://127.0.0.1:9",
             input_limits=DREX_INPUT_LIMITS,
+            max_concurrency=DREX_CONCURRENCY,
         )
         fallback = SystemOneClient(
-            model="jev-test", api_key="local-test-key", base_url=jev.url, input_limits=JEV_INPUT_LIMITS
+            model="jev-test",
+            api_key="local-test-key",
+            base_url=jev.url,
+            input_limits=JEV_INPUT_LIMITS,
+            max_concurrency=JEV_CONCURRENCY,
         )
         routed = RoutedJevClient((Route("drex", down), Route("jev", fallback)))
         judge = Judge(routed, store=JsonlAnswerStore(tmp_path / "answers.jsonl"))
@@ -160,3 +168,18 @@ def test_a_find_opening_is_split_before_sending_when_it_exceeds_the_clients_box(
 def _committed_index(root: Path, files: dict[str, str]) -> CodeIndex:
     commit_files(root, files)
     return CodeIndex(root, list(files))
+
+
+def test_a_custom_route_without_its_concurrency_is_refused_naming_the_setting() -> None:
+    # Arrange
+    environment = {
+        **KEY,
+        "SYSTEM_ONE_ROUTES": "decider",
+        "SYSTEM_ONE_DECIDER_ENDPOINT": "http://127.0.0.1:9",
+        "SYSTEM_ONE_DECIDER_MODEL": "decider-4b",
+        "SYSTEM_ONE_DECIDER_INPUT_TOKENS": "4096",
+    }
+
+    # Act and Assert
+    with pytest.raises(ValueError, match="SYSTEM_ONE_DECIDER_CONCURRENCY"):
+        routes_from_env(environment)

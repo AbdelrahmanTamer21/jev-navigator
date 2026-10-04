@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from jev_navigator.adapters.routes import (
+    JEV_CONCURRENCY,
     Route,
     RoutedJevClient,
     SystemOneClient,
@@ -109,6 +110,7 @@ def test_direct_system_one_journal_keeps_each_retry_at_the_sdk_boundary(tmp_path
         api_key="local-test-key",
         base_url=f"http://127.0.0.1:{server.server_port}",
         input_limits=JEV_INPUT_LIMITS,
+        max_concurrency=JEV_CONCURRENCY,
     )
     journal_path = tmp_path / "route-retries.jsonl"
     judge = Judge(client, journal=JsonlJournal(journal_path, keep_request_text=True))
@@ -149,6 +151,7 @@ def test_direct_system_one_journal_keeps_attempts_before_terminal_sdk_failure(tm
         api_key="local-test-key",
         base_url=f"http://127.0.0.1:{server.server_port}",
         input_limits=JEV_INPUT_LIMITS,
+        max_concurrency=JEV_CONCURRENCY,
     )
     journal_path = tmp_path / "route-terminal.jsonl"
     judge = Judge(client, journal=JsonlJournal(journal_path, keep_request_text=True))
@@ -187,12 +190,14 @@ def test_routed_journal_keeps_failed_primary_and_successful_backup_under_one_req
         api_key="local-test-key",
         base_url=f"http://127.0.0.1:{primary_server.server_port}",
         input_limits=JEV_INPUT_LIMITS,
+        max_concurrency=JEV_CONCURRENCY,
     )
     backup = SystemOneClient(
         model="backup-model",
         api_key="local-test-key",
         base_url=f"http://127.0.0.1:{backup_server.server_port}",
         input_limits=JEV_INPUT_LIMITS,
+        max_concurrency=JEV_CONCURRENCY,
     )
     routed = RoutedJevClient((Route("primary", primary), Route("backup", backup)))
     journal_path = tmp_path / "routed-retries.jsonl"
@@ -236,12 +241,14 @@ def test_routed_journal_records_all_routes_before_terminal_failure(tmp_path):
         api_key="local-test-key",
         base_url=f"http://127.0.0.1:{first_server.server_port}",
         input_limits=JEV_INPUT_LIMITS,
+        max_concurrency=JEV_CONCURRENCY,
     )
     second = SystemOneClient(
         model="second-model",
         api_key="local-test-key",
         base_url=f"http://127.0.0.1:{second_server.server_port}",
         input_limits=JEV_INPUT_LIMITS,
+        max_concurrency=JEV_CONCURRENCY,
     )
     routed = RoutedJevClient((Route("first", first), Route("second", second)))
     journal_path = tmp_path / "routed-terminal.jsonl"
@@ -284,12 +291,14 @@ def test_routed_parse_failure_keeps_fallback_behavior_and_both_attempts(tmp_path
         api_key="local-test-key",
         base_url=f"http://127.0.0.1:{primary_server.server_port}",
         input_limits=JEV_INPUT_LIMITS,
+        max_concurrency=JEV_CONCURRENCY,
     )
     backup = SystemOneClient(
         model="backup-model",
         api_key="local-test-key",
         base_url=f"http://127.0.0.1:{backup_server.server_port}",
         input_limits=JEV_INPUT_LIMITS,
+        max_concurrency=JEV_CONCURRENCY,
     )
     journal_path = tmp_path / "routed-parse-fallback.jsonl"
 
@@ -340,12 +349,14 @@ def test_route_attempt_journal_failure_propagates_without_using_backup(tmp_path)
         api_key="local-test-key",
         base_url=f"http://127.0.0.1:{primary_server.server_port}",
         input_limits=JEV_INPUT_LIMITS,
+        max_concurrency=JEV_CONCURRENCY,
     )
     backup = SystemOneClient(
         model="backup-model",
         api_key="local-test-key",
         base_url=f"http://127.0.0.1:{backup_server.server_port}",
         input_limits=JEV_INPUT_LIMITS,
+        max_concurrency=JEV_CONCURRENCY,
     )
     journal = RejectFirstAttemptWrite(tmp_path / "failed-attempt-write.jsonl")
     judge = Judge(RoutedJevClient((Route("primary", primary), Route("backup", backup))), journal=journal)
@@ -407,14 +418,22 @@ def _server(exchanges: list[tuple[bytes, bytes]], model: str = "jev-1.13.0") -> 
     threading_daemon = __import__("threading").Thread(target=httpd.serve_forever, daemon=True)
     threading_daemon.start()
     return SystemOneClient(
-        model="test", api_key="test-key", base_url=f"http://127.0.0.1:{port}", input_limits=JEV_INPUT_LIMITS
+        model="test",
+        api_key="test-key",
+        base_url=f"http://127.0.0.1:{port}",
+        input_limits=JEV_INPUT_LIMITS,
+        max_concurrency=JEV_CONCURRENCY,
     )
 
 
 def _dead_server() -> SystemOneClient:
     _requires_typesafe()
     client = SystemOneClient(
-        model="test", api_key="test-key", base_url="http://127.0.0.1:1", input_limits=JEV_INPUT_LIMITS
+        model="test",
+        api_key="test-key",
+        base_url="http://127.0.0.1:1",
+        input_limits=JEV_INPUT_LIMITS,
+        max_concurrency=JEV_CONCURRENCY,
     )
     return client
 
@@ -505,6 +524,7 @@ def test_a_routed_budget_refusal_reaches_the_judge_and_splits_without_failover()
         api_key="test-key",
         base_url=f"http://127.0.0.1:{port}",
         input_limits=JEV_INPUT_LIMITS,
+        max_concurrency=JEV_CONCURRENCY,
     )
     backup_exchanges: list[tuple[bytes, bytes]] = []
     routed = RoutedJevClient((Route("drex", client), Route("backup", _server(backup_exchanges))))

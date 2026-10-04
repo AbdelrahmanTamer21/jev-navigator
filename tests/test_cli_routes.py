@@ -107,6 +107,7 @@ def test_a_configured_local_decider_answers_and_the_hosted_jev_receives_nothing(
             "SYSTEM_ONE_DECIDER_ENDPOINT": decider.url,
             "SYSTEM_ONE_DECIDER_MODEL": "decider-test",
             "SYSTEM_ONE_DECIDER_INPUT_TOKENS": "8192",
+            "SYSTEM_ONE_DECIDER_CONCURRENCY": "4",
             "TYPESAFE_BASE_URL": hosted.url,
         }
 
@@ -176,3 +177,33 @@ def test_an_interrupt_under_routes_finishes_the_request_in_flight_and_leaves_a_r
     assert attempts == [("drex", 200)]
     assert (tmp_path / "pack" / "answers.jsonl").read_text().strip()
     assert (tmp_path / "pack" / "resume.json").is_file()
+
+
+def test_drex_never_sees_more_requests_in_flight_than_it_admits(tmp_path: Path) -> None:
+    # Arrange: a hundred functions make several batches at once; this Drex answers 429 to a third in flight
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    functions = "".join(
+        f"def check_{index}(items):\n    return len(items) <= {index}\n\n" for index in range(100)
+    )
+    (repository / "checks.py").write_text(functions)
+    with stand_in("drex-test", max_in_flight=2) as drex, stand_in("jev-test") as jev:
+        settings = {
+            "SYSTEM_ONE_ROUTES": "drex,jev",
+            "SYSTEM_ONE_DREX_ENDPOINT": drex.url,
+            "SYSTEM_ONE_DREX_MODEL": "drex-test",
+            "SYSTEM_ONE_JEV_ENDPOINT": jev.url,
+            "SYSTEM_ONE_JEV_MODEL": "jev-test",
+        }
+        command, environment = find_command(tmp_path, settings)
+        command = [*command[:3], "findall", "the item-count check", "--repo", str(repository)]
+        command += ["--max-calls", "none", "--out", str(tmp_path / "pack")]
+
+        # Act
+        result = subprocess.run(command, env=environment, text=True, capture_output=True, timeout=120)
+
+    # Assert
+    assert result.returncode == 0, result.stderr
+    assert len(drex.received) > 2
+    assert drex.throttled == 0
+    assert not jev.received

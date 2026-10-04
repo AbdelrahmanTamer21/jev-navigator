@@ -118,6 +118,12 @@ route sets its own with `SYSTEM_ONE_<NAME>_INPUT_TOKENS`, or the command stops n
 and remembers a size refusal under the limit of the route that refused. Point Drex at `jvn` through
 the route table: the default client always packs to Jev's limit.
 
+Each route also has its own concurrency: how many requests it receives in flight at once. Drex admits
+2 (it answers HTTP 429 to a third) and Jev takes 32, as Analysis Engine measured them; any other route
+sets `SYSTEM_ONE_<NAME>_CONCURRENCY`, or the command stops naming that setting. A request waits for a
+free slot of the route it goes to before it is sent, so waiting never counts against its timeout, and a
+request that falls back to Jev is not held back by Drex's limit.
+
 One difference under routes: Ctrl-C cannot abort a request already in flight, so the command waits for
 those requests to finish, keeps their answers, and then stops with a resumable pack. Without routes,
 Ctrl-C aborts requests in flight.
