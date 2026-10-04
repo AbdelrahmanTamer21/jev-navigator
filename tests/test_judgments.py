@@ -587,6 +587,20 @@ def test_a_scoped_judge_adds_unreported_responses_to_its_parent() -> None:
     assert (scoped.input_total.not_reported, judge.input_total.not_reported) == (1, 1)
 
 
+def test_a_store_replay_is_marked_replayed_and_reports_no_token_count(tmp_path: Path) -> None:
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+    state, questions = {"slice": {"code": "x = 1"}}, {"q": {"type": "noul", "instructions": "Is it?"}}
+    Judge(ScriptedJevClient(), store=store).ask(state, questions, thresholds=Thresholds())
+    replaying = Judge(ScriptedJevClient(), store=store, served_model="jev-scripted")
+
+    replayed = replaying.ask(state, questions, thresholds=Thresholds())
+
+    assert replayed.from_store is True
+    assert replayed.input_tokens is None
+    assert replaying.input_total.responses == 0
+    assert replaying.calls == 0
+
+
 def test_every_result_carries_the_hash_of_the_masked_request_that_answered_it(tmp_path: Path) -> None:
     # Arrange
     from jev_navigator.judgments.questions import Rate, request_sha256

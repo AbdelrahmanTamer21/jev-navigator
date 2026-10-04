@@ -60,10 +60,15 @@ class ScoreAnswer:
 Answer = ChoiceAnswer | NoulAnswer | ScoreAnswer
 
 
+NOT_REPORTED_TEXT = "not reported"
+"""How a missing token count (``None``) reads in text for people; data keeps ``None``/``null``."""
+
+
 @dataclass(frozen=True)
 class JevResponse:
     """``input_tokens`` is what the provider reported for the request, ``None`` when it reported
-    nothing; a missing count is never 0."""
+    nothing; a missing count is never 0. ``from_store`` marks a replay: it sent nothing and carries
+    no count."""
 
     answers: Mapping[str, Answer]
     model: str

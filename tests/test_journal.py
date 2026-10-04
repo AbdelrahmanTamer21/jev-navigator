@@ -215,8 +215,30 @@ def test_a_reported_zero_is_recorded_as_zero(tmp_path: Path) -> None:
     "body",
     [b'{"model": "m", "answers": {}}', b'{"usage": {}}', b'{"usage": null}', b"not json", b'["list"]'],
 )
-def test_a_response_without_reported_input_tokens_says_not_reported(tmp_path: Path, body: bytes) -> None:
-    assert _recorded_response(tmp_path, body)["input_tokens"] == "not reported"
+def test_a_response_without_reported_input_tokens_records_null(tmp_path: Path, body: bytes) -> None:
+    recorded = _recorded_response(tmp_path, body)
+
+    assert "input_tokens" in recorded
+    assert recorded["input_tokens"] is None
+
+
+def test_the_tokens_are_on_the_response_line_only_not_on_its_attempt_or_failure_lines(
+    tmp_path: Path,
+) -> None:
+    body = b'{"model": "m", "usage": {"input_tokens": 12}, "answers": {}}'
+    raw = RawResponse(body, 200, "application/json")
+    journal = JsonlJournal(tmp_path / "usage.jsonl")
+
+    journal.record_attempt("r1", RawAttempt(1, 5.0, b"{}", response=raw))
+    journal.record_failure("r1", "ParseError: bad", raw)
+    journal.record_response("r1", raw)
+
+    lines = {
+        line["kind"]: line for line in map(json.loads, (tmp_path / "usage.jsonl").read_text().splitlines())
+    }
+    assert lines["response"]["input_tokens"] == 12
+    assert "input_tokens" not in lines["http_attempt"]
+    assert "input_tokens" not in lines["failure"]
 
 
 def test_jsonl_journal_keeps_no_request_text_unless_asked(tmp_path: Path) -> None:

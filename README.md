@@ -404,8 +404,9 @@ on its own scope, so searches sharing one judge never use up each other's budget
   request_id`, `record_response(request_id, response)` and `record_failure(request_id, error,
   response)`). The judge records the masked request before dispatch and the raw response before
   parsing, as a `RawResponse(body, status, content_type, decoded)`: the body bytes as received, the HTTP
-  status, the content type and `input_tokens`, the count the provider reported or the text
-  `not reported`; a missing count is never written as 0. Transport errors and responses that fail to
+  status, the content type and `input_tokens`, the count the provider reported or `null`; a missing
+  count is never written as 0, and the count is on the response line only. A replay from the store
+  sends nothing, is marked `from_store` and carries no count. Transport errors and responses that fail to
   parse are recorded as failures. Clients that offer `send` and `parse` return that `RawResponse`; the TypeSafe adapter
   captures the exact bytes from its HTTP transport. A client that only parses is journaled with its
   decoded JSON and `exact=False`. `request_sha256` never includes the model; cache reuse checks the
