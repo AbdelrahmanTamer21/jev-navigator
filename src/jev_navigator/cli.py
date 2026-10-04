@@ -33,7 +33,7 @@ from .environment import checkout_root, load_typesafe_environment
 from .housekeeping import FINISHED_RUN_DAYS, RESUMABLE_RUN_DAYS
 from .index.code_index import CodeIndex
 from .index.languages import language_of
-from .judgments.answers import TokenTotal
+from .judgments.answers import TokenTotal, answered_by
 from .judgments.client import JevClient
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import (
@@ -1121,6 +1121,7 @@ def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previou
             "verdict": value.verdict,
             "request_sha256": value.request_sha256,
             "from_store": value.from_store,
+            **answered_by(value.source()),
         }
 
     return {
