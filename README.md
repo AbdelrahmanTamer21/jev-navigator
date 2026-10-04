@@ -704,9 +704,12 @@ holds exactly that revision (use `CodeIndex.at_commit` for history); a mismatch 
 by default, with a beam of 3. The CLI sets a default allowance of 24 model requests for Find and
 48 for Find All. Everything is a parameter: `SearchBudget` also sets
 `neighbours_per_kind`, `preview_lines`, `max_line_chars` (240: longer lines and signatures are cut and
-marked "[line cut]") and `max_slice_chars` (12,000: an opened place is cut on a line boundary with a
-note, and `Visit.code` ends at the last shown line). If the first line cannot fit, the place stays
-`not_inspected` with reason `budget`; Resume with a larger slice budget inspects that same source.
+marked "[line cut]"). An opened place goes to Jev whole when its requests fit the input box of the
+judge's client (Jev's 32,000 tokens are 76,800 characters, `judgments.client.JEV_INPUT_LIMITS`): the
+request asking whether it is the target, and, when the opening is split, the request asking about each
+neighbour alone. Larger code is cut on a line boundary with a visible note, and `Visit.code` ends at
+the last shown line. If not even its first line fits, the place stays `not_inspected` with reason
+`budget`; Resume on a route with a larger box inspects that same source.
 `questions=SearchQuestions(found=...,
 could_contain=..., open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
 `places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `imported`,

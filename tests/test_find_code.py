@@ -33,6 +33,7 @@ from jev_navigator.directives.places import (
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
+from jev_navigator.judgments.client import InputLimits
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.store import JsonlAnswerStore
@@ -1700,39 +1701,23 @@ def long_function_index(root: Path) -> CodeIndex:
     return CodeIndex(root, ["handler.py"])
 
 
-def test_a_slice_longer_than_the_limit_is_cut_on_a_line_boundary(tmp_path: Path) -> None:
-    # Arrange
-    index = long_function_index(tmp_path)
-    client = ScriptedJevClient(
-        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
-        choices={"open_first": {"none": 1.0}},
-    )
-
-    # Act
-    result = find_code(index, Judge(client), TARGET, [place_for_line(index, "handler.py", 2, "start")])
-
-    # Assert
-    shown = client.requests[0][0]["slice"]
-    last_line = int(shown["lines"].split("-")[1])
-    assert len(shown["code"]) <= 12_000 + 80
-    assert shown["code"].endswith("lines at 12000 characters]")
-    assert last_line < index.find_definition("handle")[0].end
-    assert result.starts[0].code.span.end == last_line
-
-
 def test_a_place_inside_the_cut_off_tail_is_still_offered(tmp_path: Path) -> None:
-    # Arrange
+    # Arrange: a route whose input box holds about half of `handle`
     index = long_function_index(tmp_path)
     client = ScriptedJevClient(
         nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
         choices={"open_first": {"none": 1.0}},
     )
+    client.input_limits = InputLimits(box_chars=10_000)
 
     # Act
     find_code(index, Judge(client), TARGET, [place_for_line(index, "handler.py", 2, "start")])
 
     # Assert
-    offered = [candidate["signature"] for candidate in client.requests[0][0]["candidates"]]
+    offered = [
+        candidate["signature"] for state, _ in client.requests for candidate in state.get("candidates", [])
+    ]
+    assert "[cut after" in client.requests[0][0]["slice"]["code"]
     assert any("`def helper(event):`" in signature for signature in offered)
 
 

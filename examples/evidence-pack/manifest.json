@@ -4,7 +4,6 @@
     "max_calls": 3,
     "max_depth": 2,
     "max_line_chars": 240,
-    "max_slice_chars": 12000,
     "max_steps": 3,
     "neighbours_per_kind": null,
     "preview_lines": 8
