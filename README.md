@@ -188,7 +188,7 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
   `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
   `--answer-store PATH` points a run at another store file; each run prints the store it uses.
-- `resume.json` (budget-stopped or cancelled runs): the frontier as locations; Resume re-reads the
+- `resume.json` (budget-stopped, cancelled or failed runs): the frontier as locations; Resume re-reads the
   code from the unchanged repository.
 
 By default the manifest, report, journal and resume state hold no source code, only locations and
@@ -522,10 +522,14 @@ signature names its file and lines: a function quotes its first line; a window a
 or key outside any function gives its line range and quotes that line; a stretch chosen by position (the
 lines before or after, the start of a co-changed or imported file) gives its range and quotes its first
 line of code, past blank lines, comments, a license banner, a `'use strict'` directive or a module
-docstring. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
-`scope_incomplete`, and the result keeps three sets: `found`; `searched` and `unsure` (bodies actually
-judged, start places apart in `starts`); and `not_inspected`, each entry with its reason (`budget`,
-`deprioritized`, `capped` or `depth`) and its `QueueTier`: `START`, `PICK` or `MOVE`. Resume
+docstring. The outcome is `found`, `stop_rule`, `budget`, `cancelled`, `failed`, `nothing_left`,
+`unsure_only` or `scope_incomplete`, and the result keeps three sets: `found`; `searched` and `unsure`
+(bodies actually judged, start places apart in `starts`); and `not_inspected`, each entry with its
+reason (`budget`, `cancelled`, `failed`, `deprioritized`, `capped` or `depth`) and its `QueueTier`:
+`START`, `PICK` or `MOVE`. A request that fails, such as a provider error or a full disk while
+storing its answer, ends `find_code` as `failed`: `failure` holds that same error object, the answers
+its round did get stay merged, and the failed place waits in `not_inspected` with reason `failed`.
+A request Ctrl-C stopped is `cancelled` instead. Resume
 preserves that role, so waiting starts still open before picks and are never reported as new finds.
 `searched` means "opened and judged at or below the no bar, probability kept", and `nothing_left`
 means "nothing left worth opening in a scope the search parsed whole"; neither proves that the code does not exist, because one "no" about

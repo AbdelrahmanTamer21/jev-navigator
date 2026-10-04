@@ -215,7 +215,8 @@ class FindResult:
     lists scope files the index could not parse. Of ``code_files`` scope code files, Jev judged code
     (the opened places, not whole files) in ``files_judged``; ``files_read`` counts those plus the
     files the search only parsed to list neighbours. While any file was never read or could not be
-    parsed, the outcome is never ``nothing_left``."""
+    parsed, the outcome is never ``nothing_left``. ``failure`` is the error that ended a ``failed``
+    search."""
 
     outcome: Outcome
     found: tuple[Visit, ...]
