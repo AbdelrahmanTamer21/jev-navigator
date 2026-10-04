@@ -31,8 +31,9 @@ CODE_LINE_BYTES = 10_000
 PUNCTUATION = frozenset(b"{}();,[]")
 _NOT_PUNCTUATION = bytes(set(range(256)) - PUNCTUATION)
 MAX_PARSE_PEAK_MB = 250.0
-"""A file whose estimated parse peak exceeds this is never parsed. The largest parse measured under it
-peaked at 122 MB, and ast-grep scans files in parallel, so several can be in memory at once."""
+"""The most a file may take to be parsed side by side with others: ast-grep scans files in parallel, so
+several can be in memory at once. A file over it is parsed alone, when it fits the single-file limit,
+or refused."""
 
 
 def _safe_size_bytes() -> int:
@@ -45,8 +46,16 @@ def _safe_size_bytes() -> int:
 
 
 PARSEABLE_UP_TO_BYTES = _safe_size_bytes()
-"""A file this small can never be over the bound, whatever its lines. The size alone clears it, without
-a read."""
+"""A file this small can never be over the side-by-side bound, whatever its lines. The size alone
+clears it, without a read."""
+
+
+class Placement(StrEnum):
+    """How the door parses a file: beside others, alone, or not at all."""
+
+    SIDE_BY_SIDE = "side_by_side"
+    ALONE = "alone"
+    REFUSED = "refused"
 
 
 LONG_LINE_CHARS = 10_000
@@ -101,15 +110,22 @@ class FileShape:
         return tuple(trigger for trigger, tripped in fired if tripped)
 
     @property
-    def too_large_to_parse(self) -> bool:
-        return self.parse_peak_mb > MAX_PARSE_PEAK_MB
+    def fits_side_by_side(self) -> bool:
+        return self.parse_peak_mb <= MAX_PARSE_PEAK_MB
 
-    @property
-    def refusal(self) -> str | None:
-        if not self.too_large_to_parse:
+    def placement(self, single_parse_limit_mb: float) -> Placement:
+        """Side by side within ``MAX_PARSE_PEAK_MB``, alone within ``single_parse_limit_mb``, else refused."""
+        if self.fits_side_by_side:
+            return Placement.SIDE_BY_SIDE
+        return Placement.ALONE if self.parse_peak_mb <= single_parse_limit_mb else Placement.REFUSED
+
+    def refusal(self, single_parse_limit_mb: float) -> str | None:
+        """Why the file is not parsed at all, or None when it is parsed side by side or alone."""
+        if self.placement(single_parse_limit_mb) is not Placement.REFUSED:
             return None
         return (
-            f"too large to parse: estimated parse peak {_peak_text(self.parse_peak_mb)}, "
+            f"too large to parse: estimated parse peak {_peak_text(self.parse_peak_mb)}, over the "
+            f"{_peak_text(max(single_parse_limit_mb, MAX_PARSE_PEAK_MB))} one file may take, "
             f"{_counted(self.line_count, 'line')}, longest line {self.longest_line:,} bytes"
         )
 
@@ -119,12 +135,14 @@ def shape_of(root: Path, path: str) -> FileShape:
     return measure((root / path).read_bytes())
 
 
-def refusal_of(root: Path, path: str) -> str | None:
-    """Why the file must not be parsed, or None. A file small enough to be safe by size is not read."""
+def placement_of(root: Path, path: str, single_parse_limit_mb: float) -> tuple[Placement, str | None]:
+    """How to parse the file, with the refusal when it is not parsed at all. A file small enough to be
+    safe by size is placed side by side without a read."""
     file = root / path
     if file.stat().st_size <= PARSEABLE_UP_TO_BYTES:
-        return None
-    return measure(file.read_bytes()).refusal
+        return Placement.SIDE_BY_SIDE, None
+    shape = measure(file.read_bytes())
+    return shape.placement(single_parse_limit_mb), shape.refusal(single_parse_limit_mb)
 
 
 def measure(content: bytes) -> FileShape:

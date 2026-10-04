@@ -322,14 +322,15 @@ reason, unless a definition in another file, not imported from one of them, sett
 search reports `scope_incomplete` instead of `nothing_left`; a budget-limited result reports which
 fact scans completed and which remain pending. A file that disappears after the working-directory
 inventory was built, or changes after the index first read it, is reported separately as
-unavailable. So is a file too large to parse safely:
-`tools.ast_grep_rules`, the one door every parse passes through, never hands ast-grep a file whose
-estimated parse peak (from the punctuation `{}();,[]` on each line, `index/file_shape.py`) is over
-250 MB, about 6,400 of those marks on one line, which a minified bundle reaches at a few tens of
-kilobytes. Code adds about 80 MB per MB, counting every line of up to 10,000 bytes, so a file of more than
-about 2.8 MB of code is refused as well. A large file that cannot be read to measure it is refused too, with the
-error. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
-peak and the longest line in bytes. A refused file is never recorded as parsed: it stays readable and
+unavailable. So is a file too large to parse safely. `tools.ast_grep_rules`, the one door every
+parse passes through, estimates each file's parse peak (`index/file_shape.py`): 80 MB per MB of code,
+counting every line of up to 10,000 bytes, plus the square of the punctuation `{}();,[]` on each line,
+which a minified bundle of a few tens of kilobytes on one line drives up. Files estimated at up to
+250 MB are parsed side by side. A file over that, but within the single-file limit
+(`tools.single_parse_limit_mb()`), is parsed alone, one at a time, with no other file beside it. A file
+over the single-file limit is never handed to ast-grep, and neither is a large file that cannot be read
+to measure it. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
+peak, the limit it is over, and the longest line in bytes. A refused file is never recorded as parsed: it stays readable and
 searchable as text, it keeps its path in import relations (also as a re-export target), a name its
 bytes mention binds `unknown`, `jvn stats` names it as never scanned, and `find_comments` lists it in
 `refused_files`. Any ast-grep or ripgrep failure other than that verified disappearance still fails the
