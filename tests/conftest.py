@@ -16,6 +16,7 @@ from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
 from jev_navigator.judgments.questions import serialized_chars
+from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
 
 
 @pytest.fixture(autouse=True)
@@ -194,3 +195,11 @@ class BudgetedClient:
     def _state_and_longest_question(state: Mapping, questions: Mapping) -> int:
         longest = max((serialized_chars(question) for question in questions.values()), default=0)
         return serialized_chars(state) + longest
+
+
+@pytest.fixture(autouse=True)
+def isolated_shared_answer_store(no_developer_settings, tmp_path_factory, monkeypatch) -> None:
+    """Every test gets its own shared answer store, never the machine's real one. It is set after
+    ``no_developer_settings`` drops every ``JEV_NAVIGATOR_`` variable, so the drop never removes it."""
+    store = tmp_path_factory.mktemp("shared-answers") / "answers.sqlite"
+    monkeypatch.setenv(SHARED_STORE_VARIABLE, str(store))

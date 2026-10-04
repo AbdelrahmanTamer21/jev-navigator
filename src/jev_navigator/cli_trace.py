@@ -20,7 +20,7 @@ from .index.code_index import CodeIndex
 from .index.spans import Span
 from .judgments.client import JevClient
 from .judgments.judge import CheckResult, Judge
-from .judgments.store import JsonlAnswerStore
+from .judgments.store import run_answer_store
 from .judgments.thresholds import Thresholds
 from .progress import ProgressJournal, TerminalProgress
 from .usage_receipt import usage_receipt, usage_report_lines
@@ -44,6 +44,7 @@ def create_trace_evidence_pack(
     cancelled: Callable[[], bool] | None = None,
     served_model: str | None = None,
     answers_from: Path | None = None,
+    answer_store: Path | None = None,
 ) -> dict:
     """Trace the workflow around ``starts`` and write the reviewable evidence pack to ``output``.
 
@@ -54,7 +55,8 @@ def create_trace_evidence_pack(
     as there; ``depth`` and ``cancelled`` pass through to the static walk. ``served_model`` pins the
     model identity that ``answers.jsonl`` replays against, as a resumed pack does; ``answers_from``
     seeds this pack's answer store from a prior pack's, so identical questions about identical code
-    replay without a new request. ``question`` is
+    replay without a new request. ``answer_store`` is the shared store file behind the pack
+    (default ``shared_store_path()``). ``question`` is
     the workflow question every obligation is asked about.
 
     Returns the manifest that is persisted as ``manifest.json`` next to ``report.md``,
@@ -101,7 +103,7 @@ def create_trace_evidence_pack(
             max_calls=max_calls,
             served_model=served_model,
             journal=journal,
-            store=JsonlAnswerStore(output / "answers.jsonl"),
+            store=run_answer_store(output / "answers.jsonl", answer_store),
         )
         progress.phase("tracing workflow")
         result = trace_workflow(index, judge, question, start_spans, depth=depth, cancelled=cancelled)
@@ -166,6 +168,7 @@ def _manifest(
             "requested_model": getattr(judge.client, "model", "unknown"),
             "served_model": judge.served_model,
             "calls": judge.calls,
+            "replayed_answers": judge.replayed_answers,
             "input_tokens": judge.input_total.reported,
             **usage_receipt(None, judge.input_total, judge.unanswered_requests),
         },

@@ -3,8 +3,8 @@
 The judge records the exact (masked) request before dispatch and the raw response before parsing:
 the body bytes as received, the HTTP status, the content type and the input tokens the provider
 reported (``null`` when it reported none, never 0), with the decoded form optional. The tokens are
-on the ``response`` line only, once per logical request. A
-transport error or a response that fails to parse is recorded as a failure. Hosts inject their
+on the ``response`` line only, once per logical request. A transport error, a response that fails
+to parse and one that leaves out an asked answer are recorded as failures. Hosts inject their
 own journal (their runtime's, an evaluation journal); ``JsonlJournal`` is a simple local one.
 
 A request holds code, and the library cannot know whose code it is. So by default ``JsonlJournal``

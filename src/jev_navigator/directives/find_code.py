@@ -21,7 +21,7 @@ import os
 import signal
 import threading
 from collections.abc import Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import IntEnum, StrEnum
@@ -481,10 +481,7 @@ def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[l
         except KeyboardInterrupt:
             settled_before_cancel = {future for future in futures if future.done()}
             with _defer_keyboard_interrupts(re_raise=False):
-                judge.cancel()
-                for future in futures:
-                    future.cancel()
-                wait(futures)
+                judge.abort_sends(futures)
                 responses = [_settled_response(future, future in settled_before_cancel) for future in futures]
             unsubmitted = len(opened) - len(futures)
             return [*responses, *[_Unanswered.CANCELLED] * unsubmitted], True

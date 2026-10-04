@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from collections.abc import Mapping
@@ -7,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from jev_navigator.judgments.answers import response_from_raw
+from jev_navigator.judgments.client import UnansweredQuestionError
 from jev_navigator.judgments.journal import JournalRequest, JsonlJournal, RawAttempt, RawResponse
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
@@ -191,6 +194,64 @@ def test_the_typesafe_adapter_journals_the_exact_bytes_it_received(
     response = json.loads((tmp_path / "journal.jsonl").read_text().splitlines()[1])
     assert base64.b64decode(response["body_base64"]) == body and response["exact"] is True
     assert answer.noul("adds_one").probability == 0.9
+
+
+ANSWERS_ONE_OF_TWO = (
+    b'{"model": "jev-1.13.0", "usage": {"input_tokens": 12},'
+    b' "answers": {"adds_one": {"type": "noul", "noul": 0.9}}}'
+)
+
+
+class _SendsOneOfTwo(ScriptedJevClient):
+    def send(self, state: Mapping, questions: Mapping) -> RawResponse:
+        return RawResponse(ANSWERS_ONE_OF_TWO, 200, "application/json")
+
+
+class _AsksOneOfTwo:
+    """A client that only parses, like the Engine's, answering one of two asked questions."""
+
+    model = "jev-1.13.0"
+
+    def ask(self, state: Mapping, questions: Mapping):
+        return response_from_raw(json.loads(ANSWERS_ONE_OF_TWO))
+
+
+def _ask_sync(judge: Judge, questions: Mapping) -> None:
+    judge.ask(STATE, questions, thresholds=Thresholds())
+
+
+def _ask_async(judge: Judge, questions: Mapping) -> None:
+    asyncio.run(judge.ask_async(STATE, questions, thresholds=Thresholds()))
+
+
+@pytest.mark.parametrize(
+    ("client", "ask"),
+    [(_SendsOneOfTwo, _ask_sync), (_SendsOneOfTwo, _ask_async), (_AsksOneOfTwo, _ask_sync)],
+    ids=["send", "send-async", "ask-only"],
+)
+def test_a_response_missing_an_asked_answer_leaves_exactly_one_failure_row(
+    tmp_path: Path, client, ask
+) -> None:
+    # Arrange
+    judge = Judge(client(), journal=JsonlJournal(tmp_path / "journal.jsonl"))
+    questions = {**QUESTIONS, "doubles": {"type": "noul", "instructions": "Does `slice.code` double?"}}
+
+    # Act
+    with pytest.raises(UnansweredQuestionError):
+        ask(judge, questions)
+
+    # Assert: the failure names the request and the error, and the tokens the response cost are on
+    # that request's one response line, so they are counted once
+    lines = [json.loads(line) for line in (tmp_path / "journal.jsonl").read_text().splitlines()]
+    request_id = next(line["request_id"] for line in lines if line["kind"] == "request")
+    failures = [line for line in lines if line["kind"] == "failure"]
+    responses = [line for line in lines if line["kind"] == "response"]
+    assert [failure["request_id"] for failure in failures] == [request_id]
+    assert failures[0]["error"] == "UnansweredQuestionError: jev-1.13.0 returned no answer for doubles"
+    assert [(response["request_id"], response["input_tokens"]) for response in responses] == [
+        (request_id, 12)
+    ]
+    assert judge.input_total.reported == 12
 
 
 def _recorded_response(tmp_path: Path, body: bytes) -> dict:
