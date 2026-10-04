@@ -43,15 +43,16 @@ class BindingResolver(Protocol):
 
 @dataclass(frozen=True)
 class CallFacts:
-    """What the index knows about one call when no injected resolver answers. ``top_level`` holds the
-    definitions no class or function contains: only those can be named from their file's module
-    scope, or by an import."""
+    """What the index knows about one call when no injected resolver answers. ``module_scope`` holds
+    the definitions their file's module scope names, and ``importable`` those another module can
+    import by name: the same ones plus the file's CommonJS exports."""
 
     file: str
     name: str
     receiver: str | None
     definitions: Sequence[Span]
-    top_level: Sequence[Span]
+    module_scope: Sequence[Span]
+    importable: Sequence[Span]
     imported_from: Sequence[ImportFact]
     # Files that could hold a definition of ``name`` the index never saw.
     unparsed: frozenset[str] = frozenset()
@@ -92,7 +93,7 @@ def binding_from_facts(facts: CallFacts) -> Binding:
             BindingStatus.CANDIDATE,
             f"method call on {facts.receiver}; receiver type not resolved ({count} definitions)",
         )
-    same_file = _one_per_definition([span for span in facts.top_level if span.file == facts.file])
+    same_file = _one_per_definition([span for span in facts.module_scope if span.file == facts.file])
     if len(same_file) == 1:
         return Binding(BindingStatus.RESOLVED, "defined in the same file", same_file[0])
     if same_file:
@@ -101,7 +102,7 @@ def binding_from_facts(facts: CallFacts) -> Binding:
         )
     imported = [
         (span, fact)
-        for span in _one_per_definition(facts.top_level)
+        for span in _one_per_definition(facts.importable)
         for fact in facts.imported_from
         if span.file == fact.path
     ]

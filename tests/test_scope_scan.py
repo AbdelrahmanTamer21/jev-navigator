@@ -237,7 +237,7 @@ def test_scan_facts_skips_unsupported_files_and_still_parses_supported_files(tmp
     def lines_of(path: str) -> list[str]:
         return (tmp_path / path).read_text().splitlines()
 
-    empty = FileFacts(FileStructure((), (), (), (), (), ()), (), ())
+    empty = FileFacts(FileStructure((), (), (), (), (), (), ()), (), ())
 
     unsupported = scan_facts(["notes.md"], tmp_path, lines_of, Unparsed())
     mixed = scan_facts(["module.py", "notes.md"], tmp_path, lines_of, Unparsed())

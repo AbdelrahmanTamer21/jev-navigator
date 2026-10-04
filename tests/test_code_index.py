@@ -722,6 +722,59 @@ def test_a_non_call_reference_binds_to_the_declaration_it_names(
     ]
 
 
+def test_a_property_assignment_names_no_module_name_but_a_commonjs_export_stays_importable(
+    tmp_path: Path,
+) -> None:
+    """`foo.bar = function () {}` and `exports.other = () => 3` give their module no name `bar` or
+    `other`, so a bare call in that file is no proof. `exports.other`, `module.exports.stop` and the
+    members of `module.exports = {...}` are the module's exports, so importing them stays proven,
+    while importing `bar` does not."""
+    # Arrange
+    files = {
+        "x.js": (
+            "exports.other = () => 3;\n"
+            "module.exports.stop = function () { return 4; };\n"
+            "foo.bar = function namedLater() { return 5; };\n"
+            "function local() {\n  other();\n  stop();\n  bar();\n}\n"
+        ),
+        "y.js": "module.exports = {\n  run() { return 1; },\n  walk: () => 2,\n};\n",
+        "esm.mjs": (
+            "import { other, stop, bar } from './x.js';\nimport { run, walk } from './y.js';\n"
+            "export function viaImport() {\n  other();\n  stop();\n  bar();\n  run();\n  walk();\n}\n"
+        ),
+        "cjs.js": (
+            "const x = require('./x');\nfunction viaRequire() {\n  x.other();\n  require('./x').stop();\n}\n"
+        ),
+    }
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files), fact_cache_dir=tmp_path.parent / "facts")
+
+    # Act
+    bindings = {
+        (caller, edge.name): (edge.binding.status.value, edge.binding.target and edge.binding.target.key)
+        for caller in ("local", "viaImport")
+        for edge in index.callee_edges(index.find_definition(caller)[0])
+    }
+    required = {
+        site.line: site.binding.status.value
+        for site in index.find_callers("other") + index.find_callers("stop")
+        if site.file == "cjs.js"
+    }
+
+    # Assert
+    assert bindings == {
+        ("local", "other"): ("candidate", None),
+        ("local", "stop"): ("candidate", None),
+        ("local", "bar"): ("candidate", None),
+        ("viaImport", "other"): ("resolved", "x.js:1-1"),
+        ("viaImport", "stop"): ("resolved", "x.js:2-2"),
+        ("viaImport", "bar"): ("candidate", None),
+        ("viaImport", "run"): ("resolved", "y.js:2-2"),
+        ("viaImport", "walk"): ("resolved", "y.js:3-3"),
+    }
+    assert required == {3: "candidate", 4: "candidate"}
+
+
 @pytest.mark.parametrize(
     ("files", "name", "site", "declaration"),
     [
