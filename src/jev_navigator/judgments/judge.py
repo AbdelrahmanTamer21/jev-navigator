@@ -14,7 +14,7 @@ import inspect
 import logging
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, field
 
 from .answers import JevResponse, NoulAnswer, TokenTotal, response_to_raw
@@ -65,6 +65,11 @@ CODE_FIELD = "code"
 ROUTE_QUESTION = "route"
 _DEFAULT_MASKER = SecretMasker()
 _DEFAULT_SCANNER = SecretScanner()
+
+
+ABORTED_SEND_ERRORS: tuple[type[BaseException], ...] = (CancelledError, KeyboardInterrupt)
+"""What a send ends with when ``Judge.abort_sends`` stopped it: the client's or the pool's
+``CancelledError``, or the caller's interrupt itself. Any other error is a real failure."""
 
 
 class CallCapReachedError(RuntimeError):
@@ -640,6 +645,7 @@ class Judge:
         except KeyboardInterrupt:
             stop.halted.set()
             self.abort_sends(futures)
+            _raise_provider_failure(futures)
             raise
         finally:
             stop.halted.set()
@@ -1156,6 +1162,17 @@ def _completed_batches(futures: list[Future]) -> Iterator[tuple[_Batch, JevRespo
         failure = failure or sent.error
     if failure is not None:
         raise failure
+
+
+def _raise_provider_failure(aborted: list[Future]) -> None:
+    """The first real failure among settled batches an interrupt aborted, so it never lives only in
+    the journal; the abort's own errors are not failures."""
+    for future in aborted:
+        if future.cancelled() or future.exception() is not None:
+            continue
+        error = future.result().error
+        if error is not None and not isinstance(error, ABORTED_SEND_ERRORS):
+            raise error
 
 
 def _is_async(client: object) -> bool:

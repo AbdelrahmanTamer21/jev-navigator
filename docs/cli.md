@@ -186,7 +186,7 @@ Check the command's exit status before reading a result file:
 | `0` | A search finished and wrote its result. Read `search.outcome`; this does not guarantee a match. |
 | `1` | Search, configuration, filesystem or provider failure. Read stderr. |
 | `2` | Invalid command or request. Read stderr. |
-| `130` | Cancelled with Ctrl-C. Existing journal records remain available. A provider failure that arrives while the search is cancelling exits `1` with that failure instead. |
+| `130` | Cancelled with Ctrl-C. Existing journal records remain available. A provider failure that arrives while the command is cancelling exits `1` with that failure instead. |
 
 The evidence directory contains `report.md`, `manifest.json`, `journal.jsonl` and `answers.jsonl`.
 Every answer also goes to the shared answer store (see `--answer-store`), which holds no code; a later
