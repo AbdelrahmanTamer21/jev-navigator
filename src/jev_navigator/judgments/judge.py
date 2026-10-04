@@ -368,8 +368,9 @@ class Judge:
         served model is still unknown and an answer store is present, the first batch pins the model
         before the remaining batches look in the store. A batch refused for its size comes back as
         its halves, which are sent one per wave before any other batch, as on the sync path. A failed
-        batch stops the batches still waiting for a slot; the wave settles whole before its failure
-        is raised, so no request of the call is still running when the error comes out."""
+        batch stops the batches still waiting for a slot of this call; one already waiting for a
+        judge-wide send slot still sends. The wave settles whole before its failure is raised, so no
+        request of the call is still running when the error comes out."""
         plan = self._check_plan(checks, items, shared, list_name, thresholds)
         queue = _WaveQueue(list(plan.batches))
         slots = asyncio.Semaphore(self.max_concurrency)
@@ -687,8 +688,9 @@ class Judge:
         stable order, so a capped call always answers the same batches. A batch refused for its size
         comes back as its halves, which are sent one per wave before any other batch (see
         ``_WaveQueue``), so they never take a call from their own wave. The first failure stops
-        every request not yet sent and raises after every batch already sending has yielded what it
-        answered."""
+        every batch that has not started, and raises after every batch already started has yielded
+        what it answered. A batch that started and is still waiting for a judge-wide send slot when
+        the failure comes still sends."""
         queue = _WaveQueue(list(plan.batches))
         if not queue:
             return
