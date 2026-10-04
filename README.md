@@ -277,7 +277,9 @@ applies every rule now.
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator import operations, comments
 
-index = CodeIndex.from_git(repo_root, prefixes=("app/", "web/"))
+index = CodeIndex.from_directory(repo_root, prefixes=("app/", "web/"))  # tracked or not, minus ignored
+index.not_indexed_files  # {"node_modules/": "ignored", ...}: every file or folder left out, with the reason
+tracked = CodeIndex.from_git(repo_root, ["app/orders.py"])  # only what git tracks; the rest is not_indexed
 old = CodeIndex.at_commit(repo_root, "abc123", prefixes=("app/",))  # from git objects, checkout untouched
 index.find_definition("LIMITS_KEY")  # functions, classes, constants, assignments, types, enums
 index.find_callers("validate_order")  # CallSite(file, line, caller, binding), found by name

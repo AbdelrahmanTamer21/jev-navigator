@@ -290,7 +290,7 @@ JSON stdout contains `output_directory`, `manifest`, `report`, `trace`, `provide
 (`null` for trace). Progress and requests stay on stderr. See `trace.outcome`, its obligations and
 `unresolved_links` before interpreting coverage; `trace.unavailable_files` names, with the reason, each
 file the index has no facts for (gone or changed on disk, or refused by the parser), and report.md lists
-them. Ctrl-C stops the command with exit 130; an abrupt
+them. `trace.not_indexed_files` names each file or folder the listing left out, such as an ignored one, and report.md counts them by reason and top folder. Ctrl-C stops the command with exit 130; an abrupt
 interruption can leave the journal and answer store without a final manifest. The library also
 offers cooperative cancellation between traversal steps and model batches that writes a partial
 pack.
