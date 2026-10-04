@@ -326,6 +326,7 @@
     ],
     "steps": 2,
     "unavailable_files": {},
+    "not_indexed_files": {},
     "unparsed_files": [],
     "unsure": []
   },

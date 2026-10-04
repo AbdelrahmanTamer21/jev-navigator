@@ -137,6 +137,7 @@ def create_statistics_pack(
             "complete": coverage.complete,
             "statement": coverage.statement,
             "unavailable": dict(index.unavailable_files),
+            "not_indexed": index.not_indexed_files,
         },
         "limits": [*_LIMITS, *([_HOLDING_LIMIT] if not held else [])],
     }
@@ -404,6 +405,10 @@ def _coverage_report(pack: dict) -> list[str]:
             f"`scope.unparsed` ({named}): what those files hold is unknown, not absent, so every "
             "count taken above them is a floor.",
         ]
+    not_indexed = pack["coverage"]["not_indexed"]
+    if not_indexed:
+        named = ", ".join(f"`{path}` ({reason})" for path, reason in sorted(not_indexed.items()))
+        lines += ["", f"Not indexed, so outside every count above: {named}."]
     lines += [""] + [f"{number}. {limit}" for number, limit in enumerate(pack["limits"], start=1)]
     return lines
 

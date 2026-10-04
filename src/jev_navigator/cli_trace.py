@@ -188,6 +188,7 @@ def _manifest(
             "excluded": [_span_json(span) for span in result.excluded],
             "unresolved_links": [_link_json(link) for link in result.unresolved_links],
             "unavailable_files": index.unavailable_files,
+            "not_indexed_files": index.not_indexed_files,
         },
     }
 
@@ -256,7 +257,7 @@ def _link_json(link) -> dict:
 
 
 def unavailable_file_lines(files: Mapping[str, str]) -> list[str]:
-    """One report line per file the index has no facts for, with the reason."""
+    """One report line per file the index has no facts for, or never listed, with the reason."""
     return [f"- `{file}`: {reason}" for file, reason in sorted(files.items())]
 
 
@@ -311,6 +312,8 @@ def _report(manifest: dict) -> str:
             ]
     if trace["unavailable_files"]:
         lines += ["", "## Files without facts", "", *unavailable_file_lines(trace["unavailable_files"])]
+    if trace["not_indexed_files"]:
+        lines += ["", "## Files not indexed", "", *unavailable_file_lines(trace["not_indexed_files"])]
     lines += ["", "## Unresolved static links", ""]
     if not trace["unresolved_links"]:
         lines.append("Every static link in the walked component is resolved.")

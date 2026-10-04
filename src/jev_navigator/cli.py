@@ -441,7 +441,9 @@ def create_evidence_pack(
             )
         if enumeration is not None:
             manifest["seed_search"] = previous["seed_search"] if resuming_enumeration else manifest["search"]
-            manifest["search"] = _find_all_summary(enumeration, judge.calls, duration_seconds, previous)
+            manifest["search"] = _find_all_summary(
+                enumeration, judge.calls, duration_seconds, previous, index.not_indexed_files
+            )
         if not keep_requests:
             _drop_code(manifest, index)
         _write_json(output / "manifest.json", manifest)
@@ -995,6 +997,7 @@ def _manifest(
                 "pending": list(result.parser_scans_pending),
             },
             "unavailable_files": {**result.unavailable_files, **(scope_unavailable or {})},
+            "not_indexed_files": index.not_indexed_files,
             "history": [
                 *old_search.get("history", []),
                 *([step.to_json() for step in result.history.steps] if result.history else []),
@@ -1038,7 +1041,9 @@ def _step_without_code(step: dict, index: CodeIndex) -> dict:
     return shown
 
 
-def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previous: dict | None) -> dict:
+def _find_all_summary(
+    result: FindAllResult, calls: int, elapsed: float, previous: dict | None, not_indexed: dict[str, str]
+) -> dict:
     old_search = previous["search"] if previous else {}
 
     def answer(value):
@@ -1067,6 +1072,7 @@ def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previou
         "unparsed_files": sorted(result.unparsed_files),
         "unsupported_files": list(result.unsupported_files),
         "unavailable_files": dict(result.unavailable_files),
+        "not_indexed_files": dict(not_indexed),
         "graph": asdict(result.graph),
     }
 
@@ -1098,8 +1104,9 @@ def _find_all_report(manifest: dict) -> str:
     lines += ["", "## Coverage gaps", ""]
     for field in ("remaining_files", "unparsed_files", "unsupported_files"):
         lines.append(f"- {field}: {', '.join(search[field]) or 'none'}")
-    lines.append("- unavailable_files:" if search["unavailable_files"] else "- unavailable_files: none")
-    lines += unavailable_file_lines(search["unavailable_files"])
+    for field in ("unavailable_files", "not_indexed_files"):
+        lines.append(f"- {field}:" if search[field] else f"- {field}: none")
+        lines += unavailable_file_lines(search[field])
     lines += ["", "## Matching bodies", ""]
     for value in search["found"]:
         source = value["source"]
@@ -1186,13 +1193,18 @@ def _outcome_summary(search: dict) -> str:
     judged, read, total = search["files_judged"], search["files_read"], search["code_files"]
     seen = f"Jev judged code in {judged} of {total} files"
     if outcome == "nothing_left":
-        return f"{outcome} (nothing left worth opening: {seen}; all {total} were read)"
-    parts = [f"not found: {seen}", f"{read - judged} more were read only to list links"]
-    parts.append(f"{total - read} never reached")
-    if search["unparsed_files"]:
-        parts.append(f"{len(search['unparsed_files'])} parsed only partly")
-    if search["unavailable_files"]:
-        parts.append(f"{len(search['unavailable_files'])} gone from disk")
+        parts = [f"nothing left worth opening: {seen}", f"all {total} were read"]
+    else:
+        parts = [f"not found: {seen}", f"{read - judged} more were read only to list links"]
+        parts.append(f"{total - read} never reached")
+        if search["unparsed_files"]:
+            parts.append(f"{len(search['unparsed_files'])} parsed only partly")
+        if search["unavailable_files"]:
+            parts.append(
+                f"{len(search['unavailable_files'])} unavailable (gone, changed or refused by the parser)"
+            )
+    if search.get("not_indexed_files"):
+        parts.append(f"{len(search['not_indexed_files'])} not indexed, such as ignored")
     return f"{outcome} ({'; '.join(parts)})"
 
 
@@ -1239,6 +1251,9 @@ def _report(manifest: dict) -> str:
         "- Files unavailable (disappeared or changed on disk, or refused by the parser): "
         f"{len(search['unavailable_files'])}.",
         *unavailable_file_lines(search["unavailable_files"]),
+        f"- Files and folders not indexed (ignored, or otherwise left out of the listing): "
+        f"{len(search['not_indexed_files'])}.",
+        *unavailable_file_lines(search["not_indexed_files"]),
         "",
         "## Opened code",
         "",

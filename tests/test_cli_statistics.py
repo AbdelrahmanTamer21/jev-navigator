@@ -137,7 +137,7 @@ def test_a_pack_writes_both_files_and_measures_the_whole_scope_in_one_parser_pas
     assert pack["scope"]["measured"] == ["app/basket.py", "web/cart.ts"]
     assert pack["scope"]["skipped"] == ["docs/notes.md"]
     assert pack["scope"]["unmeasured"] == [] and pack["scope"]["unparsed"] == []
-    assert pack["coverage"] == {"complete": True, "statement": "", "unavailable": {}}
+    assert pack["coverage"] == {"complete": True, "statement": "", "unavailable": {}, "not_indexed": {}}
     assert pack["limits"][0].startswith("Symbols come from the index's own parser")
 
     # Assert: what was measured stays whole in the document, while the count of it is only a summary
@@ -368,6 +368,21 @@ def test_a_file_that_could_not_be_measured_stays_a_gap_and_not_a_zero(tmp_path: 
     assert pack["counts"]["per_file"]["ops/broken.ts"]["symbol_lines"] == 3
     assert "so the count is a floor" in document
     assert pack["largest"]["caveat"] == pack["coverage"]["statement"]
+
+
+def test_a_pack_names_each_file_the_listing_left_out_as_not_indexed(tmp_path: Path) -> None:
+    # Arrange: outside git, ripgrep's ignore files decide what is listed
+    root = _write(tmp_path, {".ignore": "dist/\n", "ops/ties.ts": TIES, "dist/ties.ts": TIES})
+
+    # Act
+    pack = create_statistics_pack(root, (), tmp_path / "pack", fact_cache_dir=tmp_path / "facts")
+
+    # Assert
+    assert pack["coverage"]["not_indexed"] == {"dist/": "ignored"}
+    assert (
+        "Not indexed, so outside every count above: `dist/` (ignored)."
+        in (tmp_path / "pack" / "statistics.md").read_text()
+    )
 
 
 def test_an_empty_scope_measures_nothing_and_fills_no_gap(

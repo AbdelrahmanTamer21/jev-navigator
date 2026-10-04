@@ -415,6 +415,21 @@ def test_second_pack_replays_the_persisted_answers_from_the_store(tmp_path: Path
     )
 
 
+def test_trace_names_each_ignored_file_as_not_indexed(tmp_path: Path) -> None:
+    # Arrange
+    repository = _workflow_repository(tmp_path)
+    (repository / ".gitignore").write_text("build/\n")
+    (repository / "build").mkdir()
+    (repository / "build" / "respond.py").write_text("def respond():\n    return 1\n")
+
+    # Act
+    manifest = _pack(repository, tmp_path / "pack", _evidence_client())
+
+    # Assert
+    assert manifest["trace"]["not_indexed_files"] == {"build/": "ignored"}
+    assert "`build/`: ignored" in (tmp_path / "pack" / "report.md").read_text()
+
+
 def test_trace_names_each_file_the_parser_refused_with_its_reason(tmp_path: Path) -> None:
     # Arrange: a one-line bundle mentioning respond is too large to parse
     repository = _workflow_repository(tmp_path)

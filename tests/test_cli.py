@@ -80,7 +80,19 @@ def test_an_empty_find_reports_how_much_of_the_scope_it_examined(tmp_path: Path)
                 "unavailable_files": {"b.py": "disappeared after inventory"},
             },
             "scope_incomplete (not found: Jev judged code in 1 of 7 files; 4 more were read only to list "
-            "links; 2 never reached; 1 parsed only partly; 1 gone from disk)",
+            "links; 2 never reached; 1 parsed only partly; 1 unavailable (gone, changed or refused by the "
+            "parser))",
+        ),
+        (
+            {
+                "outcome": "nothing_left",
+                "files_judged": 1,
+                "files_read": 1,
+                "code_files": 1,
+                "not_indexed_files": {"vendor/": "ignored"},
+            },
+            "nothing_left (nothing left worth opening: Jev judged code in 1 of 1 files; all 1 were read; "
+            "1 not indexed, such as ignored)",
         ),
         ({"outcome": "budget", "files_judged": 1, "files_read": 1, "code_files": 6}, "budget"),
         ({"outcome": "scope_incomplete", "coverage": "partial"}, "scope_incomplete"),
@@ -1277,6 +1289,43 @@ def test_a_store_named_inside_jvns_cache_folder_stops_the_run_with_exit_2(
 
 
 REFUSED_BUNDLE = ("export function admit(){return 1};" * 6_000)[:200_000]
+
+
+def test_find_and_findall_reports_name_each_ignored_file_as_not_indexed(tmp_path: Path) -> None:
+    # Arrange
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            ".gitignore": "vendor/\n",
+            "entry.py": "from policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "policy.py": "def admit(item):\n    return len(item) <= 3\n",
+        },
+    )
+    (repository / "vendor").mkdir()
+    (repository / "vendor" / "limits.py").write_text("def limit(item):\n    return len(item) <= 3\n")
+    reports = {}
+
+    # Act
+    for workflow in ("find", "findall"):
+        output = tmp_path / workflow
+        manifest = create_evidence_pack(
+            repository,
+            (),
+            "the item count limit check",
+            ("entry.py:4",),
+            output,
+            SearchBudget(beam_width=1),
+            ScriptedJevClient(default_noul=0.04),
+            workflow=workflow,
+            fact_cache_dir=tmp_path / "facts",
+        )
+        reports[workflow] = ((output / "report.md").read_text(), manifest["search"]["not_indexed_files"])
+
+    # Assert
+    for report, not_indexed in reports.values():
+        assert not_indexed == {"vendor/": "ignored"}
+        assert "`vendor/`: ignored" in report
 
 
 def test_find_and_findall_reports_name_each_refused_file_with_its_reason(tmp_path: Path) -> None:
