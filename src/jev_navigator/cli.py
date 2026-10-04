@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import MutableMapping, Sequence
+from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -70,7 +70,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     output = Path(args.out).expanduser() if args.out else _default_output(repository)
     client: TypeSafeJevClient | None = None
     try:
-        _load_typesafe_environment(os.environ)
+        load_typesafe_environment(os.environ)
         client = TypeSafeJevClient()  # model=None resolves TYPESAFE_DEFAULT_MODEL in the adapter
         if args.command == "trace":
             manifest = create_trace_evidence_pack(
@@ -821,16 +821,6 @@ def _scope_warning(file_count: int) -> str | None:
     if file_count <= 20_000:
         return None
     return f"jvn: large scope contains {file_count:,} tracked files; indexing may take longer"
-
-
-def _load_typesafe_environment(
-    environment: MutableMapping[str, str],
-    path: Path | None = None,
-) -> None:
-    """Load official TypeSafe SDK settings: process environment, then this tool's checkout `.env`
-    (never a repository under analysis), then the legacy `~/.config/jvn/env`; a process value always
-    takes precedence."""
-    load_typesafe_environment(environment, legacy=path)
 
 
 def _parse_start(index: CodeIndex, value: str) -> Place:

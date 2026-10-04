@@ -16,12 +16,12 @@ from isolated_jvn import JVN
 from jev_navigator import cli, environment
 from jev_navigator.cli import (
     SCHEMA_VERSION,
-    _load_typesafe_environment,
     _scope_warning,
     create_evidence_pack,
     main,
 )
 from jev_navigator.directives.find_code import SearchBudget
+from jev_navigator.environment import load_typesafe_environment
 from jev_navigator.testing import ScriptedJevClient
 
 
@@ -150,7 +150,7 @@ def test_budget_pack_reopens_its_saved_frontier_in_a_second_cli_invocation(
         clients.append(instance)
         return instance
 
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
     monkeypatch.setattr(cli, "TypeSafeJevClient", client)
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -452,7 +452,7 @@ def offline_main(monkeypatch: pytest.MonkeyPatch) -> dict:
         calls["packs"].append(signature.bind(*args, **kwargs).arguments)
         return {"search": {"outcome": calls["outcome"], "calls": 1}, "provider": {"requested_model": "test"}}
 
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
     monkeypatch.setattr(cli, "TypeSafeJevClient", Client)
     monkeypatch.setattr(cli, "create_evidence_pack", create_evidence_pack)
     return calls
@@ -514,7 +514,7 @@ def test_each_existing_typesafe_environment_value_wins_independently(tmp_path: P
     path.write_text("TYPESAFE_API_KEY=file-key\nTYPESAFE_BASE_URL=http://file.example/gateway\n")
     environment = {"TYPESAFE_API_KEY": "process-key"}
 
-    _load_typesafe_environment(environment, path)
+    load_typesafe_environment(environment, legacy=path)
 
     assert environment == {
         "TYPESAFE_API_KEY": "process-key",
@@ -531,7 +531,7 @@ def test_user_dotenv_loads_only_settings_and_never_shell_evaluates(tmp_path: Pat
     )
     environment: dict[str, str] = {}
 
-    _load_typesafe_environment(environment, path)
+    load_typesafe_environment(environment, legacy=path)
 
     assert environment == {
         "TYPESAFE_API_KEY": "file-value",
@@ -576,7 +576,7 @@ def test_dotenv_base_url_reaches_the_real_sdk_system_one_endpoint(
             "TYPESAFE_API_KEY=local-viewer-key\n"
             f"TYPESAFE_BASE_URL=http://127.0.0.1:{server.server_port}/jvn\n"
         )
-        _load_typesafe_environment(os.environ, path)
+        load_typesafe_environment(os.environ, legacy=path)
 
         answer = TypeSafeJevClient().ask(
             {"code": "return wanted"},
@@ -608,7 +608,7 @@ def test_find_defaults_to_unique_results_under_invocation_directory(
     repository.mkdir(exist_ok=True)
     (repository / "policy.py").write_text("def admit(item):\n    return len(item) <= 3\n")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
 
     class Client(ScriptedJevClient):
         def close(self):
