@@ -60,7 +60,7 @@ BATCHING_RULE = "unit-place-order-count-and-box-v1"
 character box. Recorded on every stored answer; the batch membership hash in the item key already
 tells two batches apart."""
 DEFAULT_MAX_CONCURRENCY = 16
-"""How many batches of one synchronous judging call are in flight at once."""
+"""How many batches of one judging call are in flight at once, on the sync and the async path."""
 CODE_FIELD = "code"
 ROUTE_QUESTION = "route"
 _DEFAULT_MASKER = SecretMasker()
@@ -161,7 +161,7 @@ class Judge:
     single search, its own counter on the same client, store and journal; every scope adds its calls
     to its parent, and ``max_calls`` caps a judge together with all of its scopes.
     ``items_per_request`` caps the items of one batched request, and ``max_concurrency`` bounds how
-    many batches of one synchronous judging call are in flight."""
+    many batches of one judging call are in flight, sync or async."""
 
     def __init__(
         self,

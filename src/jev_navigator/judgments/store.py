@@ -1,8 +1,9 @@
 """Every Jev answer is kept: by request hash for replay, and by item content for reuse on the next scan.
 
 A record holds hashes, question ids (each with its wording hash), raw answers, the served model, the
-thresholds in force, and the source (file, line range, commit) of every code item it judged, so the
-request can be rebuilt from the repository at that commit. It holds no request text unless
+thresholds in force, and the source (file, line range, commit) of every code item it judged, so a
+request can be rebuilt from the repository at that commit, exactly unless its items carried a field
+that can quote code, which is withheld (see ``rebuild``). It holds no request text unless
 ``keep_requests`` is set, because a request carries code the library cannot know the owner of; set
 it only for your own or open-source code.
 

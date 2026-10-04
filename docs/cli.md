@@ -189,7 +189,8 @@ Check the command's exit status before reading a result file:
 
 The evidence directory contains `report.md`, `manifest.json`, `journal.jsonl` and `answers.jsonl`.
 Every answer also goes to the shared answer store (see `--answer-store`), which holds no code; a later
-run at the same commit replays from it after one live request that learns the served model, and copies
+run at the same commit replays from it after the live requests that learn the served model (one for
+`findall` and `trace`, one per place the first round of `find` opens, up to `--beam-width`), and copies
 what it replays into its own `answers.jsonl`. Find All and Trace items carry the commit and file
 hashes, so a run on a new commit asks again.
 Budget-stopped and cancelled packs also contain `resume.json`.
