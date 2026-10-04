@@ -9,9 +9,9 @@ from __future__ import annotations
 import re
 import tempfile
 import threading
+import weakref
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from functools import cache
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
@@ -31,6 +31,7 @@ from .languages import (
     declares_value,
     language_of,
 )
+from .memo import memoized
 from .name_table import CALL, DEFINITION_KINDS, REFERENCE, FileEntry, NameRow, NameTable, git_blob_id
 from .packages import Packages
 from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch, Unparsed, scan_facts
@@ -101,9 +102,9 @@ class CodeIndex:
         self._unavailable: dict[str, str] = {}
         self._refused: dict[str, str] = {}
         self._not_indexed = dict(not_indexed or {})
-        self._sources = SourceFiles(self.root, self._unavailable, LINE_CACHE_FILES, self._standing_first_read)
-        self._script_paths_in = cache(self._read_script_paths)
-        self._packages = cache(self._read_packages)
+        self._sources = SourceFiles(
+            self.root, self._unavailable, LINE_CACHE_FILES, _held_weakly(self._standing_first_read)
+        )
         self._unparsed = Unparsed()
         self._facts: dict[str, FileFacts] = {}
         self._facts_lock = threading.RLock()
@@ -119,17 +120,6 @@ class CodeIndex:
         self._file_order: dict[str, int] = {}
         self._reached: set[str] = set()
         self._incomplete_in_table: frozenset[str] = frozenset()
-        self._named = cache(self._places_named)
-        self._text_hits = cache(self._search_text)
-        self._co_changes = cache(self._read_co_changes)
-        self._calls_named = cache(self._calls_with_name)
-        self._references_named = cache(self._references_with_name)
-        self._definitions = cache(self._definitions_by_name)
-        self._top_level_in = cache(self._top_level_spans)
-        self._names_imported = cache(self._read_imported_names)
-        self._binding = cache(self._compute_binding)
-        self._nameable = cache(self._nameable_definitions)
-        self._unread_names = cache(self._read_unread_names)
 
     @classmethod
     def from_git(
@@ -370,16 +360,17 @@ class CodeIndex:
 
     def find_definition(self, name: str) -> tuple[Span, ...]:
         """Functions, classes, and module-level constants, assignments, types, interfaces and enums."""
-        return self._definitions(name)
+        return self._definitions_by_name(name)
 
     def find_callers(self, name: str) -> tuple[CallSite, ...]:
         """Calls to ``name`` found by name in the syntax tree, each with its binding status. When one
         line holds both ``x.name(...)`` and ``name(...)``, the plain call stands for that line."""
         sites: dict[tuple[str, int], str | None] = {}
-        for call in self._calls_named(name):
+        for call in self._calls_with_name(name):
             key = (call.file, call.line)
             if call.name == name and (key not in sites or call.receiver is None):
                 sites[key] = call.receiver
+        self._load_facts_for_bindings(name, (file for file, _ in sites))
         return tuple(
             CallSite(
                 file, line, self.enclosing_symbol(file, line), self.binding_of(file, line, name, receiver)
@@ -389,7 +380,7 @@ class CodeIndex:
 
     def call_site_count(self, name: str) -> int:
         """How many call sites in scope call ``name``; a name called from fewer places is more specific."""
-        return len(self._calls_named(name))
+        return len(self._calls_with_name(name))
 
     def find_callees(self, function: Span) -> tuple[str, ...]:
         """Names called inside ``function``; see ``callee_edges`` for their bindings."""
@@ -415,7 +406,9 @@ class CodeIndex:
         holder and binding. Code reached this way (a callback, a registry entry, a parameter typed
         with a class) has no call edge to follow. A member passed as an argument (``self.handler``)
         is bound like a method call on an unknown receiver, never proven by a same-named function."""
-        return self._references(self._references_named(name))
+        matches = self._references_with_name(name)
+        self._load_facts_for_bindings(name, (match.file for match in matches))
+        return self._references(matches)
 
     def references_in(self, function: Span) -> tuple[Reference, ...]:
         """Names ``function`` passes on without calling them, limited to names defined in scope."""
@@ -435,7 +428,7 @@ class CodeIndex:
         declaration a type can name, an export any definition, and a call or any other use (an
         argument, receiver, condition, decorator...) a function, class or declaration a value can
         name, such as a module constant holding a callable."""
-        return self._binding(file, line, name, receiver, role)
+        return self._compute_binding(file, line, name, receiver, role)
 
     def _references(self, matches: Iterable[ReferenceMatch]) -> tuple[Reference, ...]:
         matches = sorted(set(matches))
@@ -451,6 +444,7 @@ class CodeIndex:
             for match in matches
         )
 
+    @memoized
     def _compute_binding(
         self, file: str, line: int, name: str, receiver: str | None, role: str | None
     ) -> Binding:
@@ -458,7 +452,7 @@ class CodeIndex:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
                 return injected
-        definitions, top_level = self._nameable(name, role)
+        definitions, top_level = self._nameable_definitions(name, role)
         facts = CallFacts(
             file,
             name,
@@ -470,11 +464,22 @@ class CodeIndex:
         )
         return binding_from_facts(facts)
 
+    def _load_facts_for_bindings(self, name: str, use_files: Iterable[str]) -> None:
+        """Loads, in one scan, the facts that binding the uses of ``name`` reads: the files the uses
+        sit in and the files that define the name. With a warm table and an empty fact cache they
+        would otherwise load one file per scan. A name nothing uses loads nothing."""
+        uses = tuple(use_files)
+        if not uses:
+            return
+        definition_files = (span.file for span in self.find_definition(name))
+        self._ensure_facts(tuple(dict.fromkeys((*uses, *definition_files))))
+
+    @memoized
     def _nameable_definitions(self, name: str, role: str | None) -> tuple[tuple[Span, ...], tuple[Span, ...]]:
         """The definitions of ``name`` a use in ``role`` can name, and those of them at top level.
         Neither depends on where the use sits, so every use of a name shares them."""
         definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
-        return definitions, tuple(span for span in definitions if span in self._top_level_in(span.file))
+        return definitions, tuple(span for span in definitions if span in self._top_level_spans(span.file))
 
     def _files_hiding(self, name: str) -> frozenset[str]:
         """Where a definition of ``name`` could sit unseen: a file gone from the disk, or an unparsed or
@@ -482,9 +487,10 @@ class CodeIndex:
         lines that never mention the name cannot hold one. Every file that mentions it has already
         been scanned to look for its definitions, so the answer does not depend on scan order."""
         unread = (*self._known_unparsed(), *self._refused)
-        mentioning = (file for file in unread if name in self._unread_names(file))
+        mentioning = (file for file in unread if name in self._read_unread_names(file))
         return frozenset(mentioning) | self._unavailable.keys()
 
+    @memoized
     def _read_unread_names(self, file: str) -> frozenset[str]:
         """The words on the lines of ``file`` that its ERROR nodes span; the whole file's words while
         its facts are still being recorded, or when the parser refused it."""
@@ -500,6 +506,7 @@ class CodeIndex:
             return _NO_STRUCTURE
         return self._facts_in(file).structure
 
+    @memoized
     def _definitions_by_name(self, name: str) -> tuple[Span, ...]:
         definitions = {
             Span(file, row.start, row.end, name): None
@@ -517,12 +524,14 @@ class CodeIndex:
         first_line = self.read_slice(Span(span.file, span.start, span.start)).text
         return declares_type(first_line) if role == "type" else declares_value(first_line)
 
+    @memoized
     def _calls_with_name(self, name: str) -> tuple[CallMatch, ...]:
         return tuple(
             CallMatch(file, row.start, name, row.receiver)
             for file, row in self._readable_places(name, (CALL,))
         )
 
+    @memoized
     def _references_with_name(self, name: str) -> tuple[ReferenceMatch, ...]:
         return tuple(
             ReferenceMatch(file, row.start, row.role or "", name, row.receiver)
@@ -532,10 +541,11 @@ class CodeIndex:
     def _readable_places(self, name: str, kinds: Sequence[str]) -> Iterator[tuple[str, NameRow]]:
         """The places of ``name`` of ``kinds`` in files still readable: a file that disappeared or
         changed since the scope was covered answers nothing."""
-        for file, row in self._named(name):
+        for file, row in self._places_named(name):
             if row.kind in kinds and file not in self._unavailable:
                 yield file, row
 
+    @memoized
     def _places_named(self, name: str) -> tuple[tuple[str, NameRow], ...]:
         """Every place in scope ``name`` sits, as (file, row), in file order and then in the order of
         the file's facts: definitions first, symbols before declarations."""
@@ -669,6 +679,7 @@ class CodeIndex:
                     raise
                 files = available
 
+    @memoized
     def _top_level_spans(self, file: str) -> frozenset[Span]:
         """Symbols and declarations of ``file`` that no class or other function contains. A function
         starting on a declaration's first line is the value it declares, not its container."""
@@ -682,10 +693,12 @@ class CodeIndex:
         return frozenset((*top_symbols, *top_declarations))
 
     def _imported_from(self, file: str, name: str) -> tuple[ImportFact, ...]:
-        specifier = self._names_imported(file).get(name)
+        specifier = self._read_imported_names(file).get(name)
         if specifier is None:
             return ()
-        resolved = resolve_import(specifier, file, self._scope, self._script_paths(file), self._packages())
+        resolved = resolve_import(
+            specifier, file, self._scope, self._script_paths(file), self._read_packages()
+        )
         if resolved is None:
             return ()
         found = {resolved.path: resolved}
@@ -702,7 +715,7 @@ class CodeIndex:
                     exporter.path,
                     self._scope,
                     self._script_paths(exporter.path),
-                    self._packages(),
+                    self._read_packages(),
                 )
                 if target is None:
                     continue
@@ -723,6 +736,7 @@ class CodeIndex:
                 pending.append(inherited)
         return tuple(found.values())
 
+    @memoized
     def _read_imported_names(self, file: str) -> dict[str, str]:
         return imported_names("\n".join(self._lines_of(file)), file)
 
@@ -744,8 +758,9 @@ class CodeIndex:
 
     def search_text(self, text: str, max_hits: int = MAX_TEXT_HITS) -> tuple[TextHit, ...]:
         """Lines holding ``text``, searched once per text for the life of the index."""
-        return self._text_hits(text, max_hits)
+        return self._search_text(text, max_hits)
 
+    @memoized
     def _search_text(self, text: str, max_hits: int) -> tuple[TextHit, ...]:
         found = self._on_available(
             self._available_files(self.files),
@@ -757,7 +772,7 @@ class CodeIndex:
     def imports(self, file: str) -> tuple[str, ...]:
         source = "\n".join(self._lines_of(file))
         script_paths = self._script_paths(file)
-        packages = self._packages()
+        packages = self._read_packages()
         resolved = (
             resolve_import(specifier, file, self._scope, script_paths, packages)
             for specifier in imported_modules(source, file)
@@ -768,7 +783,7 @@ class CodeIndex:
         """The scope files ``text``, lines of ``file``, imports from, in source order, each with the
         names it takes by name or None for the whole module."""
         script_paths = self._script_paths(file)
-        packages = self._packages()
+        packages = self._read_packages()
         found: dict[str, tuple[ImportFact, frozenset[str] | None]] = {}
         for specifier, names in module_imports(text, file):
             fact = resolve_import(specifier, file, self._scope, script_paths, packages)
@@ -789,8 +804,9 @@ class CodeIndex:
         """Scope files most often committed together with ``file``, with their shared-commit counts;
         the history is read once per file for the life of the index."""
         self._require_in_scope(file)
-        return self._co_changes(file)[:limit]
+        return self._read_co_changes(file)[:limit]
 
+    @memoized
     def _read_co_changes(self, file: str) -> tuple[CoChange, ...]:
         if not self.commit:
             return ()
@@ -825,11 +841,13 @@ class CodeIndex:
 
     def _script_paths(self, file: str) -> ScriptPaths | None:
         """The path aliases of the configs nearest to a script file, read once per directory."""
-        return None if file.endswith(".py") else self._script_paths_in(str(PurePosixPath(file).parent))
+        return None if file.endswith(".py") else self._read_script_paths(str(PurePosixPath(file).parent))
 
+    @memoized
     def _read_script_paths(self, directory: str) -> ScriptPaths | None:
         return nearest_script_paths(self.root, directory)
 
+    @memoized
     def _read_packages(self) -> Packages:
         """The package.json files of the folders holding scope files, read once, on first use."""
         return Packages(self.root, self.files)
@@ -886,6 +904,13 @@ class CodeIndex:
     def _require_in_scope(self, file: str) -> None:
         if file not in self._scope:
             raise ValueError(f"{file} is outside the index scope")
+
+
+def _held_weakly(method: Callable[..., _Result]) -> Callable[..., _Result]:
+    """``method``, called through a weak reference to its object, so whatever holds the returned
+    function never keeps that object alive."""
+    weak = weakref.WeakMethod(method)
+    return lambda *args: weak()(*args)
 
 
 def _blobs_to_export(repository: Path, commit: str, listed: Sequence[str]) -> dict[str, str]:

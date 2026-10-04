@@ -6,10 +6,11 @@ from pathlib import Path
 import pytest
 from git_repos import commit_files
 
+from jev_navigator.adapters.routes import DREX_INPUT_LIMITS
 from jev_navigator.directives.entry import FILE_READ_CAP, MAX_OPTIONS, choose_initial_candidates
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS
-from jev_navigator.judgments.judge import Judge, request_exceeds_input_budget
+from jev_navigator.judgments.client import JEV_INPUT_LIMITS
+from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
 
 TARGET = "the function that computes how concentrated a set of probabilities is"
@@ -144,7 +145,7 @@ def test_all_options_of_a_request_fit_the_character_box_however_many_there_are(t
     options = _root_options(_index(tmp_path, crowded))
 
     assert len(options) == 190
-    assert sum(len(text) for text in options.values()) <= JEV_INPUT_BOX_CHARS
+    assert sum(len(text) for text in options.values()) <= JEV_INPUT_LIMITS.box_chars
 
 
 def test_anonymous_functions_and_calls_are_not_listed_as_symbols(
@@ -328,7 +329,7 @@ def test_a_long_target_leaves_the_request_inside_the_character_box(tmp_path: Pat
 
     assert client.requests
     for state, questions in client.requests:
-        assert not request_exceeds_input_budget(state, questions)
+        assert not JEV_INPUT_LIMITS.exceeded_by(state, questions)
 
 
 def test_a_level_wider_than_one_request_reads_only_the_files_of_the_options_shown(
@@ -412,4 +413,23 @@ def test_options_with_non_ascii_docs_and_names_keep_every_request_inside_the_box
     # Assert
     assert client.requests
     for state, questions in client.requests:
-        assert not request_exceeds_input_budget(state, questions)
+        assert not JEV_INPUT_LIMITS.exceeded_by(state, questions)
+
+
+def test_options_are_sized_to_the_box_of_the_client_that_sends_them(tmp_path: Path) -> None:
+    # Arrange: a route with Drex's box, a quarter of Jev's, and options whose non-ASCII docs cost
+    # their whole escape
+    doc = "计算一组概率的集中程度并返回置信度" * 8
+    files = {
+        f"mod{number:03d}.py": f'"""{doc}"""\ndef 函数_{number:03d}():\n    pass\n' for number in range(200)
+    }
+    client = ScriptedJevClient()
+    client.input_limits = DREX_INPUT_LIMITS
+
+    # Act
+    choose_initial_candidates(_index(tmp_path, files), Judge(client), TARGET)
+
+    # Assert
+    assert client.requests
+    for state, questions in client.requests:
+        assert not DREX_INPUT_LIMITS.exceeded_by(state, questions)

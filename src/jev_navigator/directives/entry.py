@@ -15,7 +15,6 @@ from pathlib import PurePosixPath
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.spans import Span
-from ..judgments.client import JEV_INPUT_BOX_CHARS
 from ..judgments.judge import Judge, PickResult
 from ..judgments.questions import Pick, serialized_chars
 from .places import Place, function_place, range_place
@@ -192,11 +191,11 @@ def _path_descriptions(index: CodeIndex, entries: Sequence[_PathEntry], mask: Ma
     ]
 
 
-def _description_limit(question: Pick, state: dict, option_count: int) -> int:
-    """Each option's share of the request box once the state and the question are paid for, so the
+def _description_limit(question: Pick, state: dict, option_count: int, box_chars: int) -> int:
+    """Each option's share of the client's box once the state and the question are paid for, so the
     options together always fit it."""
     fixed = serialized_chars(state) + serialized_chars(question.to_question({}))
-    share = (JEV_INPUT_BOX_CHARS - fixed) // max(option_count, 1) - OPTION_OVERHEAD_CHARS
+    share = (box_chars - fixed) // max(option_count, 1) - OPTION_OVERHEAD_CHARS
     return max(1, min(DESCRIPTION_CHARS, share))
 
 
@@ -204,7 +203,7 @@ def _offered(judge: Judge, question: Pick, state: dict, descriptions: Sequence[s
     """The descriptions as the request carries them and the receipt records them: masked first, then
     cut, so a cut can never split a secret the masker would have recognised."""
     mask = _mask_of(judge)
-    limit = _description_limit(question, state, len(descriptions))
+    limit = _description_limit(question, state, len(descriptions), judge.input_limits.box_chars)
     return [_bounded(mask(description), limit) for description in descriptions]
 
 

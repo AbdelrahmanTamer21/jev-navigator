@@ -36,7 +36,7 @@ Output defaults to a unique run folder under `~/.local/share/jev-navigator/runs/
 inspect the returned function, then trace it. Quote the entire natural-language argument once.
 Do not edit files in scope while a search runs: a file that changes is reported unavailable when the index reads it again, and a
 search that finds nothing then ends `scope_incomplete` instead of `nothing_left`. A file too large to
-parse safely (a one-line bundle of about 70,000 bytes or more) is never parsed: it is reported
+parse even alone (a large minified bundle, or many megabytes of generated code) is never parsed: it is reported
 unavailable with the reason "too large to parse", and it ends a not-found search the same way.
 
 For agents and pipelines, discover the current contract with `jvn schema find`, `jvn schema findall`
@@ -63,7 +63,8 @@ Read Find's outcome before claiming anything; no outcome proves the code is abse
 - `scope_incomplete` ("not found: Jev judged code in N of M files; K more were read only to list
   links; U never reached"): claim only that the places Jev judged, in N files, did not show it.
 - `nothing_left`: all files were read, Jev judged code in N. Claim nothing worth opening was left.
-- `budget` or `cancelled`: unfinished. Resume it; claim nothing about the rest.
+- `budget`, `cancelled` or `failed`: unfinished. Resume it; claim nothing about the rest. `failed`
+  exits 1 and names the error: fix its cause first.
 
 Find defaults to 24 live requests, Findall to 48. Only requests sent to the provider count: answers
 replayed from the answer store and local work are free, and `--max-calls none` removes the cap. After

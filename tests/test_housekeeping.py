@@ -3,6 +3,7 @@ for a while, and nothing outside JVN's own folders is ever touched."""
 
 from __future__ import annotations
 
+import gc
 import os
 import sqlite3
 import time
@@ -174,6 +175,50 @@ def test_a_name_table_no_jvn_used_for_three_days_goes(tmp_path: Path, private_ca
     assert not any(path.exists() for path in unused)
     assert recent.exists()
     assert NameTable().path.exists()
+
+
+def test_a_side_file_sqlite_removes_after_the_listing_counts_as_gone(tmp_path: Path) -> None:
+    # Arrange: housekeeping lists the name table with its side files while an index holds it open, as
+    # another JVN process would; the index then closes it, and SQLite removes those side files before
+    # housekeeping sizes them.
+    index = indexed(tmp_path / "repo", REPOSITORY)
+    table = NameTable().path
+    listed = housekeeping._NAMES.groups()[table]
+    del index
+    gc.collect()
+    vanished = sorted(path.name for path in listed if not path.exists())
+
+    # Act
+    sizes = {path.name: housekeeping._size(path) for path in listed}
+    item = housekeeping._group_item(listed)
+
+    # Assert
+    assert vanished == [f"{table.name}-shm", f"{table.name}-wal"]
+    assert [sizes[name] for name in vanished] == [0, 0]
+    assert sizes[table.name] == table.lstat().st_blocks * 512 > 0
+    assert item.paths == (table,)
+    assert item.bytes == sizes[table.name]
+
+
+def test_a_retired_table_another_process_removed_after_the_listing_is_left_out(
+    private_cache_root: Path,
+) -> None:
+    # Arrange: a retired table and its side file, listed, then removed by another JVN's housekeeping.
+    names = private_cache_root / "names"
+    names.mkdir(parents=True, exist_ok=True)
+    retired = [names / f"{'a' * 64}.sqlite", names / f"{'a' * 64}.sqlite-wal"]
+    for path in retired:
+        path.write_bytes(b"table")
+    listed = housekeeping._NAMES.groups()[retired[0]]
+    for path in retired:
+        path.unlink()
+
+    # Act
+    item = housekeeping._group_item(listed)
+
+    # Assert
+    assert sorted(listed) == retired
+    assert item is None
 
 
 def test_name_rows_go_once_their_files_went_unconfirmed_for_thirty_days(tmp_path: Path) -> None:

@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Protocol
 
 from .answers import JevResponse
+from .questions import serialized_chars
 
 LATEST_JEV = "jev-latest"
 
@@ -42,14 +44,45 @@ docs.typesafe.ai/models). The Engine measured it on 27.09.2026: 32,883 input tok
 JEV_REQUEST_TOKEN_LIMIT = 64_000
 """The input Jev accepts for a whole request; a request of 48,951 tokens was accepted."""
 
-JEV_INPUT_BOX_CHARS = chars_for_tokens(JEV_STATE_TOKEN_LIMIT)
-"""The character box for the state plus the longest single question: 76,800."""
 
-MAX_REQUEST_CHARS = chars_for_tokens(JEV_REQUEST_TOKEN_LIMIT)
-"""The character box for a whole request body: 153,600."""
+@dataclass(frozen=True)
+class InputLimits:
+    """A model's input limits in serialized characters: ``box_chars`` bounds the state plus the
+    longest single question, and ``request_chars`` the whole body when the provider documents a
+    bound for it (``None`` when it does not). Packing sends within them; a provider's typed refusal
+    stays authoritative."""
 
-QUESTION_RESERVE_CHARS = chars_for_tokens(2_000)
-"""What a state leaves free for the question that reads it."""
+    box_chars: int
+    request_chars: int | None = None
+
+    @classmethod
+    def from_tokens(cls, box_tokens: int, request_tokens: int | None = None) -> InputLimits:
+        request_chars = None if request_tokens is None else chars_for_tokens(request_tokens)
+        return cls(chars_for_tokens(box_tokens), request_chars)
+
+    def exceeded_by(self, state: Mapping, questions: Mapping) -> bool:
+        """Whether this request is outside the limits, measured in ASCII-escaped JSON
+        (``serialized_chars``), the one measure of every size box."""
+        longest_question = max((serialized_chars(question) for question in questions.values()), default=0)
+        if serialized_chars(state) + longest_question > self.box_chars:
+            return True
+        body = serialized_chars({"state": state, "questions": questions})
+        return self.request_chars is not None and body > self.request_chars
+
+    def tightest(self, other: InputLimits) -> InputLimits:
+        """The limits a request must keep to fit both."""
+        bounds = [limit for limit in (self.request_chars, other.request_chars) if limit is not None]
+        return InputLimits(min(self.box_chars, other.box_chars), min(bounds) if bounds else None)
+
+
+JEV_INPUT_LIMITS = InputLimits.from_tokens(JEV_STATE_TOKEN_LIMIT, JEV_REQUEST_TOKEN_LIMIT)
+"""Jev's limits: ``JEV_STATE_TOKEN_LIMIT`` for the state plus the longest question and
+``JEV_REQUEST_TOKEN_LIMIT`` for a body, in characters at ``REQUEST_CHARS_PER_TOKEN``."""
+
+
+def input_limits_of(client: object) -> InputLimits:
+    """The limits a client declares as ``input_limits``; a client that declares none is taken to be Jev."""
+    return getattr(client, "input_limits", JEV_INPUT_LIMITS)
 
 
 class JevClient(Protocol):
@@ -80,7 +113,13 @@ class UnansweredQuestionError(RuntimeError):
 
 
 class InputBudgetExceededError(RuntimeError):
-    """The provider refused a request whose input exceeded the model's input budget."""
+    """The provider refused a request whose input exceeded the model's input budget. A routed client
+    names the ``model`` that refused and its ``box_chars``, so the refusal is remembered under them."""
+
+    def __init__(self, message: str, *, model: str | None = None, box_chars: int | None = None) -> None:
+        super().__init__(message)
+        self.model = model
+        self.box_chars = box_chars
 
 
 def input_budget_error(error: BaseException) -> InputBudgetExceededError | None:

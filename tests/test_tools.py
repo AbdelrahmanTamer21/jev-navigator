@@ -3,11 +3,14 @@ from __future__ import annotations
 import stat
 import sys
 from pathlib import Path
+from typing import TypedDict
 
+import msgspec
 import pytest
 from git_repos import git
 
-from jev_navigator.index import tools
+from jev_navigator.index import file_shape, tools
+from jev_navigator.index.file_shape import Placement
 
 MISSING_OBJECT = "0" * 40
 
@@ -142,6 +145,34 @@ def test_a_process_killed_partway_through_a_line_reports_why_it_stopped(
     assert isinstance(failure.value.__cause__, ValueError)
 
 
+class _NeedsAFieldAstGrepNeverPrints(TypedDict):
+    neverPrinted: str
+
+
+def _parsed_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every file too big to be placed by its size alone is parsed alone: the side-by-side share is
+    lowered to the parser's base and the single-file limit lifted."""
+    monkeypatch.setattr(file_shape, "MAX_PARSE_PEAK_MB", file_shape.BASE_PEAK_MB)
+    monkeypatch.setattr(tools, "single_parse_limit_mb", lambda: float("inf"))
+
+
+@pytest.mark.parametrize("placement", [Placement.SIDE_BY_SIDE, Placement.ALONE])
+def test_a_whole_line_the_decoder_rejects_raises_the_decoders_error_not_the_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, placement: Placement
+) -> None:
+    # Arrange: ast-grep prints a whole match; the decoder expects a field ast-grep never prints
+    function = "def f():\n    return 1\n"
+    (tmp_path / "a.py").write_text(function * (file_shape.PARSEABLE_UP_TO_BYTES // len(function) + 1))
+    if placement is Placement.ALONE:
+        _parsed_alone(monkeypatch)
+    assert file_shape.placement_of(tmp_path, "a.py", tools.single_parse_limit_mb())[0] is placement
+    decode = msgspec.json.Decoder(_NeedsAFieldAstGrepNeverPrints).decode
+
+    # Act / Assert
+    with pytest.raises(msgspec.ValidationError):
+        list(tools.ast_grep_rules(VALID_RULE, ["a.py"], tmp_path, refused={}, decode=decode))
+
+
 def test_a_file_whose_name_starts_with_a_dash_is_scanned_as_a_file(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "-x.py").write_text("def x():\n    return 1\n")
@@ -153,8 +184,56 @@ def test_a_file_whose_name_starts_with_a_dash_is_scanned_as_a_file(tmp_path: Pat
     assert [match["file"] for match in matches] == ["-x.py"]
 
 
+def test_a_failed_scan_reports_ast_grep_s_error_without_its_scanned_file_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: ast-grep lists the files it scanned on stderr, then dies
+    for name in ("a.py", "b.py"):
+        (tmp_path / name).write_text("def f():\n    return 1\n")
+    stand_in_ast_grep(
+        tmp_path,
+        monkeypatch,
+        "for file in files:\n    print(f'sg: entity|file|{file}: language=Python', file=sys.stderr)\n"
+        "print('ast-grep: out of memory', file=sys.stderr)\nsys.exit(137)\n",
+    )
+
+    # Act / Assert
+    with pytest.raises(tools.ToolFailedError) as failure:
+        list(tools.ast_grep_rules(VALID_RULE, ["a.py", "b.py"], tmp_path, refused={}))
+    assert str(failure.value) == f"{tools.AST_GREP} exited 137: ast-grep: out of memory"
+
+
+def test_a_file_that_vanishes_during_the_scan_is_left_to_the_index_not_named_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: ast-grep lists a.py as scanned; b.py is deleted while it runs
+    _write_python_files(tmp_path, "a.py", "b.py")
+    stand_in_ast_grep(
+        tmp_path,
+        monkeypatch,
+        "import os\nos.remove('b.py')\nprint('sg: entity|file|a.py: language=Python', file=sys.stderr)\n",
+    )
+    refused: dict[str, str] = {}
+
+    # Act
+    matches = list(tools.ast_grep_rules(VALID_RULE, ["a.py", "b.py"], tmp_path, refused=refused))
+
+    # Assert
+    assert matches == []
+    assert refused == {}
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX preprocessor script")
-def test_ripgrep_ignores_a_configured_preprocessor(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "search",
+    [
+        lambda repository: tools.ripgrep_files("needle", ("a.py",), repository),
+        lambda repository: tuple(hit.file for hit in tools.ripgrep_fixed("needle", ("a.py",), repository, 5)),
+        lambda repository: tuple(hit.file for hit in tools.ripgrep_lines(("needle",), ("a.py",), repository)),
+    ],
+    ids=["ripgrep_files", "ripgrep_fixed", "ripgrep_lines"],
+)
+def test_ripgrep_ignores_a_configured_preprocessor(tmp_path: Path, monkeypatch, search) -> None:
     # A ripgrep config in the environment (RIPGREP_CONFIG_PATH) can name `--pre=<program>`, which
     # ripgrep runs for each searched file. Over an untrusted repository that is code execution, so
     # jvn's searches must ignore the config entirely.
@@ -170,7 +249,7 @@ def test_ripgrep_ignores_a_configured_preprocessor(tmp_path: Path, monkeypatch) 
     repository.mkdir()
     (repository / "a.py").write_text("needle = 1\n")
 
-    found = tuple(hit.file for hit in tools.ripgrep_fixed("needle", ("a.py",), repository, 5))
+    found = search(repository)
 
     assert found == ("a.py",)  # the search still works
     assert not marker.exists()  # but the configured preprocessor never ran

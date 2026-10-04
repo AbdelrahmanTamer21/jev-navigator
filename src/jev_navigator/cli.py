@@ -16,8 +16,9 @@ from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from time import monotonic
+from typing import TYPE_CHECKING
 
-from .adapters.typesafe import TypeSafeJevClient
+from .adapters.routes import RoutedJevClient, system_one_client
 from .cache_root import cache_root
 from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
 from .cli_resume import SavedSearch, load_resume, save_resume
@@ -26,7 +27,7 @@ from .cli_trace import create_trace_evidence_pack, not_indexed_lines, unavailabl
 from .data_root import default_run_folder
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
-from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
+from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code, search_failure
 from .directives.places import Place, place_for_line
 from .environment import checkout_root, load_typesafe_environment
 from .housekeeping import FINISHED_RUN_DAYS, RESUMABLE_RUN_DAYS
@@ -48,6 +49,9 @@ from .progress import ProgressJournal, TerminalProgress
 from .run_files import place_label, source_shown, step_shown
 from .usage_receipt import usage_receipt, usage_report_lines
 
+if TYPE_CHECKING:
+    from .adapters.typesafe import TypeSafeJevClient
+
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 KEEP_REQUESTS_HELP = (
     "Keep the code and full request text in the run folder (default: code locations and request "
@@ -58,6 +62,9 @@ POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
+RESUMABLE_OUTCOMES = (Outcome.BUDGET, Outcome.CANCELLED, Outcome.FAILED)
+"""A search that stopped before it finished: it saves its frontier, a Find All does not enumerate
+after it, and ``--resume`` continues it."""
 OUT_HELP = (
     "New or empty output directory, never pruned (default: a unique run under "
     f"$XDG_DATA_HOME/jev-navigator/runs, pruned after {FINISHED_RUN_DAYS} days, {RESUMABLE_RUN_DAYS} "
@@ -97,10 +104,10 @@ def _run_search(args: argparse.Namespace) -> int:
     repository = Path(args.repo).resolve()
     output = Path(args.out).expanduser() if args.out else _default_output(repository)
     answer_store = _answer_store(args)
-    client: TypeSafeJevClient | None = None
+    client: TypeSafeJevClient | RoutedJevClient | None = None
     try:
         load_typesafe_environment(os.environ)
-        client = TypeSafeJevClient()  # model=None resolves TYPESAFE_DEFAULT_MODEL in the adapter
+        client = system_one_client(os.environ)
         if args.command == "trace":
             manifest = create_trace_evidence_pack(
                 repository,
@@ -153,7 +160,7 @@ def _run_search(args: argparse.Namespace) -> int:
     calls = manifest["provider"]["calls"] if args.command == "trace" else result["calls"]
     resume_directory = (
         str(output.resolve())
-        if args.command in ("find", "findall") and search_outcome in ("budget", "cancelled")
+        if args.command in ("find", "findall") and search_outcome in RESUMABLE_OUTCOMES
         else None
     )
     if args.json:
@@ -331,7 +338,8 @@ def create_evidence_pack(
         )
         selection: EntrySelection | None = None
         started = monotonic()
-        entry_pending = False
+        entry_stop: Outcome | None = None
+        entry_failure: Exception | None = None
         if resume is not None:
             start_places = []
             initial_candidates = ()
@@ -341,10 +349,7 @@ def create_evidence_pack(
         else:
             progress.phase("choosing an entry point")
             start_places = []
-            try:
-                selection = choose_initial_candidates(index, judge, target)
-            except CallCapReachedError:
-                entry_pending = True
+            selection, entry_stop, entry_failure = _choose_entry(index, judge, target)
             initial_candidates = (
                 tuple(
                     (
@@ -361,8 +366,8 @@ def create_evidence_pack(
         if resuming_enumeration:
             assert resume is not None
             result = resume
-        elif entry_pending:
-            result = FindResult(Outcome.BUDGET, (), (), (), (), 0, 0)
+        elif entry_stop is not None:
+            result = FindResult(entry_stop, (), (), (), (), 0, 0, failure=entry_failure)
         else:
             progress.phase("navigating code")
             result = find_code(
@@ -378,7 +383,7 @@ def create_evidence_pack(
         seed_calls = judge.calls
         seed_duration_seconds = monotonic() - started
         enumeration = None
-        if workflow == "findall" and result.outcome not in (Outcome.BUDGET, Outcome.CANCELLED):
+        if workflow == "findall" and result.outcome not in RESUMABLE_OUTCOMES:
             progress.phase("expanding seed and checking remaining functions")
             enumeration = find_all(
                 index,
@@ -392,16 +397,16 @@ def create_evidence_pack(
         progress.phase("writing evidence pack")
         scope_unavailable: dict[str, str] = {}
         needs_resume = (
-            enumeration.stopped_by in ("budget", "cancelled")
+            enumeration.stopped_by in RESUMABLE_OUTCOMES
             if enumeration is not None
-            else result.outcome in (Outcome.BUDGET, Outcome.CANCELLED)
+            else result.outcome in RESUMABLE_OUTCOMES
         )
         if needs_resume:
             scope_unavailable = save_resume(
                 output / "resume.json",
                 index,
                 result,
-                entry_pending=entry_pending,
+                entry_pending=entry_stop is not None,
                 completed=enumeration.judged if enumeration is not None else None,
                 check_id=CONTAINS_IMPLEMENTATION.question_id if enumeration is not None else None,
             )
@@ -423,7 +428,7 @@ def create_evidence_pack(
             entry_selection=selection,
             previous=previous,
             resume_from=resume_from,
-            entry_pending=entry_pending,
+            entry_pending=entry_stop is not None,
             scope_unavailable=scope_unavailable,
         )
         manifest["workflow"] = workflow
@@ -444,6 +449,9 @@ def create_evidence_pack(
             manifest["search"] = _find_all_summary(
                 enumeration, judge.calls, duration_seconds, previous, index.not_indexed_files
             )
+        failure = enumeration.failure if enumeration is not None and enumeration.failure else result.failure
+        if failure is not None:
+            manifest["search"]["failure"] = _failure_record(failure, judge, journal)
         if not keep_requests:
             _drop_code(manifest, index)
         _write_json(output / "manifest.json", manifest)
@@ -451,6 +459,9 @@ def create_evidence_pack(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
         )
         outcome = str(manifest["search"]["outcome"])
+        if outcome == Outcome.FAILED and failure is not None:
+            print(f"resume: use --resume {output} with the same target and repository", file=sys.stderr)
+            raise failure
         return manifest
     except KeyboardInterrupt:
         outcome = "cancelled"
@@ -458,6 +469,66 @@ def create_evidence_pack(
     finally:
         journal.record_terminal(outcome)
         progress.close(outcome)
+
+
+def _choose_entry(
+    index: CodeIndex, judge: Judge, target: str
+) -> tuple[EntrySelection | None, Outcome | None, Exception | None]:
+    """The chosen entry point, or why choosing it stopped: the call cap, Ctrl-C, or a failed
+    request with its error. A stopped choice saves the entry stage, and Resume chooses again,
+    replaying the answers already stored."""
+    try:
+        return choose_initial_candidates(index, judge, target), None, None
+    except CallCapReachedError:
+        return None, Outcome.BUDGET, None
+    except KeyboardInterrupt:
+        return None, Outcome.CANCELLED, None
+    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
+        return None, Outcome.FAILED, search_failure(error)
+
+
+def _failure_record(error: BaseException, judge: Judge, journal: ProgressJournal) -> dict:
+    """The error that ended the search, with its cause chain and the journal request it failed in."""
+    request_id = judge.failed_request(error)
+    return {
+        **_error_fields(error),
+        "causes": [_error_fields(cause) for cause in _causes(error)],
+        "request_id": request_id,
+        "route": journal.routes.get(request_id) if request_id is not None else None,
+    }
+
+
+def _entry_pending_lines(search: dict) -> list[str]:
+    if not search["entry_selection_pending"]:
+        return []
+    if search["outcome"] == Outcome.BUDGET:
+        return ["- Entry selection awaits another call allowance."]
+    return [f"- Entry selection stopped ({search['outcome']}); Resume chooses it again."]
+
+
+def _failure_lines(search: dict, bullet: str) -> list[str]:
+    failure = search.get("failure")
+    return [f"{bullet}Failure: {failure['type']}: {failure['message']}"] if failure else []
+
+
+def _error_fields(error: BaseException) -> dict:
+    return {"type": type(error).__name__, "message": str(error)}
+
+
+def _causes(error: BaseException) -> list[BaseException]:
+    causes = []
+    cause = _cause_of(error)
+    while cause is not None:
+        causes.append(cause)
+        cause = _cause_of(cause)
+    return causes
+
+
+def _cause_of(error: BaseException) -> BaseException | None:
+    """The explicit cause, else the error being handled when this one was raised without ``from``."""
+    if error.__cause__ is not None or error.__suppress_context__:
+        return error.__cause__
+    return error.__context__
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -873,8 +944,8 @@ def _previous_pack(
     previous = json.loads((source / "manifest.json").read_text())
     if not (source / "resume.json").is_file():
         raise ValueError(f"no saved search frontier in {source}")
-    if previous["search"]["outcome"] not in ("budget", "cancelled"):
-        raise ValueError("only a budget-stopped or cancelled search can resume")
+    if previous["search"]["outcome"] not in RESUMABLE_OUTCOMES:
+        raise ValueError("only a budget-stopped, cancelled or failed search can resume")
     if (
         previous.get("workflow", "find") != workflow
         or previous["source"]["repository"] != str(repository)
@@ -1092,6 +1163,7 @@ def _find_all_report(manifest: dict) -> str:
         f"Target: {manifest['target']}",
         "",
         f"Outcome: **{search['outcome']}**. Coverage: **{search['coverage']}**.",
+        *_failure_lines(search, ""),
         f"{search['calls']} live requests; "
         f"{search['duration_seconds']:.3f}s for seed search and enumeration.",
         "",
@@ -1221,6 +1293,7 @@ _FRONTIER_REASONS = {
     "budget": "Configured search limit reached",
     "depth": "Configured depth limit reached",
     "cancelled": "Search cancelled",
+    "failed": "Search stopped on a failed request; Resume opens this place",
     "stop_rule": "Caller stop condition met",
     "scope_incomplete": "Source scope incomplete",
     "neighbours_per_kind": "Configured neighbour limit reached",
@@ -1246,7 +1319,8 @@ def _report(manifest: dict) -> str:
         f"- Scope: {', '.join(f'`{prefix}`' for prefix in source['prefixes']) or 'whole directory'}",
         f"- Target: {manifest['target']}",
         f"- Outcome: **{_outcome_summary(search)}**",
-        *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
+        *_failure_lines(search, "- "),
+        *_entry_pending_lines(search),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{provider['requested_model']}`, served `{provider['served_model']}`",
         *usage_report_lines(provider),
