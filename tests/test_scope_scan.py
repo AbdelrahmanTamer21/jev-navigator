@@ -823,6 +823,50 @@ def test_a_namespace_member_is_a_definition_inside_its_own_namespace(tmp_path: P
     }
 
 
+def test_a_function_expressions_own_name_names_nothing_in_its_module(tmp_path: Path) -> None:
+    """A named function or class expression binds its own name only inside itself, so `handler()`
+    after `run(function handler() {})` reaches no definition of the module, on one line or several.
+    An expression a declaration holds is named by the declaration: `f()` after `const f = function
+    g() {}` still resolves, and `g()` finds no definition. One an assignment names, `later = function
+    inner() {}`, defines `later` beside its `let`, which leaves `later()` open."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "callback.js": "run(function handler() { return 1; }); handler();\n",
+            "lines.js": (
+                "run(function retry() {\n  return 1;\n});\nregister(class Job {});\nretry();\nnew Job();\n"
+            ),
+            "held.js": "const f = function g() { return 1; };\nf();\ng();\n",
+            "assigned.js": "let later;\nlater = function inner() { return 1; };\nlater();\n",
+        },
+    )
+    sites = {
+        "one-line callback": ("callback.js", 1, "handler"),
+        "callback on its own lines": ("lines.js", 5, "retry"),
+        "class expression": ("lines.js", 6, "Job"),
+        "the declaration's name": ("held.js", 2, "f"),
+        "the expression's own name": ("held.js", 3, "g"),
+        "an expression an assignment names": ("assigned.js", 3, "later"),
+    }
+
+    # Act
+    bindings = {site: index.binding_of(file, line, name, None) for site, (file, line, name) in sites.items()}
+
+    # Assert
+    assert {
+        site: (binding.status.value, binding.target and binding.target.key)
+        for site, binding in bindings.items()
+    } == {
+        "one-line callback": ("candidate", None),
+        "callback on its own lines": ("candidate", None),
+        "class expression": ("candidate", None),
+        "the declaration's name": ("resolved", "held.js:1-1"),
+        "the expression's own name": ("unresolved", None),
+        "an expression an assignment names": ("candidate", None),
+    }
+
+
 def test_a_namespace_member_comes_before_an_import_and_after_a_functions_own_name(tmp_path: Path) -> None:
     """Inside a namespace its own `config` hides the module's import of `config`, while a parameter
     `config` hides the member. A function or constant a namespace exports is no export of its
