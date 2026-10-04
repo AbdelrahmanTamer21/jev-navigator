@@ -146,11 +146,13 @@ class FileFacts:
     # The first and last line of each stretch the grammar's ERROR nodes span, in file order.
     unparsed_lines: tuple[tuple[int, int], ...] = ()
     module_aliases: tuple[ModuleAlias, ...] = ()
-    # The names a script module exports as values: its CommonJS exports of a definition under its
-    # own name (see ``EXPORTED_VALUES``).
+    # The names a script module exports as values: its CommonJS exports (see ``EXPORTED_VALUES``).
+    # Like ``export_names``, each is its definition's own name unless ``renamed_exports`` says
+    # otherwise.
     exported_values: tuple[str, ...] = ()
     # Each name a script module exports a definition of another name under, with that name:
-    # ("outer", "inner") for `export { inner as outer }`, and ("default", "build") for its default
+    # ("outer", "inner") for `export { inner as outer }`, ("parse", "urlParse") for `exports.parse =
+    # urlParse` or `module.exports = { parse: urlParse }`, and ("default", "build") for its default
     # export, `export default build` or `module.exports = build` (see ``DEFAULT_EXPORTS``).
     renamed_exports: tuple[tuple[str, str], ...] = ()
 
@@ -202,7 +204,9 @@ def scan_facts(
     surface = _export_names_from_matches(match for match in matches if match["ruleId"] in _EXPORT_RULE_IDS)
     values = _captured_names_by_file(match for match in matches if match["ruleId"] == _EXPORTED_VALUE_RULE)
     renamed = _renamed_exports_from_matches(
-        match for match in matches if match["ruleId"] in (_EXPORT_SPECIFIER_RULE, _DEFAULT_EXPORT_RULE)
+        match
+        for match in matches
+        if match["ruleId"] in (_EXPORT_SPECIFIER_RULE, _DEFAULT_EXPORT_RULE, _EXPORTED_VALUE_RULE)
     )
     unread = _unparsed_lines_from_matches(match for match in matches if match["ruleId"] == _ERROR_RULE)
     return {
@@ -580,18 +584,27 @@ def _export_names_from_matches(matches) -> dict[str, tuple[str, ...]]:
 
 
 def _renamed_exports_from_matches(matches) -> dict[str, tuple[tuple[str, str], ...]]:
-    """Each file's own export list entries that export a definition under another name, as the
-    exported name and the definition's (``outer`` and ``inner`` for ``inner as outer``), and its
-    default export, as ``default`` and the definition's name."""
+    """Each file's own export list entries and CommonJS exports that export a definition under
+    another name, as the exported name and the definition's (``outer`` and ``inner`` for ``inner as
+    outer``), and its default export, as ``default`` and the definition's name."""
     pairs: dict[str, set[tuple[str, str]]] = {}
     for match in matches:
         if match["ruleId"] == _DEFAULT_EXPORT_RULE:
             exported, own = "default", _captured_name(match)
+        elif match["ruleId"] == _EXPORTED_VALUE_RULE:
+            exported, own = _captured_name(match), _captured_own_name(match)
         else:
             exported, own = _local(match["text"]), _exported(match["text"])
         if exported != own:
             pairs.setdefault(match["file"], set()).add((exported, own))
     return {file: tuple(sorted(found)) for file, found in pairs.items()}
+
+
+def _captured_own_name(match: dict) -> str:
+    """The definition an exported value names, `$OWN`; a shorthand entry `{ log }` captures only
+    `$NAME`, its own."""
+    captured = match.get("metaVariables", {}).get("single", {})
+    return captured.get("OWN", captured.get("NAME", {})).get("text", "")
 
 
 def _captured_names_by_file(matches) -> dict[str, tuple[str, ...]]:

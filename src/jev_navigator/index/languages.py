@@ -572,19 +572,22 @@ EXPORTED_NAMES = {
 }
 
 # The names a module exports as values rather than by an export statement over their declaration,
-# captured as `$NAME`: its CommonJS exports of a definition under its own name (`exports.query =
-# query`, `module.exports = { log, run: run }`).
+# captured as `$NAME`, with the definition each exports as `$OWN` when its name differs: its CommonJS
+# exports (`exports.query = query`, `exports.parse = urlParse`, `module.exports = { log, run: run,
+# a: b }`).
 _COMMONJS_OBJECT = (
     "not: {not: {inside: {kind: object, inside: {field: right, kind: assignment_expression, "
     "has: {field: left, regex: '^module[.]exports$'}}}}}"
 )
 _EXPORTED_VALUES = (
     """  any:
-    - pattern: exports.$NAME = $NAME
-    - pattern: module.exports.$NAME = $NAME
+    - pattern: exports.$NAME = $OWN
+    - pattern: module.exports.$NAME = $OWN
   not: {not: {has: {field: right, kind: identifier}}}""",
-    f"""  pattern: {{context: '({{ $NAME: $NAME }})', selector: pair}}
-  {_COMMONJS_OBJECT}""",
+    f"""  pattern: {{context: '({{ $NAME: $OWN }})', selector: pair}}
+  all:
+    - not: {{not: {{has: {{field: value, kind: identifier}}}}}}
+    - {_COMMONJS_OBJECT}""",
     f"""  kind: shorthand_property_identifier
   pattern: $NAME
   {_COMMONJS_OBJECT}""",
