@@ -139,26 +139,6 @@ def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> 
     return hits
 
 
-def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -> tuple[str, ...]:
-    """Every supplied file containing any of the exact ``texts``, without a result-count cutoff. The
-    texts go to ripgrep in a pattern file, one per line, so their number never meets the argument
-    limit."""
-    patterns = [texts] if isinstance(texts, str) else list(texts)
-    if not files or not patterns:
-        return ()
-    if any("\n" in pattern for pattern in patterns):
-        raise ValueError("a text searched for by file cannot hold a line break")
-    with tempfile.NamedTemporaryFile("w", prefix="jev-navigator-patterns-", suffix=".txt") as pattern_file:
-        pattern_file.write("".join(f"{pattern}\n" for pattern in patterns))
-        pattern_file.flush()
-        command = [RIPGREP, "--files-with-matches", "--null", "--fixed-strings", "-f", pattern_file.name]
-        found: list[str] = []
-        for chunk in file_chunks(files):
-            output = run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
-            found += [path.removeprefix("./") for path in output.split("\0") if path]
-    return tuple(found)
-
-
 def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
     """Regular, non-symlink files owned by this working directory, including hidden paths.
 

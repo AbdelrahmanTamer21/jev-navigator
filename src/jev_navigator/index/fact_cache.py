@@ -66,6 +66,14 @@ def user_fact_cache() -> Path:
     return cache_root() / "facts"
 
 
+def facts_identity() -> str:
+    """One identity for the facts of every language: the parser version and each language's rules
+    and match-reading code. It changes whenever any language's cached facts would."""
+    languages_parsed = sorted({*languages.FUNCTION_KINDS, FLOW_LANGUAGE})
+    parts = [ast_grep_version(), *(_rules_identity(language) for language in languages_parsed)]
+    return hashlib.sha256("\0".join(parts).encode()).hexdigest()
+
+
 @cache
 def _rules_identity(language: str) -> str:
     """Computed once per language and process: the rules and the code that reads matches do not

@@ -11,7 +11,7 @@ import re
 import tempfile
 import threading
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import cache, lru_cache
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
@@ -33,8 +33,9 @@ from .languages import (
     language_of,
     split_lines,
 )
+from .name_table import CALL, DEFINITION_KINDS, REFERENCE, FileEntry, NameRow, NameTable, git_blob_id
 from .packages import Packages
-from .scope_scan import FileFacts, FileStructure, ReferenceMatch, Unparsed, scan_facts
+from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch, Unparsed, scan_facts
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
 
@@ -51,6 +52,7 @@ CoChange = tuple[str, int]
 
 
 _NO_STRUCTURE = FileStructure((), (), ())
+_KIND_ORDER = {kind: rank for rank, kind in enumerate((*DEFINITION_KINDS, CALL, REFERENCE))}
 
 
 class RevisionMismatchError(ValueError):
@@ -79,6 +81,7 @@ class CodeIndex:
         binding_resolver: BindingResolver | None = None,
         scan_observer: ScanObserver | None = None,
         fact_cache_dir: Path | None = None,
+        blob_ids: Mapping[str, str] | None = None,
     ) -> None:
         self.root = Path(root)
         self.git_root = Path(git_root) if git_root is not None else self.root
@@ -102,11 +105,18 @@ class CodeIndex:
         self._unparsed = Unparsed()
         self._unavailable: dict[str, str] = {}
         self._facts: dict[str, FileFacts] = {}
-        self._fact_files_by_name: dict[str, set[str]] = {}
         self._facts_lock = threading.RLock()
         self._fact_cache = FactCache(fact_cache_dir)
-        self._files_for_name = cache(self._candidate_files)
-        self._discovered: dict[str, frozenset[str]] = {}
+        self._listed_blobs = {
+            file: blob for file, blob in (blob_ids or {}).items() if file not in self._changed
+        }
+        self._blobs: dict[str, str] = {}
+        self._name_table = NameTable()
+        self._unwritten: dict[str, FileFacts] = {}
+        self._entries: dict[str, FileEntry] | None = None
+        self._files_by_blob: dict[str, tuple[str, ...]] = {}
+        self._file_order: dict[str, int] = {}
+        self._named = cache(self._places_named)
         self._text_hits = cache(self._search_text)
         self._co_changes = cache(self._read_co_changes)
         self._calls_named = cache(self._calls_with_name)
@@ -132,18 +142,19 @@ class CodeIndex:
         """The tracked regular files under ``prefixes`` (every one when none are given). Symbolic links
         and submodules are left out: a link can point outside the scope, or at a directory."""
         root = Path(root)
-        listed = _regular_files(tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root))
+        blobs = _regular_blobs(tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root))
         commit = tools.git(["rev-parse", "HEAD"], root).strip()
         changed = _changed_paths(tools.git(["status", "--porcelain", "-z", "--", *prefixes], root))
         return cls(
             root,
-            listed,
+            list(blobs),
             max_files=max_files,
             commit=commit,
             changed_files=changed,
             binding_resolver=binding_resolver,
             scan_observer=scan_observer,
             fact_cache_dir=fact_cache_dir,
+            blob_ids=blobs,
         )
 
     @classmethod
@@ -171,7 +182,7 @@ class CodeIndex:
             for file in tools.listed_files(root, prefixes)
             if not any((root / file).resolve().is_relative_to(path) for path in excluded)
         )
-        commit, changed = _working_git_metadata(root, prefixes)
+        commit, changed, blobs = _working_git_metadata(root, prefixes)
         return cls(
             root,
             files,
@@ -181,6 +192,7 @@ class CodeIndex:
             binding_resolver=binding_resolver,
             scan_observer=scan_observer,
             fact_cache_dir=fact_cache_dir,
+            blob_ids=blobs,
         )
 
     @classmethod
@@ -198,14 +210,17 @@ class CodeIndex:
         tsconfig files come along (outside the scope), so path aliases resolve."""
         repository = Path(repository)
         sha = tools.git(["rev-parse", "--verify", f"{commit}^{{commit}}"], repository).strip()
-        listed = _regular_files(tools.git(["ls-tree", "-r", "-z", sha, "--", *prefixes], repository))
+        blobs = _regular_blobs(tools.git(["ls-tree", "-r", "-z", sha, "--", *prefixes], repository))
+        listed = list(blobs)
         if max_files is not None and len(listed) > max_files:
             raise ScopeTooWideError(
                 f"{len(listed)} files is wider than the limit of {max_files}; narrow the scope"
             )
         snapshot = tempfile.TemporaryDirectory(prefix=f"jev-navigator-{sha[:8]}-")
         tools.export_blobs(repository, _blobs_to_export(repository, sha, listed), Path(snapshot.name))
-        index = cls(snapshot.name, listed, max_files=max_files, commit=sha, git_root=repository)
+        index = cls(
+            snapshot.name, listed, max_files=max_files, commit=sha, git_root=repository, blob_ids=blobs
+        )
         index._snapshot = snapshot
         return index
 
@@ -229,12 +244,17 @@ class CodeIndex:
 
     @property
     def observed_unparsed_files(self) -> frozenset[str]:
-        """Files found unparsed by scans that navigation actually needed.
+        """Files found unparsed by scans that navigation actually needed, and, once a name lookup
+        covered the scope, every file the name table records as only partly parsed.
 
         Unlike ``unparsed_files``, this receipt never starts another repository-wide scan. Pair it
         with ``parser_scans_pending`` before making any claim about the whole scope.
         """
-        return self._unparsed.files
+        return self._unparsed.files | self._incomplete_in_table()
+
+    def _incomplete_in_table(self) -> frozenset[str]:
+        entries = self._entries or {}
+        return frozenset(file for file, entry in entries.items() if entry.incomplete)
 
     @property
     def parsed_files(self) -> frozenset[str]:
@@ -249,7 +269,7 @@ class CodeIndex:
     @property
     def parser_scans_pending(self) -> tuple[str, ...]:
         available = set(self._available_files(self._code_files))
-        return () if available <= self._facts.keys() else ("facts",)
+        return () if available <= self._facts.keys() | (self._entries or {}).keys() else ("facts",)
 
     @property
     def unavailable_files(self) -> dict[str, str]:
@@ -332,7 +352,6 @@ class CodeIndex:
             for call in self._facts_in(function.file).calls
             if function.start <= call.line <= function.end
         ]
-        self.prefetch_names(call.name for call in calls)
         edges: dict[str, CallEdge] = {}
         for call in calls:
             if call.name not in edges:
@@ -370,7 +389,6 @@ class CodeIndex:
 
     def _references(self, matches: Iterable[ReferenceMatch]) -> tuple[Reference, ...]:
         matches = sorted(set(matches))
-        self.prefetch_names(match.name for match in matches)
         return tuple(
             Reference(
                 match.name,
@@ -420,8 +438,8 @@ class CodeIndex:
         """The words on the lines of ``file`` that its ERROR nodes span; the whole file's words while
         its facts are still being recorded."""
         lines = self._lines_of(file)
-        facts = self._facts.get(file)
-        stretches = facts.unparsed_lines if facts is not None else ((1, len(lines)),)
+        known = self._facts.get(file) or (self._entries or {}).get(file)
+        stretches = known.unparsed_lines if known is not None else ((1, len(lines)),)
         text = "\n".join(line for start, end in stretches for line in lines[start - 1 : end])
         return frozenset(_WORD.findall(text))
 
@@ -432,16 +450,10 @@ class CodeIndex:
         return self._facts_in(file).structure
 
     def _definitions_by_name(self, name: str) -> tuple[Span, ...]:
-        files = self._files_for_name(name)
-        self._ensure_facts(files)
         definitions = {
-            span: None
-            for file in files
-            for span in (
-                *self._facts_in(file).structure.symbols,
-                *self._facts_in(file).structure.declarations,
-            )
-            if span.name == name
+            Span(file, row.start, row.end, name): None
+            for file, row in self._named(name)
+            if row.kind in DEFINITION_KINDS
         }
         return tuple(definitions)
 
@@ -455,74 +467,87 @@ class CodeIndex:
         first_line = self.read_slice(Span(span.file, span.start, span.start)).text
         return declares_type(first_line) if role == "type" else declares_value(first_line)
 
-    def _calls_with_name(self, name: str):
-        files = self._files_for_name(name)
-        self._ensure_facts(files)
-        return tuple(call for file in files for call in self._facts_in(file).calls if call.name == name)
-
-    def _references_with_name(self, name: str):
-        files = self._files_for_name(name)
-        self._ensure_facts(files)
+    def _calls_with_name(self, name: str) -> tuple[CallMatch, ...]:
         return tuple(
-            reference
-            for file in files
-            for reference in self._facts_in(file).references
-            if reference.name == name
+            CallMatch(file, row.start, name, self._receiver(file, row))
+            for file, row in self._named(name)
+            if row.kind == CALL
         )
 
-    def prefetch_names(self, names: Iterable[str]) -> None:
-        """Finds the unparsed files that may mention each of ``names`` with one ripgrep, so the
-        lookups of these names that follow start no search of their own."""
-        self._discover(names)
+    def _references_with_name(self, name: str) -> tuple[ReferenceMatch, ...]:
+        return tuple(
+            ReferenceMatch(file, row.start, row.role or "", name, self._receiver(file, row))
+            for file, row in self._named(name)
+            if row.kind == REFERENCE
+        )
 
-    def _candidate_files(self, name: str) -> tuple[str, ...]:
-        # Parsed facts already answer name membership. Only unparsed inventory needs text discovery.
-        self._discover((name,))
-        with self._facts_lock:
-            candidates = self._fact_files_by_name.get(name, set()) | self._discovered[name]
-        return tuple(file for file in self._code_files if file in candidates)
+    def _receiver(self, file: str, row: NameRow) -> str | None:
+        """The row's receiver; one the table does not store is read from the file's facts."""
+        if not row.receiver_in_facts:
+            return row.receiver
+        facts = self._facts_in(file)
+        found = facts.calls[row.position] if row.kind == CALL else facts.references[row.position]
+        return found.receiver
 
-    def _discover(self, names: Iterable[str]) -> None:
-        with self._facts_lock:
-            new = [name for name in dict.fromkeys(names) if name not in self._discovered]
-            remaining = tuple(
-                file for file in self._code_files if file not in self._facts and file not in self._unavailable
-            )
-        if not new:
-            return
-        mentioning = self._on_available(remaining, lambda files: tools.ripgrep_files(new, files, self.root))
-        found = self._files_by_name(new, mentioning)
-        with self._facts_lock:
-            for name in new:
-                self._discovered.setdefault(name, found[name])
+    def _places_named(self, name: str) -> tuple[tuple[str, NameRow], ...]:
+        """Every place in scope ``name`` sits, as (file, row), in file order and then in the order of
+        the file's facts: definitions first, symbols before declarations."""
+        self._cover_scope()
+        places = [
+            (file, row)
+            for row in self._name_table.rows(name)
+            for file in self._files_by_blob.get(row.blob, ())
+        ]
+        return tuple(sorted(places, key=self._place_order))
 
-    def _files_by_name(self, names: Sequence[str], files: Sequence[str]) -> dict[str, frozenset[str]]:
-        """Which of ``files`` (each known to hold one of ``names``) holds each name, reading each file
-        once."""
-        if len(names) == 1:
-            return {names[0]: frozenset(files)}
-        holding: dict[str, set[str]] = {name: set() for name in names}
-        patterns = [(name, name.encode()) for name in names]
-        for file in files:
-            content = self._read_bytes(file) or b""
-            for name, pattern in patterns:
-                if pattern in content:
-                    holding[name].add(file)
-        return {name: frozenset(found) for name, found in holding.items()}
+    def _place_order(self, place: tuple[str, NameRow]) -> tuple[int, int, int]:
+        file, row = place
+        return self._file_order[file], _KIND_ORDER[row.kind], row.position
+
+    def _cover_scope(self) -> dict[str, FileEntry]:
+        """Every available code file's table entry, writing the rows of files the table lacks from
+        their cached or freshly parsed facts. Runs once per index; a file that cannot be read or is
+        refused by the parse guard has no entry."""
+        with self._facts_lock:
+            if self._entries is not None:
+                return self._entries
+            files = self._available_files(self._code_files)
+            blobs = {file: blob for file in files if (blob := self._blob_of(file)) is not None}
+            held = self._name_table.entries(set(blobs.values()))
+            self._ensure_facts([file for file, blob in blobs.items() if blob not in held])
+            held = self._name_table.entries(set(blobs.values()))
+            self._entries = {file: held[blob] for file, blob in blobs.items() if blob in held}
+            by_blob: dict[str, list[str]] = {}
+            for file in self._entries:
+                by_blob.setdefault(blobs[file], []).append(file)
+            self._files_by_blob = {blob: tuple(files) for blob, files in by_blob.items()}
+            self._file_order = {file: position for position, file in enumerate(self._entries)}
+            return self._entries
+
+    def _blob_of(self, file: str) -> str | None:
+        """The git blob id of ``file``'s content: from the Git listing for a clean tracked file,
+        otherwise hashed from the bytes the index read."""
+        if file in self._listed_blobs:
+            return self._listed_blobs[file]
+        if file not in self._blobs:
+            content = self._read_bytes(file)
+            if content is None:
+                return None
+            self._blobs[file] = git_blob_id(content)
+        return self._blobs[file]
 
     def _remember_facts(self, file: str, facts: FileFacts) -> None:
+        """Keeps ``file``'s facts in memory and queues its rows for the name table; a file the parse
+        guard refused has no rows."""
         self._facts[file] = facts
-        names = {
-            item.name
-            for item in (
-                *facts.structure.symbols,
-                *facts.structure.declarations,
-                *facts.calls,
-                *facts.references,
-            )
-        }
-        for name in names:
-            self._fact_files_by_name.setdefault(name, set()).add(file)
+        blob = self._blob_of(file)
+        if facts.refusal is None and blob is not None:
+            self._unwritten[blob] = facts
+
+    def _write_names(self) -> None:
+        if self._unwritten:
+            self._name_table.add(self._unwritten)
+            self._unwritten = {}
 
     def _facts_in(self, file: str) -> FileFacts:
         self._require_in_scope(file)
@@ -534,22 +559,22 @@ class CodeIndex:
     def _ensure_facts(self, files: Sequence[str]) -> None:
         with self._facts_lock:
             contents = self._load_cached_facts(files)
-            if not contents:
-                return
-            to_scan = tuple(contents)
-            scanned = self._run_scan(
-                "facts",
-                lambda: self._scan_available_facts(to_scan),
-                len(to_scan),
-            )
-            for file, facts in scanned.items():
-                if self._read_bytes(file) is None:
-                    continue
-                self._remember_facts(file, facts)
-                if facts.refusal is None:
-                    self._fact_cache.save(file, contents[file], facts)
-                else:
-                    self._unavailable[file] = facts.refusal
+            if contents:
+                self._parse(contents)
+            self._write_names()
+
+    def _parse(self, contents: Mapping[str, bytes]) -> None:
+        """Parses the files whose bytes are ``contents``; the caller holds the facts lock."""
+        to_scan = tuple(contents)
+        scanned = self._run_scan("facts", lambda: self._scan_available_facts(to_scan), len(to_scan))
+        for file, facts in scanned.items():
+            if self._read_bytes(file) is None:
+                continue
+            self._remember_facts(file, facts)
+            if facts.refusal is None:
+                self._fact_cache.save(file, contents[file], facts)
+            else:
+                self._unavailable[file] = facts.refusal
 
     def _load_cached_facts(self, files: Sequence[str]) -> dict[str, bytes]:
         """Remembers the persisted facts of ``files``; returns the bytes of those still to parse.
@@ -769,18 +794,27 @@ class CodeIndex:
         return self._sha256.get(file, "")
 
     def _read_bytes(self, file: str) -> bytes | None:
-        """The file's bytes, every read checked against the first: once a file changes on disk, its
-        facts and lines no longer agree, so it is reported unavailable instead of read."""
+        """The file's bytes, the first read checked against the Git listing and every later read
+        against the first: once a file changes on disk, its facts, lines and table rows no longer
+        agree, so it is reported unavailable instead of read."""
         try:
             content = (self.root / file).read_bytes()
         except FileNotFoundError:
             self._unavailable[file] = "disappeared after inventory"
             return None
         digest = hashlib.sha256(content).hexdigest()
-        if self._sha256.setdefault(file, digest) != digest:
+        unchanged = self._sha256[file] == digest if file in self._sha256 else self._as_listed(file, content)
+        if not unchanged:
             self._unavailable[file] = "changed on disk after the index first read it"
             return None
+        self._sha256[file] = digest
         return content
+
+    def _as_listed(self, file: str, content: bytes) -> bool:
+        """Whether ``content`` is the blob the Git listing named for ``file``; table rows are keyed by
+        that blob, so a file edited after the listing is never read under it."""
+        listed = self._listed_blobs.get(file)
+        return listed is None or git_blob_id(content) == listed
 
     def _available_files(self, files: Sequence[str]) -> tuple[str, ...]:
         available = []
@@ -802,19 +836,8 @@ class CodeIndex:
 def _blobs_to_export(repository: Path, commit: str, listed: Sequence[str]) -> dict[str, str]:
     """Object ids of the listed files and of every script config (tsconfig, jsconfig, package.json)
     in ``commit``, keyed by path."""
-    tree = _tree_blobs(tools.git(["ls-tree", "-r", "-z", commit], repository))
+    tree = _regular_blobs(tools.git(["ls-tree", "-r", "-z", commit], repository))
     return {path: tree[path] for path in [*listed, *_script_configs(tree)]}
-
-
-def _tree_blobs(listing: str) -> dict[str, str]:
-    """Object ids of the regular files in ``git ls-tree -r -z`` output, keyed by path."""
-    blobs = {}
-    for line in listing.split("\0"):
-        details, _, path = line.partition("\t")
-        mode, _, object_id = details.partition(" blob ")
-        if mode in _REGULAR_FILE_MODES:
-            blobs[path] = object_id
-    return blobs
 
 
 def _script_configs(paths: Iterable[str]) -> list[str]:
@@ -854,24 +877,29 @@ def _changed_paths(status: str) -> list[str]:
     return changed
 
 
-def _working_git_metadata(root: Path, prefixes: Sequence[str]) -> tuple[str, list[str]]:
+def _working_git_metadata(root: Path, prefixes: Sequence[str]) -> tuple[str, list[str], dict[str, str]]:
+    """The HEAD commit, the changed and untracked paths, and the index blob id of each tracked file;
+    all empty outside Git."""
     try:
         commit = tools.git(["rev-parse", "HEAD"], root).strip()
         status = tools.git(["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root)
+        listing = tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root)
     except tools.ToolFailedError:
-        return "", []
-    return commit, _changed_paths(status)
+        return "", [], {}
+    return commit, _changed_paths(status), _regular_blobs(listing)
 
 
-def _regular_files(listing: str) -> list[str]:
-    """Paths from ``git ls-files --stage -z`` or ``git ls-tree -r -z`` output whose mode is a regular
-    file. NUL separation keeps names with non-ASCII characters exactly as they are on disk."""
-    files = []
+def _regular_blobs(listing: str) -> dict[str, str]:
+    """The blob id of each path in ``git ls-files --stage -z`` or ``git ls-tree -r -z`` output whose
+    mode is a regular file, in listing order. NUL separation keeps names with non-ASCII characters
+    exactly as they are on disk."""
+    blobs: dict[str, str] = {}
     for line in listing.split("\0"):
         details, _, path = line.partition("\t")
-        if details.split(" ", 1)[0] in _REGULAR_FILE_MODES:
-            files.append(path)
-    return list(dict.fromkeys(files))
+        fields = details.split(" ")
+        if fields[0] in _REGULAR_FILE_MODES:
+            blobs.setdefault(path, fields[1] if fields[1] != "blob" else fields[2])
+    return blobs
 
 
 def _commits(log: str) -> list[set[str]]:

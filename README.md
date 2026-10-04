@@ -277,12 +277,20 @@ out of the root (through a linked directory or `..`), raises `UnsafePathError` w
 before any tool reads it.
 
 The index extracts symbols, declarations, calls and non-call references together in one ast-grep
-pass over the files a lookup actually needs. The pass runs a few hundred files per ast-grep process
+pass. The pass runs a few hundred files per ast-grep process
 and turns each match into its fact as ast-grep prints it, so memory holds the facts, never the
 parser's output, and no command line outgrows the system's argument limit. Facts that start on the
 same line are ordered by their position in the line, so every run returns them in the same order.
-Exact-name lookups first use ripgrep to narrow the candidate files, and `prefetch_names` narrows
-several names with one ripgrep; opening a known span parses its file directly. The resulting
+Exact-name lookups (definitions, callers, call counts and references) read the persistent name table
+in `$XDG_CACHE_HOME/jev-navigator/names`, which ties every name to the lines it sits on in each file
+content. A file's content is identified by its git blob id, taken from the Git listing for a clean
+tracked file and hashed from its bytes otherwise, so a new index maps its files to table rows without
+reading them, and a warm lookup starts no text search and parses no file. The first name lookup of an
+index covers its whole scope: each file the table lacks is read from the fact cache, or parsed, and
+its rows are written. A changed file gets new rows under its new content, a deleted file answers no
+lookup, and a change to the parser or to any language's rules starts a new table. The table holds
+names and line numbers, never code: a receiver is kept only when it is a plain chain of names such as
+`this.store`, and string literals are never stored. Opening a known span parses its file directly. The resulting
 per-file facts are cached by source bytes, language, ast-grep version, the rule text and the source
 of the code that reads the matches, in `$XDG_CACHE_HOME/jev-navigator/facts` (`~/.cache` when the
 variable is unset), so a new index can reuse facts without treating changed source or changed
