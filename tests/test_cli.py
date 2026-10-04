@@ -59,6 +59,9 @@ def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -
     assert len(written["navigator"]["source_tree_sha256"]) == 64
     assert written["provider"] == {
         "input_tokens": 200,
+        "responses_without_usage": 0,
+        "unanswered_requests": 0,
+        "input_tokens_complete": True,
         "requested_model": "jev-scripted",
         "served_model": "jev-scripted",
     }
@@ -68,6 +71,40 @@ def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -
     assert written["search"]["history"][-1]["operation"] == "stop"
     assert "Candidates not independently opened" in (output / "report.md").read_text()
     assert (output / "journal.jsonl").read_text()
+
+
+def test_evidence_pack_counts_responses_without_usage_instead_of_adding_zero_tokens(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/entry.py": "from .policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "app/policy.py": "def admit(item):\n    return len(item) <= 3\n",
+        },
+    )
+    output = tmp_path / "evidence"
+    client = ScriptedJevClient(
+        nouls=lambda question_id, question, state: (
+            0.96 if "len(item) <= 3" in state["slice"]["code"] else 0.04
+        ),
+        choices={"open_first": {"0": 1.0}},
+        input_tokens_per_call=None,
+    )
+
+    manifest = create_evidence_pack(
+        repository,
+        ("app/",),
+        "the check that limits the number of items",
+        ("app/entry.py:4",),
+        output,
+        SearchBudget(max_depth=2, max_steps=3, max_calls=3, beam_width=1),
+        client,
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    provider = json.loads((output / "manifest.json").read_text())["provider"]
+    assert provider["input_tokens"] == 0
+    assert provider["responses_without_usage"] == manifest["search"]["calls"] > 0
 
 
 def test_budget_pack_reopens_its_saved_frontier_in_a_second_cli_invocation(
@@ -155,6 +192,65 @@ def test_entry_selection_replays_cached_calls_after_its_cap(tmp_path: Path) -> N
     assert resumed["search"]["entry_calls"] == 2
     assert len(client2.requests) == 1  # the first entry decision came from answers.jsonl
     assert json.loads((second / "resume.json").read_text())["stage"] == "navigation"
+
+
+def _capped_pack(tmp_path: Path, name: str) -> tuple[Path, Path, SearchBudget]:
+    repository = tmp_path / "repository"
+    if not repository.exists():
+        commit_files(
+            repository,
+            {
+                "app/one.py": "def one():\n    return 1\n",
+                "app/two.py": "def two():\n    return 2\n",
+                "tests/test_one.py": "def test_one():\n    assert True\n",
+            },
+        )
+    budget = SearchBudget(max_calls=1, beam_width=1)
+    create_evidence_pack(repository, (), "find one", (), tmp_path / name, budget, ScriptedJevClient())
+    return repository, tmp_path / name, budget
+
+
+def test_resuming_an_earlier_receipt_without_the_unreported_count_keeps_that_count_unknown(
+    tmp_path: Path,
+) -> None:
+    repository, first, budget = _capped_pack(tmp_path, "first")
+    manifest = json.loads((first / "manifest.json").read_text())
+    del manifest["provider"]["responses_without_usage"]
+    (first / "manifest.json").write_text(json.dumps(manifest))
+
+    resumed = create_evidence_pack(
+        repository,
+        (),
+        "find one",
+        (),
+        tmp_path / "second",
+        budget,
+        ScriptedJevClient(input_tokens_per_call=None),
+        resume_from=first,
+    )
+
+    assert resumed["provider"]["responses_without_usage"] is None
+    assert (
+        "Responses without usage: not known (earlier receipt)"
+        in (tmp_path / "second" / "report.md").read_text()
+    )
+
+
+def test_resuming_a_receipt_that_knows_its_unreported_count_keeps_adding_to_it(tmp_path: Path) -> None:
+    repository, first, budget = _capped_pack(tmp_path, "first")
+
+    resumed = create_evidence_pack(
+        repository,
+        (),
+        "find one",
+        (),
+        tmp_path / "second",
+        budget,
+        ScriptedJevClient(input_tokens_per_call=None),
+        resume_from=first,
+    )
+
+    assert resumed["provider"]["responses_without_usage"] == resumed["search"]["calls_this_invocation"] > 0
 
 
 def test_resume_rejects_changed_source_before_reusing_the_frontier(tmp_path: Path) -> None:
@@ -377,6 +473,63 @@ def test_cancelled_navigation_writes_a_resumable_evidence_pack(tmp_path: Path) -
     assert any(record["kind"] == "history_step" for record in records)
     assert records[-1]["kind"] == "terminal"
     assert records[-1]["outcome"] == "cancelled"
+
+
+def test_cancelled_run_marks_its_token_total_incomplete_because_a_sent_request_never_answered(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/entry.py": "from .policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "app/policy.py": "def admit(item):\n    return len(item) <= 3\n",
+        },
+    )
+
+    class CancelledOnSecondRequest(ScriptedJevClient):
+        def send(self, state, questions):
+            if self.requests:
+                raise KeyboardInterrupt
+            return super().send(state, questions)
+
+    output = tmp_path / "cancelled-usage"
+
+    # Act
+    manifest = create_evidence_pack(
+        repository,
+        ("app/",),
+        "the check that limits the number of items",
+        ("app/entry.py:4",),
+        output,
+        SearchBudget(max_depth=2, max_steps=3, max_calls=3, beam_width=1),
+        CancelledOnSecondRequest(),
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    # Assert
+    provider = manifest["provider"]
+    assert manifest["search"]["outcome"] == "cancelled"
+    assert manifest["search"]["calls"] == 2
+    assert provider["input_tokens"] == 100
+    assert provider["responses_without_usage"] == 0
+    assert provider["unanswered_requests"] == 1
+    assert provider["input_tokens_complete"] is False
+    report = (output / "report.md").read_text()
+    assert "Requests without a response: 1" in report
+    assert "Input tokens: at least 100 (not complete)" in report
+
+
+def test_answered_run_with_usage_marks_its_token_total_complete(tmp_path: Path) -> None:
+    _, output, _ = _capped_pack(tmp_path, "complete")
+
+    provider = json.loads((output / "manifest.json").read_text())["provider"]
+
+    assert provider["unanswered_requests"] == 0
+    assert provider["input_tokens_complete"] is True
+    report = (output / "report.md").read_text()
+    assert f"- Input tokens: {provider['input_tokens']}\n" in report
 
 
 @pytest.fixture
