@@ -156,6 +156,45 @@ def test_a_file_whose_name_starts_with_a_dash_is_scanned_as_a_file(tmp_path: Pat
     assert [match["file"] for match in matches] == ["-x.py"]
 
 
+def test_a_failed_scan_reports_ast_grep_s_error_without_its_scanned_file_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: ast-grep lists the files it scanned on stderr, then dies
+    for name in ("a.py", "b.py"):
+        (tmp_path / name).write_text("def f():\n    return 1\n")
+    stand_in_ast_grep(
+        tmp_path,
+        monkeypatch,
+        "for file in files:\n    print(f'sg: entity|file|{file}: language=Python', file=sys.stderr)\n"
+        "print('ast-grep: out of memory', file=sys.stderr)\nsys.exit(137)\n",
+    )
+
+    # Act / Assert
+    with pytest.raises(tools.ToolFailedError) as failure:
+        list(tools.ast_grep_rules(VALID_RULE, ["a.py", "b.py"], tmp_path, refused={}))
+    assert str(failure.value) == f"{tools.AST_GREP} exited 137: ast-grep: out of memory"
+
+
+def test_a_file_that_vanishes_during_the_scan_is_left_to_the_index_not_named_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: ast-grep lists a.py as scanned; b.py is deleted while it runs
+    _write_python_files(tmp_path, "a.py", "b.py")
+    stand_in_ast_grep(
+        tmp_path,
+        monkeypatch,
+        "import os\nos.remove('b.py')\nprint('sg: entity|file|a.py: language=Python', file=sys.stderr)\n",
+    )
+    refused: dict[str, str] = {}
+
+    # Act
+    matches = list(tools.ast_grep_rules(VALID_RULE, ["a.py", "b.py"], tmp_path, refused=refused))
+
+    # Assert
+    assert matches == []
+    assert refused == {}
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX preprocessor script")
 def test_ripgrep_ignores_a_configured_preprocessor(tmp_path: Path, monkeypatch) -> None:
     # A ripgrep config in the environment (RIPGREP_CONFIG_PATH) can name `--pre=<program>`, which

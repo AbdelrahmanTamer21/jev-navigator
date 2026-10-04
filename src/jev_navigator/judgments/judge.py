@@ -71,6 +71,11 @@ _DEFAULT_MASKER = SecretMasker()
 _DEFAULT_SCANNER = SecretScanner()
 
 
+ABORTED_SEND_ERRORS: tuple[type[BaseException], ...] = (CancelledError, KeyboardInterrupt)
+"""What a send ends with when ``Judge.abort_sends`` stopped it: the client's or the pool's
+``CancelledError``, or the caller's interrupt itself. Any other error is a real failure."""
+
+
 class CallCapReachedError(RuntimeError):
     """A call would exceed the ``max_calls`` cap of this judge or of a judge it was scoped from."""
 
@@ -199,10 +204,12 @@ class Judge:
         self.input_total = TokenTotal()
         self._parent: Judge | None = None
         self._bookkeeping = threading.Lock()
+        self._failed_requests: list[tuple[BaseException, str]] = []
         self._send_slots = threading.BoundedSemaphore(self.max_concurrency)
 
     def scope(self) -> Judge:
         child = copy.copy(self)
+        child._failed_requests = self._failed_requests
         child.max_calls = None
         child.calls = 0
         child.replayed_answers = 0
@@ -213,8 +220,14 @@ class Judge:
 
     @property
     def unanswered_requests(self) -> int:
-        """The requests sent whose response never arrived, so whose token usage is unknown."""
+        """The requests sent without a response that reported usage: cancelled, failed with an error,
+        or never answered. Their token usage is unknown."""
         return self.calls - self.input_total.responses
+
+    def failed_request(self, error: BaseException) -> str | None:
+        """The journal request id of the request that failed with exactly ``error``, in this judge or
+        any of its scopes; None when no journaled request raised it."""
+        return next((request_id for failed, request_id in self._failed_requests if failed is error), None)
 
     def calls_left(self) -> int | None:
         """The calls this judge may still send under its own and its parents' caps; None when uncapped."""
@@ -708,6 +721,7 @@ class Judge:
         except KeyboardInterrupt:
             stop.halted.set()
             self.abort_sends(futures)
+            _raise_provider_failure(futures)
             raise
         finally:
             stop.halted.set()
@@ -769,6 +783,7 @@ class Judge:
     def _journal_failure(self, request_id: str | None, error: Exception, raw: RawResponse | None) -> None:
         if self.journal is not None and request_id is not None:
             self.journal.record_failure(request_id, _failure_text(error), raw)
+            self._failed_requests.append((error, request_id))
 
     def _propagate_attempt_journal_error(
         self, request_id: str | None, error: AttemptJournalCallbackError, raw: RawResponse | None
@@ -1235,6 +1250,17 @@ def _wave_failure(failures: Sequence[BaseException]) -> BaseException | None:
         if other is not primary:
             primary.add_note(f"Also in this wave: {type(other).__name__}: {other}")
     return primary
+
+
+def _raise_provider_failure(aborted: list[Future]) -> None:
+    """The first real failure among settled batches an interrupt aborted, so it never lives only in
+    the journal; the abort's own errors are not failures."""
+    for future in aborted:
+        if future.cancelled() or future.exception() is not None:
+            continue
+        error = future.result().error
+        if error is not None and not isinstance(error, ABORTED_SEND_ERRORS):
+            raise error
 
 
 def _is_async(client: object) -> bool:
