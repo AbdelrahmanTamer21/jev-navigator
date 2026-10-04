@@ -129,7 +129,52 @@ DECLARATION_RULES = {
   not: {not: {inside: {kind: expression_statement, inside: {kind: module}}}}""",
     "typescript": _SCRIPT_DECLARATIONS,
     "tsx": _SCRIPT_DECLARATIONS,
-    "javascript": f"  any: [{_MODULE_VARIABLES}]",
+    "javascript": f"""  any:
+    - {_MODULE_VARIABLES}""",
+}
+
+# The name nodes a declaration binds, one match per name: both names of `const a = 1, b = 2`, each
+# name a destructuring pulls out, and each target of `first, second = 1, 2`. A default value, a
+# computed key, an attribute or an item binds no name. The scan pairs each name with the innermost
+# declaration holding it, so a name declared inside another declaration's value stays its own.
+_PATTERN_EXCLUSIONS = """  not:
+    any:
+      - inside:
+          stopBy: end
+          field: right
+          any: [{kind: assignment_pattern}, {kind: object_assignment_pattern}]
+      - inside: {stopBy: end, kind: computed_property_name}"""
+_SCRIPT_NAME_KINDS = "{kind: identifier}, {kind: shorthand_property_identifier_pattern}"
+_SCRIPT_DECLARED_NAMES = f"""  any: [{_SCRIPT_NAME_KINDS}]
+  inside:
+    stopBy: end
+    field: name
+    kind: variable_declarator
+    inside: {_MODULE_VARIABLES}
+{_PATTERN_EXCLUSIONS}"""
+_TYPED_SCRIPT_DECLARED_NAMES = f"""  any: [{_SCRIPT_NAME_KINDS}, {{kind: type_identifier}}]
+  inside:
+    stopBy: end
+    field: name
+    any:
+      - kind: variable_declarator
+        inside: {_MODULE_VARIABLES}
+      - kind: type_alias_declaration
+      - kind: interface_declaration
+      - kind: enum_declaration
+{_PATTERN_EXCLUSIONS}"""
+DECLARED_NAME_RULES = {
+    "python": """  kind: identifier
+  inside:
+    stopBy: end
+    field: left
+    kind: assignment
+    inside: {stopBy: end, kind: expression_statement, inside: {kind: module}}
+  not:
+    inside: {stopBy: end, any: [{kind: attribute}, {kind: subscript}]}""",
+    "typescript": _TYPED_SCRIPT_DECLARED_NAMES,
+    "tsx": _TYPED_SCRIPT_DECLARED_NAMES,
+    "javascript": _SCRIPT_DECLARED_NAMES,
 }
 
 # The installed ast-grep supports tsx but not Flow. Route marked files through tsx;
@@ -140,6 +185,7 @@ CLASS_KINDS[FLOW_LANGUAGE] = CLASS_KINDS["tsx"]
 VALUE_KINDS[FLOW_LANGUAGE] = VALUE_KINDS["tsx"]
 NAMESPACE_KINDS[FLOW_LANGUAGE] = NAMESPACE_KINDS["tsx"]
 DECLARATION_RULES[FLOW_LANGUAGE] = _SCRIPT_DECLARATIONS
+DECLARED_NAME_RULES[FLOW_LANGUAGE] = _TYPED_SCRIPT_DECLARED_NAMES
 
 # ast-grep reads `languageGlobs` only from a config file: a scan of flow files passes this sgconfig,
 # which parses every JavaScript suffix with the tsx grammar. Plain-JS files are scanned in their own
@@ -152,9 +198,6 @@ def grammar_of(language: str) -> str:
     return "tsx" if language == FLOW_LANGUAGE else language
 
 
-_DECLARED_NAME = re.compile(
-    r"^\s*(?:export\s+)?(?:declare\s+)?(?:(?:type|interface|enum|const|let|var)\s+)?(\w+)"
-)
 _SCRIPT_VALUE_DECLARATION = re.compile(r"^\s*(?:export\s+)?(?:const|let)\s+(?!enum\b)[A-Za-z_$]")
 _SCRIPT_TYPE_DECLARATION = re.compile(r"^\s*(?:export\s+)?(?:declare\s+)?(?:type|interface)\s+[A-Za-z_$]")
 
@@ -210,13 +253,6 @@ def has_flow_pragma(lines: Sequence[str]) -> bool:
             else:
                 return False
     return False
-
-
-def declared_name(declaration: str) -> str:
-    """The name a module-level assignment, constant, type, interface or enum declares, read from
-    the start of its source text."""
-    match = _DECLARED_NAME.search(declaration)
-    return match.group(1) if match else "<anonymous>"
 
 
 def declares_type(first_line: str) -> bool:
