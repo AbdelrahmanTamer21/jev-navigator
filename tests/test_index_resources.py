@@ -424,3 +424,28 @@ def test_a_literal_search_over_more_files_than_a_parser_command_takes_starts_one
     assert len(sample_index.files) > 2
     assert {hit.file for hit in hits} >= {"app/orders.py", "app/validation.py"}
     assert spawned[tools.RIPGREP] == 1
+
+
+@pytest.mark.parametrize(
+    "search",
+    [
+        lambda files, root: [hit.file for hit in tools.ripgrep_lines(["return"], files, root)],
+        lambda files, root: list(tools.ripgrep_files("return", files, root)),
+    ],
+    ids=["ripgrep_lines", "ripgrep_files"],
+)
+def test_a_pattern_file_search_over_more_files_than_a_parser_command_takes_starts_one_ripgrep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawned: Counter[str], search
+) -> None:
+    # Arrange: a parser command takes two files at most, the search covers six
+    commit_files(tmp_path, MIXED_SCOPE)
+    files = sorted(MIXED_SCOPE)
+    monkeypatch.setattr(tools, "MAX_FILES_PER_COMMAND", 2)
+    spawned.clear()
+
+    # Act
+    found = search(files, tmp_path)
+
+    # Assert
+    assert set(found) == {"app/orders.py", "app/rules.py", "web/plain.js", "web/typed.js"}
+    assert spawned[tools.RIPGREP] == 1
