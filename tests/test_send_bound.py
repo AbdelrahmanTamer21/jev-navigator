@@ -53,3 +53,14 @@ def test_openings_split_into_nested_batches_stay_within_the_bound_and_finish(
     assert seen["steps"] == 20
     assert seen["neighbour_batches"] >= 2 * 20
     assert seen["peak"] <= DEFAULT_MAX_CONCURRENCY
+
+
+def test_a_beam_of_two_hundred_split_into_nested_batches_keeps_its_threads_within_the_bound_squared(
+    tmp_path: Path,
+) -> None:
+    # Act
+    seen = _searched(tmp_path, "sync", 200, refuse_lists=True)
+
+    # Assert: the main thread, one round pool and one batch pool per round worker.
+    assert seen["steps"] == 200
+    assert seen["threads"] <= 1 + DEFAULT_MAX_CONCURRENCY + DEFAULT_MAX_CONCURRENCY**2
