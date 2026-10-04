@@ -109,6 +109,36 @@ never reads a `.env` from the directory or repository it searches. A settings fi
 `jvn`'s own `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names; `jvn` names on stderr any
 other name it ignores, never its value.
 
+### Decision-model routes
+
+`SYSTEM_ONE_ROUTES` names the decision models `jvn` asks, in order. With
+`SYSTEM_ONE_ROUTES=drex,jev`, every request goes to Drex first, and to Jev only when Drex fails; the
+journal records each attempt with the route that made it. A size refusal is not a failure: it goes back
+to the judge, which splits the request, because the next route would get the same request. Each route
+reads `SYSTEM_ONE_<NAME>_ENDPOINT`, `SYSTEM_ONE_<NAME>_MODEL` and `SYSTEM_ONE_<NAME>_API_KEY`; `drex`
+and `jev` also take `SYSTEM_ONE_<NAME>=1` for their hosted endpoint and model. Only the `jev` route
+falls back to `TYPESAFE_API_KEY`: every other route needs its own key, so your TypeSafe key never goes
+to Drex or to a server you configured. A route missing its endpoint, model or key stops the command
+before any request, naming the route and the setting. Without `SYSTEM_ONE_ROUTES`, `jvn` uses the default Jev client described above.
+
+Each route has an input limit for the state plus the longest question: Drex accepts 8,192 tokens and
+Jev 32,000, as Analysis Engine measured them; `jvn` turns tokens into characters at the one rate
+`REQUEST_CHARS_PER_TOKEN` in `judgments/client.py`. Any other
+route sets its own with `SYSTEM_ONE_<NAME>_INPUT_TOKENS`, or the command stops naming that setting.
+`jvn` packs every request to the smallest limit in the table, so whichever route answers can take it,
+and remembers a size refusal under the limit of the route that refused. Point Drex at `jvn` through
+the route table: the default client always packs to Jev's limit.
+
+Each route also has its own concurrency: how many requests it receives in flight at once. Drex admits
+2 (it answers HTTP 429 to a third) and Jev takes 32, as Analysis Engine measured them; any other route
+sets `SYSTEM_ONE_<NAME>_CONCURRENCY`, or the command stops naming that setting. A request waits for a
+free slot of the route it goes to before it is sent, so waiting never counts against its timeout, and a
+request that falls back to Jev is not held back by Drex's limit.
+
+One difference under routes: Ctrl-C cannot abort a request already in flight, so the command waits for
+those requests to finish, keeps their answers, and then stops with a resumable pack. Without routes,
+Ctrl-C aborts requests in flight.
+
 ### JSON input for agents and pipelines
 
 Put a request in `request.json`:
@@ -710,13 +740,15 @@ explicitly. An unknown name raises `UnknownSectionError`. Each section has its o
 (newest entries kept, long text cut; defaults in `DEFAULT_LIMITS`), applied before the character budget.
 Text limits also apply inside nested lists and mappings. Rendering a limited view preserves the
 complete code and judgments in the append-only record.
-The budget is a character box, capped at Jev's documented 32,000 tokens for state plus the longest
-question times 2.4 characters per token (the Engine's `REQUEST_CHARS_PER_TOKEN`), 76,800 characters
-(the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026). A whole request
-may reach the documented 64k tokens, 153,600 characters. The batching owner (`check_each`,
-`check_every`) and the `find_code` opening questions measure the same boxes before sending and split
-what would exceed them; a direct `Judge.ask` sends what it is given and relies on the provider's
-refusal. When the selected sections still do not fit, the
+The budget is a character box: the client's input limit for state plus the longest question, less
+the longest question asked, measured together with the shared state, and within `budget_chars` when
+the history sets one. Each client declares its
+limits as `input_limits` (`InputLimits`, in characters at the rate `REQUEST_CHARS_PER_TOKEN`); a
+client that declares none is taken to be Jev, 32,000 tokens for state plus the longest question and
+64k tokens for a whole request (the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026). The
+batching owner (`check_each`, `check_every`) and the `find_code` opening questions measure the same
+limits before sending and split what would exceed them; a direct `Judge.ask` sends what it is given
+and relies on the provider's refusal. When the selected sections still do not fit, the
 pluggable `evict` policy trims them; the default `drop_oldest_code` replaces the oldest code bodies with
 `[evicted]` and records each eviction in `history.evictions`. A check that reads no code never evicts.
 Pass `recorder=` (for example a `JsonlJournal`) to record every appended step; the recorder gets each

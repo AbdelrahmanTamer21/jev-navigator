@@ -21,7 +21,7 @@ from time import perf_counter_ns
 from typing import Any
 
 from ..judgments.answers import JevResponse, response_from_raw
-from ..judgments.client import LATEST_JEV, input_budget_error
+from ..judgments.client import JEV_INPUT_LIMITS, LATEST_JEV, input_budget_error
 from ..judgments.journal import AttemptJournalCallbackError, RawAttempt, RawResponse
 
 
@@ -221,11 +221,14 @@ class _AsyncRunner:
 
 
 class TypeSafeJevClient:
+    input_limits = JEV_INPUT_LIMITS
+
     def __init__(self, sdk_client=None, model: str | None = LATEST_JEV, *, transport=None) -> None:
         """``transport`` is a sync test or host transport. The default uses the official async SDK
         behind the synchronous JevClient interface so ``cancel`` can abort active HTTP requests.
         ``model=None`` resolves `TYPESAFE_DEFAULT_MODEL` from the environment, falling back to
-        `LATEST_JEV` — how consumers point the client at Drex or a finetuned endpoint."""
+        `LATEST_JEV`. It packs to Jev's input limits; other models go through `SYSTEM_ONE_ROUTES`,
+        which knows each route's limits."""
         self._capture: CapturingTransport | CapturingAsyncTransport | None = None
         self._runner: _AsyncRunner | None = None
         self._async_sdk = False

@@ -12,10 +12,9 @@ from conftest import BudgetedClient
 
 from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer
 from jev_navigator.judgments.client import (
-    JEV_INPUT_BOX_CHARS,
+    JEV_INPUT_LIMITS,
     JEV_REQUEST_TOKEN_LIMIT,
     JEV_STATE_TOKEN_LIMIT,
-    MAX_REQUEST_CHARS,
     InputBudgetExceededError,
     MissingAnswerError,
     ReplayOnlyClient,
@@ -27,7 +26,6 @@ from jev_navigator.judgments.judge import (
     CallCapReachedError,
     CallOffer,
     Judge,
-    request_exceeds_input_budget,
 )
 from jev_navigator.judgments.questions import Check, Criterion, Pick, serialized_chars
 from jev_navigator.judgments.secrets import SecretInRequestError, SecretMasker
@@ -759,7 +757,7 @@ def _padding_item(label: str, chars: int) -> dict:
 
 
 def test_items_that_would_overflow_one_request_are_packed_so_no_request_exceeds_the_input_budget() -> None:
-    client = BudgetedClient(MAX_REQUEST_CHARS)
+    client = BudgetedClient(JEV_INPUT_LIMITS.request_chars)
     judge = Judge(client)
     items = [_padding_item(f"part{index}", 28_000) for index in range(4)]
 
@@ -771,7 +769,7 @@ def test_items_that_would_overflow_one_request_are_packed_so_no_request_exceeds_
     judged_files: list[str] = []
     for state, questions in client.requests:
         body = serialized_chars({"state": state, "questions": questions})
-        assert body <= MAX_REQUEST_CHARS
+        assert body <= JEV_INPUT_LIMITS.request_chars
         assert len(questions) == len(state["parts"]), "one atomic question per item and slot"
         judged_files.extend(item["file"] for item in state["parts"])
     assert sorted(judged_files) == [f"part{index}.py" for index in range(4)]
@@ -798,11 +796,11 @@ def test_non_ascii_items_are_packed_by_their_escaped_size_so_every_request_fits_
     assert len(client.requests) > 1
     for state, questions in client.requests:
         longest = max(len(json.dumps(question)) for question in questions.values())
-        assert len(json.dumps(state)) + longest <= JEV_INPUT_BOX_CHARS
+        assert len(json.dumps(state)) + longest <= JEV_INPUT_LIMITS.box_chars
 
 
 def _boxed_client() -> BudgetedClient:
-    return BudgetedClient(MAX_REQUEST_CHARS, input_box=JEV_INPUT_BOX_CHARS)
+    return BudgetedClient(JEV_INPUT_LIMITS.request_chars, input_box=JEV_INPUT_LIMITS.box_chars)
 
 
 def _judge_padded_parts(client: BudgetedClient, count: int, chars: int):
@@ -836,36 +834,36 @@ def test_many_small_questions_over_a_moderate_state_fit_because_only_the_longest
     state = {"parts": [{"code": "y" * 60_000}]}
     questions = {f"q{index}": {"ask": "x" * 400} for index in range(200)}
 
-    assert not request_exceeds_input_budget(state, questions)
+    assert not JEV_INPUT_LIMITS.exceeded_by(state, questions)
 
 
 def test_the_longest_question_counts_towards_the_character_box() -> None:
     state = {"parts": [{"code": "y" * 60_000}]}
     questions = {"short": {"ask": "x"}, "long": {"ask": "x" * 17_000}}
 
-    assert request_exceeds_input_budget(state, questions)
-    assert not request_exceeds_input_budget(state, {"short": questions["short"]})
+    assert JEV_INPUT_LIMITS.exceeded_by(state, questions)
+    assert not JEV_INPUT_LIMITS.exceeded_by(state, {"short": questions["short"]})
 
 
 def test_a_body_over_the_request_box_is_over_budget_although_state_and_question_fit() -> None:
     state = {"doc": {"sentence": "s"}}
     questions = {f"q{index}": {"ask": "x" * 40} for index in range(5_000)}
 
-    assert request_exceeds_input_budget(state, questions)
-    assert not request_exceeds_input_budget(state, dict(list(questions.items())[:100]))
+    assert JEV_INPUT_LIMITS.exceeded_by(state, questions)
+    assert not JEV_INPUT_LIMITS.exceeded_by(state, dict(list(questions.items())[:100]))
 
 
 def test_non_ascii_state_is_measured_as_the_escaped_body_the_engine_measures() -> None:
     chinese_comments = "\u4e2d" * 20_000
     state = {"parts": [{"code": chinese_comments}]}
 
-    assert len(json.dumps(state, ensure_ascii=False)) < JEV_INPUT_BOX_CHARS
-    assert request_exceeds_input_budget(state, {"q": {"ask": "x"}})
+    assert len(json.dumps(state, ensure_ascii=False)) < JEV_INPUT_LIMITS.box_chars
+    assert JEV_INPUT_LIMITS.exceeded_by(state, {"q": {"ask": "x"}})
 
 
 def test_every_box_derives_from_the_one_characters_per_token_constant() -> None:
-    assert chars_for_tokens(JEV_STATE_TOKEN_LIMIT) == JEV_INPUT_BOX_CHARS == 76_800
-    assert chars_for_tokens(JEV_REQUEST_TOKEN_LIMIT) == MAX_REQUEST_CHARS == 153_600
+    assert chars_for_tokens(JEV_STATE_TOKEN_LIMIT) == JEV_INPUT_LIMITS.box_chars == 76_800
+    assert chars_for_tokens(JEV_REQUEST_TOKEN_LIMIT) == JEV_INPUT_LIMITS.request_chars == 153_600
     assert chars_for_tokens(8_192) == 19_660
 
 
@@ -926,7 +924,7 @@ def test_split_answers_replay_from_the_store_without_new_calls(tmp_path: Path) -
 
 
 def test_a_normal_small_batch_is_unchanged_by_the_input_budget_boundary() -> None:
-    client = BudgetedClient(MAX_REQUEST_CHARS)
+    client = BudgetedClient(JEV_INPUT_LIMITS.request_chars)
     judge = Judge(client)
     items = [{"code": "def a(): ..."}, {"code": "def b(): ..."}, {"code": "def c(): ..."}]
 
