@@ -132,6 +132,15 @@ def sample_repo(tmp_path: Path) -> Path:
     return root
 
 
+OUTER_CACHE_ROOT = cache_root()
+
+
+@pytest.fixture
+def outer_cache_root() -> Path:
+    """The cache folder the suite's own environment names, before any test's private one replaces it."""
+    return OUTER_CACHE_ROOT
+
+
 @pytest.fixture(autouse=True)
 def private_cache_root(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Each test starts with an empty cache folder of its own, holding its fact cache and its shared
