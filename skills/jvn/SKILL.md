@@ -89,7 +89,8 @@ JVN prunes its own caches and run folders as runs end (rules: `docs/cli.md`, Dis
 housekeeping); `jvn cache status` shows disk use. Copy a run folder you want to keep, or use `--out`.
 
 Live searches send source to the configured provider: reuse the user's source and spend authorization,
-and never print credentials (environment or `~/.config/jvn/env`). Progress is stderr, JSON stdout.
+and never print credentials (the environment, the `.env` of a jev-navigator checkout `jvn` runs
+from, or `~/.config/jvn/env`). Progress is stderr, JSON stdout.
 Check the exit status first: 0 completed, 1 failed, 2 invalid input, 130 cancelled.
 
 Library compositions and maintained options: `docs/extending.md` and `docs/cli.md` in the

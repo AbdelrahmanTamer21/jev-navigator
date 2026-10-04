@@ -49,9 +49,9 @@ def parsed_files(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     parsed: list[str] = []
     real_rules = tools.ast_grep_rules
 
-    def recorded_rules(rules, files, cwd, config=None, *, refused):
+    def recorded_rules(rules, files, *arguments, **options):
         parsed.extend(files)
-        return real_rules(rules, files, cwd, config=config, refused=refused)
+        return real_rules(rules, files, *arguments, **options)
 
     monkeypatch.setattr(tools, "ast_grep_rules", recorded_rules)
     return parsed

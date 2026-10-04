@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "André Machon" }]
 license = "MIT"
-dependencies = []
+dependencies = [
+    "msgspec>=0.22",
+]
 
 [project.scripts]
 jvn = "jev_navigator.cli:main"
@@ -19,7 +21,7 @@ requires = ["uv_build>=0.11.7,<0.12"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "ruff", "jev-navigator[typesafe]"]
 
 [tool.ruff]
 line-length = 110

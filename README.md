@@ -105,9 +105,11 @@ When its code runs from a jev-navigator source checkout (`uv run jvn` there, or 
 install), `jvn` first fills what is missing from that checkout's `.env` (see `.env.example`). Any
 install into site-packages (`uv tool install`, `pipx`, a non-editable `pip install`) reads no
 `.env`, and when the directory it runs in holds one, it says on stderr that it did not read it. It
-never reads a `.env` from the directory or repository it searches. A settings file can set only
+never reads a `.env` from the directory or repository it searches, unless that is the checkout
+its own code runs from. A settings file can set only
 `jvn`'s own `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names; `jvn` names on stderr any
-other name it ignores, never its value.
+other name it ignores, never its value. The `JEV_NAVIGATOR_*` settings hold the judgment thresholds
+only; a search's budget comes from its flags or the request's JSON fields.
 
 ### Decision-model routes
 
@@ -195,7 +197,7 @@ Without a start, `jvn` uses typed Jev judgments to select entry candidates from 
 
 Every live call is a paid request, so `--max-calls` defaults to 24 for the whole run, choosing an entry
 point included; a search that reaches it ends with outcome `budget` and a resumable `not_inspected`
-frontier (or a saved entry-selection stage if the cap arrives earlier). Resume with another `jvn find`
+frontier (or a saved entry-selection stage if the cap, Ctrl-C or a failed request arrives earlier). Resume with another `jvn find`
 invocation using `--resume /path/to/previous-pack`; it gets a fresh call allowance and writes a new pack
 while keeping the earlier evidence. `--max-calls none` lifts the cap. Depth and step limits are unset by default. If you want an
 explicit allowance for a particular search, you can supply one:
@@ -493,6 +495,15 @@ else:
   under dist/" and its measured facts. Anywhere else it stays in `files`, counted toward the cap, and
   is listed in `resolved.awaiting_generated_judgment` with its measured facts, for Jev to judge. With
   `with_generated` nothing is measured and nothing awaits a judgment.
+- `judgments.generated_files.judge_generated_files(judge, index, resolved.awaiting_generated_judgment)`
+  asks Jev about those files, one question each: is the file generated, meaning no person edits it as
+  source? Each file is sent as its path, its measured facts, up to 10 files that import it with their
+  true count, up to 5 files that name its path with the naming line (at most 200 characters around
+  the path; files outside the scope count, non-test files come first; a path written relative to the
+  naming file, such as `../src/a.js`, or joined to a variable folder, such as `$root/src/a.js`, is not
+  found) and their true count, and two 2,000-character excerpts (the opening and the middle). A file
+  the secret scan would refuse is never sent and comes back in `not_judged` with the reason. Nothing calls it yet: the
+  search that acts on the answers lands with Find v2's round controller.
 - `include` and `exclude` entries without `*`, `?` or `[` are folders or files. Other entries are
   globs over the whole path: `**` crosses folders, and a glob without `/` matches the file name at any
   depth unless a leading `/` anchors it at the root.
@@ -856,8 +867,11 @@ Neither a question hash nor a frozen manifest proves model quality or dataset co
 `uv run pytest --basetemp=<scratch dir>`. Tests run offline against small real git repositories and
 `ScriptedJevClient`. The suite retains the ten Express/Next.js and FastAPI/GraphQL graph
 capability regressions and verifies request/response capture through a real local HTTP socket.
-The TypeSafe adapter's tests run only with the extra installed:
-`uv run --extra typesafe pytest`. Run `uv run ruff check src tests` and
+Plain `uv run pytest` installs the TypeSafe extra with the dev group, so every test runs. A skipped
+test did not run, so a run with a skip fails and names it, unless the test declares a platform it
+cannot run on with a `skipif` condition. To show the core works without the extra, run
+`uv run --no-dev --with pytest pytest --without-typesafe`: only there may the TypeSafe tests skip,
+and it refuses to start when the extra is installed. Run `uv run ruff check src tests` and
 `uv run ruff format --check src tests` before pushing. Local checks are the normal validation
 path for this small library; pushes and pull requests do not launch hosted CI. The `tests`
 workflow is available through GitHub Actions **Run workflow** when an explicit cross-version
