@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import inspect
 import io
 import json
@@ -7,7 +8,7 @@ import os
 import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 
 import pytest
 from git_repos import commit_files
@@ -16,6 +17,7 @@ from isolated_jvn import JVN
 from jev_navigator.cli import (
     SCHEMA_VERSION,
     _load_typesafe_environment,
+    _outcome_summary,
     _scope_warning,
     create_evidence_pack,
     main,
@@ -23,6 +25,69 @@ from jev_navigator.cli import (
 from jev_navigator.directives.find_code import SearchBudget
 from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
 from jev_navigator.testing import ScriptedJevClient
+
+
+def test_an_empty_find_reports_how_much_of_the_scope_it_examined(tmp_path: Path) -> None:
+    # Arrange
+    repository = tmp_path / "repository"
+    commit_files(repository, {"app/entry.py": "def handle(item):\n    return item\n"})
+    commit_files(
+        repository,
+        {
+            "app/mail.py": "def send(letter):\n    return letter\n",
+            "app/billing.py": "def bill(account):\n    return account\n",
+        },
+    )
+    client = ScriptedJevClient(nouls=lambda question_id, question, state: 0.04)
+    output = tmp_path / "evidence"
+
+    # Act
+    manifest = create_evidence_pack(
+        repository,
+        ("app/",),
+        "the check that limits the number of items",
+        ("app/entry.py:2",),
+        output,
+        SearchBudget(),
+        client,
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    # Assert
+    assert manifest["search"]["outcome"] == "scope_incomplete"
+    assert (manifest["search"]["files_judged"], manifest["search"]["files_read"]) == (1, 1)
+    assert manifest["search"]["code_files"] == 3
+    assert (
+        "Outcome: **scope_incomplete (not found: Jev judged code in 1 of 3 files; 0 more were read only "
+        "to list links; 2 never reached)**" in (output / "report.md").read_text()
+    )
+
+
+@pytest.mark.parametrize(
+    ("search", "summary"),
+    [
+        (
+            {"outcome": "nothing_left", "files_judged": 2, "files_read": 7, "code_files": 7},
+            "nothing_left (nothing left worth opening: Jev judged code in 2 of 7 files; all 7 were read)",
+        ),
+        (
+            {
+                "outcome": "scope_incomplete",
+                "files_judged": 1,
+                "files_read": 5,
+                "code_files": 7,
+                "unparsed_files": ["a.js"],
+                "unavailable_files": {"b.py": "disappeared after inventory"},
+            },
+            "scope_incomplete (not found: Jev judged code in 1 of 7 files; 4 more were read only to list "
+            "links; 2 never reached; 1 parsed only partly; 1 gone from disk)",
+        ),
+        ({"outcome": "budget", "files_judged": 1, "files_read": 1, "code_files": 6}, "budget"),
+        ({"outcome": "scope_incomplete", "coverage": "partial"}, "scope_incomplete"),
+    ],
+)
+def test_the_outcome_summary_says_how_much_of_the_scope_an_empty_find_examined(search, summary) -> None:
+    assert _outcome_summary(search) == summary
 
 
 def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -> None:
@@ -476,6 +541,64 @@ def test_cancelled_navigation_writes_a_resumable_evidence_pack(tmp_path: Path) -
     assert records[-1]["outcome"] == "cancelled"
 
 
+class AnswersAfterTheCancel:
+    """The request for ``first.py`` raises the caller's Ctrl-C once ``second.py``'s is in flight; the
+    second is one the cancel cannot stop, so its answer still arrives and is stored."""
+
+    model = "answers-after-the-cancel"
+
+    def __init__(self) -> None:
+        self.second_in_flight = Event()
+        self.cancelled = Event()
+
+    def ask(self, state, questions):
+        if "first" in state["slice"]["code"]:
+            self.second_in_flight.wait(timeout=5)
+            raise KeyboardInterrupt
+        self.second_in_flight.set()
+        self.cancelled.wait(timeout=5)
+        return ScriptedJevClient(default_noul=0.05).ask(state, questions)
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_full_disk_while_storing_an_answer_during_ctrl_c_exits_1_with_that_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Arrange
+    from jev_navigator import cli
+    from jev_navigator.judgments.store import JsonlAnswerStore
+
+    repository = tmp_path / "repository"
+    commit_files(
+        repository, {"first.py": "def first():\n    return 1\n", "second.py": "def second():\n    return 2\n"}
+    )
+
+    def full_disk(store: JsonlAnswerStore, line: dict) -> None:
+        del store, line
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    client = AnswersAfterTheCancel()
+    monkeypatch.setattr(JsonlAnswerStore, "_append", full_disk)
+    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "TypeSafeJevClient", lambda: client)
+    command = ["find", "the item limit", "--repo", str(repository), "--beam-width", "2"]
+    command += ["--start", "first.py:1", "--start", "second.py:1", "--out", str(tmp_path / "out")]
+    command += ["--answer-store", str(tmp_path / "answers.sqlite")]
+
+    # Act
+    status = main(command)
+
+    # Assert
+    assert client.cancelled.is_set()
+    assert status == 1
+    assert "No space left on device" in capsys.readouterr().err
+
+
 def test_cancelled_run_marks_its_token_total_incomplete_because_a_sent_request_never_answered(
     tmp_path: Path,
 ) -> None:
@@ -518,7 +641,7 @@ def test_cancelled_run_marks_its_token_total_incomplete_because_a_sent_request_n
     assert provider["unanswered_requests"] == 1
     assert provider["input_tokens_complete"] is False
     report = (output / "report.md").read_text()
-    assert "Requests without a response: 1" in report
+    assert "Requests whose usage is unknown: 1" in report
     assert "Input tokens: at least 100 (not complete)" in report
 
 
@@ -699,8 +822,8 @@ def test_large_scope_warning_starts_above_twenty_thousand_files() -> None:
 
 @pytest.mark.parametrize("search_here", [False, True])
 @pytest.mark.parametrize("input_mode", ["flags", "json-file", "json-stdin", "json-inline"])
-def test_find_defaults_to_unique_results_under_invocation_directory(
-    tmp_path, monkeypatch, capsys, search_here, input_mode
+def test_find_defaults_to_unique_results_in_jvns_data_folder(
+    tmp_path, tmp_path_factory, monkeypatch, capsys, search_here, input_mode, private_data_root
 ):
     from jev_navigator import cli
 
@@ -729,8 +852,7 @@ def test_find_defaults_to_unique_results_under_invocation_directory(
         if input_mode == "flags":
             arguments = ["find", "the policy", "--repo", str(repository)]
         elif input_mode == "json-file":
-            request_file = tmp_path / "jvn-results" / "request.json"
-            request_file.parent.mkdir(exist_ok=True)
+            request_file = tmp_path_factory.mktemp("requests") / "request.json"
             request_file.write_text(json.dumps(request))
             arguments = ["--json", str(request_file)]
         elif input_mode == "json-inline":
@@ -747,7 +869,7 @@ def test_find_defaults_to_unique_results_under_invocation_directory(
             assert response["manifest"] == str(pack / "manifest.json")
             assert response["report"] == str(pack / "report.md")
             assert "jvn" in captured.err
-    packs = [path for path in (tmp_path / "jvn-results").iterdir() if path.is_dir()]
+    packs = [path for path in (private_data_root / "runs").iterdir() if path.is_dir()]
     assert len(packs) == 2
     for pack in packs:
         manifest = json.loads((pack / "manifest.json").read_text())
@@ -755,8 +877,8 @@ def test_find_defaults_to_unique_results_under_invocation_directory(
         assert manifest["source"]["tracked_files"] == 1
         assert (pack / "report.md").is_file()
         assert (pack / "journal.jsonl").is_file()
-    if not search_here:
-        assert not (repository / "jvn-results").exists()
+    assert not (tmp_path / "jvn-results").exists()
+    assert not (repository / "jvn-results").exists()
 
 
 def test_report_distinguishes_included_lines_from_an_unopened_candidate(tmp_path):
@@ -974,7 +1096,10 @@ def test_findall_budget_stop_writes_partial_pack_with_completed_results(tmp_path
 
 
 def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    private_data_root: Path,
 ) -> None:
     from jev_navigator import cli
 
@@ -1016,7 +1141,7 @@ def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
     captured = capsys.readouterr()
     result = json.loads(captured.out)
     output = Path(result["output_directory"])
-    assert output.parent == tmp_path / "jvn-results"
+    assert output.parent == private_data_root / "runs"
     pack = json.loads((output / "statistics.json").read_text())
     assert pack["counts"]["totals"] == {"function": 2}
     assert pack["largest"]["ranking"][0]["name"] == "larger"
@@ -1030,7 +1155,10 @@ def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
 
 
 def test_stats_schema_and_validation_share_the_cli_contract(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    private_data_root: Path,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     assert main(["schema", "stats"]) == 0
@@ -1040,9 +1168,9 @@ def test_stats_schema_and_validation_share_the_cli_contract(
     with pytest.raises(SystemExit) as exc:
         main(["--json", '{"command":"stats","operation":["guess"]}'])
     assert exc.value.code == 2
-    assert not (tmp_path / "jvn-results").exists()
+    assert not (private_data_root / "runs").exists()
     assert main(["stats", "--min-lines", "10", "--max-lines", "2"]) == 1
-    assert not (tmp_path / "jvn-results").exists()
+    assert not (private_data_root / "runs").exists()
 
 
 def test_each_run_names_its_answer_store_and_a_fresh_store_isolates_runs(
@@ -1120,6 +1248,37 @@ def test_the_answer_store_variable_chooses_the_shared_store_when_no_flag_is_give
     assert capsys.readouterr().err.count(f"answer store: {store}") == 2
     first, repeat = (len(instance.requests) for instance in clients)
     assert store.is_file() and first > 1 and repeat == 1
+
+
+@pytest.mark.parametrize("named_by", ["flag", "variable"])
+def test_a_store_named_inside_jvns_cache_folder_stops_the_run_with_exit_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    private_cache_root: Path,
+    private_data_root: Path,
+    named_by: str,
+) -> None:
+    from jev_navigator import cli
+
+    # Arrange: an older JVN's default file name, which housekeeping prunes as an older layout
+    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "TypeSafeJevClient", ScriptedJevClient)
+    store = private_cache_root / "answers.sqlite"
+    flag = ["--answer-store", str(store)] if named_by == "flag" else []
+    if named_by == "variable":
+        monkeypatch.setenv(SHARED_STORE_VARIABLE, str(store))
+
+    # Act
+    with pytest.raises(SystemExit) as stopped:
+        main(["find", "the order limit", "--repo", str(tmp_path), *flag])
+
+    # Assert
+    error = capsys.readouterr().err
+    assert stopped.value.code == 2
+    assert str(store) in error and "JVN prunes" in error
+    assert not store.exists()
+    assert not (private_data_root / "runs").exists()
 
 
 REFUSED_BUNDLE = ("export function admit(){return 1};" * 6_000)[:200_000]

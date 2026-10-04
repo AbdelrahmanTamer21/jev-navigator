@@ -8,6 +8,7 @@ import os
 import signal
 import threading
 from collections.abc import Callable, Mapping
+from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -197,10 +198,12 @@ def _interrupt() -> None:
 
 @dataclass
 class HangingClient:
-    """Stands in for the provider: every send hangs until the judge cancels it. The last request to
-    get in flight sends SIGINT to this process, as a terminal does on Ctrl-C."""
+    """Stands in for the provider: every send hangs until the judge cancels it, then raises
+    ``on_cancel``: by default the ``CancelledError`` the TypeSafe adapter raises for an aborted send.
+    The last request to get in flight sends SIGINT to this process, as a terminal does on Ctrl-C."""
 
     in_flight_before_interrupt: int
+    on_cancel: Exception = field(default_factory=CancelledError)
     script: ScriptedJevClient = field(default_factory=ScriptedJevClient)
     released: threading.Event = field(default_factory=threading.Event)
     cancelled: bool = False
@@ -222,7 +225,9 @@ class HangingClient:
         self.arrived.wait()
         if not self.released.wait(timeout=5):
             self.timed_out = True
-        raise ConnectionError("cancelled by the judge" if self.cancelled else "never cancelled")
+        if self.cancelled:
+            raise self.on_cancel
+        raise ConnectionError("never cancelled")
 
     def parse(self, raw: RawResponse):
         return self.script.parse(raw)
@@ -232,6 +237,7 @@ class HangingClient:
         self.released.set()
 
 
+@pytest.mark.usefixtures("python_sigint_handler")
 def test_an_interrupt_with_requests_in_flight_cancels_them_and_sends_nothing_new() -> None:
     # Arrange
     client = HangingClient(in_flight_before_interrupt=2)
@@ -244,6 +250,31 @@ def test_an_interrupt_with_requests_in_flight_cancels_them_and_sends_nothing_new
     # Assert: the cancel released the hanging sends; none ran into its timeout
     assert client.cancelled and not client.timed_out
     assert len(client.requests) == 2
+
+
+class ProviderError(RuntimeError):
+    """A failure the provider reports, such as a 503, as opposed to a send the caller aborted."""
+
+
+@pytest.mark.usefixtures("python_sigint_handler")
+def test_a_provider_error_during_an_interrupt_comes_out_as_that_error() -> None:
+    # Arrange
+    cause = ConnectionResetError("connection reset by peer")
+    error = ProviderError("Jev answered 503")
+    error.__cause__ = cause
+    client = HangingClient(in_flight_before_interrupt=2, on_cancel=error)
+    judge = Judge(client, max_concurrency=2)
+
+    # Act: the interrupt is caught too, so hiding the error fails this test instead of ending the session
+    try:
+        list(judge.iter_check_each(DESCRIBES, _items(6), SHARED))
+    except (ProviderError, KeyboardInterrupt) as stopped:
+        raised = stopped
+
+    # Assert
+    assert client.cancelled and not client.timed_out
+    assert raised is error
+    assert raised.__cause__ is cause
 
 
 @dataclass

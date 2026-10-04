@@ -18,7 +18,7 @@
     "source_tree_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
   },
   "provider": {
-    "input_tokens": 120,
+    "input_tokens": 200,
     "input_tokens_complete": true,
     "requested_model": "jev-scripted",
     "responses_without_usage": 0,
@@ -33,12 +33,14 @@
   "search": {
     "calls": 2,
     "calls_this_invocation": 2,
+    "code_files": 2,
     "duration_seconds": 0.043,
     "entry_calls": 0,
     "entry_selection_pending": false,
+    "files_judged": 2,
+    "files_read": 2,
     "found": [
       {
-        "code": "def admit(items):\n    return len(items) <= 3",
         "path": [
           "app/orders.py:3-4",
           "app/policy.py:1-2"
@@ -87,7 +89,6 @@
         "decision": "start judged no",
         "fetched": [
           {
-            "code": "def handle(items):\n    return admit(items)",
             "commit": "1111111111111111111111111111111111111111",
             "file": "app/orders.py",
             "file_sha256": "789bf14167bf0bc24aa600a358b9fb1183e752d1fca41108fbd16c9493b31243",
@@ -122,7 +123,7 @@
                 "move": "callees",
                 "relation": "called by handle"
               },
-              "signature": "app/policy.py:1 `def admit(items):` (called by handle)",
+              "signature": "app/policy.py:1 admit",
               "verdict": "no"
             },
             {
@@ -132,7 +133,7 @@
                 "move": "lines_before",
                 "relation": "the lines before app/orders.py:3-4"
               },
-              "signature": "app/orders.py:1-2 `from .policy import admit` (the lines before app/orders.py:3-4)",
+              "signature": "app/orders.py:1",
               "verdict": "no"
             }
           ],
@@ -173,7 +174,6 @@
         "decision": "found",
         "fetched": [
           {
-            "code": "def admit(items):\n    return len(items) <= 3",
             "commit": "1111111111111111111111111111111111111111",
             "file": "app/policy.py",
             "file_sha256": "0cc97f96d3638debcef4ae177e8c0e18dd8f5ba14f67c6c4658cd8cf49171fd7",
@@ -197,7 +197,7 @@
                 "move": "co_changed",
                 "relation": "start of a file committed with app/policy.py 1 times"
               },
-              "signature": "app/orders.py:1-4 `from .policy import admit` (start of a file committed with app/policy.py 1 times)",
+              "signature": "app/orders.py:1",
               "verdict": "yes"
             }
           ]
@@ -278,7 +278,7 @@
         "place": "app/orders.py:1-4",
         "priority": 0.96,
         "reason": "target_found",
-        "signature": "app/orders.py:1-4 `from .policy import admit` (start of a file committed with app/policy.py 1 times)",
+        "signature": "app/orders.py:1",
         "tier": "move"
       },
       {
@@ -291,7 +291,7 @@
         "place": "app/orders.py:1-2",
         "priority": 0.04,
         "reason": "deprioritized",
-        "signature": "app/orders.py:1-2 `from .policy import admit` (the lines before app/orders.py:3-4)",
+        "signature": "app/orders.py:1",
         "tier": "move"
       }
     ],
@@ -305,7 +305,6 @@
     "searched": [],
     "starts": [
       {
-        "code": "def handle(items):\n    return admit(items)",
         "path": [
           "app/orders.py:3-4"
         ],
@@ -333,7 +332,7 @@
     "prefixes": [
       "app/"
     ],
-    "repository": "/privatehttps://github.com/example/orders",
+    "repository": "https://github.com/example/orders",
     "revision": "1111111111111111111111111111111111111111",
     "tracked_files": 2
   },

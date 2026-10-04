@@ -12,7 +12,7 @@ from jev_navigator.index import tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.languages import has_flow_pragma
-from jev_navigator.index.scope_scan import FileFacts, FileStructure, Unparsed, scan_facts
+from jev_navigator.index.scope_scan import OPAQUE_RECEIVER, FileFacts, FileStructure, Unparsed, scan_facts
 from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
@@ -718,3 +718,115 @@ def test_a_search_over_a_scope_with_grammar_errors_never_reports_nothing_left(tm
     assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert result.unparsed_files == {"src/native/RootTag.js"}
     assert result.history.steps[-1].judgments["unparsed_files"] == ["src/native/RootTag.js"]
+
+
+def test_an_empty_search_that_never_reached_every_file_says_so_without_parsing_the_rest(
+    tmp_path: Path, ast_grep_runs
+) -> None:
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "app/start.py": "def start():\n    return 1\n",
+            "app/billing.py": "def bill():\n    return 2\n",
+            "app/mail.py": "def send():\n    return 3\n",
+        },
+    )
+    judge = Judge(ScriptedJevClient(nouls=lambda question_id, question, state: 0.05))
+    start = [place_for_line(index, "app/start.py", 2, "start")]
+
+    # Act
+    result = find_code(index, judge, "where an order is shipped", start, moves={})
+
+    # Assert
+    parsed = {file for _rule, _config, files in ast_grep_runs for file in files}
+    assert parsed == {"app/start.py"}
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
+    assert result.parser_scans_pending == ("facts",)
+    assert (result.files_judged, result.files_read_only, result.files_never_reached) == (1, 0, 2)
+
+
+def test_an_empty_search_that_parsed_every_file_reports_nothing_left(tmp_path: Path) -> None:
+    # Arrange
+    index = committed(tmp_path, {"app/start.py": "def start():\n    return 1\n"})
+    judge = Judge(ScriptedJevClient(nouls=lambda question_id, question, state: 0.05))
+    start = [place_for_line(index, "app/start.py", 2, "start")]
+
+    # Act
+    result = find_code(index, judge, "where an order is shipped", start, moves={})
+
+    # Assert
+    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.parser_scans_pending == ()
+    assert (result.files_judged, result.files_read, result.code_files) == (1, 1, 1)
+
+
+def test_reading_the_parsed_files_receipt_parses_nothing(tmp_path: Path, ast_grep_runs) -> None:
+    # Arrange
+    index = committed(
+        tmp_path, {"app/a.py": "def a():\n    return 1\n", "app/b.py": "def b():\n    return 2\n"}
+    )
+    index.functions_in("app/a.py")
+    runs_before = len(ast_grep_runs)
+
+    # Act
+    parsed = index.parsed_files
+
+    # Assert
+    assert parsed == {"app/a.py"}
+    assert len(ast_grep_runs) == runs_before
+
+
+RECEIVERS = {
+    "app/clients.ts": "export function load(client, cfg, store) {\n"
+    '  client("api-key-literal").fetch(1);\n'
+    '  cfg["token-literal"].get(2);\n'
+    "  `template-${store}`.trim();\n"
+    "  this.store.save(3);\n"
+    "  store?.rows.push(4);\n"
+    "  run(this.handler, cfg.read);\n"
+    "}\n",
+    "app/model.py": "class Model:\n    def save(self):\n        self.items.append(1)\n"
+    '        super().save()\n        open("secret-path").read()\n',
+}
+
+
+def test_a_receiver_is_kept_only_as_a_plain_chain_of_names(tmp_path: Path) -> None:
+    # Arrange
+    commit_files(tmp_path, RECEIVERS)
+
+    # Act
+    facts = scan_facts(sorted(RECEIVERS), tmp_path, Unparsed())
+
+    # Assert
+    calls = {(call.name, call.receiver) for fact in facts.values() for call in fact.calls}
+    references = {(ref.name, ref.receiver) for fact in facts.values() for ref in fact.references}
+    assert {
+        ("fetch", OPAQUE_RECEIVER),
+        ("get", OPAQUE_RECEIVER),
+        ("trim", OPAQUE_RECEIVER),
+        ("save", "this.store"),
+        ("push", "store.rows"),
+        ("append", "self.items"),
+        ("read", OPAQUE_RECEIVER),
+    } <= calls
+    assert {("handler", "this"), ("read", "cfg")} <= references
+    receivers = " ".join(str(call.receiver) for fact in facts.values() for call in fact.calls)
+    assert "literal" not in receivers and "secret" not in receivers and "template" not in receivers
+
+
+def test_a_parsed_file_that_vanished_still_counts_as_read_and_is_listed_unavailable(tmp_path: Path) -> None:
+    # Arrange: its facts come from the bytes read before it vanished, which slices keep
+    index = committed(
+        tmp_path, {"app/a.py": "def a():\n    return 1\n", "app/b.py": "def b():\n    return 2\n"}
+    )
+    index.functions_in("app/a.py")
+    (tmp_path / "app" / "a.py").unlink()
+
+    # Act
+    pending = index.parser_scans_pending
+
+    # Assert
+    assert pending == ("facts",)
+    assert "app/a.py" in index.parsed_files
+    assert "app/a.py" in index.unavailable_files

@@ -4,6 +4,7 @@ and every test's isolation from the developer's own decision-model settings."""
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 from collections import Counter
 from collections.abc import Mapping
@@ -14,6 +15,7 @@ from git_repos import git, write_files
 from isolated_jvn import NO_SETTINGS
 
 from jev_navigator.cache_root import cache_root
+from jev_navigator.data_root import data_root
 from jev_navigator.environment import SETTING_PREFIXES
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import JevResponse, NoulAnswer
@@ -121,6 +123,15 @@ API_TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 
 
 @pytest.fixture
+def python_sigint_handler():
+    """Python's own Ctrl-C handler for a test that sends SIGINT. A suite started as a background job
+    (``cmd &``) inherits SIGINT as ignored, so without this the signal never arrives."""
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    yield
+    signal.signal(signal.SIGINT, previous)
+
+
+@pytest.fixture
 def sample_repo(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
@@ -172,6 +183,14 @@ def private_cache_root(
     ``JEV_NAVIGATOR_`` variable, so the answer store variable is unset and the store lives here."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("cache")))
     return cache_root()
+
+
+@pytest.fixture(autouse=True)
+def private_data_root(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Each test starts with an empty data folder of its own, holding the run folders the CLI writes
+    without ``--out``, so no test writes the user's run folders."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path_factory.mktemp("data")))
+    return data_root()
 
 
 @pytest.fixture
@@ -228,7 +247,7 @@ class BudgetedClient:
             raise InputBudgetExceededError(
                 "TypeSafeBadRequestError: 400 "
                 '{"detail":{"error_type":"max_tokens_exceeded"}} '
-                f"(input of {body} bytes, {box} characters of state and question)"
+                f"(input of {body} characters, {box} of them state and the longest question)"
             )
         self.requests.append((state, questions))
         answers = {question_id: NoulAnswer(self.default_noul) for question_id in questions}
