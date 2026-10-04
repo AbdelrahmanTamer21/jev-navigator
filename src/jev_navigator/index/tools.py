@@ -7,7 +7,7 @@ import json
 import logging
 import subprocess
 import tempfile
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from functools import cache
 from pathlib import Path
@@ -54,6 +54,7 @@ def ast_grep_rules(
     config: str | None = None,
     *,
     refused: dict[str, str],
+    decode: Callable[[str], dict] = json.loads,
 ) -> Iterator[dict]:
     """The matches of ``rules_yaml`` over ``files``, one at a time as ast-grep prints them, so no
     process's whole output is ever held. Every parse passes through here: a file whose estimated parse
@@ -62,7 +63,8 @@ def ast_grep_rules(
     the matches. ast-grep always runs with a JVN-owned sgconfig: ``config``, when given, is sgconfig
     YAML text (a ``languageGlobs`` remapping, say), otherwise ``NEUTRAL_AST_GREP_CONFIG``. It is
     written to a temporary file outside every repository and passed with ``--config``, so the
-    repository being analysed never configures the parser."""
+    repository being analysed never configures the parser. ``decode`` turns one printed match into
+    the dict the caller reads; a caller that reads few fields passes a decoder that skips the rest."""
     parseable, skipped = _split_by_parse_peak(files, cwd)
     refused.update(skipped)
     if not parseable:
@@ -73,7 +75,7 @@ def ast_grep_rules(
         path.write_text(NEUTRAL_AST_GREP_CONFIG if config is None else config)
         command = [AST_GREP, "scan", "--inline-rules", rules_yaml, "--config", str(path)]
         for chunk in file_chunks(parseable):
-            yield from _json_lines([*command, "--json=stream", *chunk], cwd)
+            yield from _json_lines([*command, "--json=stream", *chunk], cwd, decode)
 
 
 def _split_by_parse_peak(files: Sequence[str], cwd: Path) -> tuple[list[str], dict[str, str]]:
@@ -106,7 +108,7 @@ def file_chunks(files: Sequence[str]) -> Iterator[Sequence[str]]:
         yield files[start:]
 
 
-def _json_lines(arguments: Sequence[str], cwd: Path) -> Iterator[dict]:
+def _json_lines(arguments: Sequence[str], cwd: Path, decode: Callable[[str], dict]) -> Iterator[dict]:
     """Each line the command prints, parsed as JSON while it runs. stderr goes to a file, so a full
     stderr pipe cannot stall the command; the process is killed if the reader stops early."""
     with tempfile.TemporaryFile() as errors:
@@ -114,7 +116,7 @@ def _json_lines(arguments: Sequence[str], cwd: Path) -> Iterator[dict]:
         try:
             for line in process.stdout:
                 if line.strip():
-                    yield json.loads(line)
+                    yield decode(line)
         except BaseException:
             process.kill()
             raise

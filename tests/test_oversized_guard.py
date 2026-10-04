@@ -40,11 +40,11 @@ class _AstGrepRecorder:
         self.commands: list[list[str]] = []
         original = tools._json_lines
 
-        def run(arguments, cwd):
+        def run(arguments, cwd, decode):
             if arguments[0] == tools.AST_GREP and "scan" in arguments:
                 self.commands.append(list(arguments))
                 return iter(())
-            return original(arguments, cwd)
+            return original(arguments, cwd, decode)
 
         monkeypatch.setattr(tools, "_json_lines", run)
 
