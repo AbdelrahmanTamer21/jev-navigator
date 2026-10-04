@@ -144,6 +144,22 @@ def test_a_deleted_file_answers_no_lookup_and_is_reported(tmp_path: Path, spawne
     assert spawned[tools.AST_GREP] == 0
 
 
+def test_a_file_deleted_after_the_scope_was_covered_is_reported_not_read(tmp_path: Path) -> None:
+    # Arrange: handle.ts calls then() on a receiver the table leaves in the fact cache
+    commit_files(tmp_path, REPOSITORY)
+    every_lookup(CodeIndex.from_git(tmp_path))
+    index = CodeIndex.from_git(tmp_path)
+    index.find_definition("check")
+    (tmp_path / "web/handle.ts").unlink()
+
+    # Act
+    callers, count = index.find_callers("then"), index.call_site_count("then")
+
+    # Assert
+    assert (callers, count) == ((), 0)
+    assert index.unavailable_files == {"web/handle.ts": "disappeared after inventory"}
+
+
 def test_no_table_row_holds_a_string_literal(tmp_path: Path, private_cache_root: Path) -> None:
     # Arrange
     commit_files(tmp_path, REPOSITORY)
