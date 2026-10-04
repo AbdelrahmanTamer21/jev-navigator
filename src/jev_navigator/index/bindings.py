@@ -57,6 +57,24 @@ class CallFacts:
     unparsed: frozenset[str] = frozenset()
 
 
+def names_exactly(binding: Binding | None, definition: Span) -> bool:
+    """Whether a use with ``binding`` may reach ``definition`` itself; for Trace. Its graph keeps
+    every definition as its own node and links a class or declaration to the functions it holds,
+    so a use belongs only to the node its binding names. ``falls_inside`` would link the same call
+    to the declaration and to its function."""
+    target = None if binding is None else binding.target
+    return target is None or target.key == definition.key
+
+
+def falls_inside(binding: Binding | None, view: Span) -> bool:
+    """Whether a use with ``binding`` may reach the code ``view`` shows; for the place moves. A
+    place may be a window inside the class or declaration it is named after, and no move steps from
+    a declaration to the function it holds, so a target overlapping the view counts.
+    ``names_exactly`` would drop every caller of such a place."""
+    target = None if binding is None else binding.target
+    return target is None or target.overlaps(view)
+
+
 def binding_from_facts(facts: CallFacts) -> Binding:
     """``unknown`` when the definition may sit where the index could not parse: no definition was
     found, or the import or a definition names a file that could hold one unseen. Missing evidence is
