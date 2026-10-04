@@ -881,7 +881,7 @@ def test_find_defaults_to_unique_results_in_jvns_data_folder(
     for pack in packs:
         manifest = json.loads((pack / "manifest.json").read_text())
         assert manifest["search"]["outcome"] == "found"
-        assert manifest["source"]["tracked_files"] == 1
+        assert manifest["source"]["indexed_files"] == 1
         assert (pack / "report.md").is_file()
         assert (pack / "journal.jsonl").is_file()
     assert not (tmp_path / "jvn-results").exists()
@@ -1304,6 +1304,7 @@ def test_find_and_findall_reports_name_each_ignored_file_as_not_indexed(tmp_path
     )
     (repository / "vendor").mkdir()
     (repository / "vendor" / "limits.py").write_text("def limit(item):\n    return len(item) <= 3\n")
+    (repository / "notes.md").write_text("Untracked notes are indexed too.\n")
     reports = {}
 
     # Act
@@ -1320,10 +1321,15 @@ def test_find_and_findall_reports_name_each_ignored_file_as_not_indexed(tmp_path
             workflow=workflow,
             fact_cache_dir=tmp_path / "facts",
         )
-        reports[workflow] = ((output / "report.md").read_text(), manifest["search"]["not_indexed_files"])
+        reports[workflow] = (
+            (output / "report.md").read_text(),
+            manifest["search"]["not_indexed_files"],
+            manifest["source"]["indexed_files"],
+        )
 
-    # Assert
-    for report, not_indexed in reports.values():
+    # Assert: notes.md is untracked and still indexed, beside .gitignore, entry.py and policy.py
+    for report, not_indexed, indexed in reports.values():
+        assert indexed == 4
         assert not_indexed == {"vendor/": "ignored"}
         assert "`vendor/`: ignored" in report
 

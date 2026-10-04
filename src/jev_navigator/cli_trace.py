@@ -164,7 +164,7 @@ def _manifest(
             "repository": str(repository),
             "revision": index.commit,
             "prefixes": list(prefixes),
-            "tracked_files": len(index.files),
+            "indexed_files": len(index.files),
         },
         "thresholds": thresholds.as_dict(),
         "depth": depth,

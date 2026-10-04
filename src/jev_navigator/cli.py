@@ -947,7 +947,7 @@ def _manifest(
             "repository": str(repository),
             "revision": index.commit,
             "prefixes": list(prefixes),
-            "tracked_files": len(index.files),
+            "indexed_files": len(index.files),
         },
         "target": target,
         "requested_starts": list(starts),
