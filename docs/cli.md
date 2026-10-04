@@ -25,8 +25,10 @@ jvn find "the check that limits how many items an order may have"
 ```
 
 The current directory is the search root. Git is optional and uncommitted changes are included.
-The command chooses an entry point and creates `./jvn-results/<directory>-<timestamp>/` in the
-directory where you invoked it. You do not need to supply a scope, starting line or budget.
+The command chooses an entry point and creates a run folder,
+`$XDG_DATA_HOME/jev-navigator/runs/<directory>-<timestamp>/` (`~/.local/share` when the variable is
+unset), and prints its path. Nothing is written into the directory you search or start from. You do
+not need to supply a scope, starting line or budget.
 
 Credentials come from `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` in the process environment, then
 from `~/.config/jvn/env`. The file uses dotenv syntax and is not executed. Help and schema discovery
@@ -54,7 +56,7 @@ unlimited unless you set a limit.
 | `--repo PATH` | Current directory. Select another search root. | `jvn find "the order limit" --repo /path/to/repository` |
 | `--prefix PATH` | Whole source inventory. Limit scope to a file or directory, relative to the search root. Repeat for multiple scopes. | `jvn find "the order limit" --prefix app/ --prefix tests/` |
 | `--start PATH:LINE` | Automatic entry selection. Start from a known caller or entry point; repeat for multiple starts. Lines are 1-based, paths are relative to the search root. | `jvn find "the order limit" --start app/orders.py:42 --start app/routes.py:18` |
-| `--out PATH` | A unique directory under `./jvn-results/`. Choose another new or empty directory. | `jvn find "the order limit" --out ./order-evidence` |
+| `--out PATH` | A unique run folder under `$XDG_DATA_HOME/jev-navigator/runs/`. Choose another new or empty directory; JVN never prunes a folder you name. | `jvn find "the order limit" --out ./order-evidence` |
 | `--answer-store PATH` | `$JEV_NAVIGATOR_ANSWER_STORE`, else `$XDG_CACHE_HOME/jev-navigator/answers.sqlite` (`~/.cache` when unset; provisional). The shared store every run reads and writes; a run prints `answer store: PATH` on stderr. Point an eval arm at a new file so it never replays another arm's answers. `find`, `findall` and `trace` accept it. | `jvn find "the order limit" --answer-store ./arm-a.sqlite` |
 | `--resume PATH` | Off. Continue a budget-stopped or cancelled evidence pack into a new output directory. | `jvn find "the order limit" --resume ./order-evidence` |
 | `--max-depth N` | Unlimited. Maximum relationship hops from the starting places; `0` opens only those places. | `jvn find "the order limit" --max-depth 3` |
@@ -232,8 +234,8 @@ Their sum is `search.calls`, the whole workflow's actual model-request count.
 Continue a budget-stopped pack with the same query and scope:
 
 ```sh
-jvn findall "functions enforcing the order item limit" --resume ./jvn-results/previous-pack
-jvn --json '{"command":"findall","target":"functions enforcing the order item limit","resume":"./jvn-results/previous-pack"}'
+jvn findall "functions enforcing the order item limit" --resume ./previous-pack
+jvn --json '{"command":"findall","target":"functions enforcing the order item limit","resume":"./previous-pack"}'
 ```
 
 A stop during seed selection resumes that stage first. Once enumeration has begun, continuation
@@ -256,8 +258,8 @@ jvn schema trace
 `--start PATH:LINE` is required and repeatable; paths are relative to `--repo` (current directory by
 default). Use `find` first when the entry point is unknown. `--prefix` narrows scope, `--out` chooses
 a new output directory, `--verbose` displays masked requests, and `--keep-requests` keeps code and
-request text in the pack as for `find`. Without `--out`, packs go under
-`./jvn-results/` in the invocation directory.
+request text in the pack as for `find`. Without `--out`, packs go to a run folder under
+`$XDG_DATA_HOME/jev-navigator/runs/`, as for `find`.
 
 Static relationships drive traversal. Jev receives batched, independent questions about input
 origin, transformation, handoff, outcome and relevant branches. The manifest retains all walked
@@ -290,7 +292,7 @@ jvn --json '{"command":"stats","kind":["function"],"limit":1}'
 jvn schema stats
 ```
 
-The command writes `statistics.json` and `statistics.md` under a unique `./jvn-results/` directory.
+The command writes `statistics.json` and `statistics.md` into a unique run folder, as for `find`.
 `--repo`, repeatable `--prefix`, and `--out` work as for search. Repeat `--operation` to choose
 `count`, `largest`, or `range` sections; repeat `--kind` for `function` and `class`. Both kinds and
 all sections are included by default. `--top-level` excludes methods/nested symbols from rankings

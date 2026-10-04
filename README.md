@@ -30,7 +30,7 @@ jvn help trace
 ```
 
 Trace follows static relationships and batches atomic evidence judgments. It preserves uncertain
-bindings, partial coverage and request evidence in `./jvn-results/`. A positive judgment is evidence,
+bindings, partial coverage and request evidence in its [run folder](#where-jvn-keeps-runs-and-caches). A positive judgment is evidence,
 not proof of a complete path. Use `find` first if the starting function is unknown.
 See [trace options and outputs](docs/cli.md#workflow-trace).
 
@@ -46,10 +46,10 @@ jvn schema findall
 `find` locates an implementation; `findall` finds a seed, examines related functions, then checks
 remaining function bodies for disconnected implementations. It uses batched Jev judgments and
 defaults to 48 live model calls (twice `find`); `--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
-`./jvn-results/` directory. `functions_examined` describes coverage of function bodies, not a proof
+[run folder](#where-jvn-keeps-runs-and-caches). `functions_examined` describes coverage of function bodies, not a proof
 of semantic equivalence or completeness across arbitrary code fragments. Uncertain answers and
 unreadable or unsupported source stay visible. At a call stop, the terminal offers another allowance.
-For a later invocation or an agent pipeline, pass `--resume ./jvn-results/previous-pack` with the same
+For a later invocation or an agent pipeline, pass `--resume` with the folder the earlier run printed, and the same
 Find All query and scope. Completed judgments and the seed are retained; only unfinished work spends
 new model calls.
 
@@ -84,8 +84,9 @@ jvn find "the check that limits how many items an order may have"
 In a terminal, reaching the call budget offers another allowance without losing the saved search.
 JSON and piped commands return partial results without prompting; continue them with `--resume`.
 
-That is enough. `jvn` chooses an entry point and creates a unique evidence pack under
-`./jvn-results/`. It works with uncommitted changes and ordinary directories outside Git.
+That is enough. `jvn` chooses an entry point and creates a unique evidence pack in its
+[run folder](#where-jvn-keeps-runs-and-caches), never inside your project. It works with uncommitted
+changes and ordinary directories outside Git.
 `find` follows code relationships to locate a match; it does not promise every matching function
 or a complete end-to-end trace.
 
@@ -122,8 +123,8 @@ Or send the same request on stdin:
 printf '%s\n' '{"target":"the check that limits how many items an order may have"}' | jvn --json -
 ```
 
-`command` defaults to `find`, `repo` defaults to the current directory, and output goes to
-`./jvn-results/` unless you supply `out`. JSON mode prints one result object on stdout with
+`command` defaults to `find`, `repo` defaults to the current directory, and output goes to a new
+[run folder](#where-jvn-keeps-runs-and-caches) unless you supply `out`. JSON mode prints one result object on stdout with
 `output_directory`, `manifest`, `report`, `search` and `provider`. Progress and errors stay on stderr.
 For example, pipe the command's output to `jq '.search.found'` to read the matching source spans.
 The report and manifest paths refer to the saved evidence pack. Failed invocations return a nonzero
@@ -196,6 +197,13 @@ hashes; a relation that quotes a mentioned key reads `mentions a key (path:line)
 signatures in the manifest and report and the exact request text in the journal; use it only for
 your own or open-source code. The repository includes only a small public-format sample under
 [`examples/evidence-pack`](examples/evidence-pack).
+
+### Where JVN keeps runs and caches
+
+JVN never writes into the project it searches or the directory you start it in, unless you name a
+folder with `--out`. Without `--out`, a run's evidence pack goes to its own run folder,
+`$XDG_DATA_HOME/jev-navigator/runs/<directory>-<timestamp>` (`~/.local/share` when the variable is
+unset), and the run prints that path.
 
 ## Layer 1: index, operations and comments (no model)
 
@@ -680,7 +688,7 @@ registration = RoundRegistration(
     rule={"yes_at": 0.9},
     library_commit="",  # Supply the verified navigator revision when known; empty means unknown.
 )
-round_dir = Path("jvn-results/order-limit-round")
+round_dir = Path("rounds/order-limit")
 freeze(round_dir, registration)  # Creates the directory; refuses to overwrite a frozen round.
 verify(round_dir, registration)  # Call before scoring stored answers.
 request_hash = registered_request_sha256(registration, {"code": "..."})

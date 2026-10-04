@@ -13,6 +13,7 @@ import pytest
 from git_repos import git, write_files
 
 from jev_navigator.cache_root import cache_root
+from jev_navigator.data_root import data_root
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
@@ -150,6 +151,14 @@ def private_cache_root(tmp_path_factory: pytest.TempPathFactory, monkeypatch: py
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("cache")))
     monkeypatch.delenv(SHARED_STORE_VARIABLE, raising=False)
     return cache_root()
+
+
+@pytest.fixture(autouse=True)
+def private_data_root(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Each test starts with an empty data folder of its own, holding the run folders the CLI writes
+    without ``--out``, so no test writes the user's run folders."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path_factory.mktemp("data")))
+    return data_root()
 
 
 @pytest.fixture

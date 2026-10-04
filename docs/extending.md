@@ -161,10 +161,10 @@ participate in text-based moves. Syntax operations return no symbols, calls or r
 they are never sent to ast-grep with an empty language rule. This does not claim their text was
 parsed as code.
 
-The CLI creates a unique run directory under `jvn-results/` in the invocation directory when `--out`
-is omitted. Each run retains its report, manifest and request journal. Generated result directories
-are excluded from the CLI's source inventory so repeated searches do not search their own evidence.
-Library callers can similarly pass `exclude_paths` to `CodeIndex.from_directory`.
+The CLI creates a unique run folder under `$XDG_DATA_HOME/jev-navigator/runs/` when `--out` is
+omitted. Each run retains its report, manifest and request journal. An `--out` folder inside the
+searched directory is excluded from the CLI's source inventory so repeated searches do not search
+their own evidence. Library callers can similarly pass `exclude_paths` to `CodeIndex.from_directory`.
 
 Agents can pass the same CLI request as JSON with `jvn --json request.json`, an inline JSON object,
 or `jvn --json -` for stdin. `jvn schema find` emits its JSON Schema without model calls. The CLI parser remains the single owner of options, types and defaults. `target` is

@@ -29,7 +29,7 @@ jvn trace 'how the source quote becomes an accepted or rejected claim' --start a
 ```
 
 Run in the source directory, or add `--repo /path/to/repo`. Dirty trees and non-Git directories work.
-Output defaults to a unique `./jvn-results/` directory. Trace starts must be repository-relative
+Output defaults to a unique run folder under `~/.local/share/jev-navigator/runs/` whose path the run prints; nothing is written into the project. Trace starts must be repository-relative
 `PATH:LINE` values inside a function or method, not a class declaration. Unknown entry? Find first,
 inspect the returned function, then trace it. Quote the entire natural-language argument once.
 Do not edit files in scope while a search runs: a file that changes is reported unavailable, and a

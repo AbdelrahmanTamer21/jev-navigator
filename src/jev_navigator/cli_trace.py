@@ -93,7 +93,7 @@ def create_trace_evidence_pack(
         index = CodeIndex.from_directory(
             repository,
             prefixes=prefixes,
-            exclude_paths=(output, Path.cwd() / "jvn-results"),
+            exclude_paths=(output,),
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )

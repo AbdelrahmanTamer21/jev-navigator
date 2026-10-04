@@ -21,6 +21,7 @@ from .adapters.typesafe import TypeSafeJevClient
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
 from .cli_trace import create_trace_evidence_pack
+from .data_root import default_run_folder
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
@@ -46,6 +47,7 @@ POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
+OUT_HELP = "New or empty output directory (default: a unique run under $XDG_DATA_HOME/jev-navigator/runs)"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -187,7 +189,7 @@ def _run_statistics(args: argparse.Namespace) -> int:
         index = CodeIndex.from_directory(
             repository,
             prefixes=tuple(args.prefix),
-            exclude_paths=(output, Path.cwd() / "jvn-results"),
+            exclude_paths=(output,),
             scan_observer=progress.scan,
         )
         pack = create_statistics_pack(
@@ -277,7 +279,7 @@ def create_evidence_pack(
     outcome = "failed"
     try:
         progress.phase("indexing files")
-        excluded = (output, Path.cwd() / "jvn-results")
+        excluded = (output,)
         if resume_from is not None:
             excluded += (resume_from.resolve(),)
         index = CodeIndex.from_directory(
@@ -449,7 +451,7 @@ def _parser() -> argparse.ArgumentParser:
 
 For agents: jvn schema find prints the request's JSON Schema without making model calls.
 JSON mode writes results to stdout; progress goes to stderr. Ctrl-C cancels.
-Results default to ./jvn-results/<directory>-<timestamp> in the invocation directory.
+Results default to <directory>-<timestamp> under $XDG_DATA_HOME/jev-navigator/runs (~/.local/share).
 Credentials: process environment, then ~/.config/jvn/env (TYPESAFE_API_KEY / TYPESAFE_BASE_URL).
 Use jvn help find for options and examples. Exit codes: 0 completed, 1 failed, 2 invalid input, 130 cancelled.
 A completed search can have a non-found outcome; inspect search.outcome in JSON output.""",
@@ -526,7 +528,7 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     )
     trace.add_argument("--repo", default=".", help="Source directory (default: current directory)")
     trace.add_argument("--prefix", action="append", default=[], help="Optional source scope; repeatable")
-    trace.add_argument("--out", help="New or empty output directory (default: ./jvn-results/<run>)")
+    trace.add_argument("--out", help=OUT_HELP)
     trace.add_argument("--max-depth", type=int, help="Optional maximum static relationship hops")
     trace.add_argument(
         "--max-calls", type=_count_or_none, help="Optional model-request cap; none is unlimited"
@@ -548,7 +550,7 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     )
     stats.add_argument("--repo", default=".", help="Source directory (default: current directory)")
     stats.add_argument("--prefix", action="append", default=[], help="Source scope; repeatable")
-    stats.add_argument("--out", help="New or empty output directory (default: ./jvn-results/<run>)")
+    stats.add_argument("--out", help=OUT_HELP)
     stats.add_argument(
         "--operation",
         action="append",
@@ -609,10 +611,7 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         metavar="PATH:LINE",
         help="Known entry or caller line; repeatable. Without one, jvn chooses a narrow entry point.",
     )
-    scope.add_argument(
-        "--out",
-        help="New or empty output directory (default: a unique run under ./jvn-results)",
-    )
+    scope.add_argument("--out", help=OUT_HELP)
     _add_answer_store_argument(find)
     defaults = SearchBudget()
     limits.add_argument(
@@ -852,8 +851,7 @@ def _previous_pack(
 
 
 def _default_output(repository: Path) -> Path:
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-    return Path.cwd() / "jvn-results" / f"{repository.name}-{stamp}"
+    return default_run_folder(repository, datetime.now(UTC))
 
 
 def _scope_warning(file_count: int) -> str | None:
