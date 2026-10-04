@@ -112,7 +112,6 @@ class _MetaVariables(TypedDict, total=False):
 
 class _Start(TypedDict):
     line: int
-    column: int
 
 
 class _End(TypedDict):
