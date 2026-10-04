@@ -377,3 +377,109 @@ def test_a_judge_refuses_a_batch_setting_below_one(setting: str) -> None:
     # Act and Assert: zero would hang the async path and make no batch at all
     with pytest.raises(ValueError, match=f"{setting} must be at least 1"):
         Judge(ScriptedJevClient(), **{setting: 0})
+
+
+class FailsF2Late(ScriptedJevClient):
+    """A provider whose request carrying f2 fails, the way a 503 does after its retries, only once
+    ``after`` is set and the other requests have had a moment to settle."""
+
+    after: threading.Event
+
+    def send(self, state: Mapping, questions: Mapping) -> RawResponse:
+        if any(item.get("file") == "f2.py" for item in state.get("items", [])):
+            self.after.wait(10)
+            threading.Event().wait(0.2)
+            raise ConnectionError("503 Service Unavailable")
+        return super().send(state, questions)
+
+
+def test_a_provider_failure_is_raised_over_a_call_cap_reached_in_the_same_wave() -> None:
+    # Arrange: three calls for three batches; another caller of the same judge takes one call while
+    # f0 is held, so f0, first in the wave, meets the cap before f2's provider fails
+    client = FailsF2Late(default_noul=0.9)
+    other_caller_done = threading.Event()
+    client.after = other_caller_done
+    scanner = HoldingScanner(lambda text: text == "f0.py", other_caller_done.is_set)
+    parent = Judge(client, scanner=scanner, max_calls=3, items_per_request=1)
+
+    def other_caller() -> None:
+        parent.scope().ask(
+            {"other": "state"}, {"q": {"type": "noul", "instructions": "y?"}}, thresholds=parent.thresholds
+        )
+        other_caller_done.set()
+
+    threading.Timer(0.05, other_caller).start()
+
+    # Act
+    with pytest.raises(ConnectionError) as raised:
+        parent.scope().check_each(DESCRIBES, SMALL_ITEMS[:3], SHARED)
+
+    # Assert: the real failure comes out, and the cap it shadowed is named beside it
+    assert "503" in str(raised.value)
+    assert any("CallCapReachedError" in note for note in getattr(raised.value, "__notes__", []))
+
+
+@dataclass
+class OneFailingAsyncClient:
+    """An async provider whose request for ``f0.py`` fails once the other requests of its wave have
+    started, while they are still in flight; it records each request that starts and each that
+    finishes."""
+
+    script: ScriptedJevClient = field(default_factory=lambda: ScriptedJevClient(default_noul=0.9))
+    started: list[str] = field(default_factory=list)
+    finished: list[str] = field(default_factory=list)
+
+    @property
+    def model(self) -> str:
+        return self.script.model
+
+    async def send(self, state: Mapping, questions: Mapping) -> RawResponse:
+        file = state["items"][0]["file"]
+        self.started.append(file)
+        if file == "f0.py":
+            await asyncio.sleep(0)
+            raise ConnectionError("the provider is down")
+        for _ in range(3):
+            await asyncio.sleep(0)
+        self.finished.append(file)
+        return self.script.send(state, questions)
+
+    def parse(self, raw: RawResponse):
+        return self.script.parse(raw)
+
+
+def test_an_async_batch_failure_is_raised_only_after_the_rest_of_its_wave_settles() -> None:
+    # Arrange
+    client = OneFailingAsyncClient()
+    judge = Judge(client, max_concurrency=3, items_per_request=1)
+    finished_when_raised: list[str] = []
+
+    async def judged_then_given_time() -> None:
+        try:
+            await judge.check_each_async(DESCRIBES, SMALL_ITEMS[:3], SHARED)
+        except ConnectionError:
+            finished_when_raised.extend(client.finished)
+            raise
+        finally:
+            for _ in range(10):
+                await asyncio.sleep(0)
+
+    # Act
+    with pytest.raises(ConnectionError, match="the provider is down"):
+        asyncio.run(judged_then_given_time())
+
+    # Assert: no request of the failed call was still running when the failure came out
+    assert sorted(finished_when_raised) == sorted(client.finished) == ["f1.py", "f2.py"]
+
+
+def test_an_async_batch_failure_stops_the_batches_still_waiting_for_a_slot() -> None:
+    # Arrange: one slot, so f1 and f2 wait while f0 fails
+    client = OneFailingAsyncClient()
+    judge = Judge(client, max_concurrency=1, items_per_request=1)
+
+    # Act
+    with pytest.raises(ConnectionError, match="the provider is down"):
+        asyncio.run(judge.check_each_async(DESCRIBES, SMALL_ITEMS[:3], SHARED))
+
+    # Assert
+    assert client.started == ["f0.py"]

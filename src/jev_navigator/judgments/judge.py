@@ -353,22 +353,33 @@ class Judge:
         under a call cap, in waves no larger than the calls left, as the sync path does. When the
         served model is still unknown and an answer store is present, the first batch pins the model
         before the remaining batches look in the store. A batch refused for its size comes back as
-        its halves, which are sent one per wave before any other batch, as on the sync path."""
+        its halves, which are sent one per wave before any other batch, as on the sync path. A failed
+        batch stops the batches still waiting for a slot; the wave settles whole before its failure
+        is raised, so no request of the call is still running when the error comes out."""
         plan = self._check_plan(checks, items, shared, list_name, thresholds)
         queue = _WaveQueue(list(plan.batches))
         slots = asyncio.Semaphore(self.max_concurrency)
+        halted = asyncio.Event()
         while queue:
             wave = queue.next_wave(self._next_wave_size)
-            split = await asyncio.gather(*(self._answer_batch_async(plan, batch, slots) for batch in wave))
-            queue.put_halves([half for halves in split for half in halves])
+            settled = await asyncio.gather(
+                *(self._answer_batch_async(plan, batch, slots, halted) for batch in wave),
+                return_exceptions=True,
+            )
+            failure = _wave_failure([outcome for outcome in settled if isinstance(outcome, BaseException)])
+            if failure is not None:
+                raise failure
+            queue.put_halves([half for halves in settled for half in halves])
         return plan.answers()
 
     async def _answer_batch_async(
-        self, plan: _CheckPlan, batch: _Batch, slots: asyncio.Semaphore
+        self, plan: _CheckPlan, batch: _Batch, slots: asyncio.Semaphore, halted: asyncio.Event
     ) -> list[_Batch]:
         """Send one packed batch once a slot is free and apply its answers; a size refusal returns
-        its halves instead."""
+        its halves instead. After a sibling failed, a batch still waiting for a slot is not sent."""
         async with slots:
+            if halted.is_set():
+                return []
             try:
                 response = await self.ask_async(
                     batch.state,
@@ -380,8 +391,12 @@ class Judge:
             except InputBudgetExceededError:
                 halves = self._halves(plan, batch)
                 if halves is None:
+                    halted.set()
                     raise
                 return halves
+            except Exception:
+                halted.set()
+                raise
         plan.answer(batch, response)
         return []
 
@@ -1139,15 +1154,28 @@ def _at_least_one(setting: str, value: int) -> int:
 
 def _completed_wave(futures: list[Future]) -> Generator[tuple[_Batch, JevResponse], None, list[_Batch]]:
     """Yield a wave's answers as its batches complete, then return the halves its refused batches
-    split into, in the wave's stable order; the first failure is raised after every batch settled."""
-    failure: Exception | None = None
+    split into, in the wave's stable order; after every batch settled, ``_wave_failure`` decides
+    what is raised."""
     for future in as_completed(futures):
-        sent = future.result()
-        yield from sent.answered
-        failure = failure or sent.error
+        yield from future.result().answered
+    sent = [future.result() for future in futures]
+    failure = _wave_failure([batch.error for batch in sent if batch.error is not None])
     if failure is not None:
         raise failure
-    return [half for future in futures for half in future.result().halves]
+    return [half for batch in sent for half in batch.halves]
+
+
+def _wave_failure(failures: Sequence[BaseException]) -> BaseException | None:
+    """The failure a settled wave raises: its first real failure, ahead of a call cap that only
+    stopped a sibling, so a provider error is never reported as a spent budget. Every other failure
+    of the wave is added to it as a note, so none is lost."""
+    if not failures:
+        return None
+    primary = next((error for error in failures if not isinstance(error, CallCapReachedError)), failures[0])
+    for other in failures:
+        if other is not primary:
+            primary.add_note(f"Also in this wave: {type(other).__name__}: {other}")
+    return primary
 
 
 def _is_async(client: object) -> bool:
