@@ -39,6 +39,20 @@ for _ in range(20):
 time.sleep(30)
 """
 
+GROWS_WHEN_TRIGGERED_THEN_STAYS = """\
+import sys
+import time
+from pathlib import Path
+trigger = Path(sys.argv[1])
+while not trigger.exists():
+    time.sleep(0.02)
+held = []
+for _ in range(20):
+    held.append(b"x" * (30 * 2**20))
+    time.sleep(0.03)
+time.sleep(30)
+"""
+
 PRINTS_A_LINE_THEN_STAYS = """\
 import time
 print('{"line": 1}', flush=True)
@@ -336,6 +350,51 @@ def test_a_holder_whose_slot_file_was_deleted_takes_a_slot_again_before_more_wor
 
     # Assert
     assert "ceiling of 512 MB" in str(refused.value)
+
+
+def test_the_watchdog_keeps_watching_while_another_thread_waits_for_a_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: this process holds the only slot and runs a watched child. Then its slot file is
+    # deleted, a real JVN process takes the slot, and another thread here waits to take one again.
+    slots, trigger = tmp_path / "slots", tmp_path / "grow"
+    _limit_the_process(monkeypatch, slots, allowance_mb=150, ceiling_mb=150, wait_seconds=6)
+    tools.git(["--version"], tmp_path)
+    refusals: dict[str, tuple[float, str]] = {}
+
+    def refused_as(name: str, call) -> threading.Thread:
+        def run() -> None:
+            try:
+                call()
+            except MemoryLimitReachedError as error:
+                refusals[name] = (time.monotonic(), str(error))
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        return thread
+
+    grower = [sys.executable, "-c", GROWS_WHEN_TRIGGERED_THEN_STAYS, str(trigger)]
+    child = refused_as("child", lambda: tools.run_command(grower, tmp_path))
+    time.sleep(0.5)
+    (slots / "slot-0").unlink()
+    newcomer = _jvn_process(TAKES_A_SLOT_AND_HOLDS_IT, slots, allowance_mb="150", ceiling_mb="150")
+    assert newcomer.stdout.readline() == "holding\n"
+    waiter = refused_as("waiter", lambda: tools.git(["--version"], tmp_path))
+    time.sleep(0.5)
+
+    # Act
+    trigger.touch()
+    grew_at = time.monotonic()
+    child.join(timeout=60)
+    waiter.join(timeout=60)
+    newcomer.kill()
+    newcomer.wait()
+
+    # Assert
+    stopped_at, reason = refusals["child"]
+    assert "it stopped" in reason
+    assert stopped_at - grew_at < 3
+    assert "ceiling of 150 MB" in refusals["waiter"][1]
 
 
 def test_memory_held_before_the_slot_is_not_charged_to_jvn(

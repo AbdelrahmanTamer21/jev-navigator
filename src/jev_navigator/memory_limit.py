@@ -146,6 +146,7 @@ class MemoryGuard:
         self.limit = limit
         self.directory = directory
         self._lock = threading.Lock()
+        self._slot_lock = threading.Lock()
         self._slot: _Slot | None = None
         self._baseline: int | None = None
         self._children: set[subprocess.Popen] = set()
@@ -185,8 +186,9 @@ class MemoryGuard:
 
     def _hold_slot(self) -> None:
         """Takes a slot when this process holds none, and again when its slot's file was deleted, since
-        another process may hold that slot now. The baseline stays the footprint at the first slot."""
-        with self._lock:
+        another process may hold that slot now. The baseline stays the footprint at the first slot.
+        Waiting for a slot holds only the slot lock, so the watchdog keeps watching running children."""
+        with self._slot_lock:
             if self._slot is not None and self._slot.still_ours():
                 return
             if self._slot is not None:
