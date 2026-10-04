@@ -72,7 +72,7 @@ def ast_grep_rules(
     """The matches of ``rules_yaml`` over ``files``, one at a time as ast-grep prints them, so no
     process's whole output is ever held. Every parse passes through here, placed by its estimated parse
     peak (``file_shape``): files within ``MAX_PARSE_PEAK_MB`` are parsed side by side; a file over it
-    but within ``single_parse_limit_mb()`` is parsed alone, one at a time, after them; a file over that
+    but within ``single_parse_limit_mb()`` is parsed alone, one at a time; a file over that
     is never handed to ast-grep and is added to ``refused`` with its reason when the iteration starts,
     so read ``refused`` after the matches. A file that ast-grep itself skipped without parsing
     (``NOT_PARSED_REASON``) is added when its process ends, so it is never taken for a file without
