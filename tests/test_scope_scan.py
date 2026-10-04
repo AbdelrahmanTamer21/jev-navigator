@@ -1577,22 +1577,27 @@ def test_a_name_passed_on_from_a_module_whose_export_sits_in_unparsed_lines_stay
 
 def test_a_commonjs_default_export_the_parser_lost_stays_unknown(tmp_path: Path) -> None:
     """A Flow cast the JavaScript grammar cannot parse hides `module.exports = (build: Builder)`,
-    which never says `default`. A default import of the module is unknown, never a module with no
-    definition exported as the default."""
+    which never says `default`. A default import of the module, or of a barrel passing its default
+    on, is unknown, never a module with no definition exported as the default."""
     # Arrange
     index = committed(
         tmp_path,
         {
             "lib.js": "function build() { return 1; }\nmodule.exports = (build: Builder);\n",
+            "barrel.js": "export { default } from './lib';\n",
             "use.js": "import make from './lib';\nmake();\n",
+            "through.js": "import make from './barrel';\nmake();\n",
         },
     )
 
     # Act
-    binding = index.binding_of("use.js", 2, "make", None)
+    bindings = {file: index.binding_of(file, 2, "make", None) for file in ("use.js", "through.js")}
 
     # Assert
-    assert binding.status.value == "unknown", binding
+    assert {file: binding.status.value for file, binding in bindings.items()} == {
+        "use.js": "unknown",
+        "through.js": "unknown",
+    }
 
 
 def test_only_what_a_script_module_exports_is_importable(tmp_path: Path) -> None:
