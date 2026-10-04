@@ -538,9 +538,15 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `JEV_NAVIGATOR_CHOICE_MIN_CONFIDENCE`, `JEV_NAVIGATOR_NOUL_YES_AT` and `JEV_NAVIGATOR_NOUL_NO_AT` (via
   `Thresholds.from_env()` at the edge), then a directive's defaults, then per-call overrides
   (`judge.effective(directive, call)`).
-- **Secrets.** `SecretMasker` masks private keys, token shapes, secret-named assignments and
-  high-entropy assignments in every request, by content: a value hidden in one place is hidden
-  everywhere in the request, for example where a relation text or another candidate quotes it.
+- **Secrets.** `SecretMasker` masks secret values and keeps code. It hides private keys, token
+  shapes, Bearer values, env-file values, quoted, bare and fallback values under secret-named keys,
+  literal arguments to secret-named calls, and high-entropy quoted values in assignments. A value
+  that is a reference (an identifier, dotted path, call, env lookup or interpolation) stays, so
+  `secret: process.env.AUTH_SECRET` reaches Jev unchanged, and so does a secret-named key that names
+  something (`secretName`, `TOKEN_PATH`). Masking works by content: a value of at least 8 characters
+  hidden in one place is hidden everywhere in the request, for example where a relation text or
+  another candidate quotes it; a shorter value is masked only where it stands. A plain identifier
+  under a secret-named key (`password: changeme` in YAML) reads as code and is not masked.
   The complete candidate set is masked once, before packing, so copied values stay hidden across
   batches; the final scan still runs on every request before it is sent.
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value

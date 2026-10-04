@@ -17,6 +17,11 @@ from functools import cache
 from typing import Protocol
 
 MASK = "[MASKED]"
+BY_CONTENT_MIN_CHARS = 8
+HIGH_ENTROPY_BITS_PER_CHAR = 4.0
+
+_SECRET_WORD = r"(?:secret|token|password|passwd|pwd|api[_-]?key|access[_-]?key|private[_-]?key|credential)"
+_SECRET_KEY = rf"(?P<key>(?i:\b[\w.-]*{_SECRET_WORD}[\w.-]*))[\"']?\s*[:=]\s*"
 _PRIVATE_KEY_BLOCK = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----|\Z)", re.S
 )
@@ -31,12 +36,34 @@ _TOKEN_SHAPES = (
     re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"),
 )
-_SECRET_ASSIGNMENT = re.compile(
-    r"""(?i)\b[\w.-]*(?:secret|token|password|passwd|pwd|api[_-]?key|access[_-]?key|private[_-]?key|credential)"""
-    r"""[\w.-]*\s*[:=]\s*["']([^"'\s]{8,})["']"""
+_BEARER_VALUE = re.compile(r"(?i)\bbearer\s+(?P<value>[A-Za-z0-9._~+/=-]{16,})")
+_ENV_FILE_VALUE = re.compile(
+    r"^[ \t]*(?:export[ \t]+)?(?P<key>[A-Z0-9_]*"
+    r"(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL)[A-Z0-9_]*)="
+    r"(?P<value>[^\s\"'`#$()\[\]{}][^\s\"'`#()\[\]{}]*)[ \t]*(?=#|$)",
+    re.M,
 )
-_QUOTED_ASSIGNMENT = re.compile(r"""[:=]\s*["']([A-Za-z0-9+/=_\-]{20,})["']""")
-HIGH_ENTROPY_BITS_PER_CHAR = 4.0
+_QUOTED_SECRET_VALUE = re.compile(rf"{_SECRET_KEY}(?P<quote>[\"'`])(?P<value>[^\"'`\s]+)(?P=quote)")
+_LITERAL_FALLBACK = re.compile(
+    rf"{_SECRET_KEY}[^\n,;]*?(?:\|\||\?\?|\bor\b)\s*(?P<quote>[\"'`])(?P<value>[^\"'`\n]+)(?P=quote)"
+)
+_BARE_SECRET_VALUE = re.compile(
+    rf"{_SECRET_KEY}(?P<value>[\w.$@%+/~-][\w.$@%+/~=-]*)(?=[ \t]*(?:$|[,;}})\]]|#|//))", re.M
+)
+_QUOTED_ASSIGNMENT = re.compile(r"""[:=]\s*["'](?P<value>[A-Za-z0-9+/=_\-]{20,})["']""")
+_SECRET_NAMED_CALL = re.compile(
+    r"(?:(?i:\b[\w.$]*(?:secret|token|password|passwd|credential|api_?key|hmac)\w*)|\bsign)"
+    r"\((?P<arguments>[^(){}\[\]\n]*)\)"
+)
+_QUOTED_LITERAL = re.compile(r"(?P<quote>[\"'`])(?P<value>[^\"'`\n]+)(?P=quote)")
+_NAMING_KEY = re.compile(
+    r"(?i)(?:name|path|dir|directory|file|header|ref|url|uri|type|kind|field|label|annotation|mount|env)$"
+)
+_CODE_REFERENCE = re.compile(
+    r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*|-?(?:0x[\da-fA-F]+|\d[\d_]*(?:\.\d+)*[A-Za-z%]{0,4})"
+)
+_DOTTED_PATH = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
+_NAME_LITERAL = re.compile(r"[A-Z][A-Z0-9_]*|[a-z]+(?:[-_./][a-z]+)*")
 
 
 class Masker(Protocol):
@@ -58,26 +85,19 @@ class SecretInRequestError(RuntimeError):
 
 @dataclass(frozen=True)
 class SecretMasker:
-    """Private-key blocks with their BEGIN and END lines, common token shapes, secret-named
-    assignments, and high-entropy quoted values in assignments."""
+    """Masks secret values and keeps code: private-key blocks, common token shapes, Bearer values,
+    env-file values, quoted, bare and fallback values under secret-named keys, literal arguments to
+    secret-named calls, and high-entropy quoted values in assignments. A value that is a reference
+    (an identifier, dotted path, call, env lookup or interpolation) is code and stays.
+
+    ``masked_values`` lists only values of at least ``BY_CONTENT_MIN_CHARS`` characters: a shorter
+    value is masked where it stands, because hiding a short word everywhere would blank ordinary code."""
 
     def mask(self, text: str) -> str:
-        text = _PRIVATE_KEY_BLOCK.sub(MASK, text)
-        text = _KEY_MARKER_LINE.sub(MASK, text)
-        for shape in _TOKEN_SHAPES:
-            text = shape.sub(MASK, text)
-        text = _SECRET_ASSIGNMENT.sub(_mask_group, text)
-        return _QUOTED_ASSIGNMENT.sub(_mask_if_high_entropy, text)
+        return _hide_secrets(text)[0]
 
     def masked_values(self, text: str) -> list[str]:
-        found = [match.group(0) for match in _PRIVATE_KEY_BLOCK.finditer(text)]
-        found += [match.group(0) for match in _KEY_MARKER_LINE.finditer(text)]
-        found += [match.group(0) for shape in _TOKEN_SHAPES for match in shape.finditer(text)]
-        found += [match.group(1) for match in _SECRET_ASSIGNMENT.finditer(text)]
-        found += [
-            match.group(1) for match in _QUOTED_ASSIGNMENT.finditer(text) if _is_high_entropy(match.group(1))
-        ]
-        return [value for value in found if value != MASK]
+        return [value for value in _hide_secrets(text)[1] if len(value) >= BY_CONTENT_MIN_CHARS]
 
 
 @dataclass(frozen=True)
@@ -85,15 +105,7 @@ class SecretScanner:
     """Reports what the built-in masker would have masked; used as the final check before sending."""
 
     def findings(self, text: str) -> list[str]:
-        found = [match.group(0)[:12] for match in _KEY_MARKER_LINE.finditer(text)]
-        found += [match.group(0)[:8] for shape in _TOKEN_SHAPES for match in shape.finditer(text)]
-        found += [match.group(1)[:4] for match in _SECRET_ASSIGNMENT.finditer(text) if match.group(1) != MASK]
-        found += [
-            match.group(1)[:4]
-            for match in _QUOTED_ASSIGNMENT.finditer(text)
-            if _is_high_entropy(match.group(1))
-        ]
-        return found
+        return [value[:4] for value in _hide_secrets(text)[1]]
 
 
 def mask_request(state: Mapping, questions: Mapping, masker: Masker) -> tuple[Mapping, Mapping, frozenset]:
@@ -169,15 +181,86 @@ def _strings(value: object) -> list[str]:
     return []
 
 
-def _mask_group(match: re.Match) -> str:
-    return match.group(0).replace(match.group(1), MASK)
+def _hide_secrets(text: str) -> tuple[str, list[str]]:
+    """The text with every secret value masked, and the values that were masked, in rule order."""
+    hidden: list[str] = []
+    for rule in _RULES:
+        spans = rule(text)
+        hidden += [text[start:end] for start, end in spans]
+        text = _masked_spans(text, spans)
+    return text, [value for value in hidden if value != MASK]
 
 
-def _mask_if_high_entropy(match: re.Match) -> str:
-    return _mask_group(match) if _is_high_entropy(match.group(1)) else match.group(0)
+def _masked_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    for start, end in sorted(spans, reverse=True):
+        text = text[:start] + MASK + text[end:]
+    return text
+
+
+def _matches(pattern: re.Pattern[str], hides: Callable[[re.Match[str]], bool] = bool):
+    """Spans of the pattern's ``value`` group (the whole match when it has none) that ``hides`` accepts."""
+    group = "value" if "value" in pattern.groupindex else 0
+
+    def spans(text: str) -> list[tuple[int, int]]:
+        return [match.span(group) for match in pattern.finditer(text) if hides(match)]
+
+    return spans
+
+
+def _call_literal_spans(text: str) -> list[tuple[int, int]]:
+    return [
+        (call.start("arguments") + literal.start("value"), call.start("arguments") + literal.end("value"))
+        for call in _SECRET_NAMED_CALL.finditer(text)
+        for literal in _QUOTED_LITERAL.finditer(call.group("arguments"))
+        if _is_literal(literal["value"]) and not _NAME_LITERAL.fullmatch(literal["value"])
+    ]
+
+
+def _holds_quoted_literal(match: re.Match[str]) -> bool:
+    return _holds_value(match) and _is_literal(match["value"])
+
+
+def _holds_bare_literal(match: re.Match[str]) -> bool:
+    value = match["value"]
+    return _holds_value(match) and any(c.isalnum() for c in value) and not _CODE_REFERENCE.fullmatch(value)
+
+
+def _holds_env_file_literal(match: re.Match[str]) -> bool:
+    return _holds_value(match) and not _DOTTED_PATH.fullmatch(match["value"])
+
+
+def _holds_value(match: re.Match[str]) -> bool:
+    """A secret-named key that names something (``secretName``, ``TOKEN_PATH``) holds a name, not a value."""
+    return not _NAMING_KEY.search(match["key"])
+
+
+def _is_literal(value: str) -> bool:
+    return not value.startswith("$") and "${" not in value
+
+
+def _bearer_value(match: re.Match[str]) -> bool:
+    return any(character.isdigit() for character in match["value"])
+
+
+def _high_entropy_value(match: re.Match[str]) -> bool:
+    return _is_high_entropy(match["value"])
 
 
 def _is_high_entropy(value: str) -> bool:
     counts = Counter(value)
     bits = -sum(count / len(value) * math.log2(count / len(value)) for count in counts.values())
     return bits >= HIGH_ENTROPY_BITS_PER_CHAR
+
+
+_RULES = (
+    _matches(_PRIVATE_KEY_BLOCK),
+    _matches(_KEY_MARKER_LINE),
+    *(_matches(shape) for shape in _TOKEN_SHAPES),
+    _matches(_BEARER_VALUE, _bearer_value),
+    _matches(_ENV_FILE_VALUE, _holds_env_file_literal),
+    _matches(_QUOTED_SECRET_VALUE, _holds_quoted_literal),
+    _matches(_LITERAL_FALLBACK, _holds_quoted_literal),
+    _call_literal_spans,
+    _matches(_BARE_SECRET_VALUE, _holds_bare_literal),
+    _matches(_QUOTED_ASSIGNMENT, _high_entropy_value),
+)
