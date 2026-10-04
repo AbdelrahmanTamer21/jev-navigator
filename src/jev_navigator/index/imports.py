@@ -230,6 +230,10 @@ _PYTHON_COMMENT = re.compile(r"#[^\n]*")
 _SCRIPT_DEFAULT_NAME = re.compile(r"^\s*([\w$]+)\s*(?:,|$)")
 _SCRIPT_NAMESPACE = re.compile(r"\*\s*as\s+([\w$]+)")
 # `const jwt = require('./jwt')`, but not `require('./jwt').verify` or `require('./jwt')(options)`.
+# `const { verify, sign: signToken } = require('./jwt')`, which imports `verify` and `signToken`.
+_SCRIPT_REQUIRED_NAMES = re.compile(
+    r"""\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)(?!\s*[.(\[])"""
+)
 _SCRIPT_REQUIRED_MODULE = re.compile(
     r"""\b(?:const|let|var)\s+([\w$]+)\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)(?!\s*[.(\[])"""
 )
@@ -239,7 +243,8 @@ _SCRIPT_BRACES = re.compile(r"\{([^}]*)\}")
 def imported_names(source: str, path: str) -> dict[str, str]:
     """Local name to module specifier, for names imported by name (``from m import a as b``, also
     parenthesised over several lines; ``import { a as b } from "m"`` and ``import a from "m"``, also
-    over several lines). Type-only names are included; namespace imports are not."""
+    over several lines; ``const { a, b: c } = require("m")``). Type-only names are included;
+    namespace imports are not."""
     if path.endswith(".py"):
         return {
             _local(part): match.group(1)
@@ -247,8 +252,13 @@ def imported_names(source: str, path: str) -> dict[str, str]:
             for part in _PYTHON_COMMENT.sub("", match.group(2)).strip("()\n ").split(",")
             if part.strip() and part.strip() != "*"
         }
-    names: dict[str, str] = {}
-    for match in _SCRIPT_FROM.finditer(_without_script_comments(source)):
+    code = _without_script_comments(source)
+    names = {
+        local: match.group(2)
+        for match in _SCRIPT_REQUIRED_NAMES.finditer(code)
+        for local in _destructured_names(match.group(1))
+    }
+    for match in _SCRIPT_FROM.finditer(code):
         keyword, clause, specifier = match.groups()
         if keyword != "import":
             continue
@@ -308,6 +318,13 @@ def _without_script_comments(source: str) -> str:
 def _keep_literal(match: re.Match) -> str:
     text = match.group(0)
     return "" if text.startswith("/") else text
+
+
+def _destructured_names(pattern: str) -> list[str]:
+    """The local names an object pattern binds: ``a`` and ``c`` in ``a, b: c = 1, ...rest`` but not
+    the rest element."""
+    parts = (part.split("=")[0].split(":")[-1].strip() for part in pattern.split(","))
+    return [part for part in parts if part and not part.startswith("...")]
 
 
 def _local(part: str) -> str:

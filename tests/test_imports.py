@@ -79,6 +79,20 @@ import { ignored } from "./ignored";
     assert reexported_names("from .orders import create_order", "app/__init__.py") == ()
 
 
+def test_destructuring_a_require_imports_each_local_name() -> None:
+    # Arrange
+    source = """\
+const { verify, sign: signToken, decode = fallback, ...rest } = require('./jwt');
+const { app } = require("./app")(options);
+"""
+
+    # Act
+    names = imported_names(source, "src/main.js")
+
+    # Assert
+    assert names == {"verify": "./jwt", "signToken": "./jwt", "decode": "./jwt"}
+
+
 def test_a_module_alias_is_a_name_holding_a_whole_script_module() -> None:
     """A namespace import or a plain require holds the module; a member read off a require, a call of
     it, a name imported by name, a namespace re-export and commented-out code hold none."""
