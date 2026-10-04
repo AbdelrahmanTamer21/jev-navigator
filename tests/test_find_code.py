@@ -1030,7 +1030,7 @@ def test_interrupt_while_popping_a_beam_restores_it_for_resume(
     assert resumed.found[0].place_key == target.key
 
 
-def test_interrupt_while_submitting_a_round_cancels_the_requests_already_sent(
+def test_interrupt_while_submitting_a_round_keeps_every_place_resumable_or_recorded(
     sample_index: CodeIndex, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Arrange
