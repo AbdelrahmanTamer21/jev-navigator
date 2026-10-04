@@ -22,7 +22,6 @@ from jev_navigator.cli import (
     main,
 )
 from jev_navigator.directives.find_code import SearchBudget
-from jev_navigator.environment import checkout_root
 from jev_navigator.testing import ScriptedJevClient
 
 
@@ -83,7 +82,6 @@ def test_jvn_installed_in_a_host_repository_without_commits_still_writes_its_man
     installed = host / ".venv/lib/python3.13/site-packages/jev_navigator"
     monkeypatch.setattr(cli, "__file__", str(installed / "cli.py"))
     monkeypatch.setattr(environment, "__file__", str(installed / "environment.py"))
-    monkeypatch.setattr(environment, "checkout_root", checkout_root)  # the real lookup, not conftest's
 
     manifest = _small_search_manifest(tmp_path)
 
