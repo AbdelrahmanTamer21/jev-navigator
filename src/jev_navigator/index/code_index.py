@@ -21,9 +21,7 @@ from .bindings import (
     BindingResolver,
     CallFacts,
     binding_from_facts,
-    binding_through_import,
     local_binding,
-    unparsed_binding,
 )
 from .fact_cache import FactCache
 from .imports import (
@@ -379,7 +377,7 @@ class CodeIndex:
                 return injected
         if not self._binds_locally(file, line, name, receiver, role):
             through_import = (
-                self._binding_through_alias(file, name, role)
+                self._binding_through_import(file, name, role)
                 if receiver is None
                 else self._binding_through_module(file, name, receiver, role)
             )
@@ -398,7 +396,7 @@ class CodeIndex:
             definitions,
             tuple(span for span in definitions if span in self._module_scope_in(span.file)),
             tuple(span for span in definitions if span in self._importable_in(span.file)),
-            self._imported_from(file, name),
+            (),
             self._files_hiding(name),
         )
 
@@ -589,58 +587,56 @@ class CodeIndex:
         self, file: str, name: str, receiver: str, role: str | None
     ) -> Binding | None:
         """The binding of ``receiver.name`` when ``receiver`` holds a whole module of the scope
-        (``import * as receiver``, ``const receiver = require(...)``), read from that module's own
-        facts and those of the modules it re-exports ``name`` from, never from a search of the scope.
-        None when ``receiver`` holds no module or the module defines no such ``name``."""
+        (``import * as receiver``, ``const receiver = require(...)``), decided like an import of
+        ``name`` from that module (see ``_binding_through_exporters``). None when ``receiver`` holds
+        no module of the scope."""
         specifier = self._module_alias(file, receiver)
-        if specifier is None:
-            return None
-        for exporter in self._exporters(file, specifier, name):
-            definition = self._importable_definition(exporter.path, name, role)
-            if definition is not None:
-                return binding_through_import(receiver, definition, exporter)
-        return None
+        return None if specifier is None else self._binding_through_exporters(file, specifier, name, role)
 
-    def _binding_through_alias(self, file: str, name: str, role: str | None) -> Binding | None:
-        """The binding of ``name()`` when ``name`` is a definition imported under another name
-        (``import { stop as name }``, ``const { stop: name } = require(...)``, ``from m import stop
-        as name``), read from the importing module's own facts and those it re-exports ``stop`` from,
-        never from a search of the scope; ``unknown`` when such a module could not be parsed where it
-        mentions ``stop``. None when ``name`` is no such alias, when ``file`` defines ``name`` again
-        itself, or when no module of the scope defines ``stop``."""
+    def _binding_through_import(self, file: str, name: str, role: str | None) -> Binding | None:
+        """The binding of ``name()`` when ``file`` imports ``name``: by that name or under another
+        (``import { stop as name }``, ``const { stop: name } = require(...)``, ``from m import stop as
+        name``), or as a default import, looked up by its local name. Decided from the module the
+        import names (see ``_binding_through_exporters``). None when nothing imports ``name``, when
+        ``file`` defines ``name`` itself, or when the import names no module of the scope."""
         imported = self._names_imported(file).get(name)
-        if imported is None or imported.exported in (None, name) or self._defines(file, name, role):
+        if imported is None or self._defines(file, name, role):
             return None
-        exporters = self._exporters(file, imported.specifier, imported.exported)
-        for exporter in exporters:
-            definition = self._importable_definition(exporter.path, imported.exported, role)
-            if definition is not None:
-                return binding_through_import(name, definition, exporter)
-        hiding = self._files_hiding(imported.exported)
-        unparsed = [exporter.path for exporter in exporters if exporter.path in hiding]
-        return unparsed_binding(imported.exported, unparsed) if unparsed else None
+        return self._binding_through_exporters(file, imported.specifier, imported.exported or name, role)
+
+    def _binding_through_exporters(
+        self, file: str, specifier: str, name: str, role: str | None
+    ) -> Binding | None:
+        """The binding of ``name`` imported from the module ``specifier`` names, read from that
+        module's own facts and those of the modules it re-exports ``name`` from, never from a search
+        of the scope: one definition proves the target, several leave a candidate, an exporter whose
+        unparsed lines mention ``name`` or that vanished leaves it unknown, and no definition leaves a
+        candidate naming the modules. None when ``specifier`` names no module of the scope."""
+        exporters = self._exporters(file, specifier, name)
+        if not exporters:
+            return None
+        definitions = tuple(
+            span for exporter in exporters for span in self._importable_definitions(exporter.path, name, role)
+        )
+        hiding = self._files_hiding(name) & {exporter.path for exporter in exporters}
+        return binding_from_facts(
+            CallFacts(file, name, None, definitions, (), definitions, exporters, hiding)
+        )
 
     def _defines(self, file: str, name: str, role: str | None) -> bool:
         """Whether ``file``'s module scope defines ``name`` as a definition ``role`` can name."""
         return any(span.name == name and self._can_name(role, span) for span in self._module_scope_in(file))
 
-    def _importable_definition(self, file: str, name: str, role: str | None) -> Span | None:
-        """The first definition of ``name`` in ``file`` that another module can import, symbols
-        before declarations as ``find_definition`` orders them."""
+    def _importable_definitions(self, file: str, name: str, role: str | None) -> tuple[Span, ...]:
+        """The definitions of ``name`` in ``file`` that another module can import, symbols before
+        declarations as ``find_definition`` orders them."""
         structure = self._file_structure(file)
         importable = self._importable_in(file)
-        return next(
-            (
-                span
-                for span in (*structure.symbols, *structure.declarations)
-                if span.name == name and span in importable and self._can_name(role, span)
-            ),
-            None,
+        return tuple(
+            span
+            for span in (*structure.symbols, *structure.declarations)
+            if span.name == name and span in importable and self._can_name(role, span)
         )
-
-    def _imported_from(self, file: str, name: str) -> tuple[ImportFact, ...]:
-        imported = self._names_imported(file).get(name)
-        return () if imported is None else self._exporters(file, imported.specifier, name)
 
     def _exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
         """The module ``file``'s import of ``specifier`` resolves to, then each module it re-exports

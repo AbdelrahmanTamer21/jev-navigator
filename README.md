@@ -308,8 +308,12 @@ first line, so on `stream(c, async (stream) => ...)` the outer call counts as in
 Types are looked up apart from values, so a local value never replaces a type. A call `halt()` where
 `halt` imports a definition under another name (`import { stop as halt }`, `const { stop: halt } =
 require(...)`, `from m import stop as halt`) binds the same way to `stop`, unless the file defines
-`halt` itself; it is `unknown` when that module could not be parsed where it mentions `stop`. A
-default import is looked up by its local name. A function or class
+`halt` itself. A default import is looked up by its local name. Every import, by name, under another
+name, as a default or through a module alias, is decided the same way from the module it names and
+the modules that one re-exports the name from: one definition proves the target, several leave a
+`candidate`, an exporting module that could not be parsed where it mentions the name, or that
+vanished, leaves it `unknown`, and a module that exports no such name leaves a `candidate` that says
+so. A function or class
 held by another function, a class or an object literal, or assigned to a property (`foo.bar =
 function () {}`), is no module-level definition. One assigned to `exports.x` or `module.exports.x`,
 or listed in `module.exports = {...}`, is a CommonJS export: an import names it, its own module does not.

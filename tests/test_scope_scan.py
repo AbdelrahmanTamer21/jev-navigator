@@ -1076,6 +1076,66 @@ def test_only_what_a_script_module_exports_is_importable(tmp_path: Path) -> None
     }
 
 
+def test_a_member_read_through_an_import_is_decided_like_a_named_import(tmp_path: Path) -> None:
+    """`lib.make()` through a module alias and `stroll()` through a renamed import are decided like
+    `make()` after `import { make }`: two modules re-exporting `make` leave it a candidate, an
+    exporting module whose unparsed lines mention the name leaves it unknown, and a vanished module
+    is named as the one that could hold it. A module the import names but that exports no such name
+    leaves a candidate that says so, never an absent definition."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "lib/a.ts": "export function make() { return 'a'; }\n",
+            "lib/b.ts": "export function make() { return 'b'; }\n",
+            "lib/index.ts": "export * from './a';\nexport * from './b';\n",
+            "use_ns.ts": "import * as lib from './lib/index';\nlib.make();\n",
+            "broken.js": (
+                "exports.run = function () { return 'recovered'; };\n"
+                "exports.other = function ( { run( ;; ) ) ) => {\n}\n"
+            ),
+            "use_broken.js": "const broken = require('./broken');\nbroken.run();\n",
+            "lone.js": "exports.solo = function () {};\n",
+            "gone.js": "exports.solo = function () {};\n",
+            "use_lone.js": "const lone = require('./lone');\nlone.solo();\n",
+            "tools.js": "exports.run = function () {};\n",
+            "use_tools.js": "const tools = require('./tools');\ntools.walk();\n",
+            "use_tools.ts": (
+                "import { walk } from './tools';\nimport { walk as stroll } from './tools';\n"
+                "walk();\nstroll();\n"
+            ),
+        },
+    )
+    (tmp_path / "lone.js").unlink()
+    (tmp_path / "gone.js").unlink()
+    sites = {
+        ("use_ns.ts", 2): ("make", "lib"),
+        ("use_broken.js", 2): ("run", "broken"),
+        ("use_lone.js", 2): ("solo", "lone"),
+        ("use_tools.js", 2): ("walk", "tools"),
+        ("use_tools.ts", 3): ("walk", None),
+        ("use_tools.ts", 4): ("stroll", None),
+    }
+
+    # Act
+    bindings = {site: index.binding_of(*site, name, receiver) for site, (name, receiver) in sites.items()}
+
+    # Assert
+    assert {site: (binding.status.value, binding.target) for site, binding in bindings.items()} == {
+        ("use_ns.ts", 2): ("candidate", None),
+        ("use_broken.js", 2): ("unknown", None),
+        ("use_lone.js", 2): ("unknown", None),
+        ("use_tools.js", 2): ("candidate", None),
+        ("use_tools.ts", 3): ("candidate", None),
+        ("use_tools.ts", 4): ("candidate", None),
+    }
+    assert bindings[("use_ns.ts", 2)].reason == "import suggests multiple definitions: lib/a.ts, lib/b.ts"
+    assert bindings[("use_lone.js", 2)].reason == "solo may be defined in files not parsed: lone.js"
+    assert {
+        bindings[site].reason for site in (("use_tools.js", 2), ("use_tools.ts", 3), ("use_tools.ts", 4))
+    } == {"the import names tools.js; none exports walk in the index scope"}
+
+
 def test_a_name_imported_under_an_alias_binds_to_the_exported_definition(
     tmp_path: Path, ast_grep_runs
 ) -> None:
