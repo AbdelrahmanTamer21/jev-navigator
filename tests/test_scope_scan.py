@@ -775,3 +775,20 @@ def test_reading_the_parsed_files_receipt_parses_nothing(tmp_path: Path, ast_gre
     # Assert
     assert parsed == {"app/a.py"}
     assert len(ast_grep_runs) == runs_before
+
+
+def test_a_parsed_file_that_vanished_still_counts_as_read_and_is_listed_unavailable(tmp_path: Path) -> None:
+    # Arrange: its facts come from the bytes read before it vanished, which slices keep
+    index = committed(
+        tmp_path, {"app/a.py": "def a():\n    return 1\n", "app/b.py": "def b():\n    return 2\n"}
+    )
+    index.functions_in("app/a.py")
+    (tmp_path / "app" / "a.py").unlink()
+
+    # Act
+    pending = index.parser_scans_pending
+
+    # Assert
+    assert pending == ("facts",)
+    assert "app/a.py" in index.parsed_files
+    assert "app/a.py" in index.unavailable_files
