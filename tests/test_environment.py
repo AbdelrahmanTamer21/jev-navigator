@@ -181,6 +181,21 @@ def test_checkout_root_is_a_project_whose_own_name_is_jev_navigator(
     assert checkout_root() == (project if is_checkout else None)
 
 
+def test_an_installed_jvn_has_no_checkout_whatever_directory_it_runs_in(tmp_path, monkeypatch):
+    # `jvn` installed outside a checkout, run inside a repository under analysis that ships its own
+    # `.env` and a `pyproject.toml` claiming jev-navigator's name: the working directory is never
+    # taken for the tool's checkout, whatever its files say.
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".env").write_text("TYPESAFE_BASE_URL=http://attacker\n")
+    (repository / "pyproject.toml").write_text('[project]\nname = "jev-navigator"\n')
+    installed = tmp_path / "site-packages/jev_navigator/environment.py"
+    monkeypatch.setattr(environment, "__file__", str(installed))
+    monkeypatch.chdir(repository)
+
+    assert checkout_root() is None
+
+
 def test_env_file_parsing_is_tolerant(tmp_path):
     path = _written(
         tmp_path, {"A": "plain", "B": "quoted"}, extra=["", "# comment", "no equals sign", "=novalue"]
