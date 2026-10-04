@@ -1533,6 +1533,48 @@ def test_a_default_whose_definition_may_sit_in_unparsed_lines_stays_unknown(tmp_
     assert binding.status.value == "unknown", binding
 
 
+def test_a_name_passed_on_from_a_module_whose_export_sits_in_unparsed_lines_stays_unknown(
+    tmp_path: Path,
+) -> None:
+    """A barrel passes `make` on from a module whose `exports.make = (build: Builder)` the JavaScript
+    grammar cannot parse. The lines the parser lost mention `make`, so an import of it through the
+    barrel is unknown, as an import from that module itself is. A re-exported module whose lost
+    lines never mention `make` hides nothing."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "lost.js": "function build() {\n  return 1;\n}\nexports.make = (build: Builder);\n",
+            "listed.js": "export { make } from './lost';\n",
+            "starred.js": "export * from './lost';\n",
+            "clean.js": "export function make() {\n  return 2;\n}\n",
+            "noisy.js": "const other = (x: T);\n",
+            "mixed.js": "export * from './clean';\nexport * from './noisy';\n",
+            **{
+                f"from_{module}.js": f"import {{ make }} from './{module}';\nmake();\n"
+                for module in ("lost", "listed", "starred", "mixed")
+            },
+        },
+    )
+
+    # Act
+    bindings = {
+        module: index.binding_of(f"from_{module}.js", 2, "make", None)
+        for module in ("lost", "listed", "starred", "mixed")
+    }
+
+    # Assert
+    assert {
+        module: (binding.status.value, binding.target and binding.target.key)
+        for module, binding in bindings.items()
+    } == {
+        "lost": ("unknown", None),
+        "listed": ("unknown", None),
+        "starred": ("unknown", None),
+        "mixed": ("resolved", "clean.js:1-3"),
+    }
+
+
 def test_only_what_a_script_module_exports_is_importable(tmp_path: Path) -> None:
     """A script module's own functions are importable only where it exports them: by an `export`
     statement or list, as its default export, or as a CommonJS export (`exports.x = x`, a function

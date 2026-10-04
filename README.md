@@ -412,7 +412,7 @@ default's own name is no named export, so `import { make }`, `defaults.make()` a
 require(...)` of a default reach nothing. Every import, by name, under another
 name, as a default or through a module alias, is decided the same way from the module it names and
 the modules that one re-exports the name from: one definition proves the target, several leave a
-`candidate`, an exporting module that could not be parsed where it mentions the name, or that
+`candidate`, any of these modules that could not be parsed where it mentions the name, or that
 vanished, leaves it `unknown`, and a module with no definition exported under the name leaves a
 `candidate` that says so. A name a module imports and passes on without an `export ... from`, as a
 Python module's own `from pkg.core import compute`, is not followed. A function or class

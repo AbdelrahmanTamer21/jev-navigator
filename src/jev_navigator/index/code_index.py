@@ -863,7 +863,7 @@ class CodeIndex:
 
     def _read_exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
         """The module ``file``'s import of ``specifier`` resolves to, then each module it re-exports
-        ``name`` from, with the evidence for each."""
+        ``name`` from that exports it or may hide it (see ``_hides``), with the evidence for each."""
         resolved = resolve_import(specifier, file, self._scope, self._script_paths(file), self._packages())
         if resolved is None:
             return ()
@@ -893,7 +893,7 @@ class CodeIndex:
                 if identity in seen:
                     continue
                 seen.add(identity)
-                if self._refused_parse(inherited.path) or name in self._export_names_in(inherited.path):
+                if self._hides(inherited.path, name) or name in self._export_names_in(inherited.path):
                     prior = found.get(inherited.path)
                     if prior is None or inherited.proven:
                         found[inherited.path] = inherited
