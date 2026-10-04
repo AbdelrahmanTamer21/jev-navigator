@@ -123,7 +123,8 @@ def _import_stem(path: str) -> str:
 def _whole_path(path: str) -> re.Pattern[str]:
     """``path`` as a whole token: an optional ``./`` or ``/`` after a character no path holds, and no
     path character or file extension after it. ``lib/web/a.js``, ``web/a.json`` and a URL ending in
-    ``/web/a.js`` do not name ``web/a.js``."""
+    ``/web/a.js`` do not name ``web/a.js``; neither do ``../web/a.js`` and ``$root/web/a.js``, whose
+    folder is relative or variable."""
     before = rf"(?:^|[^{_PATH_CHARACTERS}./])(?:\./|/)?"
     after = rf"(?![{_PATH_CHARACTERS}/]|\.[A-Za-z0-9])"
     return re.compile(before + re.escape(path) + after)

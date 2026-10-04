@@ -390,9 +390,10 @@ else:
   asks Jev about those files, one question each: is the file generated, meaning no person edits it as
   source? Each file is sent as its path, its measured facts, up to 10 files that import it with their
   true count, up to 5 files that name its path with the naming line (at most 200 characters around
-  the path; files outside the scope count, non-test files come first) and their true count, and two
-  2,000-character excerpts (the opening and the middle). A file the secret scan would refuse is never
-  sent and comes back in `not_judged` with the reason. Nothing calls it yet: the
+  the path; files outside the scope count, non-test files come first; a path written relative to the
+  naming file, such as `../src/a.js`, or joined to a variable folder, such as `$root/src/a.js`, is not
+  found) and their true count, and two 2,000-character excerpts (the opening and the middle). A file
+  the secret scan would refuse is never sent and comes back in `not_judged` with the reason. Nothing calls it yet: the
   search that acts on the answers lands with Find v2's round controller.
 - `include` and `exclude` entries without `*`, `?` or `[` are folders or files. Other entries are
   globs over the whole path: `**` crosses folders, and a glob without `/` matches the file name at any
