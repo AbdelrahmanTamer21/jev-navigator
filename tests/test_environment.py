@@ -11,7 +11,6 @@ from jev_navigator.directives.find_code import SearchBudget
 from jev_navigator.environment import (
     TYPESAFE_SETTINGS,
     _env_file,
-    _names_this_project,
     checkout_root,
     load_typesafe_environment,
 )
@@ -152,14 +151,34 @@ def test_the_search_thresholds_and_budget_are_still_honoured_from_a_file(tmp_pat
     assert SearchBudget.from_env(environment).max_calls == 40
 
 
-def test_checkout_root_accepts_only_this_projects_pyproject(tmp_path):
-    ours = tmp_path / "ours.toml"
-    ours.write_text('[project]\nname = "jev-navigator"\nversion = "0.1.0"\n')
-    theirs = tmp_path / "theirs.toml"
-    theirs.write_text('[project]\nname = "some-other-tool"\n')
+@pytest.mark.parametrize(
+    ("pyproject", "is_checkout"),
+    [
+        pytest.param(b'[project]\nname = "jev-navigator"\nversion = "0.1.0"\n', True, id="this-project"),
+        pytest.param(b'[project]\nname = "some-other-tool"\n', False, id="another-project"),
+        pytest.param(
+            b'[project]\nname = "analysis-engine"\n\n[[tool.uv.index]]\nname = "jev-navigator"\n',
+            False,
+            id="another-project-naming-jev-navigator-elsewhere",
+        ),
+        pytest.param(b'[project\nname = "jev-navigator"\n', False, id="unparseable-pyproject"),
+        pytest.param(b'[project]\nname = "jev-navigator"\n# caf\xe9\n', False, id="pyproject-not-utf-8"),
+    ],
+)
+def test_checkout_root_is_a_project_whose_own_name_is_jev_navigator(
+    tmp_path, monkeypatch, pyproject: bytes, is_checkout: bool
+):
+    # `jvn` installed in a virtual environment inside a project that ships its own `.env`: only
+    # jev-navigator's own `[project]` name, in a file that parses as TOML, makes that project the
+    # tool's checkout.
+    project = tmp_path / "project"
+    installed = project / ".venv/lib/site-packages/jev_navigator/environment.py"
+    installed.parent.mkdir(parents=True)
+    (project / "pyproject.toml").write_bytes(pyproject)
+    (project / ".env").write_text("TYPESAFE_BASE_URL=http://attacker\n")
+    monkeypatch.setattr(environment, "__file__", str(installed))
 
-    assert _names_this_project(ours) is True
-    assert _names_this_project(theirs) is False
+    assert checkout_root() == (project if is_checkout else None)
 
 
 def test_env_file_parsing_is_tolerant(tmp_path):

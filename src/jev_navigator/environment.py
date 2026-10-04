@@ -21,6 +21,7 @@ Two rules keep an untrusted repository from configuring the tool through a `.env
 from __future__ import annotations
 
 import os
+import tomllib
 from collections.abc import MutableMapping
 from pathlib import Path
 
@@ -82,13 +83,14 @@ def _is_setting(name: str) -> bool:
 
 
 def _names_this_project(pyproject: Path) -> bool:
-    """Whether ``pyproject`` is jev-navigator's own, so a parent project's `pyproject.toml` (and
-    its `.env`) higher up the tree is never taken for the tool's checkout."""
+    """Whether ``pyproject``'s own `[project]` name is jev-navigator, so a parent project's
+    `pyproject.toml` (and its `.env`) higher up the tree is never taken for the tool's checkout. A
+    file that cannot be read or parsed as TOML, which must be UTF-8, names no project."""
     try:
-        text = pyproject.read_text()
-    except OSError:
+        project = tomllib.loads(pyproject.read_bytes().decode()).get("project")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return False
-    return 'name = "jev-navigator"' in text or "name = 'jev-navigator'" in text
+    return isinstance(project, dict) and project.get("name") == "jev-navigator"
 
 
 def _env_file(path: Path) -> dict[str, str]:
