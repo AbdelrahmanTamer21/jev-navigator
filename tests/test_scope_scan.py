@@ -646,6 +646,78 @@ def test_an_unsupported_flow_construct_keeps_its_file_incomplete(tmp_path: Path)
     assert index.unparsed_files == {"src/native/RootTag.js"}
 
 
+# Parse Server's shape: Babel strips Flow types from every file, so most of its typed files carry no
+# `@flow` pragma (src/Config.js, src/triggers.js and src/LiveQuery/Subscription.js at 8.6.95).
+UNMARKED_FLOW = {
+    "src/Config.js": (
+        "import AppCache from './cache';\n"
+        "import type { Subscription } from './Subscription';\n"
+        "\n"
+        "export class Config {\n"
+        "  static get(applicationId: string, mount: string) {\n"
+        "    return AppCache.get(applicationId);\n"
+        "  }\n"
+        "}\n"
+    ),
+    "src/triggers.js": (
+        "export function triggerExists(className: string, type: string, applicationId: string): boolean {\n"
+        "  return getTrigger(className, type, applicationId) != undefined;\n"
+        "}\n"
+        "\n"
+        "export function getTrigger(className, type, applicationId) {\n"
+        "  return null;\n"
+        "}\n"
+    ),
+    "src/Subscription.js": (
+        "export type QueryData = { [attr: string]: any };\n"
+        "\n"
+        "export class Subscription {\n"
+        "  query: QueryData;\n"
+        "  className: string;\n"
+        "\n"
+        "  hasSubscribingClient(clientId: number): boolean {\n"
+        "    return true;\n"
+        "  }\n"
+        "}\n"
+    ),
+}
+
+
+def test_javascript_with_flow_types_and_no_pragma_parses_fully(tmp_path: Path) -> None:
+    # Arrange
+    index = committed(tmp_path, UNMARKED_FLOW)
+
+    # Act
+    names = {file: {span.name for span in index.symbols_in(file)} for file in UNMARKED_FLOW}
+
+    # Assert
+    assert index.unparsed_files == set()
+    assert names == {
+        "src/Config.js": {"Config", "get"},
+        "src/triggers.js": {"triggerExists", "getTrigger"},
+        "src/Subscription.js": {"Subscription", "hasSubscribingClient"},
+    }
+    assert [site.file for site in index.find_callers("getTrigger")] == ["src/triggers.js"]
+
+
+def test_javascript_the_flow_reading_reads_worse_keeps_its_own_facts(tmp_path: Path) -> None:
+    # Arrange: a syntax error no grammar reads, and a variable named `as`, which minified JavaScript
+    # uses and the flow reading cannot read
+    source = (
+        "export function count(n) {\n  let as = n;\n  return as;\n}\n\n"
+        "export function broken() {\n  return 1 +* 2;\n}\n"
+    )
+    index = committed(tmp_path, {"src/broken.js": source})
+
+    # Act
+    [facts] = index.facts_in_files(["src/broken.js"]).values()
+
+    # Assert
+    assert index.unparsed_files == {"src/broken.js"}
+    assert facts.unparsed_lines == ((7, 7),)
+    assert [span.name for span in index.functions_in("src/broken.js")] == ["count", "broken"]
+
+
 BROKEN_FLOW = "// @flow\nexport class Broken {\n  find(a: string:\n"
 
 

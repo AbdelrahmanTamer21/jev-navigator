@@ -3,7 +3,8 @@
 Each requested file set is handed to ast-grep scans of a few hundred files each, which schedule
 parsing across ast-grep's own worker pool; every match becomes its fact as it is printed. The
 structure rules also match the grammar's ERROR nodes: a file the parser could only recover
-partially (Flow types in a JavaScript file, say) is reported as unparsed too. Its matched symbols and
+partially is reported as unparsed too. A JavaScript file the JavaScript grammar only partly reads is
+read once more as flow, which reads Flow types written without the ``@flow`` pragma. Its matched symbols and
 calls still count — recovery keeps what it could — but whatever the ERROR nodes swallowed is unknown,
 not absent. ``FileFacts.unparsed_lines`` keeps the lines those nodes span, so a lookup can tell which
 names they may hide.
@@ -34,6 +35,9 @@ from .languages import (
     reference_rules,
 )
 from .spans import Span
+
+# The language whose files the JavaScript grammar only partly reads are read once more as flow.
+READ_AGAIN_AS_FLOW = "javascript"
 
 
 @dataclass
@@ -100,13 +104,8 @@ def scan_facts(files: Sequence[str], root: Path, unparsed: Unparsed) -> dict[str
     refused: dict[str, str] = {}
     supported_files = tuple(file for file in files if language_of(file) is not None)
     for config, group, languages in _scan_groups(supported_files, root):
-        rules = fact_rules(languages)
-        if config is None:
-            matches = tools.ast_grep_rules(rules, group, root, refused=refused)
-        else:
-            matches = tools.ast_grep_rules(rules, group, root, config=config, refused=refused)
-        for match in matches:
-            found[match["file"]].add(match)
+        found.update(_scanned(group, root, config, languages, refused))
+    found.update(_read_as_flow_where_fewer_lines_fail(found, root, refused))
     unparsed.add("facts", [file for file, facts in found.items() if facts.error_lines])
     incomplete = unparsed.files
     return {
@@ -114,6 +113,41 @@ def scan_facts(files: Sequence[str], root: Path, unparsed: Unparsed) -> dict[str
         if file in refused
         else facts.finished(file in incomplete)
         for file, facts in found.items()
+    }
+
+
+def _scanned(
+    files: Sequence[str], root: Path, config: str | None, languages: Sequence[str], refused: dict[str, str]
+) -> dict[str, _FileFound]:
+    found = {file: _FileFound() for file in files}
+    rules = fact_rules(languages)
+    if config is None:
+        matches = tools.ast_grep_rules(rules, files, root, refused=refused)
+    else:
+        matches = tools.ast_grep_rules(rules, files, root, config=config, refused=refused)
+    for match in matches:
+        found[match["file"]].add(match)
+    return found
+
+
+def _read_as_flow_where_fewer_lines_fail(
+    found: dict[str, _FileFound], root: Path, refused: dict[str, str]
+) -> dict[str, _FileFound]:
+    """Babel strips Flow types from every file it builds, so Flow-typed JavaScript often carries no
+    ``@flow`` pragma. Each JavaScript file the JavaScript grammar only partly read is read again as
+    flow, and that reading replaces the first one when its ERROR nodes span fewer lines."""
+    partly_read = [
+        file
+        for file, facts in found.items()
+        if facts.error_lines and language_of(file) == READ_AGAIN_AS_FLOW and file not in refused
+    ]
+    if not partly_read:
+        return {}
+    as_flow = _scanned(partly_read, root, FLOW_SGCONFIG, [FLOW_LANGUAGE], refused)
+    return {
+        file: facts
+        for file, facts in as_flow.items()
+        if file not in refused and facts.unread_line_count() < found[file].unread_line_count()
     }
 
 
@@ -157,6 +191,9 @@ class _FileFound:
             self._add_export(match)
         else:
             self._add_reference(match)
+
+    def unread_line_count(self) -> int:
+        return sum(end - start + 1 for start, end in _merged_stretches(self.error_lines))
 
     def finished(self, incomplete: bool) -> FileFacts:
         functions = self.functions - _same_lines_as_a_named_symbol(self.functions | self.classes)

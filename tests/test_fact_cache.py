@@ -111,6 +111,23 @@ def test_content_language_parser_and_rules_invalidate(tmp_path, example, monkeyp
     assert cache.load("module.py", content) is None
 
 
+def test_a_change_to_the_flow_rules_is_a_cache_miss_for_javascript(
+    tmp_path, monkeypatch, rule_identity_reset
+):
+    # Arrange: JavaScript the JavaScript grammar only partly reads takes its facts from the flow rules
+    content = b"export function typed(value: string): string {\n  return value;\n}\n"
+    cache = FactCache(tmp_path / "cache")
+    cache.save("typed.js", content, FileFacts(FileStructure((), (), ()), (), ()))
+
+    # Act
+    monkeypatch.setitem(languages.FUNCTION_KINDS, languages.FLOW_LANGUAGE, ("function_declaration",))
+    fact_cache._rules_identity.cache_clear()
+    reused = cache.load("typed.js", content)
+
+    # Assert
+    assert reused is None
+
+
 @pytest.mark.parametrize("broken", ["{", "null", "[]", '{"structure":{}}'])
 def test_corrupt_entries_are_cache_misses(tmp_path, example, broken):
     content, facts = example
