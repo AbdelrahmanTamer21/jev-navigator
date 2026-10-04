@@ -482,35 +482,22 @@ class CodeIndex:
 
     def _calls_with_name(self, name: str) -> tuple[CallMatch, ...]:
         return tuple(
-            CallMatch(file, row.start, name, self._receiver(file, row))
+            CallMatch(file, row.start, name, row.receiver)
             for file, row in self._readable_places(name, (CALL,))
         )
 
     def _references_with_name(self, name: str) -> tuple[ReferenceMatch, ...]:
         return tuple(
-            ReferenceMatch(file, row.start, row.role or "", name, self._receiver(file, row))
+            ReferenceMatch(file, row.start, row.role or "", name, row.receiver)
             for file, row in self._readable_places(name, (REFERENCE,))
         )
 
     def _readable_places(self, name: str, kinds: Sequence[str]) -> Iterator[tuple[str, NameRow]]:
         """The places of ``name`` of ``kinds`` in files still readable: a file that disappeared or
-        changed since the scope was covered answers nothing, and a row whose receiver sits in the
-        fact cache needs its file's facts to load."""
+        changed since the scope was covered answers nothing."""
         for file, row in self._named(name):
-            if row.kind not in kinds:
-                continue
-            if row.receiver_in_facts and file not in self._unavailable:
-                self._facts_in(file)
-            if file not in self._unavailable:
+            if row.kind in kinds and file not in self._unavailable:
                 yield file, row
-
-    def _receiver(self, file: str, row: NameRow) -> str | None:
-        """The row's receiver; one the table does not store is read from the file's loaded facts."""
-        if not row.receiver_in_facts:
-            return row.receiver
-        facts = self._facts[file]
-        found = facts.calls[row.position] if row.kind == CALL else facts.references[row.position]
-        return found.receiver
 
     def _places_named(self, name: str) -> tuple[tuple[str, NameRow], ...]:
         """Every place in scope ``name`` sits, as (file, row), in file order and then in the order of

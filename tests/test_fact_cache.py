@@ -4,16 +4,16 @@ from pathlib import Path
 from threading import Barrier
 
 import pytest
+from git_repos import commit_files
 
-from jev_navigator.index import fact_cache, languages, spans
+from jev_navigator.index import fact_cache, languages, spans, tools
+from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.fact_cache import FactCache
-from jev_navigator.index.scope_scan import Unparsed, scan_facts
+from jev_navigator.index.scope_scan import FileFacts, FileStructure, Unparsed, scan_facts
+from jev_navigator.index.spans import Span
 
 
 def test_new_index_reuses_facts_and_changed_content_is_reparsed(tmp_path, monkeypatch):
-    from jev_navigator.index import tools
-    from jev_navigator.index.code_index import CodeIndex
-
     repository = tmp_path / "repo"
     repository.mkdir()
     source = repository / "module.py"
@@ -45,7 +45,6 @@ def test_new_index_reuses_facts_and_changed_content_is_reparsed(tmp_path, monkey
 
 
 def test_warm_index_preserves_incomplete_parser_coverage(tmp_path):
-    from jev_navigator.index.code_index import CodeIndex
 
     repository = tmp_path / "repo"
     repository.mkdir()
@@ -149,9 +148,6 @@ def test_concurrent_writers_publish_one_complete_entry(tmp_path, example, monkey
 
 
 def test_facts_cached_under_other_rules_are_parsed_again(tmp_path, monkeypatch, rule_identity_reset):
-    from jev_navigator.index.code_index import CodeIndex
-    from jev_navigator.index.scope_scan import FileFacts, FileStructure
-    from jev_navigator.index.spans import Span
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -195,3 +191,23 @@ def test_a_change_to_the_code_that_reads_matches_is_a_cache_miss(tmp_path, examp
 
     # Assert
     assert reused is None
+
+
+def test_the_fact_cache_never_writes_a_literal_quoted_by_a_receiver(tmp_path, private_cache_root):
+    # Arrange
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/client.ts": 'export function load(client, cfg) {\n  client("api-key-literal").fetch(1);\n'
+            '  return cfg["token-literal"].get(2);\n}\n'
+        },
+    )
+
+    # Act
+    CodeIndex.from_git(repository).find_callers("fetch")
+
+    # Assert
+    written = " ".join(path.read_text() for path in (private_cache_root / "facts").rglob("*.json"))
+    assert '"fetch"' in written
+    assert "literal" not in written

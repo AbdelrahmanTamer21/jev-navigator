@@ -245,9 +245,23 @@ def _reference_receiver(role: str, text: str) -> str | None:
     return receiver_of(text) if role == "argument" else None
 
 
+OPAQUE_RECEIVER = "<expression>"
+
+
 def receiver_of(expression: str) -> str | None:
+    """What ``expression`` reads its last name from: a plain chain of names (``this.store``), the
+    placeholder ``OPAQUE_RECEIVER`` for anything else (a call, a subscript, a literal, a template),
+    or None when it reads it from nothing. Any other receiver text could quote a string literal, so
+    it is never kept."""
     head, dot, _ = expression.replace("?.", ".").rpartition(".")
-    return head if dot else None
+    if not dot:
+        return None
+    return head if _is_name_chain(head) else OPAQUE_RECEIVER
+
+
+def _is_name_chain(expression: str) -> bool:
+    """Names joined by dots, such as ``this.store``, ``self.items`` or ``super``, which quote no code."""
+    return all(part.removeprefix("#").replace("$", "_").isidentifier() for part in expression.split("."))
 
 
 def last_identifier(expression: str) -> str:

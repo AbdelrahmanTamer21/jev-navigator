@@ -2,9 +2,8 @@
 
 A row ties a name to a definition, a call or a reference in one file content, identified by its git
 blob id, so a new index maps its files to rows without reading them, and answers a name lookup with
-no text search and no parse. Rows hold names and line numbers, never code. A receiver is kept only
-when it is a plain chain of names (``this.store``); any other receiver (``fetch("...")``) can quote
-a string literal, so its row only says the receiver sits in the file's cached facts.
+no text search and no parse. Rows hold names and line numbers, never code: a receiver is a plain
+chain of names or ``scope_scan.OPAQUE_RECEIVER``, as the facts hold it.
 
 One table file serves one ``table_identity``: a change to the parser, to any language's rules or to
 the code that turns facts into rows starts a new table. Rows are only ever inserted, and a file's
@@ -49,8 +48,7 @@ class FileEntry:
 @dataclass(frozen=True)
 class NameRow:
     """One place a name sits in one file content. ``position`` is the place's index among the file's
-    facts of its kind, so rows come back in the facts' order. ``receiver_in_facts`` marks a call or
-    reference whose receiver is not stored here and is read from the file's facts."""
+    facts of its kind, so rows come back in the facts' order."""
 
     blob: str
     kind: str
@@ -59,7 +57,6 @@ class NameRow:
     end: int
     role: str | None = None
     receiver: str | None = None
-    receiver_in_facts: bool = False
 
 
 class NameTable:
@@ -93,21 +90,15 @@ class NameTable:
         with self._db:
             self._db.execute("begin immediate")
             if self._add_entry(blob, facts):
-                self._db.executemany(
-                    "insert into names values (?, ?, ?, ?, ?, ?, ?, ?, ?)", _rows(blob, facts)
-                )
+                self._db.executemany("insert into names values (?, ?, ?, ?, ?, ?, ?, ?)", _rows(blob, facts))
 
     def rows(self, name: str) -> tuple[NameRow, ...]:
         with self._lock:
             found = self._db.execute(
-                "select blob, kind, position, start, end, role, receiver, receiver_in_facts"
-                " from names where name = ?",
+                "select blob, kind, position, start, end, role, receiver from names where name = ?",
                 (name,),
             ).fetchall()
-        return tuple(
-            NameRow(blob, kind, position, start, end, role, receiver, bool(in_facts))
-            for blob, kind, position, start, end, role, receiver, in_facts in found
-        )
+        return tuple(NameRow(*row) for row in found)
 
     def _add_entry(self, blob: str, facts: FileFacts) -> bool:
         stretches = json.dumps([list(stretch) for stretch in facts.unparsed_lines])
@@ -130,29 +121,17 @@ def git_blob_id(content: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(content) + content).hexdigest()
 
 
-def is_name_chain(expression: str) -> bool:
-    """``this.store``, ``self.items``, ``a?.b``: names joined by dots, which quote no code."""
-    parts = expression.replace("?.", ".").split(".")
-    return all(part.removeprefix("#").replace("$", "_").isidentifier() for part in parts)
-
-
 def _rows(blob: str, facts: FileFacts) -> Iterator[tuple]:
     structure = facts.structure
     for kind, spans in ((SYMBOL, structure.symbols), (DECLARATION, structure.declarations)):
         for position, span in enumerate(spans):
             if span.name != _ANONYMOUS:
-                yield span.name, blob, kind, position, span.start, span.end, None, None, 0
+                yield span.name, blob, kind, position, span.start, span.end, None, None
     for position, call in enumerate(facts.calls):
-        yield call.name, blob, CALL, position, call.line, call.line, None, *_receiver(call.receiver)
+        yield call.name, blob, CALL, position, call.line, call.line, None, call.receiver
     for position, reference in enumerate(facts.references):
         line, role = reference.line, reference.role
-        yield reference.name, blob, REFERENCE, position, line, line, role, *_receiver(reference.receiver)
-
-
-def _receiver(receiver: str | None) -> tuple[str | None, int]:
-    if receiver is None or is_name_chain(receiver):
-        return receiver, 0
-    return None, 1
+        yield reference.name, blob, REFERENCE, position, line, line, role, reference.receiver
 
 
 def _chunks(values: list[str]) -> Iterator[list[str]]:
@@ -176,7 +155,6 @@ create table names (
     end integer not null,
     role text,
     receiver text,
-    receiver_in_facts integer not null,
     primary key (name, blob, kind, position)
 ) without rowid;
 """
