@@ -31,8 +31,8 @@ directory where you invoked it. You do not need to supply a scope, starting line
 Credentials come from `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` in the process environment, then
 from `~/.config/jvn/env`. The file uses dotenv syntax and is not executed. When `jvn`'s code runs
 from a jev-navigator checkout (`uv run jvn` there, or an editable install), it also reads that
-checkout's `.env`, after the environment and before the file; a package installed elsewhere reads
-no `.env`. A `.env` in the searched directory is never read. Either file may set only `TYPESAFE_*`,
+checkout's `.env`, after the environment and before the file; any install into site-packages
+(`uv tool install`, `pipx`, a non-editable `pip install`) reads no `.env`. A `.env` in the searched directory is never read. Either file may set only `TYPESAFE_*`,
 `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names, and `jvn` names on stderr any other name it ignores.
 Help and schema discovery need no key and make no model calls.
 

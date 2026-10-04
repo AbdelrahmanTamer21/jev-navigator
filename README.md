@@ -101,12 +101,12 @@ it does not execute that file or print the values. `TYPESAFE_BASE_URL` is the AP
 `/v1/systemone`, such as `http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
 
 When its code runs from a jev-navigator source checkout (`uv run jvn` there, or an editable
-install), `jvn` first fills what is missing from that checkout's `.env` (see `.env.example`). A
-`jvn` installed as a package elsewhere, for example with `uv tool install`, reads no `.env`, and when
-the directory it runs in holds one, it says on stderr that it did not read it. It never reads a
-`.env` from the directory or repository it searches. A settings file can set only `jvn`'s own
-`TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names; `jvn` names on stderr any other name it
-ignores, never its value.
+install), `jvn` first fills what is missing from that checkout's `.env` (see `.env.example`). Any
+install into site-packages (`uv tool install`, `pipx`, a non-editable `pip install`) reads no
+`.env`, and when the directory it runs in holds one, it says on stderr that it did not read it. It
+never reads a `.env` from the directory or repository it searches. A settings file can set only
+`jvn`'s own `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names; `jvn` names on stderr any
+other name it ignores, never its value.
 
 ### JSON input for agents and pipelines
 

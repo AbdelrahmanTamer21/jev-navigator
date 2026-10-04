@@ -12,12 +12,12 @@ Two rules keep an untrusted repository from configuring the tool through a `.env
   directory a search happens to run in, so a repository under analysis cannot point the API key at
   another host with its own `.env`. Where the tool's code is installed decides whether there is a
   checkout, not the directory it runs in: `uv run jvn` in the checkout, or an editable install,
-  reads that checkout's `.env`; a package installed elsewhere (`uv tool install`, `pipx`) reads no
-  `.env` and uses the real environment and `~/.config/jvn/env`.
+  reads that checkout's `.env`; any install into site-packages (`uv tool install`, `pipx`, a
+  non-editable `pip install`) reads no `.env` and uses the real environment and `~/.config/jvn/env`.
 - A file may set only the tool's own recognised settings (`TYPESAFE_*`, `JEV_NAVIGATOR_*` and
-  `SYSTEM_ONE_*`); every other name is ignored and named on stderr. So a config file cannot inject
-  an unrelated variable such as `PATH`, `LD_PRELOAD` or `RIPGREP_CONFIG_PATH` into the tool or into
-  the `rg`, `git` and `ast-grep` subprocesses it runs.
+  `SYSTEM_ONE_*`); every other name is ignored and named on stderr. So a settings file cannot put
+  an unrelated variable such as `PATH`, `LD_PRELOAD` or `RIPGREP_CONFIG_PATH` into jvn's
+  environment, which every program it starts inherits.
 """
 
 from __future__ import annotations
