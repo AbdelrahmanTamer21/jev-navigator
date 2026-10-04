@@ -82,11 +82,22 @@ class ModuleAlias(NamedTuple):
     specifier: str
 
 
+class NamespaceMember(NamedTuple):
+    """``span`` is a member of the TypeScript namespace on lines ``first`` to ``last``: a function,
+    class or declaration directly in its body."""
+
+    first: int
+    last: int
+    span: Span
+
+
 @dataclass(frozen=True)
 class FileStructure:
-    """``module_symbols`` are the symbols their module names: no function, class or object literal
-    holds them in the syntax tree, and no property assignment names them. Symbols sharing a line
-    each hold the other's first line, so lines alone cannot tell. ``commonjs_exports`` are the
+    """``module_symbols`` are the symbols their module names: one of their syntax nodes no function,
+    class, namespace or object literal holds, and no property assignment names. Symbols sharing a
+    line each hold the other's first line, so lines alone cannot tell. ``declarations`` are
+    module-level and namespace-level; ``namespace_members`` says which symbols and declarations a
+    namespace holds. ``commonjs_exports`` are the
     functions and classes assigned to CommonJS exports (``exports.run = function () {}``), which
     another module imports by name but their own module never names.
     ``type_declarations`` and ``value_declarations`` are the declarations a type use and a value
@@ -102,6 +113,7 @@ class FileStructure:
     type_declarations: tuple[Span, ...]
     value_declarations: tuple[Span, ...]
     local_names: tuple[LocalName, ...] = ()
+    namespace_members: tuple[NamespaceMember, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -221,6 +233,7 @@ def _structure_from_matches(files, unparsed, matches):
     marks: dict[str, dict[str, set[tuple[int, int]]]] = {
         file: {rule: set() for rule in _MARK_RULES} for file in files
     }
+    namespaces: dict[str, list[_Namespace]] = {file: [] for file in files}
     for match in matches:
         file, start, end = match["file"], _line_of(match), match["range"]["end"]["line"] + 1
         if match["ruleId"] == _ERROR_RULE:
@@ -231,6 +244,8 @@ def _structure_from_matches(files, unparsed, matches):
         offsets = match["range"]["byteOffset"]
         if match["ruleId"] in _MARK_RULES:
             marks[file][match["ruleId"]].add((offsets["start"], offsets["end"]))
+        elif match["ruleId"] == _NAMESPACE_RULE:
+            namespaces[file].append(_Namespace(offsets["start"], offsets["end"], start, end))
         elif match["ruleId"] == _DECLARED_NAME_RULE:
             declared_names[file].append((offsets["start"], match["text"]))
         elif match["ruleId"] == _LOCAL_NAME_RULE:
@@ -253,17 +268,20 @@ def _structure_from_matches(files, unparsed, matches):
     for file in files:
         symbols = functions[file] | classes[file]
         declared = _declarations(file, declaration_nodes[file], declared_names[file])
-        held = _held(ranges[file], marks[file][_HELD_RULE])
-        module_symbols = symbols - held - _marked(ranges[file], marks[file][_PROPERTY_VALUE_RULE])
+        # A function held by a value or assigned to a property is the value's or the property's.
+        nodes = _Nodes(
+            ranges[file], marks[file][_HELD_RULE] | marks[file][_PROPERTY_VALUE_RULE], namespaces[file]
+        )
         structures[file] = FileStructure(
             _ordered(functions[file], positions),
             _ordered(symbols, positions),
             _sorted(span for span, _ in declared),
-            _ordered(module_symbols, positions),
+            _ordered(symbols & nodes.module_level(), positions),
             _ordered(_marked(ranges[file], marks[file][_MODULE_EXPORT_RULE]), positions),
-            _sorted(span for span, kind in declared if kind.named_by_types),
-            _sorted(span for span, kind in declared if kind.named_by_values),
+            _sorted(span for span, declaration in declared if declaration.kind.named_by_types),
+            _sorted(span for span, declaration in declared if declaration.kind.named_by_values),
             _local_names(ranges[file], classes[file], bound_names[file]),
+            nodes.namespace_members(declared),
         )
     return structures
 
@@ -322,13 +340,13 @@ class _Declaration:
 
 def _declarations(
     file: str, nodes: list[_Declaration], names: list[tuple[int, str]]
-) -> set[tuple[Span, _DeclarationKind]]:
+) -> set[tuple[Span, _Declaration]]:
     """One span per name a declaration binds, over the lines of the innermost declaration holding
-    the name, with that declaration's kind."""
+    the name, with that declaration."""
     ordered = sorted(nodes, key=lambda node: node.start)
     starts = [node.start for node in ordered]
     return {
-        (Span(file, holder.first_line, holder.last_line, name), holder.kind)
+        (Span(file, holder.first_line, holder.last_line, name), holder)
         for offset, name in names
         if (holder := _innermost(ordered, starts, offset)) is not None
     }
@@ -366,18 +384,61 @@ def _marked(ranges: list[tuple[int, int, Span]], marked: set[tuple[int, int]]) -
     return {span for start, end, span in ranges if (start, end) in marked}
 
 
-def _held(ranges: list[tuple[int, int, Span]], held_nodes: set[tuple[int, int]]) -> set[Span]:
-    """The spans whose syntax node is a value or a namespace member (see ``_held_rule``) or lies inside
-    another function or class node, counting the callbacks ``_same_lines_as_a_named_symbol`` drops: a
-    function inside a one-line callback is the callback's. Nodes nest or are disjoint, so a node is
-    inside another exactly when one starting no later reaches at least as far."""
-    held = _marked(ranges, held_nodes)
-    furthest = -1
-    for _start, end, span in sorted(ranges, key=lambda range_: (range_[0], -range_[1])):
-        if end <= furthest:
-            held.add(span)
-        furthest = max(furthest, end)
-    return held
+@dataclass(frozen=True)
+class _Namespace:
+    """A namespace node's byte range, end exclusive, and its first and last line."""
+
+    start: int
+    end: int
+    first_line: int
+    last_line: int
+
+
+@dataclass(frozen=True)
+class _Nodes:
+    """A file's function and class nodes (``ranges``), the ones a value or a property holds
+    (``owned``), and its namespace nodes. Nodes nest or are disjoint, so a sweep in source order
+    keeps the nodes still open on a stack, the innermost on top."""
+
+    ranges: list[tuple[int, int, Span]]
+    owned: set[tuple[int, int]]
+    namespaces: list[_Namespace]
+
+    def module_level(self) -> set[Span]:
+        """The spans with a node nothing owns and no other function, class or namespace holds,
+        counting the callbacks ``_same_lines_as_a_named_symbol`` drops: a function inside a one-line
+        callback is the callback's. A span is lines and a name, so one such node is enough:
+        `function handler() {} const table = { handler() {} };` on one line is one span holding a
+        module-level function."""
+        return {
+            span
+            for start, end, span, holder in self._sweep(())
+            if holder is None and isinstance(span, Span) and (start, end) not in self.owned
+        }
+
+    def namespace_members(self, declared: Iterable[tuple[Span, _Declaration]]) -> tuple[NamespaceMember, ...]:
+        """Each function, class and declaration whose innermost holder is a namespace, with that
+        namespace's lines; a declaration enters the sweep as the point it starts at."""
+        if not self.namespaces:
+            return ()
+        points = [(declaration.start, declaration.start, span) for span, declaration in declared]
+        members = {
+            NamespaceMember(holder.first_line, holder.last_line, span)
+            for start, end, span, holder in self._sweep(points)
+            if isinstance(holder, _Namespace) and isinstance(span, Span) and (start, end) not in self.owned
+        }
+        return tuple(sorted(members))
+
+    def _sweep(self, points: Iterable[tuple[int, int, Span]]):
+        """Each node and point with the innermost node holding it, in source order."""
+        entries = [*self.ranges, *((ns.start, ns.end, ns) for ns in self.namespaces), *points]
+        open_nodes: list[tuple[int, Span | _Namespace]] = []
+        for start, end, item in sorted(entries, key=lambda entry: (entry[0], -entry[1])):
+            while open_nodes and open_nodes[-1][0] <= start:
+                open_nodes.pop()
+            yield start, end, item, open_nodes[-1][1] if open_nodes else None
+            if end > start:
+                open_nodes.append((end, item))
 
 
 def _same_lines_as_a_named_symbol(symbols: set[Span]) -> set[Span]:
@@ -467,6 +528,7 @@ def _captured_name(match: dict) -> str:
 
 _ERROR_RULE = "parse_error"
 _HELD_RULE = "held"
+_NAMESPACE_RULE = "namespace"
 _DECLARED_NAME_RULE = "declared_name"
 _LOCAL_NAME_RULE = "local_name"
 _MODULE_ALIAS_RULE = "module_alias"
@@ -481,6 +543,7 @@ _STRUCTURE_RULE_IDS = frozenset(
         _DECLARED_NAME_RULE,
         _LOCAL_NAME_RULE,
         *_MARK_RULES,
+        _NAMESPACE_RULE,
         _ERROR_RULE,
     }
 )
@@ -539,10 +602,13 @@ def _structure_rules(languages: Sequence[str]) -> str:
         documents.append(_rule_document(_DECLARED_NAME_RULE, language, DECLARED_NAME_RULES[language]))
         documents.append(_rule_document(_LOCAL_NAME_RULE, language, LOCAL_NAME_RULES[language]))
         documents.append(_rule_document(_ERROR_RULE, language, "  kind: ERROR"))
-        if VALUE_KINDS[language] or NAMESPACE_KINDS[language]:
-            documents.append(_held_rule(language))
         if VALUE_KINDS[language]:
+            documents.append(_held_rule(language))
             documents += _property_rules(language)
+        if NAMESPACE_KINDS[language]:
+            documents.append(
+                _rule_document(_NAMESPACE_RULE, language, f"  any: {_kinds(NAMESPACE_KINDS[language])}")
+            )
     return "\n---\n".join(documents)
 
 
@@ -584,10 +650,9 @@ def _past_wrappers(language: str) -> str:
 
 
 def _held_rule(language: str) -> str:
-    """Every function and class anywhere inside a value or a namespace node (see ``VALUE_KINDS`` and
-    ``NAMESPACE_KINDS``)."""
+    """Every function and class anywhere inside a value node (see ``VALUE_KINDS``)."""
     symbols = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language]))
-    holders = _kinds((*VALUE_KINDS[language], *NAMESPACE_KINDS[language]))
+    holders = _kinds(VALUE_KINDS[language])
     return _rule_document(
         _HELD_RULE, language, f"  any: {symbols}\n  not: {{not: {{inside: {{stopBy: end, any: {holders}}}}}}}"
     )

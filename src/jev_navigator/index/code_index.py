@@ -21,6 +21,7 @@ from .bindings import (
     BindingResolver,
     CallFacts,
     binding_from_facts,
+    binding_in_namespace,
     local_binding,
 )
 from .fact_cache import FactCache
@@ -286,11 +287,13 @@ class CodeIndex:
         return self._file_structure(file).symbols
 
     def declarations_in(self, file: str) -> tuple[Span, ...]:
-        """Module-level constants, assignments, types, interfaces and enums."""
+        """Constants, assignments, types, interfaces and enums at module level or directly in a
+        TypeScript namespace."""
         return self._file_structure(file).declarations
 
     def find_definition(self, name: str) -> tuple[Span, ...]:
-        """Functions, classes, and module-level constants, assignments, types, interfaces and enums."""
+        """Functions, classes, and the constants, assignments, types, interfaces and enums of
+        ``declarations_in``."""
         return self._definitions(name)
 
     def find_callers(self, name: str) -> tuple[CallSite, ...]:
@@ -376,16 +379,23 @@ class CodeIndex:
             if injected is not None:
                 return injected
         if not self._binds_locally(file, line, name, receiver, role):
-            through_import = (
-                self._binding_through_import(file, name, role)
-                if receiver is None
-                else self._binding_through_module(file, name, receiver, role)
-            )
-            if through_import is not None:
-                return through_import
+            enclosing = self._binding_beyond_the_function(file, line, name, receiver, role)
+            if enclosing is not None:
+                return enclosing
         elif receiver is None:
             return local_binding(name)
         return binding_from_facts(self._call_facts(file, name, receiver, role))
+
+    def _binding_beyond_the_function(
+        self, file: str, line: int, name: str, receiver: str | None, role: str | None
+    ) -> Binding | None:
+        """A use no function binds for itself names, in this order, a member of a namespace around
+        it, then what its module imports under that name; a method call names the module its
+        receiver holds."""
+        if receiver is not None:
+            return self._binding_through_module(file, name, receiver, role)
+        in_namespace = self._binding_in_namespace(file, line, name, role)
+        return in_namespace if in_namespace is not None else self._binding_through_import(file, name, role)
 
     def _call_facts(self, file: str, name: str, receiver: str | None, role: str | None) -> CallFacts:
         definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
@@ -399,6 +409,25 @@ class CodeIndex:
             (),
             self._files_hiding(name),
         )
+
+    def _binding_in_namespace(self, file: str, line: int, name: str, role: str | None) -> Binding | None:
+        """A use inside a TypeScript namespace names a member of the innermost namespace around it that
+        defines ``name`` before anything outside, imports included; None when no namespace around
+        the line does, or when lines the index could not parse may hide a definition."""
+        members = [
+            member
+            for member in self._file_structure(file).namespace_members
+            if member.first <= line <= member.last
+            and member.span.name == name
+            and self._can_name(role, member.span)
+        ]
+        if not members or file in self._files_hiding(name):
+            return None
+        first, last = max(
+            ((member.first, member.last) for member in members), key=lambda lines: (lines[0], -lines[1])
+        )
+        innermost = [member.span for member in members if (member.first, member.last) == (first, last)]
+        return binding_in_namespace(name, line, (first, last), innermost)
 
     def _binds_locally(self, file: str, line: int, name: str, receiver: str | None, role: str | None) -> bool:
         """Whether a function holding ``line`` binds the name the use looks up first for its own body:
@@ -574,13 +603,15 @@ class CodeIndex:
         return frozenset((*named, *facts.structure.commonjs_exports))
 
     def _module_declarations(self, file: str) -> tuple[Span, ...]:
-        """The declarations no class or function contains. A function starting on a declaration's
-        first line is the value it declares, not its container."""
+        """The declarations no class, function or namespace contains. A function starting on a
+        declaration's first line is the value it declares, not its container."""
         structure = self._file_structure(file)
+        members = {member.span for member in structure.namespace_members}
         return tuple(
             span
             for span in structure.declarations
-            if not any(other.start < span.start <= other.end for other in structure.symbols)
+            if span not in members
+            and not any(other.start < span.start <= other.end for other in structure.symbols)
         )
 
     def _binding_through_module(

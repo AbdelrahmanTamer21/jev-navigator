@@ -117,8 +117,14 @@ _IN_TYPED_MODULE = (
     "inside: {any: [{kind: program}, {kind: export_statement, inside: {kind: program}}, "
     f"{{kind: ambient_declaration, {_IN_MODULE}}}]}}"
 )
-_TYPED_MODULE_LEVEL = f"not: {{not: {{{_IN_TYPED_MODULE}}}}}"
 _MODULE_VARIABLES = f"{{kind: lexical_declaration, not: {{not: {{{_IN_MODULE}}}}}}}"
+
+# A TypeScript namespace or module body is a scope of its own: a declaration directly in it, or in an
+# export it holds, is a member of that namespace, never of the module.
+_NAMESPACE_BODY = "{kind: statement_block, inside: {any: [{kind: internal_module}, {kind: module}]}}"
+_IN_NAMESPACE = f"inside: {{any: [{_NAMESPACE_BODY}, {{kind: export_statement, inside: {_NAMESPACE_BODY}}}]}}"
+_TYPED_SCOPE_LEVEL = f"not: {{not: {{any: [{{{_IN_TYPED_MODULE}}}, {{{_IN_NAMESPACE}}}]}}}}"
+_TYPED_SCOPE_VARIABLES = f"{{kind: lexical_declaration, {_TYPED_SCOPE_LEVEL}}}"
 
 # A function or class assigned to a property, `foo.bar = function () {}`, gives its module no name.
 # Assigned to `exports.x` or `module.exports.x`, or listed in `module.exports = {...}`, it is one of
@@ -141,16 +147,21 @@ COMMONJS_EXPORT_PAIR = f"{{kind: pair, inside: {COMMONJS_EXPORTS_OBJECT}}}"
 # parser's output grew with matches times file size. Every such relation sits under a double
 # negation, `not: {not: ...}`: it holds the same and prints only the match.
 #
-# Module-level declarations by what may name them, each a rule per grammar that has such
-# declarations: a type alias or interface only a type, a constant or variable only a value, and an
-# enum or a Python assignment (which may be a type alias) both.
+# Module-level and namespace-level declarations by what may name them, each a rule per grammar that
+# has such declarations: a type alias or interface only a type, a constant or variable only a value,
+# and an enum or a Python assignment (which may be a type alias) both.
 _SCRIPT_TYPES = (
-    f"  any: [{{kind: type_alias_declaration}}, {{kind: interface_declaration}}]\n  {_TYPED_MODULE_LEVEL}"
+    f"  any: [{{kind: type_alias_declaration}}, {{kind: interface_declaration}}]\n  {_TYPED_SCOPE_LEVEL}"
 )
 _SCRIPT_VALUES = f"  any: [{_MODULE_VARIABLES}]"
-_SCRIPT_ENUMS = f"  kind: enum_declaration\n  {_TYPED_MODULE_LEVEL}"
+_TYPED_SCRIPT_VALUES = f"  any: [{_TYPED_SCOPE_VARIABLES}]"
+_SCRIPT_ENUMS = f"  kind: enum_declaration\n  {_TYPED_SCOPE_LEVEL}"
 TYPE_DECLARATIONS = {"typescript": _SCRIPT_TYPES, "tsx": _SCRIPT_TYPES}
-VALUE_DECLARATIONS = {"typescript": _SCRIPT_VALUES, "tsx": _SCRIPT_VALUES, "javascript": _SCRIPT_VALUES}
+VALUE_DECLARATIONS = {
+    "typescript": _TYPED_SCRIPT_VALUES,
+    "tsx": _TYPED_SCRIPT_VALUES,
+    "javascript": _SCRIPT_VALUES,
+}
 TYPE_AND_VALUE_DECLARATIONS = {
     "python": (
         "  kind: assignment\n  not: {not: {inside: {kind: expression_statement, inside: {kind: module}}}}"
@@ -197,7 +208,7 @@ _TYPED_SCRIPT_DECLARED_NAMES = f"""  any: [{_SCRIPT_NAME_KINDS}, {{kind: type_id
             field: name
             any:
               - kind: variable_declarator
-                inside: {_MODULE_VARIABLES}
+                inside: {_TYPED_SCOPE_VARIABLES}
               - kind: type_alias_declaration
               - kind: interface_declaration
               - kind: enum_declaration
@@ -322,7 +333,7 @@ CLASS_KINDS[FLOW_LANGUAGE] = CLASS_KINDS["tsx"]
 VALUE_KINDS[FLOW_LANGUAGE] = VALUE_KINDS["tsx"]
 NAMESPACE_KINDS[FLOW_LANGUAGE] = NAMESPACE_KINDS["tsx"]
 TYPE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_TYPES
-VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_VALUES
+VALUE_DECLARATIONS[FLOW_LANGUAGE] = _TYPED_SCRIPT_VALUES
 TYPE_AND_VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_ENUMS
 DECLARED_NAME_RULES[FLOW_LANGUAGE] = _TYPED_SCRIPT_DECLARED_NAMES
 MODULE_ALIAS_RULES[FLOW_LANGUAGE] = _SCRIPT_MODULE_ALIASES

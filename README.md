@@ -307,7 +307,11 @@ Calls are found by name in the syntax tree, which is not a resolved binding. Eve
 `Binding(status, reason, target)`: `resolved` when a module-level definition in the same file, or one
 an import names, proves the target, `candidate` when only the name matches (a method on an unknown receiver, or a
 definition elsewhere with no import), `unresolved` when nothing in scope defines it, and `unknown` when
-the definition may sit in lines the index could not parse. A call `jwt.verify()` where module-level
+the definition may sit in lines the index could not parse. Inside a TypeScript namespace a use first
+names a member of the innermost namespace around it that defines the name, exported or not, so
+`config` in `namespace B` is B's own and never namespace A's, nor an import's; outside it, a member is
+no module-level definition. Lines are the unit, so a use on the namespace's first or last line stays a
+candidate, and one namespace split over two blocks is not merged. A call `jwt.verify()` where module-level
 code binds `jwt` to a whole module of the scope (`import * as jwt`, `const jwt = require('./jwt')`,
 read from the syntax tree) binds to the `verify` that module, or one it re-exports from, defines; only
 that module's facts are read. A name a function binds for its own body (a parameter, a local
