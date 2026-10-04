@@ -25,12 +25,14 @@ NEUTRAL_AST_GREP_CONFIG = "ruleDirs: []\n"
 analysed repository's own sgconfig.yml, which is customer content: its ``languageGlobs`` would change
 what a file is parsed as, and its ``customLanguages`` makes ast-grep load a library the repository
 names. Confirmed with ast-grep 0.45.1 that ``--config`` replaces discovery and is not merged with it."""
+NOT_UTF8_REASON = "not parsed: not valid UTF-8"
 NOT_PARSED_REASON = "not parsed: ast-grep skipped the file and printed nothing for it"
 """ast-grep 0.45.1 skips a file it was handed on its command line, exits 0 and prints nothing, when the
 file has more than 3,000,000 bytes and more than 200,000 lines (found by bisection on synthetic files:
 both limits must be exceeded; ``--stdin`` is not affected). Even a rule on ``kind: program`` matches
 nothing then, so a skipped file reads exactly like a file without functions. Only ``--inspect=entity``
-tells them apart: it prints one ``entity|file|PATH`` line for every file ast-grep actually scanned."""
+tells them apart: it prints one ``entity|file|PATH`` line for every file ast-grep actually scanned. A
+file that is not valid UTF-8 is skipped the same way (``NOT_UTF8_REASON``)."""
 MAX_FILES_PER_COMMAND = 300
 MAX_ARGUMENT_BYTES = 128 * 1024
 
@@ -128,7 +130,19 @@ def _skipped_files(chunk: Sequence[str], inspection: str, cwd: Path) -> dict[str
         for line in inspection.splitlines()
         if line.startswith("sg: entity|file|")
     }
-    return {file: NOT_PARSED_REASON for file in chunk if file not in scanned and (cwd / file).stat().st_size}
+    return {
+        file: _not_parsed_reason(cwd / file)
+        for file in chunk
+        if file not in scanned and (cwd / file).stat().st_size
+    }
+
+
+def _not_parsed_reason(path: Path) -> str:
+    try:
+        path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        return NOT_UTF8_REASON
+    return NOT_PARSED_REASON
 
 
 def _json_lines(

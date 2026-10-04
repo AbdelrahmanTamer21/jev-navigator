@@ -310,8 +310,9 @@ inventory was built is reported separately as unavailable. So is a file too larg
 `tools.ast_grep_rules`, the one door every parse passes through, never hands ast-grep a file whose
 estimated parse peak (from the punctuation on each line, `index/file_shape.py`) is over 250 MB, and
 `unavailable_files` gives the estimated peak and the longest line. A file that ast-grep itself skips
-without parsing (it prints nothing for a file of more than 3,000,000 bytes and more than 200,000
-lines) is unavailable too, as `not parsed`, and is never taken for a file without functions.
+without parsing (it prints nothing for a file that is not valid UTF-8, or has more than 3,000,000
+bytes and more than 200,000 lines) is unavailable too, as `not parsed`, and is never taken for a file
+without functions.
 The file keeps its path in import relations, a name that may be defined in it binds `unknown`, and
 `find_comments` lists it in `refused_files`. Any ast-grep or ripgrep failure other
 than that verified disappearance still fails the lookup that triggered it.

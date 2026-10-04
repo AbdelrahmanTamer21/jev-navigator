@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from git_repos import commit_files
+from git_repos import commit_all, commit_files, write_files
 
 from jev_navigator.comments import find_comments
 from jev_navigator.index import tools
@@ -195,6 +195,21 @@ def test_a_file_ast_grep_skipped_is_reported_unavailable_and_never_cached_as_emp
     cache = FactCache(tmp_path / "facts")
     assert cache.load(SKIPPED_BY_AST_GREP, (repository / SKIPPED_BY_AST_GREP).read_bytes()) is None
     assert cache.load("src/comment_only.ts", (repository / "src/comment_only.ts").read_bytes()) is not None
+
+
+def test_a_source_file_that_is_not_valid_utf8_is_named_as_such_not_taken_for_empty(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    write_files(repository, {"src/small.ts": "export function small() { return 1; }\n"})
+    (repository / "src/latin.ts").write_bytes("export function caf\u00e9() { return 1 }\n".encode("latin-1"))
+    commit_all(repository)
+    refused: dict[str, str] = {}
+
+    matches = list(
+        tools.ast_grep_rules(FUNCTION_RULE, ["src/latin.ts", "src/small.ts"], repository, refused=refused)
+    )
+
+    assert [match["file"] for match in matches] == ["src/small.ts"]
+    assert refused == {"src/latin.ts": "not parsed: not valid UTF-8"}
 
 
 SCAN_IN_A_FRESH_PROCESS = """
