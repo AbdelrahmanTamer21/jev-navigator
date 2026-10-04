@@ -1,10 +1,12 @@
 """What a file's bytes say about the cost of parsing it, measured without parsing it.
 
-ast-grep's memory follows the length of each line of code, roughly with its square: a 120 KB bundle on
-one line peaked at 681 MB, the same bundle cut into lines of about 1,000 characters at 35 MB. Size
-alone does not drive it (703 KB of short lines peaked at 28 MB). The estimate below fits every real
-file measured on 03.10.2026 within about 10%; a line of data such as one image string holds few syntax
-nodes and the estimate over-counts it, which errs on the safe side.
+ast-grep's memory follows the number of syntax nodes on a line, and a node is roughly one punctuation
+character (``{ } ( ) ; , [ ]``): a 120 KB bundle on one line peaked at 681 MB, the same bundle cut into
+lines of about 1,000 characters at 35 MB, and one 2.5 MB image string, which is a single node, at 58 MB.
+So the estimate sums, over lines, the square of each line's punctuation count. It fits every real file
+measured on 03.10.2026 and 04.10.2026 (the table is in the ``census/parse-peak`` folder of the
+evaluation, ``fit-table-punctuation-5.5.md``): the 13 files that really peak above 250 MB stay refused,
+and a long string of data is parsed.
 """
 
 from __future__ import annotations
@@ -14,17 +16,21 @@ from enum import StrEnum
 from pathlib import Path
 
 BASE_PEAK_MB = 25.0
-PEAK_MB_PER_SQUARED_THOUSAND_CHARACTERS = 0.05
+PEAK_MB_PER_SQUARED_THOUSAND_PUNCTUATION = 5.5
+"""The fitted constant is 5.0 (the real peaks of eight bundles give 3.5 to 5.0 after the base, and it
+under-counts by at most 1%); 5.5 is the margin."""
+PUNCTUATION = frozenset(b"{}();,[]")
+_NOT_PUNCTUATION = bytes(set(range(256)) - PUNCTUATION)
 MAX_PARSE_PEAK_MB = 250.0
-"""A file whose estimated parse peak exceeds this is never parsed. For a one-line file that is a line
-of about 70,000 characters. The largest parse measured under it peaked at 122 MB, and ast-grep scans
-files in parallel, so several can be in memory at once."""
+"""A file whose estimated parse peak exceeds this is never parsed. The largest parse measured under it
+peaked at 122 MB, and ast-grep scans files in parallel, so several can be in memory at once."""
 
 PARSEABLE_UP_TO_BYTES = int(
-    1000 * ((MAX_PARSE_PEAK_MB - BASE_PEAK_MB) / PEAK_MB_PER_SQUARED_THOUSAND_CHARACTERS) ** 0.5
+    1000 * ((MAX_PARSE_PEAK_MB - BASE_PEAK_MB) / PEAK_MB_PER_SQUARED_THOUSAND_PUNCTUATION) ** 0.5
 )
-"""A file this small can never be over the bound, whatever its lines: the sum of the squared line
-lengths is at most the square of the file's size. The size alone clears it, without a read."""
+"""A file this small can never be over the bound, whatever its lines: punctuation cannot exceed bytes,
+and the sum of the squared line counts is at most the square of the file's size. The size alone clears
+it, without a read."""
 
 
 LONG_LINE_CHARS = 10_000
@@ -51,7 +57,7 @@ class FileShape:
     size_bytes: int
     line_count: int
     longest_line: int
-    squared_thousands: float
+    squared_thousands_of_punctuation: float
 
     @property
     def chars_per_line(self) -> float:
@@ -59,7 +65,7 @@ class FileShape:
 
     @property
     def parse_peak_mb(self) -> float:
-        return BASE_PEAK_MB + PEAK_MB_PER_SQUARED_THOUSAND_CHARACTERS * self.squared_thousands
+        return BASE_PEAK_MB + PEAK_MB_PER_SQUARED_THOUSAND_PUNCTUATION * self.squared_thousands_of_punctuation
 
     @property
     def triggers(self) -> tuple[Trigger, ...]:
@@ -103,13 +109,16 @@ def refusal_of(root: Path, path: str) -> str | None:
 def measure(content: bytes) -> FileShape:
     """Line lengths are counted in bytes, which over-counts multibyte text and so errs on the safe side."""
     lines = content.split(b"\n")
-    lengths = [len(line) for line in lines]
     return FileShape(
         size_bytes=len(content),
         line_count=len(lines) - 1 if lines[-1] == b"" else len(lines),
-        longest_line=max(lengths),
-        squared_thousands=sum((length / 1000) ** 2 for length in lengths),
+        longest_line=max(len(line) for line in lines),
+        squared_thousands_of_punctuation=sum(_punctuation_in(line) ** 2 for line in lines) / 1_000_000,
     )
+
+
+def _punctuation_in(line: bytes) -> int:
+    return len(line.translate(None, _NOT_PUNCTUATION))
 
 
 def _peak_text(megabytes: float) -> str:

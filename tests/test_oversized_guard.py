@@ -61,9 +61,9 @@ def test_a_file_over_the_memory_bound_is_never_parsed_and_is_reported(
     index.functions_in_files(index.files)
 
     assert not ast_grep.received(BUNDLE)
-    assert index.unavailable_files[BUNDLE] == (
-        "too large to parse: estimated parse peak 22 GB, longest line 668,777 characters"
-    )
+    reason = index.unavailable_files[BUNDLE]
+    assert reason.startswith("too large to parse: estimated parse peak ")
+    assert reason.endswith(" GB, longest line 668,777 characters")
     assert index.parser_scans_pending == ()
 
 
@@ -114,7 +114,7 @@ def test_comment_scanning_never_parses_a_guarded_file(
     found = find_comments(index)
 
     assert not ast_grep.received(BUNDLE)
-    assert found.refused_files[BUNDLE].startswith("too large to parse: estimated parse peak 22 GB")
+    assert found.refused_files[BUNDLE].startswith("too large to parse: estimated parse peak ")
 
 
 def test_the_door_yields_the_matches_of_the_files_it_parsed_and_names_the_ones_it_refused(
@@ -248,3 +248,17 @@ def test_a_config_passed_by_the_caller_replaces_the_repositorys_config_and_is_no
     )
 
     assert [match["file"] for match in matches] == ["a.ts"]
+
+
+def test_a_component_holding_one_huge_image_string_is_parsed_not_refused(tmp_path: Path) -> None:
+    image = "A" * 2_500_000
+    commit_files(
+        tmp_path / "repo",
+        {"background.tsx": f"export function Background() {{\n  return <img src='{image}' />;\n}}\n"},
+    )
+    index = CodeIndex.from_git(tmp_path / "repo", fact_cache_dir=tmp_path / "facts")
+
+    functions = index.functions_in("background.tsx")
+
+    assert [span.name for span in functions] == ["Background"]
+    assert index.unavailable_files == {}
