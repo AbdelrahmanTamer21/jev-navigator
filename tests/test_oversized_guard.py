@@ -545,3 +545,15 @@ def test_a_file_parsed_alone_peaks_inside_the_single_file_limit(tmp_path: Path) 
     peak_megabytes = report["peak_bytes"] / (1 if sys.platform == "darwin" else 1024) / 1_000_000
     assert report["refused"] == {} and report["functions"] > 0
     assert peak_megabytes < SINGLE_PARSE_LIMIT_MB
+
+
+def test_without_a_single_file_limit_a_file_over_the_side_by_side_share_is_refused(tmp_path: Path) -> None:
+    # Arrange: no memory settings name a single-file limit, so nothing may be parsed alone
+    commit_files(tmp_path / "repo", {"src/big.py": _real_code_file(4_700_000)})
+    index = CodeIndex.from_git(tmp_path / "repo", fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    index.functions_in_files(index.files)
+
+    # Assert
+    assert ", over the 250 MB one file may take," in index.refused_files["src/big.py"]
