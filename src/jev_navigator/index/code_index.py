@@ -246,7 +246,7 @@ class CodeIndex:
 
     @property
     def unavailable_files(self) -> dict[str, str]:
-        """Inventory entries that disappeared after this working-directory index was created."""
+        """Inventory entries that disappeared, or changed after the index first read them, with why."""
         return dict(self._unavailable)
 
     @property

@@ -184,7 +184,7 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   code) and the exact provider responses, as the run progresses.
 - `answers.jsonl`: reusable typed answers keyed by source and request hashes. Every answer is also
   written to the machine's shared answer store (`$XDG_CACHE_HOME/jev-navigator/answers.sqlite`,
-  `~/.cache` when the variable is unset, or `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
+  `~/.cache` when the variable is unset or relative, or `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
   same questions replays from it after the live requests that learn the served model (one for Find
   All and Trace, one per place a Find's first round opens, up to `--beam-width`; Find All and
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
@@ -278,14 +278,15 @@ The index extracts symbols, declarations, calls and non-call references together
 pass over the files a lookup actually needs. The pass runs a few hundred files per ast-grep process
 and turns each match into its fact as ast-grep prints it, so memory holds the facts, never the
 parser's output, and no command line outgrows the system's argument limit. Facts that start on the
-same line are ordered by their position in the line, so every run returns them in the same order.
+same line are ordered by their position in the line, so every run returns them in the same order;
+symbols spanning the same lines are ordered by name.
 Exact-name lookups first use ripgrep to narrow the candidate files, and `prefetch_names` narrows
 several names with one ripgrep; opening a known span parses its file directly. The resulting
 per-file facts are cached by source bytes, language, ast-grep version, the rule text and the source
 of the code that reads the matches, in `$XDG_CACHE_HOME/jev-navigator/facts` (`~/.cache` when the
-variable is unset), so a new index can reuse facts without treating changed source or changed
+variable is unset or relative), so a new index can reuse facts without treating changed source or changed
 parser rules as current. A file that changes on disk after the index first read it is
-reported as unavailable rather than read in its new form. Each call
+reported as unavailable when the index reads it again, rather than read in its new form. Each call
 site's binding is computed once, and `search_text` and `co_changed_files` each run their tool once
 per argument for the life of the index. The index keeps the lines of a bounded number of recently
 read files (`LINE_CACHE_FILES`). There is no default file-count refusal or parser timeout, and no requested file is silently
@@ -307,7 +308,8 @@ lines mention can be hidden there: a call to such a name has status `unknown`, w
 reason, unless a definition in another file, not imported from one of them, settles it. A completed
 search reports `scope_incomplete` instead of `nothing_left`; a budget-limited result reports which
 fact scans completed and which remain pending. A file that disappears after the working-directory
-inventory was built is reported separately as unavailable. Any ast-grep or ripgrep failure other
+inventory was built, or changes after the index first read it, is reported separately as
+unavailable. Any ast-grep or ripgrep failure other
 than that verified disappearance still fails the lookup that triggered it.
 
 Calls are found by name in the syntax tree, which is not a resolved binding. Every call carries a
