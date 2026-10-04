@@ -26,12 +26,18 @@ def run_cache_command(action: str) -> int:
     return 0
 
 
-def tidy_after_run() -> None:
-    """Housekeeping as a run ends. A failure is a notice on stderr, never the run's failure."""
+def tidy_after_run() -> bool:
+    """Housekeeping as a run ends, after its result is saved; whether Ctrl-C interrupted it. A failure
+    is a notice on stderr, never the run's failure. An interrupt ends the cleanup with one notice;
+    what the sweep had not finished goes on in a later run."""
     try:
         housekeeping.tidy()
+    except KeyboardInterrupt:
+        print("jvn: housekeeping interrupted; the run's result is saved", file=sys.stderr)
+        return True
     except Exception as error:  # noqa: BLE001 - a failed prune must never fail the run it follows
         print(f"jvn: housekeeping skipped: {error}", file=sys.stderr)
+    return False
 
 
 def _status_lines(status: Status) -> list[str]:

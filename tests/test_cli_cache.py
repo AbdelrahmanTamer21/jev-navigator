@@ -4,6 +4,7 @@ without a housekeeping failure ever failing the run."""
 from __future__ import annotations
 
 import os
+import signal
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 import pytest
 from git_repos import commit_files
 
+from jev_navigator import housekeeping
 from jev_navigator.cli import main
 from jev_navigator.data_root import default_run_folder, runs_root
 from jev_navigator.index.fact_cache import user_fact_cache
@@ -103,3 +105,30 @@ def test_a_housekeeping_failure_never_fails_the_run(
     assert exit_code == 0
     assert "statistics pack:" in captured.out
     assert "jvn: housekeeping skipped:" in captured.err and ".trash" in captured.err
+
+
+@pytest.mark.usefixtures("python_sigint_handler")
+def test_ctrl_c_during_the_cleanup_ends_it_with_one_notice_after_the_result_is_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Arrange: the terminal sends Ctrl-C as the end-of-run sweep starts
+    commit_files(tmp_path / "repo", {"app.py": "def f():\n    return 1\n"})
+    monkeypatch.chdir(tmp_path / "repo")
+    real_sweep = housekeeping._sweep
+
+    def sweep_interrupted(allowance):
+        os.kill(os.getpid(), signal.SIGINT)
+        return real_sweep(allowance)
+
+    monkeypatch.setattr(housekeeping, "_sweep", sweep_interrupted)
+
+    # Act
+    exit_code = main(["stats"])
+
+    # Assert
+    captured = capsys.readouterr()
+    [pack] = runs_root().iterdir()
+    assert exit_code == 130
+    assert "statistics pack:" in captured.out and (pack / "statistics.json").is_file()
+    assert captured.err.count("jvn: housekeeping interrupted") == 1
+    assert "Traceback" not in captured.err

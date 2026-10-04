@@ -331,4 +331,6 @@ rules as it ends, at most once a day and deleting at most 2,000 files per run:
 
 A store named with `--answer-store` or `JEV_NAVIGATOR_ANSWER_STORE` and a folder named with `--out`
 are never touched. A cleanup that fails prints `jvn: housekeeping skipped: <reason>` on stderr and
-leaves the run's exit status as it was.
+leaves the run's exit status as it was. Ctrl-C during the cleanup, which starts only after the result
+is saved, ends it with `jvn: housekeeping interrupted; the run's result is saved` and exit status
+130; a later run finishes the cleanup.

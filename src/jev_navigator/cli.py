@@ -68,8 +68,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "cache":
         return run_cache_command(args.action)
     status = _run_statistics(args) if args.command == "stats" else _run_search(args)
-    tidy_after_run()
-    return status
+    return 130 if tidy_after_run() else status
 
 
 def _run_search(args: argparse.Namespace) -> int:
