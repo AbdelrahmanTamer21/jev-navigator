@@ -528,6 +528,8 @@ def test_answered_run_with_usage_marks_its_token_total_complete(tmp_path: Path) 
 
     assert provider["unanswered_requests"] == 0
     assert provider["input_tokens_complete"] is True
+    report = (output / "report.md").read_text()
+    assert f"- Input tokens: {provider['input_tokens']}\n" in report
 
 
 @pytest.fixture

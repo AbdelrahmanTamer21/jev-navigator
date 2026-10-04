@@ -33,6 +33,7 @@ from .judgments.store import JsonlAnswerStore
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
+from .usage_receipt import usage_receipt, usage_report_lines
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
@@ -894,7 +895,7 @@ def _manifest(
             "requested_model": requested_model,
             "served_model": served_model,
             "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_total.reported,
-            **_usage_receipt(previous, input_total, unanswered_requests),
+            **usage_receipt(previous, input_total, unanswered_requests),
         },
         "search": {
             "outcome": result.outcome,
@@ -1004,38 +1005,6 @@ def _find_all_report(manifest: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _usage_receipt(previous: dict | None, input_total: TokenTotal, unanswered_requests: int) -> dict:
-    """What the provider block says about how far ``input_tokens`` can be trusted: the responses that
-    reported no usage, the requests that got no response, and whether the total is complete. A count
-    an earlier receipt predates stays unknown."""
-    without_usage = _plus_known(_carried_count(previous, "responses_without_usage"), input_total.not_reported)
-    unanswered = _plus_known(_carried_count(previous, "unanswered_requests"), unanswered_requests)
-    return {
-        "responses_without_usage": without_usage,
-        "unanswered_requests": unanswered,
-        "input_tokens_complete": without_usage == 0 and unanswered == 0,
-    }
-
-
-def _carried_count(previous: dict | None, name: str) -> int | None:
-    """A count of an earlier receipt, ``None`` when it predates the field."""
-    return 0 if previous is None else previous["provider"].get(name)
-
-
-def _input_tokens_text(provider: dict) -> str:
-    if provider["input_tokens_complete"]:
-        return str(provider["input_tokens"])
-    return f"at least {provider['input_tokens']} (not complete)"
-
-
-def _unreported_text(count: int | None) -> str:
-    return "not known (earlier receipt)" if count is None else str(count)
-
-
-def _plus_known(carried: int | None, added: int) -> int | None:
-    return None if carried is None else carried + added
-
-
 def _navigator_provenance() -> dict:
     package_root = Path(__file__).resolve().parent
     source_files = sorted(package_root.rglob("*.py"))
@@ -1123,9 +1092,7 @@ def _report(manifest: dict) -> str:
         *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{provider['requested_model']}`, served `{provider['served_model']}`",
-        f"- Responses without usage: {_unreported_text(provider['responses_without_usage'])}",
-        f"- Requests without a response: {_unreported_text(provider['unanswered_requests'])}",
-        f"- Input tokens: {_input_tokens_text(provider)}",
+        *usage_report_lines(provider),
         f"- Navigation elapsed: {search['duration_seconds']:.3f} seconds "
         "(indexing and entry selection excluded)",
         f"- Coverage caveat: {len(search['not_inspected'])} candidates were not independently opened; "
