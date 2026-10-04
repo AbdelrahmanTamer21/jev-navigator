@@ -91,13 +91,16 @@ def _split_by_parse_peak(files: Sequence[str], cwd: Path) -> tuple[list[str], di
     return parseable, refused
 
 
-def file_chunks(files: Sequence[str]) -> Iterator[Sequence[str]]:
-    """``files`` in order, split so no command gets more than ``MAX_FILES_PER_COMMAND`` paths or
-    ``MAX_ARGUMENT_BYTES`` of them, whatever the size of the scope."""
+def file_chunks(files: Sequence[str], *, bytes_only: bool = False) -> Iterator[Sequence[str]]:
+    """``files`` in order, split so no command gets more than ``MAX_ARGUMENT_BYTES`` of paths, and,
+    unless ``bytes_only``, no more than ``MAX_FILES_PER_COMMAND`` of them, which bounds what one
+    parser process holds. A text search holds no file, so only the argument limit applies to it."""
+    most_files = None if bytes_only else MAX_FILES_PER_COMMAND
     start, size = 0, 0
     for position, file in enumerate(files):
         length = len(file.encode()) + 1
-        full = position - start >= MAX_FILES_PER_COMMAND or size + length > MAX_ARGUMENT_BYTES
+        too_many = most_files is not None and position - start >= most_files
+        full = too_many or size + length > MAX_ARGUMENT_BYTES
         if position > start and full:
             yield files[start:position]
             start, size = position, 0
@@ -132,7 +135,7 @@ def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> 
     hold a Unicode line separator that ``str.splitlines`` would split."""
     command = [RIPGREP, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
     hits = []
-    for chunk in file_chunks(files):
+    for chunk in file_chunks(files, bytes_only=True):
         output = run_command([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
         events = (json.loads(line) for line in output.split("\n") if line.strip())
         hits += [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
