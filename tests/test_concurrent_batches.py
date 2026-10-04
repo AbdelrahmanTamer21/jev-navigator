@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
 from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS, InputBudgetExceededError
-from jev_navigator.judgments.journal import RawResponse
+from jev_navigator.judgments.journal import JsonlJournal, RawResponse
 from jev_navigator.judgments.judge import CallCapReachedError, Judge
 from jev_navigator.judgments.questions import Check, Criterion
+from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
 DESCRIBES = Check(
@@ -448,10 +451,19 @@ class OneFailingAsyncClient:
         return self.script.parse(raw)
 
 
-def test_an_async_batch_failure_is_raised_only_after_the_rest_of_its_wave_settles() -> None:
+def test_an_async_batch_failure_is_raised_only_after_the_rest_of_its_wave_settles(tmp_path: Path) -> None:
     # Arrange
     client = OneFailingAsyncClient()
-    judge = Judge(client, max_concurrency=3, items_per_request=1)
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+    journal = JsonlJournal(tmp_path / "journal.jsonl")
+    judge = Judge(
+        client,
+        store=store,
+        journal=journal,
+        served_model=client.model,
+        max_concurrency=3,
+        items_per_request=1,
+    )
     finished_when_raised: list[str] = []
 
     async def judged_then_given_time() -> None:
@@ -468,8 +480,21 @@ def test_an_async_batch_failure_is_raised_only_after_the_rest_of_its_wave_settle
     with pytest.raises(ConnectionError, match="the provider is down"):
         asyncio.run(judged_then_given_time())
 
-    # Assert: no request of the failed call was still running when the failure came out
+    # Assert: no request of the failed call was still running when the failure came out, and every
+    # answer that came back after the failure is journaled, stored for a resume and counted
     assert sorted(finished_when_raised) == sorted(client.finished) == ["f1.py", "f2.py"]
+    assert _answers_kept(journal, store, client.model) == (2, 2, 1)
+    assert judge.input_total.reported == 2 * 100
+
+
+def _answers_kept(journal: JsonlJournal, store: JsonlAnswerStore, model: str) -> tuple[int, int, int]:
+    """How many requests the journal shows answered, how many of those the store replays, and how
+    many failed."""
+    rows = [json.loads(line) for line in journal.path.read_text().splitlines()]
+    hashes = {row["request_id"]: row["request_sha256"] for row in rows if row["kind"] == "request"}
+    answered = [hashes[row["request_id"]] for row in rows if row["kind"] == "response"]
+    stored = [digest for digest in answered if store.by_request(digest, model) is not None]
+    return len(answered), len(stored), sum(row["kind"] == "failure" for row in rows)
 
 
 def test_an_async_batch_failure_stops_the_batches_still_waiting_for_a_slot() -> None:

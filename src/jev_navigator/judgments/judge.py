@@ -11,7 +11,6 @@ import asyncio
 import base64
 import copy
 import inspect
-import logging
 import threading
 from collections.abc import AsyncIterator, Callable, Generator, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
@@ -51,8 +50,6 @@ from .secrets import (
 )
 from .store import AnswerRecord, AnswerStore
 from .thresholds import NoulVerdict, Thresholds
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_ITEMS_PER_REQUEST = 16
 """How many items one batched request carries at most (André, 03.10.2026: measured on the code-index
