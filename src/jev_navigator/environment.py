@@ -21,6 +21,7 @@ Two rules keep an untrusted repository from configuring the tool through a `.env
 from __future__ import annotations
 
 import os
+import sys
 import tomllib
 from collections.abc import MutableMapping
 from pathlib import Path
@@ -51,28 +52,50 @@ def load_typesafe_environment(
     root: Path | None = None,
     legacy: Path | None = None,
 ) -> dict[str, str]:
-    """Fill `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL` from the tool's
+    """Fill jvn's settings (`TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*`) from the tool's
     checkout `.env`, then the legacy `~/.config/jvn/env`; return what the files contributed.
 
     Real environment variables win over both files, and a file may set only the tool's own
-    settings (`SETTING_PREFIXES`). Raises when no source provides an API key. ``root`` overrides
-    the checkout the `.env` is read from; passing it opts into reading that directory's `.env`.
+    settings (`SETTING_PREFIXES`). Every other name in a file is named on stderr, never its value,
+    and so is a `.env` in the working directory when there is no checkout to read one from. Raises
+    when no source provides an API key. ``root`` overrides the checkout the `.env` is read from;
+    passing it opts into reading that directory's `.env`.
     """
     environment = os.environ if environment is None else environment
     root = checkout_root() if root is None else root
     legacy = legacy or LEGACY_CONFIG
+    if root is None:
+        _note_an_unread_working_directory_env(legacy)
     contributed: dict[str, str] = {}
     sources = ([root / ".env"] if root is not None else []) + [legacy]
     for source in sources:
-        for name, value in _env_file(source).items():
-            if not _is_setting(name):
-                continue
+        for name, value in _settings_in(source).items():
             if not environment.get(name, "").strip() and value:
                 environment[name] = value
                 contributed[name] = value
     if not environment.get("TYPESAFE_API_KEY", "").strip():
         raise RuntimeError(_missing_key_message(root, legacy))
     return contributed
+
+
+def _settings_in(source: Path) -> dict[str, str]:
+    """The file's names under `SETTING_PREFIXES`; the others are named on stderr and left out."""
+    values = _env_file(source)
+    ignored = [name for name in values if not _is_setting(name)]
+    if ignored:
+        prefixes = ", ".join(f"{prefix}*" for prefix in SETTING_PREFIXES)
+        _notice(f"ignored {', '.join(ignored)} in {source}: a settings file may set only {prefixes} names")
+    return {name: value for name, value in values.items() if _is_setting(name)}
+
+
+def _note_an_unread_working_directory_env(legacy: Path) -> None:
+    unread = Path.cwd() / ".env"
+    if unread.is_file():
+        _notice(f"not read: {unread}, because jvn reads only its own checkout's .env and {legacy}")
+
+
+def _notice(message: str) -> None:
+    print(f"jvn: {message}", file=sys.stderr)
 
 
 def _is_setting(name: str) -> bool:
@@ -97,7 +120,8 @@ def _names_this_project(pyproject: Path) -> bool:
 
 
 def _env_file(path: Path) -> dict[str, str]:
-    """`KEY=value` lines; `#` comments, `export ` prefixes and quotes handled; nothing overrides."""
+    """`KEY=value` lines; `#` comments, `export ` prefixes and quotes handled, a line without a
+    name or `=` skipped; nothing overrides."""
     if not path.is_file():
         return {}
     values: dict[str, str] = {}
@@ -106,7 +130,8 @@ def _env_file(path: Path) -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         name, _, value = line.removeprefix("export ").partition("=")
-        values[name.strip()] = value.strip().strip("'\"")
+        if name := name.strip():
+            values[name] = value.strip().strip("'\"")
     return values
 
 

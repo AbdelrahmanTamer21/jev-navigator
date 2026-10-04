@@ -134,6 +134,52 @@ def test_a_file_may_set_only_the_tools_own_settings(tmp_path):
         assert name not in os.environ
 
 
+def test_each_file_names_the_names_it_could_not_set_but_never_their_values(tmp_path, capsys):
+    checkout_env = tmp_path / ".env"
+    checkout_env.write_text("TYPESAFE_API_KEY=real-key\nLD_PRELOAD=/tmp/evil.so\nEVIL_MARKER=owned\n")
+    legacy = _written(tmp_path, {"TYPESAFE_BASE_URL": "https://drex.nace.ai", "PATH": "/tmp/evil-bin"})
+
+    load_typesafe_environment({}, root=tmp_path, legacy=legacy)
+
+    notices = capsys.readouterr().err.splitlines()
+    assert len(notices) == 2
+    checkout_notice, legacy_notice = notices
+    assert str(checkout_env) in checkout_notice
+    assert "LD_PRELOAD, EVIL_MARKER" in checkout_notice
+    assert str(legacy) in legacy_notice
+    assert "PATH" in legacy_notice
+    for value in ("/tmp/evil.so", "owned", "/tmp/evil-bin", "real-key", "drex.nace.ai"):
+        assert value not in "\n".join(notices)
+
+
+def test_files_holding_only_settings_print_nothing(tmp_path, capsys):
+    (tmp_path / ".env").write_text("TYPESAFE_API_KEY=k\n# a comment\n\n")
+
+    load_typesafe_environment({}, root=tmp_path, legacy=_written(tmp_path, {"SYSTEM_ONE_ROUTES": "jev"}))
+
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("has_checkout", [True, False], ids=["run-from-a-checkout", "installed"])
+def test_a_working_directory_env_is_named_when_jvn_has_no_checkout_to_read(
+    tmp_path, monkeypatch, capsys, has_checkout: bool
+):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    searched = tmp_path / "searched"
+    searched.mkdir()
+    (searched / ".env").write_text("TYPESAFE_API_KEY=their-key\n")
+    legacy = _written(tmp_path, {"TYPESAFE_API_KEY": "legacy-key"})
+    monkeypatch.setattr(environment, "checkout_root", lambda: checkout if has_checkout else None)
+    monkeypatch.chdir(searched)
+
+    load_typesafe_environment({}, legacy=legacy)
+
+    notice = capsys.readouterr().err
+    assert (f"not read: {searched / '.env'}" in notice) is not has_checkout
+    assert (str(legacy) in notice) is not has_checkout
+
+
 def test_a_route_setting_is_still_honoured_from_a_file(tmp_path):
     # The allowlist is a namespace, not a fixed list, so decision-model route settings load too.
     (tmp_path / ".env").write_text(
@@ -220,7 +266,7 @@ def test_env_file_parsing_is_tolerant(tmp_path):
     path = _written(
         tmp_path, {"A": "plain", "B": "quoted"}, extra=["", "# comment", "no equals sign", "=novalue"]
     )
-    assert _env_file(path) == {"A": "plain", "B": "quoted", "": "novalue"}
+    assert _env_file(path) == {"A": "plain", "B": "quoted"}
 
 
 def _written(tmp_path, values: dict[str, str], extra: list[str] | None = None):
