@@ -55,19 +55,17 @@ def test_the_checkout_env_file_fills_what_the_environment_lacks(tmp_path, monkey
     }
 
 
-def test_the_legacy_config_fills_what_both_left_open(tmp_path, monkeypatch):
-    from jev_navigator.environment import LEGACY_CONFIG
-
+def test_the_legacy_config_fills_only_what_both_left_open(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("TYPESAFE_BASE_URL=https://drex.nace.ai\n")
-    monkeypatch.setattr(
-        "jev_navigator.environment.LEGACY_CONFIG", _written(tmp_path, {"TYPESAFE_API_KEY": "legacy-key"})
+    legacy = _written(
+        tmp_path, {"TYPESAFE_API_KEY": "legacy-key", "TYPESAFE_BASE_URL": "https://legacy.example"}
     )
+    monkeypatch.setattr(environment, "LEGACY_CONFIG", legacy)
 
     load_typesafe_environment(root=tmp_path)
 
     assert os.environ["TYPESAFE_API_KEY"] == "legacy-key"
-    assert os.environ["TYPESAFE_BASE_URL"] == "https://drex.nace.ai"
-    assert LEGACY_CONFIG  # the real default stays importable
+    assert os.environ["TYPESAFE_BASE_URL"] == "https://drex.nace.ai"  # the checkout `.env` comes first
 
 
 @pytest.mark.parametrize("has_checkout", [True, False], ids=["run-from-a-checkout", "installed"])
