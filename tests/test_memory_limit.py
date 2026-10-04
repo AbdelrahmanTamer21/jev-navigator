@@ -60,6 +60,12 @@ for _ in range(20):
 time.sleep(30)
 """
 
+GROWS_TO_50_MB_THEN_ENDS = """\
+import time
+held = b"x" * (50 * 2**20)
+time.sleep(0.5)
+"""
+
 PRINTS_A_LINE_THEN_STAYS = """\
 import time
 print('{"line": 1}', flush=True)
@@ -498,6 +504,22 @@ def test_what_a_host_grows_between_two_searches_is_not_charged_to_the_second(
 
     # Assert
     assert [span.name for span in second] == [span.name for span in first] == ["place", "cancel"]
+
+
+def test_a_process_started_while_no_index_is_alive_is_charged_only_for_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: the process took its slot, then grew 60 MB of its own; with no index alive none of it is
+    # JVN's, but with the child's own 50 MB it is over the allowance.
+    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
+    tools.git(["--version"], tmp_path)
+
+    # Act
+    with _holding(60):
+        output = tools.run_command([sys.executable, "-c", GROWS_TO_50_MB_THEN_ENDS], tmp_path)
+
+    # Assert
+    assert output == ""
 
 
 class FailsEveryRequest:
