@@ -102,3 +102,20 @@ def test_a_chunk_that_fails_fails_the_scan_after_the_matches_before_it(
     assert matches == [{"file": "a.py"}]
     assert str(failure.value) == f"{tools.AST_GREP} exited 3: ast-grep: panicked on b.py"
 
+
+def test_a_process_killed_partway_through_a_line_reports_why_it_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: the process prints one whole match, half of the next, then dies
+    stand_in_ast_grep(
+        tmp_path,
+        monkeypatch,
+        'print(json.dumps({\'file\': \'a.py\'}))\nsys.stdout.write(\'{"file": "b.py", "text": "unterm\')\n'
+        "sys.stdout.flush()\nprint('ast-grep: out of memory', file=sys.stderr)\nsys.exit(137)\n",
+    )
+
+    # Act / Assert
+    with pytest.raises(tools.ToolFailedError) as failure:
+        list(tools.ast_grep_rules(VALID_RULE, ["a.py", "b.py"], tmp_path))
+    assert str(failure.value) == f"{tools.AST_GREP} exited 137: ast-grep: out of memory"
+    assert isinstance(failure.value.__cause__, ValueError)
