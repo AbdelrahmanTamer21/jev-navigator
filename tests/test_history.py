@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from jev_navigator.directives.find_code import Outcome, SearchBudget, StopRule, find_code
+from jev_navigator.directives.find_code import (
+    Outcome,
+    SearchBudget,
+    StopRule,
+    StopRuleTooLargeError,
+    find_code,
+)
 from jev_navigator.directives.places import place_for_line
 from jev_navigator.history import (
     FetchedSpan,
@@ -22,9 +28,9 @@ from jev_navigator.history import (
     judge_sections,
 )
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS
+from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS, InputBudgetExceededError
 from jev_navigator.judgments.journal import JsonlJournal
-from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.judge import Judge, request_exceeds_input_budget
 from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
@@ -289,6 +295,50 @@ def test_find_code_can_stop_on_the_callers_history_check(sample_index: CodeIndex
         entry.fetched[0].source["file"] for entry in result.history.steps if entry.operation == "open"
     ]
     assert opened_files[0] == "app/orders.py" and "app/validation.py" in opened_files
+
+
+def test_a_stop_rule_whose_history_cannot_fit_stops_the_search_with_a_named_error(
+    sample_index: CodeIndex,
+) -> None:
+    start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
+    rule = StopRule(HOLDS_LIMIT, sections=("decisions",), budget_chars=5)
+
+    with pytest.raises(StopRuleTooLargeError, match="holds_limit_check") as raised:
+        find_code(
+            sample_index,
+            Judge(ScriptedJevClient()),
+            "the item limit check",
+            start,
+            budget=SearchBudget(beam_width=1),
+            stop_rule=rule,
+        )
+
+    assert isinstance(raised.value.__cause__, HistoryTooLargeError)
+
+
+def test_a_stop_rule_the_provider_refuses_for_size_stops_the_search_with_the_same_named_error(
+    sample_index: CodeIndex,
+) -> None:
+    start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
+    rule = StopRule(HOLDS_LIMIT, shared={"padding": "x" * 80_000})
+
+    class RefusesOverTheBox(ScriptedJevClient):
+        def send(self, state, questions):
+            if request_exceeds_input_budget(state, questions):
+                raise InputBudgetExceededError("max_tokens_exceeded")
+            return super().send(state, questions)
+
+    with pytest.raises(StopRuleTooLargeError, match="holds_limit_check") as raised:
+        find_code(
+            sample_index,
+            Judge(RefusesOverTheBox()),
+            "the item limit check",
+            start,
+            budget=SearchBudget(beam_width=1),
+            stop_rule=rule,
+        )
+
+    assert isinstance(raised.value.__cause__, InputBudgetExceededError)
 
 
 def test_the_ceiling_curve_reports_probability_against_history_size() -> None:

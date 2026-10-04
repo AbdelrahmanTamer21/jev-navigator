@@ -33,6 +33,7 @@ from ..history import (
     HistoryJudgment,
     HistoryOutcome,
     HistoryStep,
+    HistoryTooLargeError,
     judge_history,
     judge_history_async,
 )
@@ -544,6 +545,14 @@ class StopRule:
         return History(budget_chars=self.budget_chars, sections={SUBJECT: subject, **self.context})
 
 
+class StopRuleTooLargeError(RuntimeError):
+    """The stop rule's request cannot fit Jev's input box, so the search cannot judge whether to stop.
+    The caller sizes its rule (``budget_chars``, ``shared``, ``sections``); the search does not guess."""
+
+    def __init__(self, rule: StopRule, cause: Exception) -> None:
+        super().__init__(f"the stop rule {rule.check.name} cannot fit Jev's input: {cause}")
+
+
 def _apply_stop_rule(judge: Judge, search: _Search) -> None:
     rule = search.stop_rule
     if rule is None:
@@ -554,6 +563,8 @@ def _apply_stop_rule(judge: Judge, search: _Search) -> None:
         )
     except CallCapReachedError:
         search.cap_reached = True
+    except (HistoryTooLargeError, InputBudgetExceededError) as error:
+        raise StopRuleTooLargeError(rule, error) from error
 
 
 async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:
@@ -566,6 +577,8 @@ async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:
         )
     except CallCapReachedError:
         search.cap_reached = True
+    except (HistoryTooLargeError, InputBudgetExceededError) as error:
+        raise StopRuleTooLargeError(rule, error) from error
 
 
 def _restore(search: _Search, previous: FindResult) -> None:
