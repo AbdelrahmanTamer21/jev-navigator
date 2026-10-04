@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -183,6 +183,7 @@ def _manifest(
             "included": [_span_json(span) for span in result.included],
             "excluded": [_span_json(span) for span in result.excluded],
             "unresolved_links": [_link_json(link) for link in result.unresolved_links],
+            "unavailable_files": index.unavailable_files,
         },
     }
 
@@ -243,6 +244,11 @@ def _link_json(link) -> dict:
     }
 
 
+def unavailable_file_lines(files: Mapping[str, str]) -> list[str]:
+    """One report line per file the index has no facts for, with the reason."""
+    return [f"- `{file}`: {reason}" for file, reason in sorted(files.items())]
+
+
 def _report(manifest: dict) -> str:
     trace = manifest["trace"]
     lines = [
@@ -292,6 +298,8 @@ def _report(manifest: dict) -> str:
                 f"- `{source['file']}:{source['lines'][0]}-{source['lines'][1]}` "
                 f"P(yes) {evidence['probability']:.3f} ({evidence['verdict']})"
             ]
+    if trace["unavailable_files"]:
+        lines += ["", "## Files without facts", "", *unavailable_file_lines(trace["unavailable_files"])]
     lines += ["", "## Unresolved static links", ""]
     if not trace["unresolved_links"]:
         lines.append("Every static link in the walked component is resolved.")
