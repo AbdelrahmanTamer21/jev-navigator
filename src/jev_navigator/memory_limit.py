@@ -110,7 +110,8 @@ class MemoryLimit:
     @property
     def parse_threads(self) -> int:
         """How many files ast-grep may parse at once: the allowance less Python's share, divided by the
-        largest parse the guard admits; at least one."""
+        largest parse the guard admits; at least one. It assumes one parse per process, which
+        ``parsing`` keeps."""
         return max(1, int((self.allowance_mb - PYTHON_SHARE_MB) // MAX_PARSE_PEAK_MB))
 
 
@@ -140,6 +141,15 @@ def started(arguments: Sequence[str], **options) -> Iterator[subprocess.Popen]:
 def check() -> None:
     """``MemoryGuard.check`` of this process's guard."""
     process_guard().check()
+
+
+@contextmanager
+def parsing() -> Iterator[int]:
+    """This process's one parse at a time, with the threads it may parse with. ``parse_threads``
+    spends the whole allowance on one ast-grep, so a scan in another thread waits for this one to
+    finish instead of both running and the allowance stopping every scan."""
+    with _ONE_PARSE:
+        yield process_guard().limit.parse_threads
 
 
 class MemoryGuard:
@@ -245,7 +255,8 @@ class MemoryGuard:
         stopped = f"; it stopped {names}" if sizes else "; it starts no more work"
         return (
             f"JVN reached its memory allowance of {self.limit.allowance_mb:,} MB with {_mb(used)} in use: "
-            f"{', '.join(held)}{stopped}. Narrow the scope, or raise "
+            f"{', '.join(held)}{stopped}. The growth counts everything this process holds, JVN's or not. "
+            f"Narrow the scope, run fewer searches in this process at once, or raise "
             f"{ENVIRONMENT_NAMES['allowance_mb']}, then resume"
         )
 
@@ -404,3 +415,4 @@ else:
 
 _GUARDS: dict[tuple[MemoryLimit, Path], MemoryGuard] = {}
 _GUARDS_LOCK = threading.Lock()
+_ONE_PARSE = threading.Lock()

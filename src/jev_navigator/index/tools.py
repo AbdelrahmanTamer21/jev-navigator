@@ -68,8 +68,9 @@ def ast_grep_rules(
     the matches. ast-grep always runs with a JVN-owned sgconfig: ``config``, when given, is sgconfig
     YAML text (a ``languageGlobs`` remapping, say), otherwise ``NEUTRAL_AST_GREP_CONFIG``. It is
     written to a temporary file outside every repository and passed with ``--config``, so the
-    repository being analysed never configures the parser. It parses at most as many files at once
-    as JVN's memory allowance affords (``MemoryLimit.parse_threads``)."""
+    repository being analysed never configures the parser. One scan runs at a time in a process
+    (``memory_limit.parsing``), parsing at most as many files at once as JVN's memory allowance
+    affords."""
     parseable, skipped = _split_by_parse_peak(files, cwd)
     refused.update(skipped)
     if not parseable:
@@ -78,12 +79,12 @@ def ast_grep_rules(
         directory = resources.enter_context(tempfile.TemporaryDirectory(prefix="jev-navigator-sgconfig-"))
         path = Path(directory) / "sgconfig.yml"
         path.write_text(NEUTRAL_AST_GREP_CONFIG if config is None else config)
-        threads = str(memory_limit.process_guard().limit.parse_threads)
+        threads = resources.enter_context(memory_limit.parsing())
         command = [
             AST_GREP,
             "scan",
             "--threads",
-            threads,
+            str(threads),
             "--inline-rules",
             rules_yaml,
             "--config",

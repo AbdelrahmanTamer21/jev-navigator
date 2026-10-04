@@ -213,9 +213,13 @@ Every JVN process has a memory allowance, and all JVN processes on one machine s
 covers the `jvn` command and every program that imports `jev_navigator`.
 
 - **Allowance:** a process may grow by 1,024 MB past the memory it held when JVN first started a
-  tool, counting the ast-grep, ripgrep and git processes it runs. Over it, JVN stops those processes
-  and raises `MemoryLimitReachedError`, which names the allowance, the memory in use and that baseline.
-  ast-grep parses only as many files at once as the allowance affords: 3 at the default.
+  tool, counting the ast-grep, ripgrep and git processes it runs. The growth counts everything the
+  process holds, so a program that imports JVN and later holds much data of its own uses up JVN's
+  allowance too. Over it, JVN stops those processes and raises `MemoryLimitReachedError`, which names
+  the allowance, the memory in use and that baseline.
+- **One parse at a time:** a process runs one ast-grep scan at a time, and ast-grep parses only as
+  many files at once as the allowance affords: 3 at the default. Scans started in parallel threads
+  take turns instead of outgrowing the allowance together.
 - **Ceiling:** 8,192 MB, so eight slots of 1,024 MB. A process takes a slot when it first starts a
   tool and keeps it until it exits. When every slot is held, it waits up to 120 seconds for one, then
   raises `MemoryLimitReachedError`, which names the processes holding the slots. The slots are files

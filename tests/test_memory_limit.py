@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import sysconfig
 import threading
 import time
 from collections.abc import Iterator, Mapping
@@ -691,6 +692,42 @@ def test_a_test_takes_its_memory_slot_in_the_suites_folder_and_never_in_the_mach
     machine = memory_limit.slots_directory({})
     assert held_here(private_memory_slots)
     assert not machine.is_dir() or held_here(machine) == []
+
+
+def test_scans_in_parallel_threads_of_one_process_take_turns_and_all_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: eight scans of their own copy of twenty standard-library files. Run together, their
+    # parsers outgrow an allowance of 96 MB; one at a time, each fits in it with room to spare.
+    library = Path(sysconfig.get_paths()["stdlib"])
+    names = sorted(path.name for path in library.glob("*.py"))[:20]
+    indexes = [_copied_index(library, names, tmp_path / f"copy-{number}") for number in range(8)]
+    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=96, ceiling_mb=96)
+    outcomes: list[str] = []
+
+    def scan(index: CodeIndex) -> None:
+        try:
+            index.functions_in_files(names)
+            outcomes.append("finished")
+        except MemoryLimitReachedError as refusal:
+            outcomes.append(str(refusal))
+
+    # Act
+    workers = [threading.Thread(target=scan, args=(index,)) for index in indexes]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    # Assert
+    assert outcomes == ["finished"] * 8
+
+
+def _copied_index(library: Path, names: list[str], root: Path) -> CodeIndex:
+    root.mkdir()
+    for name in names:
+        shutil.copy(library / name, root / name)
+    return CodeIndex(root, names, fact_cache_dir=root.parent / f"{root.name}-facts")
 
 
 def test_the_process_guard_follows_the_settings_it_is_read_with(
