@@ -150,12 +150,12 @@ def check() -> None:
 
 
 @contextmanager
-def parsing() -> Iterator[int]:
-    """This process's one parse at a time, with the threads it may parse with. ``parse_threads``
-    spends the whole allowance on one ast-grep, so a scan in another thread waits for this one to
-    finish instead of both running and the allowance stopping every scan."""
+def parsing() -> Iterator[None]:
+    """This process's one parse at a time. ``parse_threads`` and ``single_parse_mb`` each spend the
+    whole allowance on one ast-grep, so a scan in another thread waits for this one to finish instead
+    of both running and the allowance stopping every scan."""
     with _ONE_PARSE:
-        yield process_guard().limit.parse_threads
+        yield
 
 
 class MemoryGuard:
