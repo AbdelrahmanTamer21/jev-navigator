@@ -22,9 +22,9 @@ def test_new_index_reuses_facts_and_changed_content_is_reparsed(tmp_path, monkey
     scans = []
     actual_scan = tools.ast_grep_rules
 
-    def observe_scan(rules, files, root, *, refused):
+    def observe_scan(rules, files, *arguments, **options):
         scans.append(tuple(files))
-        return actual_scan(rules, files, root, refused=refused)
+        return actual_scan(rules, files, *arguments, **options)
 
     monkeypatch.setattr(tools, "ast_grep_rules", observe_scan)
     first = CodeIndex.from_directory(repository, fact_cache_dir=cache)

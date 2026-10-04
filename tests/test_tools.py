@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 import sys
 from pathlib import Path
 
@@ -60,6 +61,11 @@ INVALID_RULE = "id: broken\nlanguage: python\nrule:\n  kind: not_a_real_kind\n"
 VALID_RULE = "id: function\nlanguage: python\nrule:\n  kind: function_definition\n"
 
 
+def _write_python_files(root: Path, *names: str) -> None:
+    for name in names:
+        (root / name).write_text("def f():\n    return 1\n")
+
+
 def stand_in_ast_grep(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> None:
     """Puts a script in ast-grep's place. ``body`` is Python that sees the scanned ``files`` and may
     print to stdout and stderr and exit."""
@@ -85,6 +91,7 @@ def test_a_chunk_that_fails_fails_the_scan_after_the_matches_before_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Arrange: one file per command; the command for b.py fails
+    _write_python_files(tmp_path, "a.py", "b.py", "c.py")
     stand_in_ast_grep(
         tmp_path,
         monkeypatch,
@@ -107,6 +114,7 @@ def test_a_process_killed_partway_through_a_line_reports_why_it_stopped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Arrange: the process prints one whole match, half of the next, then dies
+    _write_python_files(tmp_path, "a.py", "b.py")
     stand_in_ast_grep(
         tmp_path,
         monkeypatch,
@@ -130,3 +138,47 @@ def test_a_file_whose_name_starts_with_a_dash_is_scanned_as_a_file(tmp_path: Pat
 
     # Assert
     assert [match["file"] for match in matches] == ["-x.py"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX preprocessor script")
+@pytest.mark.parametrize(
+    "search",
+    [
+        lambda repository: tools.ripgrep_files("needle", ("a.py",), repository),
+        lambda repository: tuple(hit.file for hit in tools.ripgrep_fixed("needle", ("a.py",), repository, 5)),
+    ],
+    ids=["ripgrep_files", "ripgrep_fixed"],
+)
+def test_ripgrep_ignores_a_configured_preprocessor(tmp_path: Path, monkeypatch, search) -> None:
+    # A ripgrep config in the environment (RIPGREP_CONFIG_PATH) can name `--pre=<program>`, which
+    # ripgrep runs for each searched file. Over an untrusted repository that is code execution, so
+    # jvn's searches must ignore the config entirely.
+    marker = tmp_path / "preprocessor-ran"
+    preprocessor = tmp_path / "pre.sh"
+    preprocessor.write_text(f'#!/bin/sh\n: > "{marker}"\ncat "$1"\n')
+    preprocessor.chmod(preprocessor.stat().st_mode | stat.S_IXUSR)
+    config = tmp_path / "rg.conf"
+    config.write_text(f"--pre={preprocessor}\n")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "a.py").write_text("needle = 1\n")
+
+    found = search(repository)
+
+    assert found == ("a.py",)  # the search still works
+    assert not marker.exists()  # but the configured preprocessor never ran
+
+
+def test_listing_outside_git_ignores_a_configured_ripgrep_filter(tmp_path: Path, monkeypatch) -> None:
+    # Outside a Git worktree the file inventory comes from `rg --files`; a ripgrep config must not
+    # change which files the index sees there either.
+    config = tmp_path / "rg.conf"
+    config.write_text("--glob=!a.py\n")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
+    directory = tmp_path / "plain"
+    directory.mkdir()
+    (directory / "a.py").write_text("needle = 1\n")
+
+    assert tools.listed_files(directory) == ("a.py",)
