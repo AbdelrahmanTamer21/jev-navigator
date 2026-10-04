@@ -73,8 +73,8 @@ Trace may leave a journal without a manifest; keep its output.
 
 Find All and Trace judge at most 16 functions per request and send their requests in parallel; a Find
 opening still asks about all its neighbours in one request. Every answer goes to one shared answer
-store, `$XDG_CACHE_HOME/jev-navigator/answers.sqlite` (`~/.cache` when unset), which holds hashes,
-locations and answers, never code. A later run at the same commit replays from it after one live
+store, `$XDG_CACHE_HOME/jev-navigator/answers-v2.sqlite` (`~/.cache` when unset), which holds hashes,
+locations and answers, never code, and forgets a request no run reused for 30 days. A later run at the same commit replays from it after one live
 request. Give each experiment or eval arm its own store with `--answer-store PATH` (or
 `JEV_NAVIGATOR_ANSWER_STORE`) so arms never reuse each other's answers; stderr names the store in
 use. `jvn trace` reports `replayed_answers` beside its live `calls`.

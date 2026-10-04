@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from conftest import BudgetedClient
 
+from jev_navigator.confirmation import today
 from jev_navigator.judgments import judge as judge_module
 from jev_navigator.judgments.client import ReplayOnlyClient
 from jev_navigator.judgments.judge import BATCHING_RULE, Judge
@@ -21,6 +22,7 @@ from jev_navigator.judgments.store import (
     LayeredAnswerStore,
     SqliteAnswerStore,
     UnsupportedAnswerStoreError,
+    default_shared_store,
 )
 from jev_navigator.judgments.thresholds import Thresholds
 from jev_navigator.testing import ScriptedJevClient
@@ -316,3 +318,137 @@ def test_processes_creating_a_new_store_at_once_all_open_it(tmp_path: Path) -> N
     for shared, exit_codes in rounds:
         assert exit_codes == [0, 0, 0, 0]
         assert len(SqliteAnswerStore(shared).records()) == 4
+
+
+def _confirmed(shared: Path) -> dict[str, int]:
+    with sqlite3.connect(shared) as database:
+        return dict(database.execute("select request_sha256, confirmed from confirmations"))
+
+
+def _age_every_confirmation(shared: Path, days: int) -> None:
+    with sqlite3.connect(shared) as database:
+        database.execute("update confirmations set confirmed = ?", (today() - days,))
+
+
+def _rows_for(shared: Path, request_sha256: str) -> dict[str, int]:
+    with sqlite3.connect(shared) as database:
+        return {
+            table: database.execute(
+                f"select count(*) from {table} where request_sha256 = ?", (request_sha256,)
+            ).fetchone()[0]
+            for table in ("answers", "item_answers", "refusals", "confirmations")
+        }
+
+
+def test_a_reused_answer_stays_and_an_unused_one_goes_with_its_item_answers_and_refusals(
+    tmp_path: Path,
+) -> None:
+    # Arrange: two requests stored 40 days ago, each with a refusal; only the first is reused today
+    shared = tmp_path / "answers.sqlite"
+    reused_items, unused_items = ITEMS[:2], [{"code": "w = 0"}]
+    Judge(ScriptedJevClient(default_noul=0.9), store=SqliteAnswerStore(shared)).check_each(
+        DESCRIBES, reused_items, SHARED
+    )
+    Judge(ScriptedJevClient(), store=SqliteAnswerStore(shared)).check_each(DESCRIBES, unused_items, SHARED)
+    reused, unused = (record.request_sha256 for record in SqliteAnswerStore(shared).records())
+    for request in (reused, unused):
+        SqliteAnswerStore(shared).put_refusal(request, "route", 1)
+    _age_every_confirmation(shared, 40)
+    replay = ScriptedJevClient(default_noul=0.1)
+    Judge(replay, store=SqliteAnswerStore(shared), served_model="jev-scripted").check_each(
+        DESCRIBES, reused_items, SHARED
+    )
+
+    # Act
+    forgotten = SqliteAnswerStore(shared).forget_unconfirmed(before=today() - 30, limit=2_000)
+
+    # Assert
+    assert replay.requests == []
+    assert forgotten == 1
+    assert _rows_for(shared, unused) == {"answers": 0, "item_answers": 0, "refusals": 0, "confirmations": 0}
+    assert _rows_for(shared, reused) == {"answers": 1, "item_answers": 2, "refusals": 1, "confirmations": 1}
+    again = Judge(ScriptedJevClient(), store=SqliteAnswerStore(shared), served_model="jev-scripted")
+    assert [result.probability for result in again.check_each(DESCRIBES, reused_items, SHARED)] == [0.9] * 2
+
+
+@pytest.mark.parametrize("hit", ["by_request", "record_for", "by_item", "refused"])
+def test_every_kind_of_reuse_confirms_its_request(tmp_path: Path, hit: str) -> None:
+    # Arrange
+    shared = tmp_path / "answers.sqlite"
+    store = SqliteAnswerStore(shared)
+    store.put(
+        AnswerRecord("r1", ("q",), {"q": {"type": "noul", "noul": 0.5}}, "m", 1, {}, item_keys={"k1": "q"})
+    )
+    store.put_refusal("r1", "route", 1)
+    _age_every_confirmation(shared, 40)
+    lookups = {
+        "by_request": lambda: store.by_request("r1"),
+        "record_for": lambda: store.record_for("r1", "m"),
+        "by_item": lambda: store.by_item("k1", "m"),
+        "refused": lambda: store.refused("r1", "route", 1),
+    }
+
+    # Act
+    found = lookups[hit]()
+
+    # Assert
+    assert found
+    assert _confirmed(shared) == {"r1": today()}
+
+
+def test_a_same_day_replay_takes_no_write_lock(tmp_path: Path) -> None:
+    # Arrange: another process holds the store's write lock for the whole replay
+    shared = tmp_path / "answers.sqlite"
+    Judge(ScriptedJevClient(), store=SqliteAnswerStore(shared)).check_each(DESCRIBES, ITEMS, SHARED)
+    writer = sqlite3.connect(shared, isolation_level=None)
+    writer.execute("begin immediate")
+    outcome: list[object] = []
+
+    def replay() -> None:
+        store = SqliteAnswerStore(shared)
+        outcome.append(
+            Judge(ScriptedJevClient(), store=store, served_model="jev-scripted").check_each(
+                DESCRIBES, ITEMS, SHARED
+            )
+        )
+
+    # Act
+    run = threading.Thread(target=replay, daemon=True)
+    run.start()
+    run.join(timeout=10)
+    writer.execute("rollback")
+
+    # Assert
+    assert not run.is_alive(), "the same-day replay waited for the store's write lock"
+    assert len(outcome) == 1
+
+
+def test_forgetting_takes_the_least_recently_used_requests_first_and_stops_at_the_limit(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    shared = tmp_path / "answers.sqlite"
+    store = SqliteAnswerStore(shared)
+    for request in ("r1", "r2", "r3"):
+        store.put(AnswerRecord(request, ("q",), {"q": {"type": "noul", "p": 0.5}}, "m", 1, {}))
+    with sqlite3.connect(shared) as database:
+        for age, request in enumerate(("r3", "r1", "r2")):
+            database.execute(
+                "update confirmations set confirmed = ? where request_sha256 = ?", (today() - age, request)
+            )
+
+    # Act
+    forgotten = store.forget_unconfirmed(before=today() + 1, limit=2)
+
+    # Assert
+    assert forgotten == 2
+    assert set(_confirmed(shared)) == {"r3"}
+
+
+def test_the_default_store_file_names_its_layout(private_cache_root: Path) -> None:
+    # Act
+    path = default_shared_store()
+
+    # Assert
+    assert path == private_cache_root / f"answers-v{SHARED_STORE_VERSION}.sqlite"
+    assert SHARED_STORE_VERSION == 2

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from jev_navigator.index.fact_cache import FactCache
-from jev_navigator.judgments.store import SHARED_STORE_VARIABLE, shared_store_path
+from jev_navigator.judgments.store import SHARED_STORE_VARIABLE, SHARED_STORE_VERSION, shared_store_path
 
 
 def test_the_answer_store_and_the_fact_cache_share_the_xdg_cache_folder(
@@ -21,7 +21,7 @@ def test_the_answer_store_and_the_fact_cache_share_the_xdg_cache_folder(
     answers, facts = shared_store_path(), FactCache().root
 
     # Assert
-    assert answers == tmp_path / "jev-navigator" / "answers.sqlite"
+    assert answers == tmp_path / "jev-navigator" / f"answers-v{SHARED_STORE_VERSION}.sqlite"
     assert facts == tmp_path / "jev-navigator" / "facts"
 
 
@@ -36,5 +36,5 @@ def test_without_xdg_cache_home_both_live_under_the_home_cache_folder(
     answers, facts = shared_store_path(), FactCache().root
 
     # Assert
-    assert answers == Path.home() / ".cache" / "jev-navigator" / "answers.sqlite"
+    assert answers == Path.home() / ".cache" / "jev-navigator" / f"answers-v{SHARED_STORE_VERSION}.sqlite"
     assert facts == Path.home() / ".cache" / "jev-navigator" / "facts"

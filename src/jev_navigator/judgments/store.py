@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import threading
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
@@ -31,7 +32,8 @@ from pathlib import Path
 from typing import Protocol
 
 from ..cache_root import cache_root
-from ..shared_database import open_shared_database
+from ..confirmation import Confirmations, today
+from ..shared_database import open_shared_database, release_free_pages
 from .answers import Answer, JevResponse, answer_from_json
 from .relations import without_quoted_code
 
@@ -171,8 +173,10 @@ class JsonlAnswerStore:
             )
 
 
-SHARED_STORE_VERSION = 1
-"""The layout of ``SqliteAnswerStore``; a file in any other layout is refused, never migrated."""
+SHARED_STORE_VERSION = 2
+"""The layout of ``SqliteAnswerStore``; a file in any other layout is refused, never migrated. The
+default file names it, so JVN versions with different layouts never share one default file."""
+_DEFAULT_STORE_FILE = re.compile(r"\.?answers(?:-v\d+)?\.sqlite(?:-wal|-shm|\.\w+)?")
 
 
 class UnsupportedAnswerStoreError(RuntimeError):
@@ -190,17 +194,29 @@ create table if not exists refusals (
     request_sha256 text not null, route text not null, input_box integer not null
 );
 create index if not exists refusals_by_request on refusals (request_sha256, route, input_box);
+create table if not exists confirmations (
+    request_sha256 text primary key, confirmed integer not null
+) without rowid;
+create index if not exists confirmations_by_day on confirmations (confirmed, request_sha256);
 """
+_CONFIRM = (
+    "insert into confirmations values (?, ?)"
+    " on conflict (request_sha256) do update set confirmed = excluded.confirmed"
+)
+_CONFIRMED_ON = "left join confirmations c on c.request_sha256 = {table}.request_sha256"
 
 
 class SqliteAnswerStore:
-    """One SQLite file shared by every run on a machine. Rows are only ever inserted, never updated or
-    deleted, so no answer is lost; the newest answer for a key wins a lookup. WAL mode lets several
-    runs read and write the file at once. A record is stored without its request, sent bytes and
-    skeleton, so no code, state or question text reaches this file whatever the caller keeps.
+    """One SQLite file shared by every run on a machine. Answers are inserted, never changed; the newest
+    answer for a key wins a lookup. WAL mode lets several runs read and write the file at once. A
+    record is stored without its request, sent bytes and skeleton, so no code, state or question
+    text reaches this file whatever the caller keeps.
 
-    Provisional (open question O29 for André): the location defaults to ``default_shared_store()``
-    under the JVN cache root, overridable with ``SHARED_STORE_VARIABLE``, and answers never expire.
+    Each request carries the day a run last stored or reused one of its answers or its refusal; a
+    reuse on an earlier day restamps it, so a same-day replay writes nothing. ``forget_unconfirmed``
+    deletes a request's answers, item answers and refusals together. Housekeeping calls it only for
+    ``default_shared_store()``, where a request unused for 30 days goes (André, 04.10.2026, replacing
+    O29 for the default store); a store at a path the user names keeps every answer.
     """
 
     def __init__(self, path: Path) -> None:
@@ -221,15 +237,19 @@ class SqliteAnswerStore:
             )
 
     def by_request(self, request_sha256: str) -> AnswerRecord | None:
-        row = self._one(
-            "select record from answers where request_sha256 = ? order by rowid desc limit 1",
+        row = self._reused(
+            "select answers.record, answers.request_sha256, c.confirmed from answers "
+            f"{_CONFIRMED_ON.format(table='answers')} where answers.request_sha256 = ? "
+            "order by answers.rowid desc limit 1",
             (request_sha256,),
         )
         return _record_from_json(json.loads(row[0])) if row else None
 
     def record_for(self, request_sha256: str, model: str) -> AnswerRecord | None:
-        row = self._one(
-            "select record from answers where request_sha256 = ? and model = ? order by rowid desc limit 1",
+        row = self._reused(
+            "select answers.record, answers.request_sha256, c.confirmed from answers "
+            f"{_CONFIRMED_ON.format(table='answers')} where answers.request_sha256 = ? and answers.model = ? "
+            "order by answers.rowid desc limit 1",
             (request_sha256, model),
         )
         return _record_from_json(json.loads(row[0])) if row else None
@@ -241,16 +261,15 @@ class SqliteAnswerStore:
 
     def by_item(self, item_key: str, served_model: str | None) -> StoredItemAnswer | None:
         """``served_model`` None accepts an answer from any model (replay)."""
-        if served_model is None:
-            query, parameters = (
-                "select answer, request_sha256, model from item_answers where item_key = ?",
-                (item_key,),
-            )
-        else:
-            query = "select answer, request_sha256, model from item_answers where item_key = ? and model = ?"
-            parameters = (item_key, served_model)
-        row = self._one(f"{query} order by rowid desc limit 1", parameters)
-        return StoredItemAnswer(answer_from_json(json.loads(row[0])), row[1], row[2]) if row else None
+        query = (
+            "select item_answers.answer, item_answers.request_sha256, c.confirmed, item_answers.model "
+            f"from item_answers {_CONFIRMED_ON.format(table='item_answers')} where item_answers.item_key = ?"
+        )
+        parameters: tuple = (item_key,)
+        if served_model is not None:
+            query, parameters = f"{query} and item_answers.model = ?", (item_key, served_model)
+        row = self._reused(f"{query} order by item_answers.rowid desc limit 1", parameters)
+        return StoredItemAnswer(answer_from_json(json.loads(row[0])), row[1], row[3]) if row else None
 
     def put(self, record: AnswerRecord) -> None:
         stored = _stamped(_code_free(record))
@@ -264,18 +283,57 @@ class SqliteAnswerStore:
                 (stored.request_sha256, stored.model, json.dumps(asdict(stored), sort_keys=True)),
             )
             self._db.executemany("insert into item_answers values (?, ?, ?, ?)", items)
+            self._db.execute(_CONFIRM, (stored.request_sha256, today()))
 
     def refused(self, request_sha256: str, route: str, input_box: int) -> bool:
-        query = "select 1 from refusals where request_sha256 = ? and route = ? and input_box = ?"
-        return self._one(query, (request_sha256, route, input_box)) is not None
+        query = (
+            "select refusals.input_box, refusals.request_sha256, c.confirmed from refusals "
+            f"{_CONFIRMED_ON.format(table='refusals')} "
+            "where refusals.request_sha256 = ? and refusals.route = ? and refusals.input_box = ?"
+        )
+        return self._reused(query, (request_sha256, route, input_box)) is not None
 
     def put_refusal(self, request_sha256: str, route: str, input_box: int) -> None:
         with self._lock, self._db:
             self._db.execute("insert into refusals values (?, ?, ?)", (request_sha256, route, input_box))
+            self._db.execute(_CONFIRM, (request_sha256, today()))
 
-    def _one(self, query: str, parameters: tuple) -> tuple | None:
+    def forget_unconfirmed(self, before: int, limit: int) -> int:
+        """Deletes the answers, item answers and refusals of at most ``limit`` requests last used before
+        the day ``before``, least recently used first; returns how many, and frees their space."""
+        chosen = (
+            "select request_sha256 from confirmations where confirmed < ? "
+            "order by confirmed, request_sha256 limit ?"
+        )
         with self._lock:
-            return self._db.execute(query, parameters).fetchone()
+            with self._db:
+                for table in ("answers", "item_answers", "refusals"):
+                    self._db.execute(
+                        f"delete from {table} where request_sha256 in ({chosen})", (before, limit)
+                    )
+                forgotten = self._db.execute(
+                    f"delete from confirmations where request_sha256 in ({chosen})", (before, limit)
+                )
+            release_free_pages(self._db)
+        return forgotten.rowcount
+
+    def confirmations(self, before: int) -> Confirmations:
+        with self._lock:
+            held, unconfirmed, oldest = self._db.execute(
+                "select count(*), count(*) filter (where confirmed < ?), min(confirmed) from confirmations",
+                (before,),
+            ).fetchone()
+        return Confirmations(held, unconfirmed, oldest)
+
+    def _reused(self, query: str, parameters: tuple) -> tuple | None:
+        """The row ``query`` finds, whose second and third columns are its request and that request's
+        confirmation day; a request last confirmed on an earlier day is stamped today."""
+        with self._lock:
+            row = self._db.execute(query, parameters).fetchone()
+            if row is not None and (row[2] is None or row[2] < today()):
+                with self._db:
+                    self._db.execute(_CONFIRM, (row[1], today()))
+        return row
 
 
 class LayeredAnswerStore:
@@ -340,7 +398,13 @@ def shared_store_path(environment: Mapping[str, str] | None = None) -> Path:
 
 
 def default_shared_store() -> Path:
-    return cache_root() / "answers.sqlite"
+    return cache_root() / f"answers-v{SHARED_STORE_VERSION}.sqlite"
+
+
+def is_default_store_file(name: str) -> bool:
+    """Whether ``name`` is a file of a default store in any layout: the store, its write-ahead log and
+    shared memory, or a store still being created."""
+    return _DEFAULT_STORE_FILE.fullmatch(name) is not None
 
 
 def _code_free(record: AnswerRecord) -> AnswerRecord:

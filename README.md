@@ -183,7 +183,7 @@ An explicitly selected output directory must be new or empty. Each evidence pack
 - `report.md`: a readable outcome, source table, found locations, and coverage caveat.
 - `journal.jsonl`: request hashes and exact provider responses as the run progresses.
 - `answers.jsonl`: reusable typed answers keyed by source and request hashes. Every answer is also
-  written to the machine's shared answer store (`$XDG_CACHE_HOME/jev-navigator/answers.sqlite`,
+  written to the machine's shared answer store (`$XDG_CACHE_HOME/jev-navigator/answers-v2.sqlite`,
   `~/.cache` when the variable is unset, or `JEV_NAVIGATOR_ANSWER_STORE`), which holds no code; a later run at the same commit asking the
   same questions replays from it after one live request that learns the served model (Find All and
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
@@ -458,11 +458,13 @@ on its own scope, so searches sharing one judge never use up each other's budget
   unknown counts as a miss (or pass `served_model=`); with a store, a first `check_each_async` then sends its
   first batch alone, and the batches after that answer replay as usual. `ReplayOnlyClient` replays
   from the store and never calls Jev.
-  `JsonlAnswerStore` is one run's pack. `SqliteAnswerStore(path)` is one insert-only store shared by
+  `JsonlAnswerStore` is one run's pack. `SqliteAnswerStore(path)` is one store shared by
   every run on a machine, so a repeated run at the same commit asks nothing again but the request
   that learns the served model. It never holds
   code, state or question text: only hashes, unit locations, batch member ids, the batching rule and
-  size, the model, raw answers and timestamps. Its location and retention (no expiry) are provisional;
+  size, the model, raw answers and timestamps. Each request records the day a run last stored or reused
+  it; the default store forgets a request unused for 30 days, and a store at a path you name keeps every
+  answer ([housekeeping](#where-jvn-keeps-runs-and-caches)).
   `LayeredAnswerStore(pack, shared)` reads the pack first, copies every answer it finds only in the
   shared store into the pack, and writes new answers to both, so the pack alone still replays the run.
 - **Journal, separate from the store.** Pass `journal=` (any object with `record_request(request) ->
