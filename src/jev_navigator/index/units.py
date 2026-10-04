@@ -1,4 +1,4 @@
-"""Units: what a search judges and what a result names.
+"""Units: what a search judges and what a result names, and the one resolver of lines to units.
 
 A unit is one function, one method, or one file's top-level code: its lines outside every function
 and method, class bodies included, kept as runs of lines in order. A function's or method's unit
@@ -16,6 +16,7 @@ function holding it), but a listing leaves it out: its text is already inside it
 
 Records hold locations and hashes, never code. ``items_to_judge`` gives what a request judges (the
 unit, or its pieces that fit the box) and ``read_ranges`` reads their code through the index.
+``resolve_anchors`` names the units that hold a caller's lines and line ranges.
 """
 
 from __future__ import annotations
@@ -163,6 +164,56 @@ def best_piece(unit: Unit, scores: Mapping[str, float]) -> Piece | None:
     return max(scored, key=lambda piece: scores[unit.piece_id(piece)], default=None)
 
 
+@dataclass(frozen=True)
+class LineAnchor:
+    file: str
+    line: int
+
+
+@dataclass(frozen=True)
+class RangeAnchor:
+    file: str
+    start: int
+    end: int
+
+
+Anchor = LineAnchor | RangeAnchor
+
+
+@dataclass(frozen=True)
+class UnresolvedAnchor:
+    anchor: Anchor
+    problem: str
+
+
+@dataclass(frozen=True)
+class AnchorResolution:
+    """Each unit the anchors name, once, in the order first named, and every anchor that named none."""
+
+    units: tuple[Unit, ...]
+    unresolved: tuple[UnresolvedAnchor, ...]
+
+
+def resolve_anchors(index: CodeIndex, anchors: Iterable[Anchor], *, box_chars: int) -> AnchorResolution:
+    """The units ``anchors`` name. A line names the innermost unit holding it: a function, decorators
+    included, or the file's top-level code outside every function, stubs included, even top-level
+    code the listing leaves out. A range names each unit its non-blank lines touch, leaving out units
+    nested in another it names. Nothing is guessed: a file outside the scope or in a language JVN does
+    not parse, a line outside its file, a reversed range, and a blank line in a file with no top-level
+    code are reported, and a file is parsed only after its anchor is known to point inside it.
+    ``box_chars`` is ``list_units``'."""
+    resolver = _AnchorResolver(index, box_chars)
+    found: dict[str, Unit] = {}
+    unresolved = []
+    for anchor in anchors:
+        units, problem = resolver.resolve(anchor)
+        if problem:
+            unresolved.append(UnresolvedAnchor(anchor, problem))
+        for unit in units:
+            found.setdefault(unit.id, unit)
+    return AnchorResolution(tuple(found.values()), tuple(unresolved))
+
+
 class _SourceFile:
     """The units of one source file, built from the index's functions and the file's lines."""
 
@@ -183,6 +234,10 @@ class _SourceFile:
         outermost = tuple(unit for unit in self.functions if unit.nested_in is None)
         top_level = () if self.top_level is None or self._holds_no_code() else (self.top_level,)
         return (*outermost, *top_level)
+
+    def unit_at(self, line: int) -> Unit | None:
+        holding = [unit for unit in self.functions if unit.start <= line <= unit.end]
+        return min(holding, key=lambda unit: unit.end - unit.start, default=self.top_level)
 
     def qualified(self, span: Span) -> str:
         """``span``'s name after every holder's: ``OrderService.place``, ``registerRoutes.<anonymous:4>``."""
@@ -260,6 +315,55 @@ class _SourceFile:
         return Piece(number, start, end, _sha256(text), chars, chars > self._box_chars)
 
 
+class _AnchorResolver:
+    def __init__(self, index: CodeIndex, box_chars: int) -> None:
+        self._index = index
+        self._box_chars = box_chars
+        self._sources: dict[str, _SourceFile] = {}
+
+    def resolve(self, anchor: Anchor) -> tuple[tuple[Unit, ...], str]:
+        start, end = (
+            (anchor.line, anchor.line) if isinstance(anchor, LineAnchor) else (anchor.start, anchor.end)
+        )
+        problem = self._lines_problem(anchor.file, start, end)
+        if problem:
+            return (), problem
+        units = self._units_touching(anchor.file, start, end)
+        if not units:
+            return (), f"line {start} of {anchor.file} is blank and outside every function"
+        return units, ""
+
+    def _units_touching(self, file: str, start: int, end: int) -> tuple[Unit, ...]:
+        source = self._source(file)
+        lines = self._index.lines(file)
+        touched_lines = [line for line in range(start, end + 1) if lines[line - 1].strip()] or [start]
+        touched = dict.fromkeys(unit for line in touched_lines if (unit := source.unit_at(line)) is not None)
+        return tuple(unit for unit in touched if not any(_nests(unit, other) for other in touched))
+
+    def _lines_problem(self, file: str, start: int, end: int) -> str:
+        if problem := self._file_problem(file):
+            return problem
+        if start > end:
+            return f"the range {start}-{end} ends before it starts"
+        line_count = len(self._index.lines(file))
+        outside = next((line for line in (start, end) if not 1 <= line <= line_count), None)
+        if outside is not None:
+            return f"line {outside} is outside {file}, which has {line_count} lines"
+        return ""
+
+    def _file_problem(self, file: str) -> str:
+        if file not in self._index.files:
+            return f"{file} is not in scope"
+        if not language_of(file):
+            return UNSUPPORTED_LANGUAGE
+        return ""
+
+    def _source(self, file: str) -> _SourceFile:
+        if file not in self._sources:
+            self._sources[file] = _SourceFile(self._index, file, self._box_chars)
+        return self._sources[file]
+
+
 def _non_code_lines(source: str, file: str) -> frozenset[int]:
     """Lines holding nothing but imports, comments, a directive, closing brackets or whitespace."""
     code = without_comments(source, file).split("\n")
@@ -292,6 +396,13 @@ def _runs(lines: Iterable[int]) -> list[LineRange]:
         else:
             runs.append([line, line])
     return [(start, end) for start, end in runs]
+
+
+def _nests(inner: Unit, outer: Unit) -> bool:
+    """Whether ``inner`` is a function inside ``outer``'s function lines."""
+    if inner == outer or UnitKind.TOP_LEVEL in (inner.kind, outer.kind):
+        return False
+    return outer.start <= inner.start and inner.end <= outer.end
 
 
 def _is_named(span: Span) -> bool:

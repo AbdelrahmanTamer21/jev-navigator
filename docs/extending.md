@@ -10,7 +10,7 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `resolve_scope` | the files a search covers from folders, patterns, languages and a git ref, with tests, generated, vendored code and docs left out by default; a file only its shape marks as possibly generated is set aside under an output folder (`dist`, `build`, `generated`), and otherwise awaits Jev's generated judgment with its measured facts; a scope over its cap is refused with counts per folder and language (README, "Choosing the files a search covers") |
 | `judge_generated_files` | Jev's generated-file judgment for the files a scope left undecided: one question per file over its path, measured facts, up to 10 importers and up to 5 files naming its path, each with their true count, and two excerpts; a file the secret scan refuses is named as not judged (README, "Choosing the files a search covers") |
 | `CodeIndex` | mechanical lookups over a narrowed scope: definitions, callers, callees, references, text, imports, git history |
-| `index.units` | the units a search judges (functions, methods, each file's top-level code), cut into 60-line pieces only when larger than their room in a request |
+| `index.units` | the units a search judges (functions, methods, each file's top-level code), cut into 60-line pieces only when larger than their room in a request, and the one resolver of lines and line ranges to units |
 | `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc |
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
@@ -295,10 +295,11 @@ than AST parent identities. The `jvn stats` CLI writes these measurements as JSO
 
 ## Units
 
-`index.units` lists what a search judges, with no model:
+`index.units` lists what a search judges and names the units that hold a caller's lines, with no
+model:
 
 ```python
-from jev_navigator.index.units import items_to_judge, list_units, read_ranges
+from jev_navigator.index.units import LineAnchor, RangeAnchor, items_to_judge, list_units, read_ranges, resolve_anchors
 
 room = judge.input_limits.box_chars - beside_the_unit  # the characters one unit's text may take in a request
 listing = list_units(index, index.files, box_chars=room)
@@ -307,6 +308,9 @@ for unit in listing.units:
 print(listing.unlisted)  # files that gave no units, each with its reason
 for item in items_to_judge(listing.units[0]):  # the unit, or its pieces that fit the box
     print(item.id, item.ranges, read_ranges(index, item.file, item.ranges)[:60])
+
+resolved = resolve_anchors(index, [LineAnchor("app/routes.py", 21), RangeAnchor("app/orders.py", 5, 7)], box_chars=room)
+print([unit.id for unit in resolved.units], resolved.unresolved)
 ```
 
 `box_chars` is the room a unit's text has in one request, counted as escaped JSON like every request
@@ -354,6 +358,16 @@ id plus `#p<index>`.
 Spans are lines, so functions on the same lines are one unit named by the first named one, and a
 callback that shares a line with top-level code (`app.post("/orders", (req, res) => ...)`) takes
 that line: its unit's text holds the registration.
+
+`resolve_anchors` is the one way to turn lines into units. A line names the innermost unit holding it:
+a function, its decorators included, or the file's top-level code when the line lies outside every
+function, stubs included, even top-level code the listing leaves out. A line inside a nested
+function names that function, which the listing leaves out; its `nested_in` names the function that
+holds its text. A range names each unit its non-blank lines touch, without the units nested in
+another one it names. Each unit comes back once, in the order first named. A file outside the scope,
+a file in a language JVN does not parse, a line outside its file, a reversed range, and a blank line
+in a file with no top-level code are reported in `unresolved` with their problem, and a file is
+parsed only after its anchor is known to point inside it.
 
 ## Trace a workflow and retain its evidence
 

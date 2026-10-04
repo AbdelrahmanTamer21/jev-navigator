@@ -1,4 +1,4 @@
-"""Units: the functions, methods and top-level code a search judges.
+"""Units: the functions, methods and top-level code a search judges, and the lines that name them.
 
 Every test runs the real ast-grep parser over a real git repository, so each record below is what
 the index reports for that source, not what this module assumes it reports. Each index gets its own
@@ -19,12 +19,16 @@ from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import Span
 from jev_navigator.index.units import (
     Item,
+    LineAnchor,
+    RangeAnchor,
     Unit,
     UnitKind,
+    UnresolvedAnchor,
     best_piece,
     items_to_judge,
     list_units,
     read_ranges,
+    resolve_anchors,
     unit_score,
 )
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
@@ -128,6 +132,7 @@ TEST_FILE = """\
 def test_create():
     assert create
 """
+HELPERS = "def first():\n    return 1\n\n\ndef second():\n    return 2\n"
 
 TABLE = (
     "TABLE = {\n"
@@ -155,6 +160,7 @@ SHOP = {
     "app/image.py": IMAGE,
     "app/long.py": LONG_BUT_SMALL,
     "app/table.py": TABLE,
+    "app/helpers.py": HELPERS,
     "web/wire.ts": SCRIPT_IMPORTS,
     "web/pick.ts": ONE_LINE_NESTED,
     "web/pair.ts": ONE_LINE_METHODS,
@@ -628,3 +634,102 @@ def test_a_stub_joins_its_files_top_level_code(protocol: CodeIndex) -> None:
         "retry",
         "call",
     ]
+
+
+def test_a_line_on_a_decorator_names_the_function_it_decorates(decorated: CodeIndex) -> None:
+    # Act
+    resolved = resolve_anchors(
+        decorated,
+        (LineAnchor("app/views.py", 5), LineAnchor("web/orders.controller.ts", 12)),
+        box_chars=JEV_BOX,
+    )
+
+    # Assert: `@app.route(` and NestJS's `@HttpCode(201)` sit before their functions' own lines
+    assert [unit.id for unit in resolved.units] == ["app/views.py:10-11", "web/orders.controller.ts:13-15"]
+    assert resolved.unresolved == ()
+
+
+def test_a_line_in_a_stub_names_the_top_level_code_it_joins(protocol: CodeIndex) -> None:
+    # Act
+    resolved = resolve_anchors(
+        protocol, (LineAnchor("app/client.py", 6), LineAnchor("app/client.py", 16)), box_chars=JEV_BOX
+    )
+
+    # Assert: both stubs are in the one top-level unit, named once
+    assert [unit.id for unit in resolved.units] == ["app/client.py:top"]
+
+
+def test_a_line_between_units_names_the_top_level_code_or_is_reported(shop: CodeIndex) -> None:
+    # Act: line 93 of table.py is blank between TABLE and `lookup`; line 3 of helpers.py is blank
+    # between its two functions, and helpers.py has no top-level code
+    resolved = resolve_anchors(
+        shop, (LineAnchor("app/table.py", 93), LineAnchor("app/helpers.py", 3)), box_chars=JEV_BOX
+    )
+
+    # Assert
+    assert [unit.id for unit in resolved.units] == ["app/table.py:top"]
+    assert resolved.unresolved == (
+        UnresolvedAnchor(
+            LineAnchor("app/helpers.py", 3), "line 3 of app/helpers.py is blank and outside every function"
+        ),
+    )
+
+
+def test_a_range_across_two_functions_names_both_and_each_once(shop: CodeIndex) -> None:
+    # Act: lines 93 and 94 of table.py are blank, between TABLE and `lookup` on lines 95 and 96
+    resolved = resolve_anchors(
+        shop,
+        (
+            RangeAnchor("app/helpers.py", 1, 6),
+            LineAnchor("app/helpers.py", 6),
+            RangeAnchor("app/table.py", 93, 96),
+        ),
+        box_chars=JEV_BOX,
+    )
+
+    # Assert: a range's blank lines name no unit
+    assert [unit.id for unit in resolved.units] == [
+        "app/helpers.py:1-2",
+        "app/helpers.py:5-6",
+        "app/table.py:95-96",
+    ]
+
+
+def test_a_range_names_the_function_holding_a_nested_one_and_a_line_the_innermost(shop: CodeIndex) -> None:
+    # Act: `helper` is nested in `Basket.total` (lines 5 to 8), on lines 6 and 7
+    whole_method = resolve_anchors(shop, (RangeAnchor("app/basket.py", 5, 8),), box_chars=JEV_BOX)
+    inner = resolve_anchors(shop, (LineAnchor("app/basket.py", 7),), box_chars=JEV_BOX)
+
+    # Assert: a line inside the nested function names it, a unit the listing leaves out, and its
+    # nested_in names the listed method that holds its text
+    assert [unit.id for unit in whole_method.units] == ["app/basket.py:5-8"]
+    assert [(unit.symbol, unit.nested_in) for unit in inner.units] == [
+        ("Basket.total.helper", "app/basket.py:5-8")
+    ]
+
+
+def test_an_anchor_outside_the_scope_or_its_file_is_reported_before_any_parse(
+    sample_repo: Path, tmp_path: Path
+) -> None:
+    # Arrange
+    scans = []
+    index = CodeIndex.from_git(
+        sample_repo, fact_cache_dir=tmp_path / "facts", scan_observer=lambda *event: scans.append(event)
+    )
+    anchors = (
+        LineAnchor("app/missing.py", 3),
+        LineAnchor("app/orders.py", 99),
+        RangeAnchor("app/orders.py", 7, 5),
+    )
+
+    # Act
+    resolved = resolve_anchors(index, anchors, box_chars=JEV_BOX)
+
+    # Assert
+    assert resolved.units == ()
+    assert [item.problem for item in resolved.unresolved] == [
+        "app/missing.py is not in scope",
+        "line 99 is outside app/orders.py, which has 14 lines",
+        "the range 7-5 ends before it starts",
+    ]
+    assert scans == []
