@@ -106,7 +106,8 @@ install into site-packages (`uv tool install`, `pipx`, a non-editable `pip insta
 `.env`, and when the directory it runs in holds one, it says on stderr that it did not read it. It
 never reads a `.env` from the directory or repository it searches. A settings file can set only
 `jvn`'s own `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names; `jvn` names on stderr any
-other name it ignores, never its value.
+other name it ignores, never its value. The `JEV_NAVIGATOR_*` settings hold the judgment thresholds
+only; a search's budget comes from its flags or the request's JSON fields.
 
 ### JSON input for agents and pipelines
 
