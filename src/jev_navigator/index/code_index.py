@@ -16,6 +16,7 @@ from functools import cache, lru_cache
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
+from .. import memory_limit
 from . import tools
 from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts
 from .fact_cache import FactCache
@@ -543,13 +544,16 @@ class CodeIndex:
                     self._unavailable[file] = facts.refusal
 
     def _load_cached_facts(self, files: Sequence[str]) -> dict[str, bytes]:
-        """Remembers the persisted facts of ``files``; returns the bytes of those still to parse.
+        """Remembers the persisted facts of ``files``; returns the bytes of those still to parse. Facts
+        loaded from the cache grow the process with no parser running, so each file is first checked
+        against JVN's memory allowance.
 
         The caller holds the facts lock."""
         to_parse: dict[str, bytes] = {}
         for file in files:
             if language_of(file) is None or file in self._facts or file in self._unavailable:
                 continue
+            memory_limit.check()
             content = self._read_bytes(file)
             if content is None:
                 continue

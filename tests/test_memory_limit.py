@@ -179,6 +179,25 @@ def test_growth_past_the_allowance_starts_no_further_process(
     assert commands == [["git", "--version"]]
 
 
+def test_growth_past_the_allowance_stops_loading_cached_facts(
+    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: list[list[str]]
+) -> None:
+    # Arrange: a first index fills the fact cache; a second one over the same files reads only it.
+    facts = tmp_path / "facts"
+    CodeIndex.from_git(sample_repo, fact_cache_dir=facts).functions_in("app/orders.py")
+    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
+    tools.git(["--version"], tmp_path)
+    warm = CodeIndex(sample_repo, ["app/orders.py"], fact_cache_dir=facts)
+
+    # Act
+    with _holding(200), pytest.raises(MemoryLimitReachedError):
+        warm.functions_in("app/orders.py")
+
+    # Assert
+    assert len(_scans(commands)) == 1
+    assert "app/orders.py" not in warm.parsed_files
+
+
 def test_a_second_jvn_process_waits_for_a_full_ceiling_then_refuses_naming_the_holder(tmp_path: Path) -> None:
     # Arrange: one slot, held by a real JVN process.
     slots = tmp_path / "slots"
