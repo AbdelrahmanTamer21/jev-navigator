@@ -1186,6 +1186,40 @@ def test_an_export_list_entry_under_another_name_exports_its_own_definition(tmp_
     assert (reexported.status.value, reexported.target) == ("candidate", None), reexported
 
 
+def test_a_commonjs_export_under_another_name_exports_its_own_definition(tmp_path: Path) -> None:
+    """`exports.parse = urlParse` and `module.exports = { a: b }` export `urlParse` and `b` under the
+    names `parse` and `a`: an import of `a` reaches `b`, never the module's private `a`."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "url.js": "function urlParse() { return 1; }\nexports.parse = urlParse;\n",
+            "m.js": "function a() { return 0; }\nfunction b() { return 1; }\nmodule.exports = { a: b };\n",
+            "app.js": (
+                "const { parse } = require('./url');\nconst { a } = require('./m');\n"
+                "const m = require('./m');\nparse();\na();\nm.a();\n"
+            ),
+        },
+    )
+    sites = {"parse": (4, "parse", None), "a": (5, "a", None), "m.a": (6, "a", "m")}
+
+    # Act
+    bindings = {
+        site: index.binding_of("app.js", line, name, receiver)
+        for site, (line, name, receiver) in sites.items()
+    }
+
+    # Assert
+    assert {
+        site: (binding.status.value, binding.target and binding.target.key)
+        for site, binding in bindings.items()
+    } == {
+        "parse": ("resolved", "url.js:1-1"),
+        "a": ("resolved", "m.js:2-2"),
+        "m.a": ("resolved", "m.js:2-2"),
+    }
+
+
 def test_a_default_export_is_imported_only_as_the_default(tmp_path: Path) -> None:
     """A default import takes the module's default export under any local name, and `{ default as
     entry }` is one too. The default export's own name is no named export: `import { make }`, a
