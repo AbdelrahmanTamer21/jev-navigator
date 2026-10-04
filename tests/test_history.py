@@ -31,7 +31,7 @@ from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS, InputBudgetExceededError
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import Judge, request_exceeds_input_budget
-from jev_navigator.judgments.questions import Check, Criterion
+from jev_navigator.judgments.questions import Check, Criterion, serialized_chars
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
@@ -170,6 +170,38 @@ def test_the_budget_is_capped_at_jevs_state_limit_and_overflow_raises() -> None:
     assert capped.budget_chars == JEV_INPUT_BOX_CHARS
     with pytest.raises(HistoryTooLargeError):
         tiny.state_for(["fetched"])
+
+
+def test_the_shared_state_counts_against_the_history_budget() -> None:
+    history = History(budget_chars=2_500)
+    history.append(step(1, "y" * 1_500))
+    client = ScriptedJevClient()
+
+    judge_history(Judge(client), history, FETCHED_HOLDS_LIMIT, {"pad": "x" * 1_200})
+
+    state, _ = client.requests[0]
+    assert serialized_chars(state) <= 2_500
+    assert state["fetched"][0]["code"] == "[evicted]"
+    assert [eviction["file"] for eviction in history.evictions] == ["f1.py"]
+
+
+def test_the_history_leaves_room_for_the_question_that_reads_it() -> None:
+    history = History(budget_chars=10**6)
+    for number in range(100):
+        history.append(step(number, "y" * 1_000))
+    long_question = Check(
+        "long_question",
+        "Does `fetched` contain code that compares the number of items with a limit? " + "z" * 3_000,
+        Criterion("A code body in `fetched` compares an item count with a limit."),
+        Criterion("No code body in `fetched` makes that comparison."),
+    )
+    client = ScriptedJevClient()
+
+    judge_history(Judge(client), history, long_question)
+
+    state, questions = client.requests[0]
+    assert not request_exceeds_input_budget(state, questions)
+    assert history.evictions
 
 
 def test_every_appended_step_is_journaled(tmp_path: Path) -> None:
@@ -320,18 +352,18 @@ def test_a_stop_rule_the_provider_refuses_for_size_stops_the_search_with_the_sam
     sample_index: CodeIndex,
 ) -> None:
     start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
-    rule = StopRule(HOLDS_LIMIT, shared={"padding": "x" * 80_000})
+    rule = StopRule(FETCHED_HOLDS_LIMIT)
 
-    class RefusesOverTheBox(ScriptedJevClient):
+    class RefusesTheStopRequest(ScriptedJevClient):
         def send(self, state, questions):
-            if request_exceeds_input_budget(state, questions):
+            if "fetched" in state:
                 raise InputBudgetExceededError("max_tokens_exceeded")
             return super().send(state, questions)
 
-    with pytest.raises(StopRuleTooLargeError, match="holds_limit_check") as raised:
+    with pytest.raises(StopRuleTooLargeError, match="fetched_holds_limit_check") as raised:
         find_code(
             sample_index,
-            Judge(RefusesOverTheBox()),
+            Judge(RefusesTheStopRequest()),
             "the item limit check",
             start,
             budget=SearchBudget(beam_width=1),
