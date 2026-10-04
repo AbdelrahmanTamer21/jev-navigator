@@ -79,6 +79,31 @@ def test_a_file_option_shows_its_first_doc_line_and_its_symbol_names(tmp_path: P
     assert answers == "file answers.py: Typed answers. Symbols: distribution_confidence, Answer"
 
 
+@pytest.mark.parametrize(
+    "retry",
+    [
+        "function retry(again = () => 1) { return attempt(); }\n",
+        "export function retry(again = () => 1) {\n  return attempt();\n}\n",
+    ],
+    ids=["on one line", "over several lines"],
+)
+def test_a_function_whose_default_value_is_an_arrow_keeps_its_name_in_the_entry_text(
+    tmp_path: Path, retry: str
+) -> None:
+    """The arrow a default value holds shares the function's first line; the module still names the
+    function, so the entry text lists it."""
+    # Arrange
+    index = _index(
+        tmp_path, {"retry.ts": retry + "function attempt() {\n  return 1;\n}\n", "util/x.py": "x = 1\n"}
+    )
+
+    # Act
+    options = _root_options(index)
+
+    # Assert
+    assert _option_for(options, "file retry.ts") == "file retry.ts: Symbols: retry, attempt"
+
+
 def test_the_option_set_is_the_same_directories_and_files_as_before(tmp_path: Path) -> None:
     options = _root_options(_index(tmp_path, {**LIBRARY, "setup.py": "def setup():\n    pass\n"}))
 
