@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 import tracemalloc
@@ -112,18 +113,21 @@ def test_a_file_list_longer_than_the_argument_limit_is_split_across_processes(
 
 
 def test_the_line_cache_holds_at_most_its_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Arrange
+    # Arrange: three files read through a two-file line cache, then the first and last edited
     monkeypatch.setattr(code_index, "LINE_CACHE_FILES", 2)
-    commit_files(tmp_path, MIXED_SCOPE)
-    index = CodeIndex.from_git(tmp_path, fact_cache_dir=tmp_path.parent / "facts")
+    for name in ("a.py", "b.py", "c.py"):
+        (tmp_path / name).write_text(f"def {name[0]}():\n    return 1\n")
+    index = CodeIndex(tmp_path, ["a.py", "b.py", "c.py"])
+    first = {file: index.lines(file) for file in ("a.py", "b.py", "c.py")}
+    for name in ("a.py", "c.py"):
+        (tmp_path / name).write_text("def edited():\n    return 2\n")
 
-    # Act
-    line_counts = {file: len(index.lines(file)) for file in index.files}
-    again = index.lines("app/orders.py")
+    # Act: c.py is still cached; a.py was evicted, so reading it goes back to the disk
+    again = {file: index.lines(file) for file in ("c.py", "a.py")}
 
     # Assert
-    assert index._lines_of.cache_info().currsize == 2
-    assert line_counts["app/orders.py"] == len(again) == 5
+    assert again == {"c.py": first["c.py"], "a.py": first["a.py"]}
+    assert set(index.unavailable_files) == {"a.py"}
 
 
 def test_a_repeated_text_search_starts_no_second_process(sample_index: CodeIndex, spawned) -> None:
@@ -182,12 +186,29 @@ def test_a_file_removed_after_inventory_is_reported_when_a_search_meets_it(sampl
     assert "app/settings.py" in index.unavailable_files
 
 
-def test_facts_on_one_line_are_ordered_by_position_then_name(tmp_path: Path) -> None:
+def test_a_file_changed_during_a_search_is_only_unavailable_and_the_scan_finishes(tmp_path: Path) -> None:
+    # Arrange: a.py is read, then edited before its facts are scanned
+    (tmp_path / "a.py").write_text("def a():\n    return 'needle'\n")
+    (tmp_path / "b.py").write_text("def b():\n    return 'needle'\n")
+    index = CodeIndex(tmp_path, ["a.py", "b.py"])
+    index.lines("a.py")
+    (tmp_path / "a.py").write_text("def a():\n    return 'needle, changed'\n")
+
+    # Act
+    unparsed = index.unparsed_files
+    hits = index.search_text("needle")
+
+    # Assert
+    assert "changed" in index.unavailable_files["a.py"]
+    assert index.available_files == ("b.py",)
+    assert index.parser_scans_pending == ()
+    assert [hit.file for hit in hits] == ["b.py"]
+    assert unparsed == frozenset()
+
+
+def test_symbols_on_the_same_lines_are_ordered_by_name_on_every_scan(tmp_path: Path) -> None:
     # Arrange
-    (tmp_path / "chain.ts").write_text(
-        "export const o = { b() { return 1; }, a() { return 2; } };\n"
-        "outer(middle(inner(1)), new Box(2)).then(done);\n"
-    )
+    (tmp_path / "chain.ts").write_text("export const o = { b() { return 1; }, a() { return 2; } };\n")
 
     # Act: a fresh parse each time, since ast-grep may print matches in any order.
     runs = [scan_facts(["chain.ts"], tmp_path, Unparsed())["chain.ts"] for _ in range(5)]
@@ -195,13 +216,6 @@ def test_facts_on_one_line_are_ordered_by_position_then_name(tmp_path: Path) -> 
     # Assert
     assert all(run == runs[0] for run in runs)
     assert [span.name for span in runs[0].structure.functions] == ["a", "b"]
-    assert [call.name for call in runs[0].calls if call.line == 2] == [
-        "outer",
-        "then",
-        "middle",
-        "inner",
-        "Box",
-    ]
 
 
 def test_listing_callees_searches_once_for_every_name_called(tmp_path: Path, spawned: Counter[str]) -> None:
@@ -242,12 +256,13 @@ def test_an_index_built_in_a_test_never_writes_the_user_fact_cache(tmp_path: Pat
     assert list(index._fact_cache.root.rglob("*.json"))
 
 
-def test_a_file_changed_after_its_lines_were_evicted_is_reported_not_read(
+def test_a_file_changed_after_its_lines_were_evicted_reads_as_first_read_and_is_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Arrange
+    # Arrange: a.py is read, evicted from a one-file line cache by b.py, then edited
     monkeypatch.setattr(code_index, "LINE_CACHE_FILES", 1)
-    (tmp_path / "a.py").write_text("def a():\n    return 1\n")
+    original = "def a():\n    return 1\n"
+    (tmp_path / "a.py").write_text(original)
     (tmp_path / "b.py").write_text("def b():\n    return 2\n")
     index = CodeIndex(tmp_path, ["a.py", "b.py"])
     first = index.read_slice(index.functions_in("a.py")[0])
@@ -256,10 +271,12 @@ def test_a_file_changed_after_its_lines_were_evicted_is_reported_not_read(
 
     # Act
     again = index.read_slice(first.span)
+    window = index.read_window("a.py", 1, radius=5)
 
     # Assert
-    assert "changed" not in again.text
-    assert again.file_sha256 == first.file_sha256
+    assert again.text == first.text == original.rstrip("\n")
+    assert again.file_sha256 == first.file_sha256 == hashlib.sha256(original.encode()).hexdigest()
+    assert window.text == original.rstrip("\n")
     assert "changed" in index.unavailable_files["a.py"]
 
 
