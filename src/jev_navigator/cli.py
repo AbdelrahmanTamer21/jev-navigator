@@ -20,7 +20,7 @@ from time import monotonic
 from .adapters.typesafe import TypeSafeJevClient
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
-from .cli_trace import create_trace_evidence_pack
+from .cli_trace import create_trace_evidence_pack, unavailable_file_lines
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
@@ -35,6 +35,7 @@ from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
 from .run_files import place_label, source_shown, step_shown
+from .usage_receipt import usage_receipt, usage_report_lines
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 KEEP_REQUESTS_HELP = (
@@ -398,6 +399,7 @@ def create_evidence_pack(
             requested_model=getattr(client, "model", "unknown"),
             served_model=judge.served_model,
             input_total=judge.input_total,
+            unanswered_requests=judge.unanswered_requests,
             duration_seconds=seed_duration_seconds,
             total_calls=seed_calls,
             entry_selection=selection,
@@ -910,8 +912,9 @@ def _load_typesafe_environment(
     environment: MutableMapping[str, str],
     path: Path | None = None,
 ) -> None:
-    """Load official TypeSafe SDK settings: process environment, then checkout `.env`,
-    then the legacy `~/.config/jvn/env`; a process value always takes precedence."""
+    """Load official TypeSafe SDK settings: process environment, then this tool's checkout `.env`
+    (never a repository under analysis), then the legacy `~/.config/jvn/env`; a process value always
+    takes precedence."""
     from .environment import load_typesafe_environment
 
     load_typesafe_environment(environment, legacy=path)
@@ -943,6 +946,7 @@ def _manifest(
     requested_model: str,
     served_model: str | None,
     input_total: TokenTotal,
+    unanswered_requests: int,
     duration_seconds: float,
     total_calls: int,
     entry_selection: EntrySelection | None,
@@ -975,7 +979,7 @@ def _manifest(
             "requested_model": requested_model,
             "served_model": served_model,
             "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_total.reported,
-            "responses_without_usage": _plus_known(_carried_unreported(previous), input_total.not_reported),
+            **usage_receipt(previous, input_total, unanswered_requests),
         },
         "search": {
             "outcome": result.outcome,
@@ -1115,27 +1119,16 @@ def _find_all_report(manifest: dict) -> str:
                 f"`{source['file']}:{source['lines'][0]}-{source['lines'][1]}` |"
             )
     lines += ["", "## Coverage gaps", ""]
-    for field in ("remaining_files", "unparsed_files", "unsupported_files", "unavailable_files"):
+    for field in ("remaining_files", "unparsed_files", "unsupported_files"):
         lines.append(f"- {field}: {', '.join(search[field]) or 'none'}")
+    lines.append("- unavailable_files:" if search["unavailable_files"] else "- unavailable_files: none")
+    lines += unavailable_file_lines(search["unavailable_files"])
     lines += ["", "## Matching bodies", ""]
     for value in search["found"]:
         source = value["source"]
         lines += [f"### {source['file']}:{source['lines'][0]}-{source['lines'][1]}", ""]
         lines += _code_block(value, "")
     return "\n".join(lines) + "\n"
-
-
-def _carried_unreported(previous: dict | None) -> int | None:
-    """The unreported-response count of an earlier receipt, ``None`` when it predates the field."""
-    return 0 if previous is None else previous["provider"].get("responses_without_usage")
-
-
-def _unreported_text(count: int | None) -> str:
-    return "not known (earlier receipt)" if count is None else str(count)
-
-
-def _plus_known(carried: int | None, added: int) -> int | None:
-    return None if carried is None else carried + added
 
 
 def _navigator_provenance() -> dict:
@@ -1235,6 +1228,7 @@ def _code_block(place: dict, language: str) -> list[str]:
 def _report(manifest: dict) -> str:
     source = manifest["source"]
     search = manifest["search"]
+    provider = manifest["provider"]
     lines = [
         "# Jev navigator evidence pack",
         "",
@@ -1248,16 +1242,16 @@ def _report(manifest: dict) -> str:
         *_failure_lines(search, "- "),
         *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
-        f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
-        f"`{manifest['provider']['served_model']}`",
-        f"- Responses without usage: {_unreported_text(manifest['provider']['responses_without_usage'])}",
+        f"- Provider: requested `{provider['requested_model']}`, served `{provider['served_model']}`",
+        *usage_report_lines(provider),
         f"- Navigation elapsed: {search['duration_seconds']:.3f} seconds "
         "(indexing and entry selection excluded)",
         f"- Coverage caveat: {len(search['not_inspected'])} candidates were not independently opened; "
         f"{len(search['unparsed_files'])} files failed a completed parser scan. "
         f"Pending parser scans: {', '.join(search['parser_scans']['pending']) or 'none'}.",
-        "- Files unavailable (disappeared or changed on disk, or too large to parse): "
+        "- Files unavailable (disappeared or changed on disk, or refused by the parser): "
         f"{len(search['unavailable_files'])}.",
+        *unavailable_file_lines(search["unavailable_files"]),
         "",
         "## Opened code",
         "",

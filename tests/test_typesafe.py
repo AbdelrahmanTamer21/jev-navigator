@@ -554,7 +554,7 @@ def test_sigint_returns_the_active_http_place_as_resumable(
         )
         returned_after = time.monotonic() - interrupted_at[0]
 
-        assert returned_after < 5
+        assert returned_after < 5, "the sent requests were left to the 30 s transport timeout"
         assert result.outcome == Outcome.CANCELLED
         assert {entry.place_key for entry in result.not_inspected} == {place.key for place in places}
         assert {entry.reason for entry in result.not_inspected} == {"cancelled"}
