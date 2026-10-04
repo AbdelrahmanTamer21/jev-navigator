@@ -109,6 +109,36 @@ never reads a `.env` from the directory or repository it searches. A settings fi
 `jvn`'s own `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names; `jvn` names on stderr any
 other name it ignores, never its value.
 
+### Decision-model routes
+
+`SYSTEM_ONE_ROUTES` names the decision models `jvn` asks, in order. With
+`SYSTEM_ONE_ROUTES=drex,jev`, every request goes to Drex first, and to Jev only when Drex fails; the
+journal records each attempt with the route that made it. A size refusal is not a failure: it goes back
+to the judge, which splits the request, because the next route would get the same request. Each route
+reads `SYSTEM_ONE_<NAME>_ENDPOINT`, `SYSTEM_ONE_<NAME>_MODEL` and `SYSTEM_ONE_<NAME>_API_KEY`; `drex`
+and `jev` also take `SYSTEM_ONE_<NAME>=1` for their hosted endpoint and model. Only the `jev` route
+falls back to `TYPESAFE_API_KEY`: every other route needs its own key, so your TypeSafe key never goes
+to Drex or to a server you configured. A route missing its endpoint, model or key stops the command
+before any request, naming the route and the setting. Without `SYSTEM_ONE_ROUTES`, `jvn` uses the default Jev client described above.
+
+Each route has an input limit for the state plus the longest question: Drex accepts 8,192 tokens and
+Jev 32,000, as Analysis Engine measured them; `jvn` turns tokens into characters at the one rate
+`REQUEST_CHARS_PER_TOKEN` in `judgments/client.py`. Any other
+route sets its own with `SYSTEM_ONE_<NAME>_INPUT_TOKENS`, or the command stops naming that setting.
+`jvn` packs every request to the smallest limit in the table, so whichever route answers can take it,
+and remembers a size refusal under the limit of the route that refused. Point Drex at `jvn` through
+the route table: the default client always packs to Jev's limit.
+
+Each route also has its own concurrency: how many requests it receives in flight at once. Drex admits
+2 (it answers HTTP 429 to a third) and Jev takes 32, as Analysis Engine measured them; any other route
+sets `SYSTEM_ONE_<NAME>_CONCURRENCY`, or the command stops naming that setting. A request waits for a
+free slot of the route it goes to before it is sent, so waiting never counts against its timeout, and a
+request that falls back to Jev is not held back by Drex's limit.
+
+One difference under routes: Ctrl-C cannot abort a request already in flight, so the command waits for
+those requests to finish, keeps their answers, and then stops with a resumable pack. Without routes,
+Ctrl-C aborts requests in flight.
+
 ### JSON input for agents and pipelines
 
 Put a request in `request.json`:
@@ -334,7 +364,10 @@ reading them, and a warm lookup starts no text search and parses no file. The fi
 index covers its whole scope: each file the table lacks is read from the fact cache, or parsed, and
 its rows are written. A changed file gets new rows under its new content, a file deleted before the
 first lookup answers none, one deleted later is reported unavailable and proves nothing, and a change
-to the parser or to any language's rules starts a new table. `definitions_in(file)` reads one file's
+to the parser or to any language's rules starts a new table. When the table is warm but the fact
+cache is not (after a change to the fact rules, or after housekeeping pruned it), callers and
+references load the facts their bindings read, the files of the uses and of the definitions, in one
+scan instead of one per file. `definitions_in(file)` reads one file's
 definitions from the table. The table holds names and line numbers, never code. A file counts as read
 in a Find's counts only when navigation reached it, never because the table covered it. A call's or
 argument's receiver, in the table and in the cached facts alike, is kept only when it is a plain chain
@@ -371,12 +404,18 @@ reason, unless a definition in another file, not imported from one of them, sett
 search reports `scope_incomplete` instead of `nothing_left`; a budget-limited result reports which
 fact scans completed and which remain pending. A file that disappears after the working-directory
 inventory was built, or changes after the index first read it, is reported separately as
-unavailable. So is a file too large to parse safely:
-`tools.ast_grep_rules`, the one door every parse passes through, never hands ast-grep a file whose
-estimated parse peak (from the length of each line, `index/file_shape.py`) is over 250 MB, about
-70,000 bytes on one line. A large file that cannot be read to measure it is refused too, with the
-error. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
-peak and the longest line in bytes. A refused file is never recorded as parsed: it stays readable and
+unavailable. So is a file too large to parse safely. `tools.ast_grep_rules`, the one door every
+parse passes through, estimates each file's parse peak (`index/file_shape.py`): 80 MB per MB of the
+file, every byte counted as code, plus the square of the punctuation `{}();,[]` on each line,
+which a minified bundle of a few tens of kilobytes on one line drives up. Files estimated at up to
+250 MB are parsed side by side. A file over that, but within the single-file limit
+(`tools.single_parse_limit_mb()`), is parsed alone, one at a time, with no other file beside it. A file
+over the single-file limit is never handed to ast-grep, and neither is a large file that cannot be read
+to measure it. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
+peak, the limit it is over, and the longest line in bytes. A file that ast-grep itself skips without
+parsing (it prints nothing for a file that is not valid UTF-8, or for one of more than 3,000,000
+bytes and 200,000 lines, which a file parsed alone can be) is refused too, as `not parsed`, and is
+never taken for a file without functions. A refused file is never recorded as parsed: it stays readable and
 searchable as text, it keeps its path in import relations (also as a re-export target), a name its
 bytes mention binds `unknown`, `jvn stats` names it as never scanned, and `find_comments` lists it in
 `refused_files`. Any ast-grep or ripgrep failure other than that verified disappearance still fails the
@@ -412,6 +451,60 @@ pluggable rules (`jev_navigator.facts`): each `Fact` has a name, offsets, line a
 is `FactRule(name, pattern, keep=None)`; the shipped `DEFAULT_COMMENT_RULES` (TODO without owner,
 commented-out code, date, ticket reference) are examples. `outside_names` is an optional filter that
 skips matches inside paths, file names or identifiers: `DATE.with_filter(outside_names)`.
+
+### Choosing the files a search covers
+
+`resolve_scope` decides which files a search covers from paths, git and the first lines of files. It
+parses nothing, and it is not yet wired into the `jvn` commands. A `Scope` carries the request's
+`scope` object: the four `with_` switches and `max_files` are required, because the request schema
+owns their defaults (switches off, a cap of 200), and `Scope` repeats none of them.
+
+```python
+from jev_navigator.index.scope import ResolvedScope, Scope, resolve_scope
+
+scope = Scope(
+    repo=repo_root,
+    include=("app/",),
+    languages=("python",),
+    with_tests=False,
+    with_generated=False,
+    with_vendored=False,
+    with_docs=False,
+    max_files=200,
+)
+resolved = resolve_scope(scope)
+if isinstance(resolved, ResolvedScope):
+    resolved.files  # the files in scope; resolved.filters names every filter applied
+else:
+    resolved.counts_by_folder, resolved.counts_by_language  # a ScopeRefusal: over max_files
+```
+
+- Only files JVN parses (Python, TypeScript, TSX, JavaScript) enter a scope and count toward the cap,
+  plus markup files with `with_docs`; `filters["supported_languages"]` names them.
+- Left out unless asked for: tests (`with_tests`), generated code (`with_generated`: a true
+  `linguist-generated` attribute, or a comment line holding `@generated` or `do not edit`, in any case,
+  in the first 10 lines), vendored code (`with_vendored`: a true `linguist-vendored` attribute, or a
+  `vendor`, `third_party` or `node_modules` folder) and docs (`with_docs`: a `docs` folder or a markup
+  file). A false linguist attribute keeps a file the path or header rule would leave out.
+- A file none of those rules decides may still look generated by its shape: a line over 10,000
+  characters, dense lines, or a very large file (the triggers of `file_shape.shape_of`). Under an
+  output folder (`dist`, `build`, `generated`, `__generated__` or one starting with `generated-`) such
+  a file is left out before the count, listed in `resolved.set_aside` with "left out as generated:
+  under dist/" and its measured facts. Anywhere else it stays in `files`, counted toward the cap, and
+  is listed in `resolved.awaiting_generated_judgment` with its measured facts, for Jev to judge. With
+  `with_generated` nothing is measured and nothing awaits a judgment.
+- `include` and `exclude` entries without `*`, `?` or `[` are folders or files. Other entries are
+  globs over the whole path: `**` crosses folders, and a glob without `/` matches the file name at any
+  depth unless a leading `/` anchors it at the root.
+- `changed_since` keeps the files that differ from a git ref in the working tree, untracked files
+  included; `filters["changed_since_commit"]` records the commit the ref named.
+- More files than `max_files` returns a `ScopeRefusal` instead of files: the count, the cap, the
+  filters, and counts per language and per folder one level below the folder the files share. Each
+  folder label (`src/`, or `/src/*` for files directly in `src`), used as an `include` entry with the
+  same other filters, keeps exactly the files it counts. Raise the cap with `max_files`.
+- An unusable field raises `InvalidScopeError` naming it (`/scope/languages`, `/scope/changed_since`,
+  `/scope/repo`). `checked_root(scope)` runs the `/scope/repo` check alone, for a caller that reads
+  files inside the folder before it resolves the scope.
 
 ### Static trace graphs
 
@@ -647,13 +740,15 @@ explicitly. An unknown name raises `UnknownSectionError`. Each section has its o
 (newest entries kept, long text cut; defaults in `DEFAULT_LIMITS`), applied before the character budget.
 Text limits also apply inside nested lists and mappings. Rendering a limited view preserves the
 complete code and judgments in the append-only record.
-The budget is a character box, capped at Jev's documented 32,000 tokens for state plus the longest
-question times 2.4 characters per token (the Engine's `REQUEST_CHARS_PER_TOKEN`), 76,800 characters
-(the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026). A whole request
-may reach the documented 64k tokens, 153,600 characters. The batching owner (`check_each`,
-`check_every`) and the `find_code` opening questions measure the same boxes before sending and split
-what would exceed them; a direct `Judge.ask` sends what it is given and relies on the provider's
-refusal. When the selected sections still do not fit, the
+The budget is a character box: the client's input limit for state plus the longest question, less
+the longest question asked, measured together with the shared state, and within `budget_chars` when
+the history sets one. Each client declares its
+limits as `input_limits` (`InputLimits`, in characters at the rate `REQUEST_CHARS_PER_TOKEN`); a
+client that declares none is taken to be Jev, 32,000 tokens for state plus the longest question and
+64k tokens for a whole request (the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026). The
+batching owner (`check_each`, `check_every`) and the `find_code` opening questions measure the same
+limits before sending and split what would exceed them; a direct `Judge.ask` sends what it is given
+and relies on the provider's refusal. When the selected sections still do not fit, the
 pluggable `evict` policy trims them; the default `drop_oldest_code` replaces the oldest code bodies with
 `[evicted]` and records each eviction in `history.evictions`. A check that reads no code never evicts.
 Pass `recorder=` (for example a `JsonlJournal`) to record every appended step; the recorder gets each
