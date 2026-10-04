@@ -81,7 +81,7 @@ def closable(client: ScriptedJevClient) -> ScriptedJevClient:
 
 
 def use_clients(monkeypatch: pytest.MonkeyPatch, clients: Iterator) -> None:
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
     monkeypatch.setattr(cli, "system_one_client", lambda environment: next(clients))
 
 

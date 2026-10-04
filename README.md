@@ -105,9 +105,11 @@ When its code runs from a jev-navigator source checkout (`uv run jvn` there, or 
 install), `jvn` first fills what is missing from that checkout's `.env` (see `.env.example`). Any
 install into site-packages (`uv tool install`, `pipx`, a non-editable `pip install`) reads no
 `.env`, and when the directory it runs in holds one, it says on stderr that it did not read it. It
-never reads a `.env` from the directory or repository it searches. A settings file can set only
+never reads a `.env` from the directory or repository it searches, unless that is the checkout
+its own code runs from. A settings file can set only
 `jvn`'s own `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names; `jvn` names on stderr any
-other name it ignores, never its value.
+other name it ignores, never its value. The `JEV_NAVIGATOR_*` settings hold the judgment thresholds
+only; a search's budget comes from its flags or the request's JSON fields.
 
 ### Decision-model routes
 

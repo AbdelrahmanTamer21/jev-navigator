@@ -932,13 +932,13 @@ def _changed_paths(status: str) -> list[str]:
 
 def _working_git_metadata(root: Path, prefixes: Sequence[str]) -> tuple[str, list[str], dict[str, str]]:
     """The HEAD commit, the changed and untracked paths, and the index blob id of each tracked file;
-    all empty outside Git."""
-    try:
-        commit = tools.git(["rev-parse", "HEAD"], root).strip()
-        status = tools.git(["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root)
-        listing = tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root)
-    except tools.ToolFailedError:
+    all empty outside Git, and no revision before the first commit. A repository git refuses raises
+    rather than reading as a plain folder."""
+    if not tools.inside_git_worktree(root):
         return "", [], {}
+    commit = tools.head_commit(root)
+    status = tools.git(["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root)
+    listing = tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root)
     return commit, _changed_paths(status), _regular_blobs(listing)
 
 

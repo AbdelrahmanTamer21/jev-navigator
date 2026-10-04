@@ -11,18 +11,19 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
-from git_repos import commit_files
+from git_repos import commit_files, git
 from isolated_jvn import JVN
 
+from jev_navigator import cli, environment
 from jev_navigator.cli import (
     SCHEMA_VERSION,
-    _load_typesafe_environment,
     _outcome_summary,
     _scope_warning,
     create_evidence_pack,
     main,
 )
 from jev_navigator.directives.find_code import SearchBudget
+from jev_navigator.environment import load_typesafe_environment
 from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
 from jev_navigator.testing import ScriptedJevClient
 
@@ -139,6 +140,59 @@ def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -
     assert (output / "journal.jsonl").read_text()
 
 
+def test_jvn_installed_in_a_host_repository_without_commits_still_writes_its_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The host project's Git repository is not jvn's checkout: its HEAD is never recorded as jvn's
+    # revision, and a host with no commits yet cannot stop a finished search from writing its pack.
+    host = tmp_path / "host"
+    host.mkdir()
+    git(host, "init", "-q")
+    installed = host / ".venv/lib/python3.13/site-packages/jev_navigator"
+    monkeypatch.setattr(cli, "__file__", str(installed / "cli.py"))
+    monkeypatch.setattr(environment, "__file__", str(installed / "environment.py"))
+
+    manifest = _small_search_manifest(tmp_path)
+
+    assert manifest["navigator"]["source_revision"] is None
+    assert manifest["navigator"]["source_dirty"] is None
+    assert manifest["navigator"]["source_revision_error"] is None
+
+
+def test_a_git_failure_in_jvns_checkout_is_recorded_instead_of_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "jvn-checkout"
+    checkout.mkdir()
+    git(checkout, "init", "-q")
+    monkeypatch.setattr(cli, "checkout_root", lambda: checkout)
+
+    manifest = _small_search_manifest(tmp_path)
+
+    provenance = manifest["navigator"]
+    assert provenance["source_revision"] is None
+    assert provenance["source_dirty"] is None
+    assert provenance["source_revision_error"].startswith("git rev-parse HEAD failed: ")
+    assert len(provenance["source_revision_error"]) > len("git rev-parse HEAD failed: ")
+
+
+def _small_search_manifest(tmp_path: Path) -> dict:
+    """The manifest of a finished one-call search over a small committed repository."""
+    repository = tmp_path / "repository"
+    commit_files(repository, {"app/policy.py": "def admit(item):\n    return len(item) <= 3\n"})
+    client = ScriptedJevClient(nouls=lambda question_id, question, state: 0.96)
+    return create_evidence_pack(
+        repository,
+        ("app/",),
+        "the check that limits the number of items",
+        ("app/policy.py:2",),
+        tmp_path / "evidence",
+        SearchBudget(max_depth=0, max_steps=1, max_calls=1, beam_width=1),
+        client,
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+
 def test_evidence_pack_counts_responses_without_usage_instead_of_adding_zero_tokens(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     commit_files(
@@ -199,7 +253,7 @@ def test_budget_pack_reopens_its_saved_frontier_in_a_second_cli_invocation(
         clients.append(instance)
         return instance
 
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
     monkeypatch.setattr(cli, "system_one_client", lambda environment: client())
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -592,7 +646,7 @@ def test_a_full_disk_during_ctrl_c_exits_1_with_that_error_and_its_resume_finish
     interrupted = AnswersAfterTheCancel()
     clients = iter([interrupted, resuming])
     monkeypatch.setattr(JsonlAnswerStore, "_append", full_disk)
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
     monkeypatch.setattr(cli, "system_one_client", lambda environment: next(clients))
     starts = ["--start", "first.py:1", "--start", "second.py:1"]
     command = ["find", "the item limit", "--repo", str(repository), "--beam-width", "2", *starts]
@@ -715,7 +769,7 @@ def offline_main(monkeypatch: pytest.MonkeyPatch) -> dict:
         calls["packs"].append(signature.bind(*args, **kwargs).arguments)
         return {"search": {"outcome": calls["outcome"], "calls": 1}, "provider": {"requested_model": "test"}}
 
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
     monkeypatch.setattr(cli, "system_one_client", lambda environment: Client())
     monkeypatch.setattr(cli, "create_evidence_pack", create_evidence_pack)
     return calls
@@ -777,7 +831,7 @@ def test_each_existing_typesafe_environment_value_wins_independently(tmp_path: P
     path.write_text("TYPESAFE_API_KEY=file-key\nTYPESAFE_BASE_URL=http://file.example/gateway\n")
     environment = {"TYPESAFE_API_KEY": "process-key"}
 
-    _load_typesafe_environment(environment, path)
+    load_typesafe_environment(environment, legacy=path)
 
     assert environment == {
         "TYPESAFE_API_KEY": "process-key",
@@ -794,7 +848,7 @@ def test_user_dotenv_loads_only_settings_and_never_shell_evaluates(tmp_path: Pat
     )
     environment: dict[str, str] = {}
 
-    _load_typesafe_environment(environment, path)
+    load_typesafe_environment(environment, legacy=path)
 
     assert environment == {
         "TYPESAFE_API_KEY": "file-value",
@@ -839,7 +893,7 @@ def test_dotenv_base_url_reaches_the_real_sdk_system_one_endpoint(
             "TYPESAFE_API_KEY=local-viewer-key\n"
             f"TYPESAFE_BASE_URL=http://127.0.0.1:{server.server_port}/jvn\n"
         )
-        _load_typesafe_environment(os.environ, path)
+        load_typesafe_environment(os.environ, legacy=path)
 
         answer = TypeSafeJevClient().ask(
             {"code": "return wanted"},
@@ -871,7 +925,7 @@ def test_find_defaults_to_unique_results_in_jvns_data_folder(
     repository.mkdir(exist_ok=True)
     (repository / "policy.py").write_text("def admit(item):\n    return len(item) <= 3\n")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
 
     class Client(ScriptedJevClient):
         def close(self):
@@ -1232,7 +1286,7 @@ def test_each_run_names_its_answer_store_and_a_fresh_store_isolates_runs(
         clients.append(instance)
         return instance
 
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
     monkeypatch.setattr(cli, "system_one_client", lambda environment: client())
     common = ["findall", "the item limit", "--repo", str(repository)]
     arm_a, arm_b = tmp_path / "arm-a.sqlite", tmp_path / "arm-b.sqlite"
@@ -1276,7 +1330,7 @@ def test_the_answer_store_variable_chooses_the_shared_store_when_no_flag_is_give
 
     store = tmp_path / "from-variable.sqlite"
     monkeypatch.setenv(SHARED_STORE_VARIABLE, str(store))
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
     monkeypatch.setattr(cli, "system_one_client", lambda environment: client())
     common = ["findall", "the item limit", "--repo", str(repository)]
 
@@ -1302,7 +1356,7 @@ def test_a_store_named_inside_jvns_cache_folder_stops_the_run_with_exit_2(
     from jev_navigator import cli
 
     # Arrange: an older JVN's default file name, which housekeeping prunes as an older layout
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
     monkeypatch.setattr(cli, "system_one_client", lambda environment: ScriptedJevClient())
     store = private_cache_root / "answers.sqlite"
     flag = ["--answer-store", str(store)] if named_by == "flag" else []

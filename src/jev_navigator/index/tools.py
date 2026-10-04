@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -56,9 +57,13 @@ def run_command(
     ``stdin``, when given, is written to the command's standard input."""
     completed = subprocess.run(list(arguments), cwd=cwd, input=stdin, capture_output=True, text=True)
     if completed.returncode not in (0, no_match_exit):
-        detail = completed.stderr.strip()[:300]
-        raise ToolFailedError(f"{arguments[0]} exited {completed.returncode}: {detail}")
+        raise _tool_failure(arguments[0], completed.returncode, completed.stderr)
     return completed.stdout
+
+
+def _tool_failure(tool: str, returncode: int, stderr: str) -> ToolFailedError:
+    """The failure with the tool's whole error output, whose cause is often its last line."""
+    return ToolFailedError(f"{tool} exited {returncode}: {stderr.strip()}")
 
 
 @cache
@@ -244,7 +249,7 @@ def _tool_failed(tool: str, returncode: int, errors: IO[bytes]) -> ToolFailedErr
     files, which can run to one line per file of the scope."""
     lines = _stderr_text(errors).splitlines()
     message = "\n".join(line for line in lines if not line.startswith(_SCANNED_FILE_PREFIX))
-    return ToolFailedError(f"{tool} exited {returncode}: {message.strip()}")
+    return _tool_failure(tool, returncode, message)
 
 
 def _stderr_text(errors: IO[bytes]) -> str:
@@ -296,6 +301,30 @@ def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
     return tuple(sorted(dict.fromkeys(files)))
 
 
+def inside_git_worktree(cwd: Path) -> bool:
+    """Whether ``cwd`` lies in a Git worktree. Only git's own "not a git repository" means no; any
+    other failure, such as a repository git refuses for dubious ownership, is raised, so it is never
+    listed as a plain directory. Git runs in the C locale so that message is never translated."""
+    completed = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    if completed.returncode == 0:
+        return completed.stdout.strip() == "true"
+    if "not a git repository" in completed.stderr:
+        return False
+    raise _tool_failure("git", completed.returncode, completed.stderr)
+
+
+def head_commit(cwd: Path) -> str:
+    """HEAD's commit in the Git worktree at ``cwd``; empty before its first commit, which is the one
+    case `git rev-parse -q --verify` reports with exit 1 and no message. Any other failure raises."""
+    return run_command(["git", "rev-parse", "-q", "--verify", "HEAD"], cwd, no_match_exit=1).strip()
+
+
 def _text_hit(match: dict) -> TextHit:
     return TextHit(_decoded(match["path"]), match["line_number"], _decoded(match["lines"]).rstrip("\r\n"))
 
@@ -306,13 +335,6 @@ def _decoded(field: dict) -> str:
     if "text" in field:
         return field["text"]
     return base64.b64decode(field["bytes"]).decode("utf-8", errors="replace")
-
-
-def inside_git_worktree(cwd: Path) -> bool:
-    try:
-        return git(["rev-parse", "--is-inside-work-tree"], cwd).strip() == "true"
-    except ToolFailedError:
-        return False
 
 
 def git(arguments: Sequence[str], cwd: Path, *, stdin: str | None = None) -> str:
@@ -345,9 +367,7 @@ def _cat_file_batch(repository: Path, object_ids: Iterable[str]) -> list[bytes]:
         capture_output=True,
     )
     if completed.returncode != 0:
-        raise ToolFailedError(
-            f"git cat-file exited {completed.returncode}: {completed.stderr.decode()[:300]}"
-        )
+        raise _tool_failure("git cat-file", completed.returncode, completed.stderr.decode())
     return _batch_contents(completed.stdout)
 
 

@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import heapq
 import itertools
-import os
 import signal
 import threading
 from collections.abc import Mapping, Sequence
@@ -142,26 +141,6 @@ class SearchBudget:
     preview_lines: int = 8
     max_slice_chars: int = MAX_SLICE_CHARS
     max_line_chars: int = MAX_LINE_CHARS
-
-    @classmethod
-    def from_env(cls, environment: Mapping[str, str] | None = None) -> SearchBudget:
-        """Library defaults, overridden by ``JEV_NAVIGATOR_<FIELD>`` variables; read once at the edge."""
-        environment = os.environ if environment is None else environment
-        found = {
-            name: int(environment[f"JEV_NAVIGATOR_{name.upper()}"])
-            for name in (
-                "max_depth",
-                "max_steps",
-                "max_calls",
-                "beam_width",
-                "neighbours_per_kind",
-                "preview_lines",
-                "max_slice_chars",
-                "max_line_chars",
-            )
-            if f"JEV_NAVIGATOR_{name.upper()}" in environment
-        }
-        return replace(cls(), **found)
 
 
 @dataclass(frozen=True)
