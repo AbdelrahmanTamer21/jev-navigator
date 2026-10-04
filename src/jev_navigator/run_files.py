@@ -11,6 +11,7 @@ owner of how a key mention is shown without its literal.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from .index.code_index import CodeIndex
 from .judgments.relations import without_quoted_code
 
 _LINE_RANGE = re.compile(r"[-~]")
+_LABEL_NAME = re.compile(r"(?: [^\s`]+)?")
 _NEIGHBOUR_LISTS = ("could_contain", "not_inspected", "not_opened")
 
 
@@ -36,6 +38,33 @@ def place_label(index: CodeIndex, place_key: str) -> str:
     file, _, line = location.rpartition(":")
     symbol = index.known_enclosing_symbol(file, int(line)) if line.isdigit() else None
     return f"{location} {symbol.name}" if symbol is not None and symbol.name else location
+
+
+def is_place_label(place_key: str, text: str) -> bool:
+    """Whether ``text`` has the form ``place_label`` gives ``place_key``: its location, then optionally
+    one name. A signature, which quotes a line of code, does not."""
+    location = place_location(place_key)
+    return text.startswith(location) and _LABEL_NAME.fullmatch(text, len(location)) is not None
+
+
+def carried_over_journal_line(line: str) -> str:
+    """A line of an earlier pack's journal as this pack keeps it. A history step neighbour whose
+    signature is not a label, the code signature an older pack wrote, shows its location instead; a
+    line that is not a JSON record stays as written."""
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return line
+    if record["kind"] != "history_step":
+        return line
+    coded = [
+        offered
+        for offered in record["step"].get("judgments", {}).get("could_contain", [])
+        if not is_place_label(offered["place"], offered["signature"])
+    ]
+    for offered in coded:
+        offered["signature"] = place_location(offered["place"])
+    return json.dumps(record, sort_keys=True) + "\n" if coded else line
 
 
 @dataclass(frozen=True)

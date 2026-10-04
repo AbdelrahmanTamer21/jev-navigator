@@ -14,7 +14,7 @@ from .index.code_index import CodeIndex
 from .index.spans import Span
 from .judgments.judge import CheckResult
 from .judgments.thresholds import NoulVerdict
-from .run_files import PlaceLabels, relation_shown, relationship_shown
+from .run_files import PlaceLabels, is_place_label, relation_shown, relationship_shown
 
 STATE_VERSION = 1
 
@@ -22,7 +22,8 @@ STATE_VERSION = 1
 @dataclass(frozen=True)
 class SavedSearch:
     """``frontier_labels``: the label the earlier save wrote for each place of the frontier, by place
-    key. A restored place's own ``signature`` is its code signature, rebuilt from the code."""
+    key; a place whose stored signature is not a label, the code signature an older pack holds, has
+    none. A restored place's own ``signature`` is its code signature, rebuilt from the code."""
 
     result: FindResult | None
     completed: tuple[CheckResult, ...] | None = None
@@ -115,7 +116,11 @@ def load_resume(path: Path, index: CodeIndex) -> SavedSearch:
         completed = tuple(
             CheckResult(**{**item, "verdict": NoulVerdict(item["verdict"])}) for item in state["completed"]
         )
-    labels = {item["place_key"]: item["signature"] for item in record["not_inspected"]}
+    labels = {
+        item["place_key"]: item["signature"]
+        for item in record["not_inspected"]
+        if is_place_label(item["place_key"], item["signature"])
+    }
     return SavedSearch(result, completed, state.get("check_id"), labels)
 
 

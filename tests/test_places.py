@@ -709,16 +709,18 @@ def a_move_offering(*places: Place) -> Move:
     return lambda index, opened: list(places)
 
 
-def test_a_restored_place_rebuilds_the_signature_its_builder_gave(tmp_path: Path) -> None:
-    # Arrange: a place from each builder; the function and the window carry a name-match binding,
-    # which their signatures mark.
+@pytest.mark.parametrize("file", ["orders.py", "v~2/orders.py", "v:5~2/orders.py"])
+def test_a_restored_place_rebuilds_the_signature_its_builder_gave(tmp_path: Path, file: str) -> None:
+    # Arrange: a place from each builder, in a file whose path may hold a tilde, and a colon and a
+    # number before it, as a window key does; the function and the window carry a name-match
+    # binding, which their signatures mark.
     source = "import os\n\n\ndef place(order):\n    limit = os.environ['LIMIT']\n    return check(order)\n"
-    index = committed_index(tmp_path, {"orders.py": source})
+    index = committed_index(tmp_path, {file: source})
     name_match = Binding(BindingStatus.CANDIDATE, "same name in another file")
     places = [
         function_place(index, index.find_definition("place")[0], "calls check", binding=name_match),
-        window_place(index, "orders.py", 5, "reads LIMIT", radius=2, binding=name_match),
-        range_place(index, "orders.py", 1, 2, "the start of a co-changed file"),
+        window_place(index, file, 5, "reads LIMIT", radius=2, binding=name_match),
+        range_place(index, file, 1, 2, "the start of a co-changed file"),
     ]
 
     # Act

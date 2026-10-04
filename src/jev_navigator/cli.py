@@ -43,7 +43,7 @@ from .judgments.store import (
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
-from .run_files import PlaceLabels, source_shown, step_shown
+from .run_files import PlaceLabels, carried_over_journal_line, source_shown, step_shown
 from .usage_receipt import usage_receipt, usage_report_lines
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
@@ -288,10 +288,7 @@ def create_evidence_pack(
     previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client, workflow)
     _prepare_output(output)
     if resume_from is not None:
-        for name in ("answers.jsonl", "journal.jsonl"):
-            source = resume_from.resolve() / name
-            if source.is_file():
-                shutil.copyfile(source, output / name)
+        _carry_over_run_logs(resume_from.resolve(), output, keep_requests)
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
@@ -929,6 +926,22 @@ def _previous_pack(
             "resume must use the same workflow, repository, scope, target, starts, thresholds and model"
         )
     return previous
+
+
+def _carry_over_run_logs(source: Path, output: Path, keep_requests: bool) -> None:
+    """The earlier pack's answers and journal continue in this pack. With ``keep_requests`` the journal
+    is copied whole; otherwise each line goes through ``run_files.carried_over_journal_line``."""
+    answers = source / "answers.jsonl"
+    if answers.is_file():
+        shutil.copyfile(answers, output / "answers.jsonl")
+    journal = source / "journal.jsonl"
+    if not journal.is_file():
+        return
+    if keep_requests:
+        shutil.copyfile(journal, output / "journal.jsonl")
+        return
+    with journal.open() as lines, (output / "journal.jsonl").open("w") as kept:
+        kept.writelines(carried_over_journal_line(line) for line in lines)
 
 
 def _default_output(repository: Path) -> Path:

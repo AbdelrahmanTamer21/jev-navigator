@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -11,8 +12,10 @@ import pytest
 from git_repos import commit_files
 
 from jev_navigator.cli import create_evidence_pack
+from jev_navigator.cli_resume import load_resume
 from jev_navigator.cli_trace import create_trace_evidence_pack
 from jev_navigator.directives.find_code import SearchBudget
+from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.questions import request_sha256
 from jev_navigator.testing import ScriptedJevClient
 
@@ -161,6 +164,96 @@ def test_a_resumed_default_run_replays_its_stored_answers_and_finds_the_code(tmp
     assert len(client.requests) == 1
     assert resumed["search"]["calls"] == 2
     assert files_holding_code(first) == files_holding_code(second) == []
+
+
+def with_code_signatures(value: object, code_signatures: Mapping[str, str]) -> object:
+    """``value`` with the ``signature`` of every place named in ``code_signatures`` set to its code."""
+    if isinstance(value, list):
+        return [with_code_signatures(item, code_signatures) for item in value]
+    if not isinstance(value, dict):
+        return value
+    shown = {key: with_code_signatures(item, code_signatures) for key, item in value.items()}
+    place = value.get("place", value.get("place_key"))
+    if "signature" in value and place in code_signatures:
+        shown["signature"] = code_signatures[place]
+    return shown
+
+
+def save_as_before_labels(pack: Path, code_signatures: Mapping[str, str]) -> None:
+    """Rewrite ``pack`` as JVN wrote it from 29.09 to 03.10: the manifest, the journal and resume.json
+    gave each neighbour its code signature, which quotes the neighbour's first line."""
+    for name in ("manifest.json", "resume.json"):
+        record = json.loads((pack / name).read_text())
+        (pack / name).write_text(json.dumps(with_code_signatures(record, code_signatures)))
+    lines = (pack / "journal.jsonl").read_text().splitlines()
+    records = [with_code_signatures(json.loads(line), code_signatures) for line in lines]
+    (pack / "journal.jsonl").write_text("".join(json.dumps(record) + "\n" for record in records))
+
+
+def test_a_run_resumed_from_a_pack_that_saved_neighbour_code_holds_no_code_text(tmp_path: Path) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    first, second = tmp_path / "first", tmp_path / "second"
+    find_pack(repository, first, "find", 1)
+    index = CodeIndex.from_directory(repository, ("app/",), fact_cache_dir=tmp_path / "fact-cache")
+    frontier = load_resume(first / "resume.json", index).result.not_inspected
+    save_as_before_labels(first, {entry.place_key: entry.signature for entry in frontier})
+    assert files_holding_code(first) == ["journal.jsonl", "manifest.json", "resume.json"]
+
+    # Act
+    find_pack(repository, second, "find", 1, resume_from=first)
+
+    # Assert
+    assert files_holding_code(second) == []
+
+
+@pytest.mark.parametrize("keep_requests", [False, True])
+def test_a_resumed_run_continues_a_journal_written_in_its_own_mode_unchanged(
+    tmp_path: Path, keep_requests: bool
+) -> None:
+    # Arrange: a default journal names each neighbour by its label; with keep_requests it quotes the
+    # neighbour's code.
+    repository = marked_repository(tmp_path / "repository")
+    first, second = tmp_path / "first", tmp_path / "second"
+    find_pack(repository, first, "find", 1, keep_requests=keep_requests)
+    earlier = (first / "journal.jsonl").read_text()
+
+    # Act
+    find_pack(repository, second, "find", 1, keep_requests=keep_requests, resume_from=first)
+
+    # Assert
+    assert (MARKER in earlier) is keep_requests
+    assert (second / "journal.jsonl").read_text().startswith(earlier)
+
+
+def test_a_search_stopped_in_a_folder_whose_name_holds_a_tilde_resumes(tmp_path: Path) -> None:
+    # Arrange: the stopped search leaves unopened the import line before `handle`, a line range whose
+    # key, app/v~2/entry.py:1-2, holds a tilde before its line numbers.
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/v~2/entry.py": "from .policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "app/v~2/policy.py": "def admit(item):\n    return len(item) <= 3\n",
+        },
+    )
+
+    def search(output: Path, **options) -> dict:
+        start, budget = ("app/v~2/entry.py:4",), SearchBudget(max_calls=1, beam_width=1)
+        options["fact_cache_dir"] = tmp_path / "fact-cache"
+        return create_evidence_pack(
+            repository, ("app/",), TARGET, start, output, budget, limit_client(), **options
+        )
+
+    stopped = search(tmp_path / "first")
+
+    # Act
+    resumed = search(tmp_path / "second", resume_from=tmp_path / "first")
+
+    # Assert
+    assert "app/v~2/entry.py:1-2" in [entry["place"] for entry in stopped["search"]["not_inspected"]]
+    assert resumed["search"]["outcome"] == "found"
+    assert [visit["place"] for visit in resumed["search"]["found"]] == ["app/v~2/policy.py:1-2"]
 
 
 @pytest.mark.parametrize("keep_requests", [False, True])

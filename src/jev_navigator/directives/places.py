@@ -25,6 +25,7 @@ _ENVIRONMENT_READ = re.compile(
 )
 _QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{5,79})["'`]""")
 _KEY_SHAPE = re.compile(r"[._:/-]")
+_WINDOW_KEY_LINES = re.compile(r"(\d+)~\d+")
 MAX_KEY_HITS = 30
 _PASSED_ON_ROLES = frozenset(
     {"argument", "decorator", "collection", "assignment", "export", "return", "receiver", "type"}
@@ -101,11 +102,16 @@ def restored_signature(
     showed. Only lines are read, nothing is parsed."""
     if kind == "function":
         return _function_signature(index, span, _with_binding(relation or "", binding))
-    location, around, _ = key.rpartition("~")
-    if around:
-        line = int(location.rpartition(":")[2])
+    line = _window_line(key)
+    if line is not None:
         return _window_signature(index, span, line, _with_binding(relation or "", binding))
     return _range_signature(index, span, relation or "")
+
+
+def _window_line(key: str) -> int | None:
+    """The line a window key, ``path:line~radius``, names; None for any other key."""
+    lines = _WINDOW_KEY_LINES.fullmatch(key.rpartition(":")[2])
+    return int(lines[1]) if lines else None
 
 
 def _function_signature(index: CodeIndex, span: Span, shown_relation: str) -> str:
