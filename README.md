@@ -73,6 +73,12 @@ Needs Python 3.11 or newer, and `ast-grep`, `rg` (ripgrep) and `git` on the PATH
 the official SDK for live calls; set `TYPESAFE_API_KEY`. Everything else, including the tests, runs
 offline.
 
+JVN limits its own memory, for the command and for every program that imports the library. Each
+process may grow by 1,024 MB, its ast-grep, ripgrep and git processes included, and all JVN processes
+on a machine share 4,096 MB; a process waits up to two minutes for room, then stops with
+`MemoryLimitReachedError`. See [Memory limit](docs/cli.md#memory-limit) for what a refusal does and
+the settings.
+
 ## Live evidence-pack command
 
 Start in the directory you want to search:

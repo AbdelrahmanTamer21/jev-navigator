@@ -13,6 +13,7 @@ that are absent from the source?” rather than “find everything important”.
 - [Continue after a call limit](#continue-after-a-call-limit)
 - [JSON requests](#json-requests)
 - [Results, progress and exit status](#results-progress-and-exit-status)
+- [Memory limit](#memory-limit)
 - [Agent workflow](#agent-workflow)
 - [Find All function search](#find-all-function-search)
 - [Workflow trace](#workflow-trace)
@@ -185,7 +186,7 @@ Check the command's exit status before reading a result file:
 | Exit code | Meaning |
 |---|---|
 | `0` | A search finished and wrote its result. Read `search.outcome`; this does not guarantee a match. |
-| `1` | Search, configuration, filesystem or provider failure. Read stderr. When a request of a Find or Find All search failed, the pack is written first: `search.outcome` is `failed`, `search.failure` holds the error's type, message, causes and journal `request_id`, and stderr names the `--resume` path. |
+| `1` | Search, configuration, filesystem or provider failure. Read stderr. When a request of a Find or Find All search failed, the pack is written first: `search.outcome` is `failed`, `search.failure` holds the error's type, message, causes and journal `request_id`, and stderr names the `--resume` path. JVN's memory limit stopping a search is reported the same way; see [Memory limit](#memory-limit). |
 | `2` | Invalid command or request. Read stderr. |
 | `130` | Cancelled with Ctrl-C. Existing journal records remain available. A failure that arrives while the command is cancelling exits `1` with that failure instead, with the same resume state. |
 
@@ -200,6 +201,35 @@ the manifest, report, journal and resume state hold no source code: places appea
 `path:start-end` with file hashes, neighbours as `path:line name`, a key mention as `mentions a key
 (path:line)`, and journal requests as hashes. With `--keep-requests` the manifest and report also carry the code and the journal the
 exact request body; inspect the journal's exact-capture flags when auditing bytes.
+
+## Memory limit
+
+Every JVN process has a memory allowance, and all JVN processes on one machine share a ceiling. This
+covers the `jvn` command and every program that imports `jev_navigator`.
+
+- **Allowance:** a process may grow by 1,024 MB past the memory it held when JVN first started a
+  tool, counting the ast-grep, ripgrep and git processes it runs. Over it, JVN stops those processes
+  and raises `MemoryLimitReachedError`, which names the allowance, the memory in use and that baseline.
+  ast-grep parses only as many files at once as the allowance affords: 3 at the default.
+- **Ceiling:** 4,096 MB, so four slots of 1,024 MB. A process takes a slot when it first starts a
+  tool and keeps it until it exits. When every slot is held, it waits up to 120 seconds for one, then
+  raises `MemoryLimitReachedError`, which names the processes holding the slots. The slots are files
+  in `/tmp/jev-navigator-memory-<uid>`, and the operating system frees a slot when its process ends,
+  however it ends.
+- **What a refusal does:** during a Find, its entry selection or Find All's enumeration, the search
+  ends `failed` with resume state, and `--resume` continues it once there is room. A refusal before
+  any search starts, such as a full ceiling at the first file listing, exits `1` having done no work:
+  run the command again later.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `JEV_NAVIGATOR_MEMORY_ALLOWANCE_MB` | `1024` | What one JVN process may grow by, its tools included. |
+| `JEV_NAVIGATOR_MEMORY_CEILING_MB` | `4096` | What all JVN processes on the machine may hold; slots are ceiling divided by allowance. |
+| `JEV_NAVIGATOR_MEMORY_WAIT_SECONDS` | `120` | How long a process waits for a free slot. |
+| `JEV_NAVIGATOR_MEMORY_SLOTS_DIR` | `/tmp/jev-navigator-memory-<uid>` | The slot folder. It must be a folder of this user, never a link. |
+
+The defaults are measured (04.10.2026): parsing every file of an app-sized scope, the largest measured
+(15.6 MB of code) peaked at 333 MB, and the worst, a folder of generated bundles, at 471 MB.
 
 ## Agent workflow
 
