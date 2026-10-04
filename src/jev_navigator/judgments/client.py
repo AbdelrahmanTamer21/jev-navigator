@@ -76,7 +76,8 @@ class InputLimits:
 
 
 JEV_INPUT_LIMITS = InputLimits.from_tokens(JEV_STATE_TOKEN_LIMIT, JEV_REQUEST_TOKEN_LIMIT)
-"""Jev's limits: 76,800 characters for the state plus the longest question, 153,600 for a body."""
+"""Jev's limits: ``JEV_STATE_TOKEN_LIMIT`` for the state plus the longest question and
+``JEV_REQUEST_TOKEN_LIMIT`` for a body, in characters at ``REQUEST_CHARS_PER_TOKEN``."""
 
 
 def input_limits_of(client: object) -> InputLimits:
