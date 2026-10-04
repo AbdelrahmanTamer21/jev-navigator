@@ -372,9 +372,8 @@ search reports `scope_incomplete` instead of `nothing_left`; a budget-limited re
 fact scans completed and which remain pending. A file that disappears after the working-directory
 inventory was built, or changes after the index first read it, is reported separately as
 unavailable. So is a file too large to parse safely. `tools.ast_grep_rules`, the one door every
-parse passes through, estimates each file's parse peak (`index/file_shape.py`): 80 MB per MB of code,
-counting every byte outside a quoted string of 1,000 bytes or more on one line (such a string is one
-node, however long), plus the square of the punctuation `{}();,[]` on each line,
+parse passes through, estimates each file's parse peak (`index/file_shape.py`): 80 MB per MB of the
+file, every byte counted as code, plus the square of the punctuation `{}();,[]` on each line,
 which a minified bundle of a few tens of kilobytes on one line drives up. Files estimated at up to
 250 MB are parsed side by side. A file over that, but within the single-file limit
 (`tools.single_parse_limit_mb()`), is parsed alone, one at a time, with no other file beside it. A file

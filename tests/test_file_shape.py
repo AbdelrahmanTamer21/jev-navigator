@@ -37,12 +37,42 @@ def test_an_empty_file_has_no_lines_and_costs_only_the_base() -> None:
     assert shape.fits_side_by_side
 
 
-def test_the_estimate_follows_the_punctuation_of_a_line_not_its_length() -> None:
+def test_a_long_string_costs_by_its_size_and_minified_code_by_its_punctuation() -> None:
     image_string = measure(b"export const background = '" + b"A" * 2_000_000 + b"';\n")
     minified_code = measure(_one_line(2_000_000))
 
-    assert image_string.parse_peak_mb == pytest.approx(25, abs=1)
+    assert image_string.parse_peak_mb == pytest.approx(25 + 80 * 2, abs=1)
     assert minified_code.parse_peak_mb > 1_000
+
+
+_TERMS = " + ".join(f"a{i}" for i in range(1300))
+_WORDS = " ".join(f'<b className="k">w{i}</b>' for i in range(400))
+
+
+@pytest.mark.parametrize(
+    ("line_of", "real_peak_mb"),
+    [
+        (lambda n: f"let v{n} = `it's` + {_TERMS} + 'x';\n", 253.8),
+        (lambda n: f"/* don't */ let v{n} = {_TERMS} + 'x';\n", 253.5),
+        (lambda n: f'let v{n} = `say "${{{_TERMS}}}"`;\n', 253.7),
+        (lambda n: f"v{n} = '''don't''' + {_TERMS} + 'z'\n", 199.7),
+        (lambda n: f"const p{n} = <div>Don't {_WORDS} isn't</div>;\n", 186.8),
+    ],
+    ids=["template-apostrophe", "block-comment", "template-quote", "triple-quote", "jsx-text"],
+)
+def test_a_quote_that_opens_no_string_never_hides_the_code_after_it(line_of, real_peak_mb: float) -> None:
+    # Measured by jvn-verifier on 04.10.2026: 4 MB of such lines peak at these MB under ast-grep
+    content = _lines_up_to(4_000_000, line_of)
+
+    assert measure(content.encode()).parse_peak_mb >= real_peak_mb
+
+
+def _lines_up_to(size: int, line_of) -> str:
+    lines, total = [], 0
+    while total < size:
+        lines.append(line_of(len(lines)))
+        total += len(lines[-1])
+    return "".join(lines)
 
 
 def test_code_of_short_lines_costs_by_its_size() -> None:
@@ -95,10 +125,10 @@ def test_a_long_line_of_short_strings_is_priced_as_code() -> None:
     assert concatenation.parse_peak_mb > 300
 
 
-def test_a_line_of_one_long_string_is_priced_by_its_punctuation_not_its_size() -> None:
+def test_a_line_of_one_long_string_as_large_as_documensos_svg_path_is_parsed_side_by_side() -> None:
     path = b'  d="' + b"M708 195.8c.4-1.5.8-3.5 2-4.7 " * 80_000 + b'"\n'
 
-    assert measure(b"<path\n" + path + b"/>\n").parse_peak_mb < 30
+    assert measure(b"<path\n" + path + b"/>\n").fits_side_by_side
 
 
 def test_the_bound_for_a_one_line_bundle_sits_between_25000_and_32000_characters() -> None:
