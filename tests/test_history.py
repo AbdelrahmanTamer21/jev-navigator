@@ -160,16 +160,34 @@ def test_a_check_that_reads_no_code_never_evicts_code() -> None:
     assert history.evictions == []
 
 
-def test_the_budget_is_capped_at_jevs_state_limit_and_overflow_raises() -> None:
-    # Arrange
-    capped = History(budget_chars=10**6)
-    tiny = History(budget_chars=5)
-    tiny.append(step(1))
+def test_the_budget_is_capped_at_jevs_state_limit() -> None:
+    assert History(budget_chars=10**6).budget_chars == JEV_INPUT_BOX_CHARS
+
+
+def test_sections_that_do_not_fit_even_without_code_raise_and_evict_nothing() -> None:
+    # Arrange: the decisions alone need more than the budget, and no code is read to evict.
+    history = History(budget_chars=100)
+    for number in range(3):
+        history.append(step(number, "y" * 300, decision="opened " + "z" * 100))
 
     # Act and Assert
-    assert capped.budget_chars == JEV_INPUT_BOX_CHARS
     with pytest.raises(HistoryTooLargeError):
-        tiny.state_for(["fetched"])
+        history.state_for(["decisions"])
+    assert history.evictions == []
+
+
+def test_code_is_evicted_before_the_history_is_declared_too_large() -> None:
+    # Arrange: the stubs fit the budget, the code does not.
+    history = History(budget_chars=900)
+    for number in range(3):
+        history.append(step(number, "y" * 600))
+
+    # Act
+    state = history.state_for(["fetched"])
+
+    # Assert
+    assert [entry["code"] for entry in state["fetched"]] == ["[evicted]"] * 2 + ["y" * 600]
+    assert len(history.evictions) == 2
 
 
 def test_the_shared_state_counts_against_the_history_budget() -> None:
