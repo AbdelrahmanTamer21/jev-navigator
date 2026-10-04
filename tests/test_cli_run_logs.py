@@ -244,6 +244,70 @@ def test_a_capped_run_and_its_resume_send_exactly_the_requests_of_an_uninterrupt
     assert files_holding_code(tmp_path / "first") == []
 
 
+def test_ctrl_c_after_a_rounds_answers_land_and_its_resume_send_exactly_the_requests_of_an_uninterrupted_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl-C lands after a round's answers arrived but before they are merged: while the round's
+    thread pool shuts down. The opened place must stay on the saved frontier, so Resume replays its
+    stored answer and goes on, instead of ending with nothing left to open."""
+    # Arrange
+    from concurrent.futures import ThreadPoolExecutor
+
+    from jev_navigator.directives import find_code as find_code_module
+
+    class InterruptedAtShutdown(ThreadPoolExecutor):
+        interrupts_left = 1
+
+        def shutdown(self, *args, **kwargs) -> None:
+            super().shutdown(*args, **kwargs)
+            if type(self).interrupts_left:
+                type(self).interrupts_left -= 1
+                raise KeyboardInterrupt
+
+    repository = marked_repository(tmp_path / "repository")
+    whole_client, first_client, resumed_client = limit_client(), limit_client(), limit_client()
+    options = {"fact_cache_dir": tmp_path / "fact-cache"}
+    interrupted = {**options, "answer_store": tmp_path / "interrupted-answers.sqlite"}
+    start = ("app/entry.py:5",)
+    budget = SearchBudget(beam_width=1, max_calls=5)
+    create_evidence_pack(
+        repository,
+        ("app/",),
+        TARGET,
+        start,
+        tmp_path / "whole",
+        budget,
+        whole_client,
+        answer_store=tmp_path / "whole-answers.sqlite",
+        **options,
+    )
+    monkeypatch.setattr(find_code_module, "ThreadPoolExecutor", InterruptedAtShutdown)
+    cancelled = create_evidence_pack(
+        repository, ("app/",), TARGET, start, tmp_path / "first", budget, first_client, **interrupted
+    )
+
+    # Act
+    resumed = create_evidence_pack(
+        repository,
+        ("app/",),
+        TARGET,
+        start,
+        tmp_path / "second",
+        budget,
+        resumed_client,
+        resume_from=tmp_path / "first",
+        **interrupted,
+    )
+
+    # Assert
+    def hashes(client: ScriptedJevClient) -> list[str]:
+        return [request_sha256(state, questions) for state, questions in client.requests]
+
+    assert cancelled["search"]["outcome"] == "cancelled"
+    assert resumed["search"]["outcome"] == "found"
+    assert hashes(first_client) + hashes(resumed_client) == hashes(whole_client)
+
+
 def offered_signatures(manifest: dict) -> list[str]:
     return [
         offered["signature"]

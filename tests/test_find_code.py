@@ -1245,6 +1245,40 @@ def test_a_send_the_interrupt_aborted_is_set_aside_as_cancelled(tmp_path: Path) 
     }
 
 
+def test_an_interrupt_after_a_round_is_merged_keeps_its_place_merged_once(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "places.txt").write_text("first\nsecond\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
+    stop_rule = StopRule(Check("is_done", "Is the search done?", Criterion("Yes."), Criterion("No.")))
+
+    class InterruptedAtTheStopCheck:
+        model = "interrupted-at-the-stop-check"
+
+        def ask(self, state, questions):
+            if any(question_id.startswith("is_done") for question_id in questions):
+                raise KeyboardInterrupt
+            return ScriptedJevClient(default_noul=0.05).ask(state, questions)
+
+    # Act
+    cancelled = find_code(
+        index,
+        Judge(InterruptedAtTheStopCheck()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        initial_candidates=[(place, 1.0) for place in places],
+        stop_rule=stop_rule,
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert [visit.place_key for visit in cancelled.searched] == [places[0].key]
+    assert [entry.place_key for entry in cancelled.not_inspected] == [places[1].key]
+    assert cancelled.steps == 1
+
+
 def test_the_result_and_the_stop_step_name_the_moves_the_search_used(sample_index: CodeIndex) -> None:
     # Arrange
     client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1))
