@@ -68,11 +68,13 @@ class Unparsed:
 
 
 class LocalName(NamedTuple):
-    """``name`` is bound by the function on lines ``first`` to ``last`` for its own body."""
+    """``name`` is bound on ``line`` by the function on lines ``first`` to ``last`` for its own body:
+    one fact per binding, so a function that binds a name twice has two."""
 
     first: int
     last: int
     name: str
+    line: int
 
 
 class ModuleAlias(NamedTuple):
@@ -247,7 +249,7 @@ def _structure_from_matches(files, unparsed, matches):
     classes: dict[str, set[Span]] = {file: set() for file in files}
     declaration_nodes: dict[str, list[_Declaration]] = {file: [] for file in files}
     declared_names: dict[str, list[tuple[int, str]]] = {file: [] for file in files}
-    bound_names: dict[str, list[tuple[int, str]]] = {file: [] for file in files}
+    bound_names: dict[str, list[tuple[int, int, str]]] = {file: [] for file in files}
     ranges: dict[str, list[tuple[int, int, Span]]] = {file: [] for file in files}
     marks: dict[str, dict[str, set[tuple[int, int]]]] = {
         file: {rule: set() for rule in _MARK_RULES} for file in files
@@ -268,7 +270,7 @@ def _structure_from_matches(files, unparsed, matches):
         elif match["ruleId"] == _DECLARED_NAME_RULE:
             declared_names[file].append((offsets["start"], match["text"]))
         elif match["ruleId"] == _LOCAL_NAME_RULE:
-            bound_names[file].append((offsets["start"], match["text"]))
+            bound_names[file].append((offsets["start"], start, match["text"]))
         elif match["ruleId"] in _DECLARATION_BY_RULE:
             kind = _DECLARATION_BY_RULE[match["ruleId"]]
             declaration_nodes[file].append(_Declaration(offsets["start"], offsets["end"], start, end, kind))
@@ -306,15 +308,16 @@ def _structure_from_matches(files, unparsed, matches):
 
 
 def _local_names(
-    ranges: list[tuple[int, int, Span]], classes: set[Span], names: list[tuple[int, str]]
+    ranges: list[tuple[int, int, Span]], classes: set[Span], names: list[tuple[int, int, str]]
 ) -> tuple[LocalName, ...]:
-    """Each bound name with the lines of the innermost function holding it. A name a class body binds
-    (a Python class attribute) reaches none of its methods, so it is no function's local name."""
+    """Each bound name, with its line, and the lines of the innermost function holding it. A name a
+    class body binds (a Python class attribute) reaches none of its methods, so it is no function's
+    local name."""
     ordered = sorted((_Node(start, end, span) for start, end, span in ranges), key=lambda node: node.start)
     starts = [node.start for node in ordered]
     found = {
-        LocalName(holder.span.start, holder.span.end, name)
-        for offset, name in names
+        LocalName(holder.span.start, holder.span.end, name, line)
+        for offset, line, name in names
         if (holder := _innermost(ordered, starts, offset)) is not None and holder.span not in classes
     }
     return tuple(sorted(found))

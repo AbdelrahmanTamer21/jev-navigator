@@ -1236,6 +1236,37 @@ def test_a_call_through_a_python_module_import_reads_only_that_module(tmp_path: 
     assert (either.status.value, either.target) == ("candidate", None)
 
 
+def test_each_binding_of_a_functions_own_name_is_its_own_fact(tmp_path: Path) -> None:
+    """A function that binds `store` twice records two bindings, each with its line, so a lookup can
+    tell one binding in a scope from several, in Python and in scripts."""
+    # Arrange
+    sources = {
+        "load.js": (
+            "function load(flag) {\n  var store = require('./db');\n"
+            "  if (flag) { var store = require('./fake'); }\n"
+            "  const once = 1;\n  return store.query(once);\n}\n"
+        ),
+        "load.py": (
+            "def load(flag):\n    store = open_db()\n    if flag:\n        store = open_fake()\n"
+            "    once = 1\n    return store.query(once)\n"
+        ),
+    }
+    for file, source in sources.items():
+        (tmp_path / file).write_text(source)
+
+    # Act
+    facts = scan_facts(list(sources), tmp_path, lambda path: sources[path].splitlines(), Unparsed())
+
+    # Assert
+    assert {
+        file: sorted((local.name, local.line) for local in found.structure.local_names)
+        for file, found in facts.items()
+    } == {
+        "load.js": [("flag", 1), ("once", 4), ("store", 2), ("store", 3)],
+        "load.py": [("flag", 1), ("once", 5), ("store", 2), ("store", 4)],
+    }
+
+
 def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_it(tmp_path: Path) -> None:
     """`db.query()` binds to db.js's `query` where `db` is the module-level alias; a parameter `db`, a
     `const store = require(...)` inside a function, a name module-level code binds to two modules, or
