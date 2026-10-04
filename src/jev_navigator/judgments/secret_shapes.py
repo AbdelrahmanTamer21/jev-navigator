@@ -20,12 +20,14 @@ from .secret_values import (
     CALL_OR_INDEX,
     CODE_REFERENCE,
     DOTTED_PATH,
+    ENVIRONMENT_NAME,
     KEY,
     NAME_LITERAL,
     SEPARATOR,
     is_literal,
     is_plain_words,
     key_kind,
+    looks_generated,
     names_something,
 )
 
@@ -60,7 +62,7 @@ _SHELL_WORD = (
     r"""(?:"(?:\\[\s\S]|\\\Z|[^"\\])*+(?:"|\Z)|'(?:\\[\s\S]|\\\Z|[^'\\])*+(?:'|\Z)|\\[\s\S]|[^\s"'\\])++"""
 )
 _SHELL_ASSIGNMENT = re.compile(
-    rf"^[ \t]*(?:export[ \t]+)?{KEY}=(?P<value>(?![{{\[]){_SHELL_WORD})"
+    rf"^[ \t]*(?:export[ \t]+)?{KEY}=(?P<value>(?![{{\[(]){_SHELL_WORD})"
     r"(?=[ \t]*(?:$|#|;|&&|\|\||[A-Za-z_]\w*=))",
     re.M,
 )
@@ -125,21 +127,36 @@ def _quoted_spans(text: str) -> list[Span]:
     ]
 
 
-def _keyed(holds: Callable[[re.Match[str]], bool], naming: bool = True) -> Callable[[re.Match[str]], bool]:
+def _keyed(holds: Callable[[re.Match[str]], bool], scalar: bool = True) -> Callable[[re.Match[str]], bool]:
     """A rule's test for a value under a key: ``holds`` must call it a literal, and the key must be
-    secret, or, when ``naming`` allows it, a naming key whose value is not a name, path or URL."""
+    secret; a scalar rule also takes the other key kinds that ``_keyed_value`` names."""
 
     def hides(match: re.Match[str]) -> bool:
-        return _keyed_value(match, holds(match), naming)
+        return _keyed_value(match, holds(match), scalar)
 
     return hides
 
 
-def _keyed_value(match: re.Match[str], literal: bool, naming: bool = True) -> bool:
+def _keyed_value(match: re.Match[str], literal: bool, scalar: bool = True) -> bool:
+    """Under a secret key every literal is hidden. A scalar rule also hides a one-word literal of eight or
+    more characters under a suffixed key (``SECRET_KEY_BASE``, ``GH_TOKEN_RO``), unless it is a sentence
+    (a message) or an environment variable's name, and a literal
+    that is not a name, path or URL under a naming key (``SECRET_ENV``, ``token_url``)."""
     kind = key_kind(match["key"])
     if not literal or kind is None:
         return False
-    return kind == "secret" or (naming and not names_something(match["value"]))
+    if kind == "secret":
+        return True
+    value = match["value"]
+    if not scalar:
+        return False
+    if kind == "suffixed":
+        return (
+            len(value) >= BY_CONTENT_MIN_CHARS
+            and not any(character.isspace() for character in value)
+            and not ENVIRONMENT_NAME.fullmatch(value)
+        )
+    return not names_something(value)
 
 
 def _call_literal_spans(text: str) -> list[Span]:
@@ -187,7 +204,7 @@ def _plain_literal(match: re.Match[str]) -> bool:
 
 def _bare_literal(match: re.Match[str]) -> bool:
     value = match["value"]
-    return any(c.isalnum() for c in value) and not CODE_REFERENCE.fullmatch(value)
+    return any(c.isalnum() for c in value) and (not CODE_REFERENCE.fullmatch(value) or looks_generated(value))
 
 
 def _quoted_literal(match: re.Match[str]) -> bool:
@@ -202,7 +219,7 @@ def _url_password(match: re.Match[str]) -> bool:
 def _query_secret(match: re.Match[str]) -> bool:
     value = match["value"]
     return (
-        key_kind(match["key"]) == "secret"
+        key_kind(match["key"]) in ("secret", "suffixed")
         and is_literal(value)
         and any(c.isalnum() for c in value)
         and not _PLACEHOLDER.fullmatch(value)
@@ -236,9 +253,9 @@ _RULES: tuple[Callable[[str], list[Span]], ...] = (
     _quoted_spans,
     flow_spans,
     yaml_block_spans,
-    _matches(_PLAIN_VALUE, _keyed(_plain_literal, naming=False)),
+    _matches(_PLAIN_VALUE, _keyed(_plain_literal, scalar=False)),
     _matches(_BARE_VALUE, _keyed(_bare_literal)),
-    _matches(_LITERAL_FALLBACK, _keyed(_quoted_literal, naming=False)),
+    _matches(_LITERAL_FALLBACK, _keyed(_quoted_literal, scalar=False)),
     _call_literal_spans,
     _matches(_QUOTED_ASSIGNMENT, _high_entropy_value),
 )

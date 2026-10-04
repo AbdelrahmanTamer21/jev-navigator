@@ -545,9 +545,12 @@ on its own scope, so searches sharing one judge never use up each other's budget
   triple quotes, across lines, or never closed), YAML block and continued values, nested values that
   hold a literal, plain words, fallbacks after a reference, and literal arguments to secret-named
   calls that look like key material; plus high-entropy quoted values that are not identifier words.
-  A secret-named key ends in a secret word (`authToken`, `DB_PASSWORD`, `password_hash`; not
-  `max_tokens` or `tokenizer`). A key with a naming word after it (`SECRET_ENV`, `token_url`,
-  `secretName`) keeps a value only when it is a name, a path or a URL. A reference stays code: an
+  A key holds a secret when a secret word (including `pass`, `pwd` and `credentials`) is one of its
+  parts: every literal under a key it ends (`authToken`, `DB_PASSWORD`, `db_pass`) is hidden; under a
+  suffixed key (`SECRET_KEY_BASE`, `GH_TOKEN_RO`) a one-word literal of eight or more characters that
+  is not an environment variable's name; under a key a naming word ends (`SECRET_ENV`, `token_url`)
+  a literal that is not a name, a path or a URL. `max_tokens`, `tokenizer` and `bypass` are not
+  secret keys, and a long unquoted run of letters and digits is a value, not a reference. A reference stays code: an
   identifier, dotted path, call, a whole `${...}`, a command substitution `$(...)`, or `$NAME`
   outside single quotes, so `secret: process.env.AUTH_SECRET` reaches Jev unchanged, and so does
   nested metadata such as a Kubernetes `secret:` volume. Every rule scans in time linear in the text

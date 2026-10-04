@@ -134,6 +134,8 @@ SECRET_VALUES = {
         'password: {"part": "s3cret-value", "next": ',
         "s3cret-value",
     ),
+    "unquoted hex key under a lower-case key": ("secret_key_base=" + "4f" * 64, "4f" * 64),
+    "unquoted generated value": ("webhook_secret_v1=whsec_" + "a1B2" * 8, "a1B2" * 8),
     "high-entropy value under an ordinary name": (
         'const signingKey = "Zq8vT2mN4xR7pL1wK9sD3fH6";',
         "Zq8vT2mN4xR7pL1wK9sD3fH6",
@@ -205,6 +207,16 @@ CODE_REFERENCES = [
     "const gitSecretName = `inv-${input.inventoryId}-${input.generation}-git`;",
     'need = isCredential(name) ? "must use valueFrom.secretKeyRef" : "is not an approved literal";',
     "return `read -rsp 'GitLab token: ' GITLAB_TOKEN && printf '\\n' && export GITLAB_TOKEN && ` +",
+    'PASSWORD_TOO_SHORT_MESSAGE = "Password must be at least 8 characters."',
+    'CREDENTIAL_PATTERNS = [\n  { label: "github-token", pattern: /gh_x/g },\n];',
+    "secret-scan:\n  runs-on: ubuntu-latest\n  steps:\n    - name: Install pinned Gitleaks\n",
+    'credentialsSourcePath: "/var/run/secrets/google/credentials.json",',
+    "        token_budget=(",
+    "        password=(",
+    'export GOOGLE_APPLICATION_CREDENTIALS="$CI_TMP/google-adc.json"',
+    "print(f\"GATE pass={c['gate_pass']} confidence={c.get('confidence')}\")",
+    '"rawCredentialInherited": "GOOGLE_VERTEX_CREDENTIALS_JSON" in os.environ,',
+    '_CREDENTIAL_NAME_PROBE = "a" * 40',
 ]
 
 
@@ -289,6 +301,8 @@ LONG_LINES = {
     "plain value with a long space run": "password: a" + " " * 70_000 + "x",
     "flow value of many quoted pairs": "secret: {" + '"a": "b", ' * 7_000 + "}",
     "YAML block of many lines": "password:\n" + "  x: y\n" * 10_000,
+    "assignment pairs": "a=b " * 8_000,
+    "inline SVG attributes": "<svg " + 'x="1" y="2" fill="none" ' * 2_700 + "/>",
 }
 
 
@@ -301,3 +315,45 @@ def test_masking_a_long_line_takes_time_linear_in_its_length(text: str) -> None:
 
     # Assert
     assert time.perf_counter() - started < 1.0
+
+
+SUFFIXED_SECRET_KEYS = [
+    "SECRET_KEY_BASE", "API_KEY_2", "api_key_v2", "apiKey2", "TOKEN_GITHUB", "DB_PASSWORD_PROD",
+    "dbPasswordProd", "STRIPE_SECRET_LIVE", "password1", "PASSWORD_CONFIRMATION", "access_token_secret",
+    "client_secret_value", "refresh_token_old", "MYSQL_ROOT_PASSWORD", "mysql_password_root",
+    "secretAccessKeyId", "GH_TOKEN_RO", "webhook_secret_v1", "PASSWORD_SALT", "pwd_admin", "credentials_json",
+    "db_pass", "userPwd", "credentials",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("key", SUFFIXED_SECRET_KEYS)
+@pytest.mark.parametrize(
+    "shape", ['{key} = "{value}"', "{key}: '{value}'", "{key}={value}", '"{key}": "{value}",']
+)
+def test_a_secret_word_anywhere_in_the_key_makes_it_secret(key: str, shape: str) -> None:
+    # Act
+    masked = SecretMasker().mask(shape.format(key=key, value="hunter2-hunter2x"))
+
+    # Assert
+    assert "hunter2-hunter2x" not in masked
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        'bypass = "allow-all-traffic"',
+        'compass = "north-north-west"',
+        'passport = "travel-docs-only"',
+        "max_tokens = 4096",
+        'MAX_TOKENS_MARKER = "max_tokens_exceeded"',
+        'tokenizer = "cl100k_base"',
+        "packages/trpc/server/api-token-router/create-api-token.ts:9-43",
+        'credentialsMountPath: "/var/run/secrets/google",',
+    ],
+)
+def test_a_secret_word_inside_another_word_is_not_a_secret_key(code: str) -> None:
+    # Act
+    masked = SecretMasker().mask(code)
+
+    # Assert
+    assert masked == code

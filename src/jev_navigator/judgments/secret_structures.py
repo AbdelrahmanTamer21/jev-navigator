@@ -54,9 +54,17 @@ def flow_spans(text: str) -> list[Span]:
 def holds_literal_leaf(content: str) -> bool:
     """Whether nested content under a secret key holds a literal, as the module docstring says."""
     content = _NESTED_COMMENT.sub("", content)
-    quoted = any(not _under_naming_key(content, match.start()) for match in _NESTED_QUOTED.finditer(content))
+    quoted = any(
+        not _under_naming_key(content, match.start()) and not _is_subscript(content, match)
+        for match in _NESTED_QUOTED.finditer(content)
+    )
     unquoted = _NESTED_QUOTED.sub("", content)
     return quoted or any(_is_literal_leaf(leaf) for leaf in _NESTED_LEAF.finditer(unquoted))
+
+
+def _is_subscript(content: str, match: re.Match[str]) -> bool:
+    """A quoted index (``c['gate_pass']``) names a field; it is not a literal value."""
+    return content[match.start() - 1 : match.start()] == "[" and content[match.end() : match.end() + 1] == "]"
 
 
 def _under_naming_key(content: str, position: int) -> bool:
