@@ -13,7 +13,7 @@ import copy
 import inspect
 import threading
 from collections.abc import AsyncIterator, Callable, Generator, Iterator, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed, wait
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
@@ -210,6 +210,11 @@ class Judge:
         child._parent = self
         child._send_slots = self._send_slots
         return child
+
+    @property
+    def unanswered_requests(self) -> int:
+        """The requests sent whose response never arrived, so whose token usage is unknown."""
+        return self.calls - self.input_total.responses
 
     def calls_left(self) -> int | None:
         """The calls this judge may still send under its own and its parents' caps; None when uncapped."""
@@ -763,7 +768,7 @@ class Judge:
 
     def _journal_failure(self, request_id: str | None, error: Exception, raw: RawResponse | None) -> None:
         if self.journal is not None and request_id is not None:
-            self.journal.record_failure(request_id, f"{type(error).__name__}: {error}", raw)
+            self.journal.record_failure(request_id, _failure_text(error), raw)
 
     def _propagate_attempt_journal_error(
         self, request_id: str | None, error: AttemptJournalCallbackError, raw: RawResponse | None
@@ -1294,6 +1299,12 @@ def _pick_result(response: JevResponse, question_id: str, thresholds: Thresholds
 
 def _argument_id(operation: str, offer: CallOffer) -> str:
     return f"{operation}.{offer.argument.question_id}"
+
+
+def _failure_text(error: Exception) -> str:
+    if isinstance(error, CancelledError) and not str(error):
+        return f"{type(error).__name__}: the request was cancelled after it was sent"
+    return f"{type(error).__name__}: {error}"
 
 
 def _batches(plan: _CheckPlan) -> list[list[int]]:

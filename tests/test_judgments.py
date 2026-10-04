@@ -13,11 +13,14 @@ from conftest import BudgetedClient
 from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer
 from jev_navigator.judgments.client import (
     JEV_INPUT_BOX_CHARS,
+    JEV_REQUEST_TOKEN_LIMIT,
+    JEV_STATE_TOKEN_LIMIT,
     MAX_REQUEST_CHARS,
     InputBudgetExceededError,
     MissingAnswerError,
     ReplayOnlyClient,
     UnansweredQuestionError,
+    chars_for_tokens,
 )
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import (
@@ -26,7 +29,7 @@ from jev_navigator.judgments.judge import (
     Judge,
     request_exceeds_input_budget,
 )
-from jev_navigator.judgments.questions import Check, Criterion, Pick
+from jev_navigator.judgments.questions import Check, Criterion, Pick, serialized_chars
 from jev_navigator.judgments.secrets import SecretInRequestError, SecretMasker
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.judgments.thresholds import NoulVerdict, Thresholds
@@ -616,6 +619,7 @@ def test_a_response_without_usage_is_reported_as_not_reported_and_never_added_as
     assert [response.input_tokens for response in answered] == [10, None, 0]
     assert judge.input_total.reported == 10
     assert judge.input_total.not_reported == 1
+    assert judge.unanswered_requests == 0
 
 
 def test_a_reported_zero_counts_as_reported_not_missing() -> None:
@@ -670,6 +674,20 @@ def test_a_response_missing_an_asked_answer_is_refused_and_leaves_the_run_pack_r
     assert unanswered in str(refused.value)
     assert judge.input_total.reported == 100
     assert JsonlAnswerStore(path).records() == ()
+
+
+def test_a_store_replay_is_marked_replayed_and_reports_no_token_count(tmp_path: Path) -> None:
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+    state, questions = {"slice": {"code": "x = 1"}}, {"q": {"type": "noul", "instructions": "Is it?"}}
+    Judge(ScriptedJevClient(), store=store).ask(state, questions, thresholds=Thresholds())
+    replaying = Judge(ScriptedJevClient(), store=store, served_model="jev-scripted")
+
+    replayed = replaying.ask(state, questions, thresholds=Thresholds())
+
+    assert replayed.from_store is True
+    assert replayed.input_tokens is None
+    assert replaying.input_total.responses == 0
+    assert replaying.calls == 0
 
 
 def test_every_result_carries_the_hash_of_the_masked_request_that_answered_it(tmp_path: Path) -> None:
@@ -752,7 +770,7 @@ def test_items_that_would_overflow_one_request_are_packed_so_no_request_exceeds_
     assert len(client.requests) == 2
     judged_files: list[str] = []
     for state, questions in client.requests:
-        body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
+        body = serialized_chars({"state": state, "questions": questions})
         assert body <= MAX_REQUEST_CHARS
         assert len(questions) == len(state["parts"]), "one atomic question per item and slot"
         judged_files.extend(item["file"] for item in state["parts"])
@@ -813,6 +831,24 @@ def test_a_body_over_the_request_box_is_over_budget_although_state_and_question_
     assert not request_exceeds_input_budget(state, dict(list(questions.items())[:100]))
 
 
+def test_non_ascii_state_is_measured_as_the_escaped_body_the_engine_measures() -> None:
+    chinese_comments = "\u4e2d" * 20_000
+    state = {"parts": [{"code": chinese_comments}]}
+
+    assert len(json.dumps(state, ensure_ascii=False)) < JEV_INPUT_BOX_CHARS
+    assert request_exceeds_input_budget(state, {"q": {"ask": "x"}})
+
+
+def test_every_box_derives_from_the_one_characters_per_token_constant() -> None:
+    assert chars_for_tokens(JEV_STATE_TOKEN_LIMIT) == JEV_INPUT_BOX_CHARS == 76_800
+    assert chars_for_tokens(JEV_REQUEST_TOKEN_LIMIT) == MAX_REQUEST_CHARS == 153_600
+    assert chars_for_tokens(8_192) == 19_660
+
+
+def test_serialized_chars_counts_every_escaped_character() -> None:
+    assert serialized_chars({"a": "\u4e2d" * 10}) == len('{"a": "' + "\\u4e2d" * 10 + '"}')
+
+
 def test_provider_max_tokens_error_splits_the_batch_and_keeps_every_question_identity() -> None:
     client = BudgetedClient(34_000)  # stricter than the measured packing budget
     judge = Judge(client)
@@ -824,7 +860,7 @@ def test_provider_max_tokens_error_splits_the_batch_and_keeps_every_question_ide
     assert client.refusals == 1, "the first over-budget request is the provider's own evidence"
     assert len(client.requests) == 2
     for state, questions in client.requests:
-        body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
+        body = serialized_chars({"state": state, "questions": questions})
         assert body <= 34_000
     # Each item keeps its own store identity across the split: every item is judged exactly once.
     keys = [result.item["file"] for result in results["describes"]]

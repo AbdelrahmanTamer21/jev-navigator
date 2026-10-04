@@ -33,6 +33,7 @@ from .judgments.store import DEFAULT_SHARED_STORE, SHARED_STORE_VARIABLE, run_an
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
+from .usage_receipt import usage_receipt, usage_report_lines
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
@@ -384,6 +385,7 @@ def create_evidence_pack(
             requested_model=getattr(client, "model", "unknown"),
             served_model=judge.served_model,
             input_total=judge.input_total,
+            unanswered_requests=judge.unanswered_requests,
             duration_seconds=seed_duration_seconds,
             total_calls=seed_calls,
             entry_selection=selection,
@@ -886,6 +888,7 @@ def _manifest(
     requested_model: str,
     served_model: str | None,
     input_total: TokenTotal,
+    unanswered_requests: int,
     duration_seconds: float,
     total_calls: int,
     entry_selection: EntrySelection | None,
@@ -918,7 +921,7 @@ def _manifest(
             "requested_model": requested_model,
             "served_model": served_model,
             "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_total.reported,
-            "responses_without_usage": _plus_known(_carried_unreported(previous), input_total.not_reported),
+            **usage_receipt(previous, input_total, unanswered_requests),
         },
         "search": {
             "outcome": result.outcome,
@@ -1028,19 +1031,6 @@ def _find_all_report(manifest: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _carried_unreported(previous: dict | None) -> int | None:
-    """The unreported-response count of an earlier receipt, ``None`` when it predates the field."""
-    return 0 if previous is None else previous["provider"].get("responses_without_usage")
-
-
-def _unreported_text(count: int | None) -> str:
-    return "not known (earlier receipt)" if count is None else str(count)
-
-
-def _plus_known(carried: int | None, added: int) -> int | None:
-    return None if carried is None else carried + added
-
-
 def _navigator_provenance() -> dict:
     package_root = Path(__file__).resolve().parent
     source_files = sorted(package_root.rglob("*.py"))
@@ -1114,6 +1104,7 @@ _FRONTIER_REASONS = {
 def _report(manifest: dict) -> str:
     source = manifest["source"]
     search = manifest["search"]
+    provider = manifest["provider"]
     lines = [
         "# Jev navigator evidence pack",
         "",
@@ -1126,9 +1117,8 @@ def _report(manifest: dict) -> str:
         f"- Outcome: **{search['outcome']}**",
         *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
-        f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
-        f"`{manifest['provider']['served_model']}`",
-        f"- Responses without usage: {_unreported_text(manifest['provider']['responses_without_usage'])}",
+        f"- Provider: requested `{provider['requested_model']}`, served `{provider['served_model']}`",
+        *usage_report_lines(provider),
         f"- Navigation elapsed: {search['duration_seconds']:.3f} seconds "
         "(indexing and entry selection excluded)",
         f"- Coverage caveat: {len(search['not_inspected'])} candidates were not independently opened; "
