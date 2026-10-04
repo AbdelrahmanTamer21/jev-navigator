@@ -408,3 +408,19 @@ def test_a_files_language_follows_the_suffix_of_its_last_path_part(path: str) ->
 
     # Assert
     assert language == expected
+
+
+def test_a_literal_search_over_more_files_than_a_parser_command_takes_starts_one_ripgrep(
+    sample_index: CodeIndex, monkeypatch: pytest.MonkeyPatch, spawned: Counter[str]
+) -> None:
+    # Arrange: a parser command takes two files at most, the search covers every scope file
+    monkeypatch.setattr(tools, "MAX_FILES_PER_COMMAND", 2)
+    spawned.clear()
+
+    # Act
+    hits = sample_index.search_text("order")
+
+    # Assert
+    assert len(sample_index.files) > 2
+    assert {hit.file for hit in hits} >= {"app/orders.py", "app/validation.py"}
+    assert spawned[tools.RIPGREP] == 1
