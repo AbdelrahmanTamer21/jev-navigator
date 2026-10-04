@@ -1224,25 +1224,29 @@ def _search_two_places_while_one_is_interrupted(
     )
 
 
-def test_a_provider_error_during_cancellation_comes_out_as_that_error(tmp_path: Path) -> None:
+def test_a_provider_error_during_cancellation_ends_the_search_failed_with_that_error(tmp_path: Path) -> None:
     # Arrange
     cause = ConnectionResetError("connection reset by peer")
     error = ProviderError("Jev answered 503")
     error.__cause__ = cause
     client = FailsWhileCancelling(on_abort=error)
-    _, search = _search_two_places_while_one_is_interrupted(tmp_path, client)
+    places, search = _search_two_places_while_one_is_interrupted(tmp_path, client)
 
     # Act
-    with pytest.raises(ProviderError) as raised:
-        search()
+    failed = search()
 
     # Assert
     assert client.cancelled.is_set()
-    assert raised.value is error
-    assert raised.value.__cause__ is cause
+    assert failed.outcome == Outcome.FAILED
+    assert failed.failure is error
+    assert failed.failure.__cause__ is cause
+    assert {(entry.place_key, entry.reason) for entry in failed.not_inspected} == {
+        (places[0].key, "cancelled"),
+        (places[1].key, "failed"),
+    }
 
 
-def test_a_full_disk_while_storing_an_answer_during_cancellation_comes_out_as_that_error(
+def test_a_full_disk_while_storing_an_answer_during_cancellation_ends_the_search_failed_with_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Arrange
@@ -1259,12 +1263,74 @@ def test_a_full_disk_while_storing_an_answer_during_cancellation_comes_out_as_th
     )
 
     # Act
-    with pytest.raises(OSError) as raised:
-        search()
+    failed = search()
 
     # Assert
     assert client.cancelled.is_set()
-    assert raised.value is disk_full
+    assert failed.outcome == Outcome.FAILED
+    assert failed.failure is disk_full
+
+
+class FailsOnce:
+    """Answers like ``script``, except that the first request about ``failing`` code raises
+    ``error``; asked again, that request is answered. Records every request it receives."""
+
+    def __init__(self, script: ScriptedJevClient, failing: str, error: Exception) -> None:
+        self.script = script
+        self.failing = failing
+        self.error: Exception | None = error
+        self.requests: list[tuple[Mapping, Mapping]] = []
+        self.model = script.model
+
+    def ask(self, state, questions):
+        self.requests.append((state, questions))
+        if self.error is not None and state["slice"]["code"] == self.failing:
+            error, self.error = self.error, None
+            raise error
+        return self.script.ask(state, questions)
+
+
+def test_a_provider_failure_ends_the_search_failed_and_its_resume_finishes_it(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "places.txt").write_text("first\nsecond\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
+    error = ProviderError("Jev answered 503")
+    error.__cause__ = ConnectionResetError("connection reset by peer")
+    script = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.95 if code == "second" else 0.05, could_contain=lambda signature: 0.05
+        )
+    )
+    client = FailsOnce(script, "second", error)
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+
+    def search(resume=None):
+        return find_code(
+            index,
+            Judge(client, store=store),
+            TARGET,
+            [],
+            budget=SearchBudget(beam_width=2),
+            moves={},
+            initial_candidates=[] if resume else [(place, 1.0) for place in places],
+            resume=resume,
+        )
+
+    # Act
+    failed = search()
+    resumed = search(resume=failed)
+
+    # Assert
+    assert failed.outcome == Outcome.FAILED
+    assert failed.failure is error
+    assert [visit.place_key for visit in failed.searched] == [places[0].key]
+    assert [(entry.place_key, entry.reason) for entry in failed.not_inspected] == [(places[1].key, "failed")]
+    assert resumed.outcome == Outcome.FOUND
+    assert resumed.failure is None
+    assert [visit.place_key for visit in resumed.found] == [places[1].key]
+    asked = [state["slice"]["code"] for state, _ in client.requests]
+    assert sorted(asked) == ["first", "second", "second"]
 
 
 def test_a_send_the_interrupt_aborted_is_set_aside_as_cancelled(tmp_path: Path) -> None:
