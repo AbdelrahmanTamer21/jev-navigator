@@ -280,6 +280,18 @@ def _structure_rules(languages: Sequence[str]) -> str:
     return "\n---\n".join(documents)
 
 
+# A component rendered as `<Name ...>` or `<ns.Name ...>` is called by the code that renders it;
+# lower-case names are the platform's own elements (`<div>`), defined nowhere in scope.
+_JSX_CALL_RULE = """rule:
+  any:
+    - kind: jsx_opening_element
+    - kind: jsx_self_closing_element
+  has:
+    field: name
+    regex: "^[A-Z]|[.][A-Z][^.]*$"
+    pattern: $CALLEE"""
+
+
 def _call_rules(languages: Sequence[str]) -> str:
     documents = []
     for language in languages:
@@ -287,6 +299,8 @@ def _call_rules(languages: Sequence[str]) -> str:
         documents.append(f"id: call\nlanguage: {grammar}\nrule:\n  pattern: $CALLEE($$$)")
         if grammar != "python":
             documents.append(f"id: call\nlanguage: {grammar}\nrule:\n  pattern: new $CALLEE($$$)")
+        if grammar == "tsx":
+            documents.append(f"id: call\nlanguage: {grammar}\n{_JSX_CALL_RULE}")
     return "\n---\n".join(documents)
 
 
