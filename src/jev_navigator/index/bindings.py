@@ -101,7 +101,8 @@ def binding_from_facts(facts: CallFacts) -> Binding:
     if not facts.definitions and facts.imported_from:
         paths = ", ".join(dict.fromkeys(fact.path for fact in facts.imported_from))
         return Binding(
-            BindingStatus.CANDIDATE, f"the import names {paths}; none exports {facts.name} in the index scope"
+            BindingStatus.CANDIDATE,
+            f"the import names {paths}, where the index finds no exported {facts.name}",
         )
     if not facts.definitions:
         return Binding(BindingStatus.UNRESOLVED, f"no definition of {facts.name} in the index scope")

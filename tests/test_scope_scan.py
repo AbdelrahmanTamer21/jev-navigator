@@ -1133,7 +1133,7 @@ def test_a_member_read_through_an_import_is_decided_like_a_named_import(tmp_path
     assert bindings[("use_lone.js", 2)].reason == "solo may be defined in files not parsed: lone.js"
     assert {
         bindings[site].reason for site in (("use_tools.js", 2), ("use_tools.ts", 3), ("use_tools.ts", 4))
-    } == {"the import names tools.js; none exports walk in the index scope"}
+    } == {"the import names tools.js, where the index finds no exported walk"}
 
 
 def test_a_name_imported_under_an_alias_binds_to_the_exported_definition(
