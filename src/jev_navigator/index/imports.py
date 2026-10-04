@@ -250,14 +250,10 @@ def _script_files(base: str) -> list[str]:
 
 _PYTHON_COMMENT = re.compile(r"#[^\n]*")
 _SCRIPT_DEFAULT_NAME = re.compile(r"^\s*([\w$]+)\s*(?:,|$)")
-_SCRIPT_NAMESPACE = re.compile(r"\*\s*as\s+([\w$]+)")
-# `const jwt = require('./jwt')`, but not `require('./jwt').verify` or `require('./jwt')(options)`.
-# `const { verify, sign: signToken } = require('./jwt')`, which imports `verify` and `signToken`.
+# `const { verify, sign: signToken } = require('./jwt')`, which imports `verify` and `signToken`, but
+# not `require('./jwt').verify` or `require('./jwt')(options)`.
 _SCRIPT_REQUIRED_NAMES = re.compile(
     r"""\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)(?!\s*[.(\[])"""
-)
-_SCRIPT_REQUIRED_MODULE = re.compile(
-    r"""\b(?:const|let|var)\s+([\w$]+)\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)(?!\s*[.(\[])"""
 )
 _SCRIPT_BRACES = re.compile(r"\{([^}]*)\}")
 
@@ -301,38 +297,6 @@ def imported_names(source: str, path: str) -> dict[str, ImportedName]:
 def _script_imported(specifier: str, exported: str) -> ImportedName:
     """``import { default as entry }`` is a default import: it names no export."""
     return ImportedName(specifier, None if exported == "default" else exported)
-
-
-def module_aliases(source: str, path: str) -> dict[str, str]:
-    """Local name to module specifier, for names that hold a whole module: ``import * as jwt from
-    "./jwt"`` and ``const jwt = require("./jwt")``; in Python ``import app.jwt as jwt``, and
-    ``import app.jwt``, which makes ``app`` and ``app.jwt`` hold the modules of those dotted names."""
-    if path.endswith(".py"):
-        return _python_module_aliases(source)
-    code = _without_script_comments(source)
-    aliases = {match.group(1): match.group(2) for match in _SCRIPT_REQUIRED_MODULE.finditer(code)}
-    for match in _SCRIPT_FROM.finditer(code):
-        keyword, clause, specifier = match.groups()
-        namespace = _SCRIPT_NAMESPACE.search(clause) if keyword == "import" else None
-        if namespace:
-            aliases[namespace.group(1)] = specifier
-    return aliases
-
-
-def _python_module_aliases(source: str) -> dict[str, str]:
-    aliases = {}
-    for _, module, alias in _python_imports(source):
-        if alias:
-            aliases[alias] = module
-        else:
-            aliases.update((prefix, prefix) for prefix in _dotted_prefixes(module))
-    return aliases
-
-
-def _dotted_prefixes(module: str) -> list[str]:
-    """``app``, ``app.jobs`` for ``app.jobs``."""
-    parts = module.split(".")
-    return [".".join(parts[:count]) for count in range(1, len(parts) + 1)]
 
 
 def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | None, str], ...]:

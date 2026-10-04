@@ -297,21 +297,33 @@ Calls are found by name in the syntax tree, which is not a resolved binding. Eve
 `Binding(status, reason, target)`: `resolved` when a module-level definition in the same file, or one
 an import names, proves the target, `candidate` when only the name matches (a method on an unknown receiver, or a
 definition elsewhere with no import), `unresolved` when nothing in scope defines it, and `unknown` when
-the definition may sit in lines the index could not parse. A call `jwt.verify()` where `jwt` holds a
-whole module of the scope (`import * as jwt`, `const jwt = require(...)`, in Python `import app.jwt as
-jwt`, and `app.jwt.verify()` after `import app.jwt`) binds to the `verify` that module, or one it
-re-exports from, defines; only that module's facts are read. A call `halt()` where `halt` imports a
-definition under another name (`import { stop as halt }`, `const { stop: halt } = require(...)`,
-`from m import stop as halt`) binds the same way to `stop`, unless the file defines `halt` itself at
-module level; it is `unknown` when that module could not be parsed where it mentions `stop`. Local
-variables are not read, so an import inside a function counts for the whole file, and a function that
-also assigns `halt` itself still binds `halt()` to `stop`. A default import is looked up by its local
-name. A function or class
+the definition may sit in lines the index could not parse. A call `jwt.verify()` where module-level
+code binds `jwt` to a whole module of the scope (`import * as jwt`, `const jwt = require('./jwt')`,
+in Python `import app.jwt as jwt`, and `app.jwt.verify()` after `import app.jwt`, all read from the
+syntax tree) binds to the `verify` that module, or one it re-exports from, defines; only that module's
+facts are read. A name a function binds for its own body (a parameter, a local
+variable, a caught error or a loop variable) replaces any module-level definition or import of that
+name inside the function: `db.query()` with a parameter `db`, or `stop()` with a parameter `stop`,
+binds to no import; it is a `candidate` whose local value is not resolved. A function counts from its
+first line, so on `stream(c, async (stream) => ...)` the outer call counts as inside the callback.
+Types are looked up apart from values, so a local value never replaces a type. A call `halt()` where
+`halt` imports a definition under another name (`import { stop as halt }`, `const { stop: halt } =
+require(...)`, `from m import stop as halt`) binds the same way to `stop`, unless the file defines
+`halt` itself. A default import is looked up by its local name. Every import, by name, under another
+name, as a default or through a module alias, is decided the same way from the module it names and
+the modules that one re-exports the name from: one definition proves the target, several leave a
+`candidate`, an exporting module that could not be parsed where it mentions the name, or that
+vanished, leaves it `unknown`, and a module that exports no such name leaves a `candidate` that says
+so. A function or class
 held by another function, a class or an object literal, or assigned to a property (`foo.bar =
 function () {}`), is no module-level definition. One assigned to `exports.x` or `module.exports.x`,
 or listed in `module.exports = {...}`, is a CommonJS export: an import names it, its own module does not.
-Each name an exported destructuring binds, as `a` and `c` in `export const { a, b: c } = ...`, is an
-export. References carry a binding too. A
+An import reaches only what its module exports. A Python module exports its whole module scope. A
+script module exports the definitions an `export` statement or list names, its default export
+(`export default build`, `module.exports = build`), and its CommonJS exports (`exports.query = query`,
+`module.exports = { log }`); a module that exports `new Logger()` exports no `log`, and an
+unexported helper stays its own module's. Each name an exported destructuring binds, as `a` and `c` in
+`export const { a, b: c } = ...`, is an export. References carry a binding too. A
 binding counts only the definitions its site can name: a type, a class or a declaration a type can
 name, such as an interface; an export, any definition; and a call or any other reference (an
 argument, receiver, condition or decorator), a function, class or declaration a value can name, such
@@ -446,7 +458,8 @@ contain the code described in `target.description`?" and, per neighbour code lis
 callers in test files after the others; callees, proven production targets first and then the ones
 called from fewest places; code that
 refers to it or that it passes on without a call, as an argument, collection entry, assignment,
-decorator, export, return, method receiver, type or base class; the modules it imports, re-exports
+decorator, export, return, method receiver, type or base class (also a qualified one, `pkg.Base`); the
+modules it imports, re-exports
 or requires (module-level code takes its whole file's imports): the definitions of the names it
 takes from each, and the start of a module it takes whole or takes names from that it does not
 define itself; the other functions of its file, nearest first; lines anywhere in scope (docs and

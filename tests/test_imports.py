@@ -13,7 +13,6 @@ from jev_navigator.index.imports import (
     ImportedName,
     imported_modules,
     imported_names,
-    module_aliases,
     module_imports,
     reexported_names,
 )
@@ -96,53 +95,6 @@ const { app } = require("./app")(options);
         "verify": ImportedName("./jwt", "verify"),
         "signToken": ImportedName("./jwt", "sign"),
         "decode": ImportedName("./jwt", "decode"),
-    }
-
-
-def test_a_module_alias_is_a_name_holding_a_whole_script_module() -> None:
-    """A namespace import or a plain require holds the module; a member read off a require, a call of
-    it, a name imported by name, a namespace re-export and commented-out code hold none."""
-    # Arrange
-    source = """\
-import * as jwt from "./jwt";
-const db = require('./db');
-const verify = require("./jwt").verify;
-const app = require("./app")(options);
-import { sign } from "./jwt";
-export * as tools from "./tools";
-// const old = require("./old");
-"""
-
-    # Act
-    aliases = module_aliases(source, "src/main.ts")
-
-    # Assert
-    assert aliases == {"jwt": "./jwt", "db": "./db"}
-
-
-def test_a_python_import_statement_holds_each_module_it_imports() -> None:
-    """`import a.b as n` binds `n` to `a.b`; `import a.b` makes `a` and `a.b` reachable, each by its
-    own dotted name; one statement may import several modules. A name imported from a module and
-    commented-out code hold none."""
-    # Arrange
-    source = """\
-import app.jobs as jobs
-import app.mail  # sends receipts
-import json, app.billing as billing
-from app import tools
-# import app.old as old
-"""
-
-    # Act
-    aliases = module_aliases(source, "app/main.py")
-
-    # Assert
-    assert aliases == {
-        "jobs": "app.jobs",
-        "app": "app",
-        "app.mail": "app.mail",
-        "json": "json",
-        "billing": "app.billing",
     }
 
 

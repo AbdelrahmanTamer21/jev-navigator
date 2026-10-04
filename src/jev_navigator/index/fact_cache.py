@@ -9,11 +9,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .languages import language_of
-from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch
+from .scope_scan import CallMatch, FileFacts, FileStructure, LocalName, ModuleAlias, ReferenceMatch
 from .spans import Span
 from .tools import ast_grep_version
 
-FACT_RULE_VERSION = "combined-facts-v23-destructured-exports"
+FACT_RULE_VERSION = "combined-facts-v28-python-module-aliases"
 
 
 class FactCache:
@@ -69,15 +69,18 @@ def _encode(facts: FileFacts) -> dict:
             "symbols": [asdict(span) for span in facts.structure.symbols],
             "declarations": [asdict(span) for span in facts.structure.declarations],
             "module_symbols": [asdict(span) for span in facts.structure.module_symbols],
-            "importable_symbols": [asdict(span) for span in facts.structure.importable_symbols],
+            "commonjs_exports": [asdict(span) for span in facts.structure.commonjs_exports],
             "type_declarations": [asdict(span) for span in facts.structure.type_declarations],
             "value_declarations": [asdict(span) for span in facts.structure.value_declarations],
+            "local_names": [list(local) for local in facts.structure.local_names],
         },
         "calls": [asdict(call) for call in facts.calls],
         "references": [asdict(reference) for reference in facts.references],
         "incomplete": facts.incomplete,
         "export_names": list(facts.export_names),
         "unparsed_lines": [list(stretch) for stretch in facts.unparsed_lines],
+        "module_aliases": [list(alias) for alias in facts.module_aliases],
+        "exported_values": list(facts.exported_values),
     }
 
 
@@ -89,9 +92,10 @@ def _decode(file: str, raw: dict) -> FileFacts:
             tuple(_span(file, span) for span in structure["symbols"]),
             tuple(_span(file, span) for span in structure["declarations"]),
             tuple(_span(file, span) for span in structure["module_symbols"]),
-            tuple(_span(file, span) for span in structure["importable_symbols"]),
+            tuple(_span(file, span) for span in structure["commonjs_exports"]),
             tuple(_span(file, span) for span in structure["type_declarations"]),
             tuple(_span(file, span) for span in structure["value_declarations"]),
+            tuple(LocalName(int(first), int(last), name) for first, last, name in structure["local_names"]),
         ),
         tuple(CallMatch(file, call["line"], call["name"], call.get("receiver")) for call in raw["calls"]),
         tuple(
@@ -103,4 +107,6 @@ def _decode(file: str, raw: dict) -> FileFacts:
         bool(raw["incomplete"]),
         tuple(raw.get("export_names", ())),
         tuple((int(start), int(end)) for start, end in raw["unparsed_lines"]),
+        tuple(ModuleAlias(name, specifier) for name, specifier in raw["module_aliases"]),
+        tuple(raw["exported_values"]),
     )

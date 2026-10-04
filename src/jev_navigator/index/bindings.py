@@ -76,15 +76,11 @@ def falls_inside(binding: Binding | None, view: Span) -> bool:
     return target is None or target.overlaps(view)
 
 
-def binding_through_import(alias: str, definition: Span, exporter: ImportFact) -> Binding:
-    """A use of ``alias``, a name that holds a whole module of the scope (``alias.name()`` after
-    ``import * as alias``) or one definition under another name (``alias()`` after ``import { name as
-    alias }``), where ``definition`` is the ``name`` that ``exporter``, the module or one it re-exports
-    from, defines."""
-    if exporter.proven:
-        return Binding(BindingStatus.RESOLVED, f"imported from {definition.file} as {alias}", definition)
+def local_binding(name: str) -> Binding:
+    """``candidate``: the calling function binds ``name`` for its own body, so the use names that
+    local value, whose target the index does not resolve."""
     return Binding(
-        BindingStatus.CANDIDATE, f"import suggests {definition.file}: {exporter.reason}", definition
+        BindingStatus.CANDIDATE, f"{name} is bound inside the calling function; its value is not resolved"
     )
 
 
@@ -102,6 +98,12 @@ def binding_from_facts(facts: CallFacts) -> Binding:
     unparsed_definitions = [span.file for span in facts.definitions if span.file in facts.unparsed]
     if facts.unparsed and (not facts.definitions or unparsed_import or unparsed_definitions):
         return unparsed_binding(facts.name, unparsed_import or unparsed_definitions or facts.unparsed)
+    if not facts.definitions and facts.imported_from:
+        paths = ", ".join(dict.fromkeys(fact.path for fact in facts.imported_from))
+        return Binding(
+            BindingStatus.CANDIDATE,
+            f"the import names {paths}, where the index finds no exported {facts.name}",
+        )
     if not facts.definitions:
         return Binding(BindingStatus.UNRESOLVED, f"no definition of {facts.name} in the index scope")
     if facts.receiver is not None:
@@ -110,11 +112,18 @@ def binding_from_facts(facts: CallFacts) -> Binding:
             BindingStatus.CANDIDATE,
             f"method call on {facts.receiver}; receiver type not resolved ({count} definitions)",
         )
-    same_file = [span for span in facts.module_scope if span.file == facts.file]
-    if same_file:
+    same_file = _one_per_definition([span for span in facts.module_scope if span.file == facts.file])
+    if len(same_file) == 1:
         return Binding(BindingStatus.RESOLVED, "defined in the same file", same_file[0])
+    if same_file:
+        return Binding(
+            BindingStatus.CANDIDATE, f"{len(same_file)} definitions of {facts.name} in the same file"
+        )
     imported = [
-        (span, fact) for span in facts.importable for fact in facts.imported_from if span.file == fact.path
+        (span, fact)
+        for span in _one_per_definition(facts.importable)
+        for fact in facts.imported_from
+        if span.file == fact.path
     ]
     if len(imported) == 1:
         span, fact = imported[0]
@@ -126,5 +135,18 @@ def binding_from_facts(facts: CallFacts) -> Binding:
         return Binding(BindingStatus.CANDIDATE, f"import suggests multiple definitions: {paths}")
     count = len(facts.definitions)
     return Binding(
-        BindingStatus.CANDIDATE, f"name match only; {count} definitions in scope and no import names it"
+        BindingStatus.CANDIDATE,
+        f"name match only; {count} definitions in scope and no import of a module in scope names it",
     )
+
+
+def _one_per_definition(spans: Sequence[Span]) -> list[Span]:
+    """The first span of each definition: a declaration and the function or class it holds overlap,
+    `const load =\n  () => 2` is one definition of `load` over lines 1 to 2 and 2 to 2."""
+    kept: list[Span] = []
+    for span in spans:
+        if not any(
+            other.file == span.file and other.start <= span.end and span.start <= other.end for other in kept
+        ):
+            kept.append(span)
+    return kept

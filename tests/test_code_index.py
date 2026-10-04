@@ -475,6 +475,10 @@ SCRIPT_BASE_AND_SUBCLASS = (
     "export class Base {}\n",
     'import { Base } from "./base";\n\n\nexport class Sub extends Base {}\n',
 )
+SCRIPT_BASE_AND_QUALIFIED_SUBCLASS = (
+    "export class Base {}\n",
+    'import * as base from "./base";\n\n\nexport class Sub extends base.Base {}\n',
+)
 
 
 @pytest.mark.parametrize(
@@ -483,6 +487,17 @@ SCRIPT_BASE_AND_SUBCLASS = (
         (".py", "class Base:\n    pass\n", "from base import Base\n\n\nclass Sub(Base):\n    pass\n"),
         (".ts", *SCRIPT_BASE_AND_SUBCLASS),
         (".js", *SCRIPT_BASE_AND_SUBCLASS),
+        (".py", "class Base:\n    pass\n", "import base\n\n\nclass Sub(base.Base):\n    pass\n"),
+        (".ts", *SCRIPT_BASE_AND_QUALIFIED_SUBCLASS),
+        (".js", *SCRIPT_BASE_AND_QUALIFIED_SUBCLASS),
+    ],
+    ids=[
+        "python",
+        "typescript",
+        "javascript",
+        "qualified-python",
+        "qualified-typescript",
+        "qualified-javascript",
     ],
 )
 def test_a_class_s_base_is_recorded_once_as_its_base(
@@ -763,8 +778,9 @@ def test_a_property_assignment_names_no_module_name_but_a_commonjs_export_stays_
 
 def test_destructuring_a_require_imports_its_names_without_declaring_them(tmp_path: Path) -> None:
     """`const { other, stop: halt } = require('./x')` imports `other` and `halt` from x.js the way
-    `import { other, stop as halt }` does: a call to `other` binds to x.js's export, never to the
-    require line as if that line defined it, and the line declares neither name."""
+    `import { other, stop as halt }` does: a call to `other` binds to x.js's export, a call to `halt`
+    to x.js's `stop`, never to the require line as if that line defined them, and the line declares
+    neither name."""
     # Arrange
     files = {
         "x.js": "exports.other = () => 3;\nexports.stop = () => 4;\n",
@@ -783,7 +799,7 @@ def test_destructuring_a_require_imports_its_names_without_declaring_them(tmp_pa
     }
 
     # Assert
-    assert bindings["other"] == ("resolved", "x.js:1-1")
+    assert bindings == {"other": ("resolved", "x.js:1-1"), "halt": ("resolved", "x.js:2-2")}
     assert index.declarations_in("cjs.js") == ()
 
 
