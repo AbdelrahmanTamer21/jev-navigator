@@ -7,7 +7,7 @@ import json
 import logging
 import subprocess
 import tempfile
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from functools import cache
 from pathlib import Path
@@ -25,6 +25,12 @@ NEUTRAL_AST_GREP_CONFIG = "ruleDirs: []\n"
 analysed repository's own sgconfig.yml, which is customer content: its ``languageGlobs`` would change
 what a file is parsed as, and its ``customLanguages`` makes ast-grep load a library the repository
 names. Confirmed with ast-grep 0.45.1 that ``--config`` replaces discovery and is not merged with it."""
+NOT_PARSED_REASON = "not parsed: ast-grep skipped the file and printed nothing for it"
+"""ast-grep 0.45.1 skips a file it was handed on its command line, exits 0 and prints nothing, when the
+file has more than 3,000,000 bytes and more than 200,000 lines (found by bisection on synthetic files:
+both limits must be exceeded; ``--stdin`` is not affected). Even a rule on ``kind: program`` matches
+nothing then, so a skipped file reads exactly like a file without functions. Only ``--inspect=entity``
+tells them apart: it prints one ``entity|file|PATH`` line for every file ast-grep actually scanned."""
 MAX_FILES_PER_COMMAND = 300
 MAX_ARGUMENT_BYTES = 128 * 1024
 
@@ -59,10 +65,12 @@ def ast_grep_rules(
     process's whole output is ever held. Every parse passes through here: a file whose estimated parse
     peak is over the bound (``file_shape.MAX_PARSE_PEAK_MB``) is never handed to ast-grep. Each such
     file is added to ``refused`` with its reason when the iteration starts, so read ``refused`` after
-    the matches. ast-grep always runs with a JVN-owned sgconfig: ``config``, when given, is sgconfig
-    YAML text (a ``languageGlobs`` remapping, say), otherwise ``NEUTRAL_AST_GREP_CONFIG``. It is
-    written to a temporary file outside every repository and passed with ``--config``, so the
-    repository being analysed never configures the parser."""
+    the matches. A file that ast-grep itself skipped without parsing (``NOT_PARSED_REASON``) is added
+    when its chunk's process ends, so it is never taken for a file without symbols. ast-grep always
+    runs with a JVN-owned sgconfig: ``config``, when given, is sgconfig YAML text (a
+    ``languageGlobs`` remapping, say), otherwise ``NEUTRAL_AST_GREP_CONFIG``. It is written to a
+    temporary file outside every repository and passed with ``--config``, so the repository being
+    analysed never configures the parser."""
     parseable, skipped = _split_by_parse_peak(files, cwd)
     refused.update(skipped)
     if not parseable:
@@ -73,7 +81,13 @@ def ast_grep_rules(
         path.write_text(NEUTRAL_AST_GREP_CONFIG if config is None else config)
         command = [AST_GREP, "scan", "--inline-rules", rules_yaml, "--config", str(path)]
         for chunk in file_chunks(parseable):
-            yield from _json_lines([*command, "--json=stream", *chunk], cwd)
+            yield from _json_lines(
+                [*command, "--json=stream", "--inspect=entity", *chunk],
+                cwd,
+                on_stderr=lambda inspection, chunk=chunk: refused.update(
+                    _skipped_files(chunk, inspection, cwd)
+                ),
+            )
 
 
 def _split_by_parse_peak(files: Sequence[str], cwd: Path) -> tuple[list[str], dict[str, str]]:
@@ -106,9 +120,23 @@ def file_chunks(files: Sequence[str]) -> Iterator[Sequence[str]]:
         yield files[start:]
 
 
-def _json_lines(arguments: Sequence[str], cwd: Path) -> Iterator[dict]:
+def _skipped_files(chunk: Sequence[str], inspection: str, cwd: Path) -> dict[str, str]:
+    """The non-empty files of ``chunk`` that ast-grep's ``--inspect=entity`` output does not list as
+    scanned. ast-grep lists no empty file either, and an empty file has nothing to find."""
+    scanned = {
+        line.removeprefix("sg: entity|file|").rsplit(": language=", 1)[0]
+        for line in inspection.splitlines()
+        if line.startswith("sg: entity|file|")
+    }
+    return {file: NOT_PARSED_REASON for file in chunk if file not in scanned and (cwd / file).stat().st_size}
+
+
+def _json_lines(
+    arguments: Sequence[str], cwd: Path, on_stderr: Callable[[str], None] | None = None
+) -> Iterator[dict]:
     """Each line the command prints, parsed as JSON while it runs. stderr goes to a file, so a full
-    stderr pipe cannot stall the command; the process is killed if the reader stops early."""
+    stderr pipe cannot stall the command; the process is killed if the reader stops early.
+    ``on_stderr`` gets the whole stderr text once the command has ended successfully."""
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen(list(arguments), cwd=cwd, stdout=subprocess.PIPE, stderr=errors, text=True)
         try:
@@ -121,10 +149,12 @@ def _json_lines(arguments: Sequence[str], cwd: Path) -> Iterator[dict]:
         finally:
             process.stdout.close()
             returncode = process.wait()
+        errors.seek(0)
+        text = errors.read().decode(errors="replace")
         if returncode not in (0, _NO_MATCHES_EXIT):
-            errors.seek(0)
-            detail = errors.read().decode(errors="replace").strip()[:300]
-            raise ToolFailedError(f"{arguments[0]} exited {returncode}: {detail}")
+            raise ToolFailedError(f"{arguments[0]} exited {returncode}: {text.strip()[:300]}")
+        if on_stderr is not None:
+            on_stderr(text)
 
 
 def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:

@@ -40,11 +40,11 @@ class _AstGrepRecorder:
         self.commands: list[list[str]] = []
         original = tools._json_lines
 
-        def run(arguments, cwd):
+        def run(arguments, cwd, **callbacks):
             if arguments[0] == tools.AST_GREP and "scan" in arguments:
                 self.commands.append(list(arguments))
                 return iter(())
-            return original(arguments, cwd)
+            return original(arguments, cwd, **callbacks)
 
         monkeypatch.setattr(tools, "_json_lines", run)
 
@@ -143,6 +143,58 @@ def test_the_door_yields_the_matches_of_the_files_it_parsed_and_names_the_ones_i
     assert [match["file"] for match in matches] == ["src/small.py"]
     assert guarded == []
     assert set(refused) == {BUNDLE}
+
+
+SKIPPED_BY_AST_GREP = "src/skipped.ts"
+"""ast-grep 0.45.1 exits 0 and prints nothing for a file of more than 3,000,000 bytes and more than
+200,000 lines, even for a rule on ``kind: program``. This one has 1,000,001 lines of 3 bytes."""
+
+
+def _repository_with_a_file_ast_grep_skips(tmp_path: Path) -> Path:
+    files = {
+        SKIPPED_BY_AST_GREP: "x;\n" * 1_000_001,
+        "src/comment_only.ts": "// nothing to find here\n",
+        "src/empty.ts": "",
+        "src/small.ts": "export function small() { return 1; }\n",
+    }
+    commit_files(tmp_path / "repo", files)
+    return tmp_path / "repo"
+
+
+FUNCTION_RULE = "id: function\nlanguage: typescript\nrule:\n  kind: function_declaration"
+
+
+def test_the_door_names_a_file_ast_grep_skipped_without_parsing(tmp_path: Path) -> None:
+    repository = _repository_with_a_file_ast_grep_skips(tmp_path)
+    refused: dict[str, str] = {}
+
+    matches = list(
+        tools.ast_grep_rules(
+            FUNCTION_RULE,
+            [SKIPPED_BY_AST_GREP, "src/comment_only.ts", "src/empty.ts", "src/small.ts"],
+            repository,
+            refused=refused,
+        )
+    )
+
+    assert [match["file"] for match in matches] == ["src/small.ts"]
+    assert set(refused) == {SKIPPED_BY_AST_GREP}, (
+        "a parsed file with no match, or an empty one, is not a skipped file"
+    )
+    assert refused[SKIPPED_BY_AST_GREP].startswith("not parsed: ast-grep skipped the file")
+
+
+def test_a_file_ast_grep_skipped_is_reported_unavailable_and_never_cached_as_empty(tmp_path: Path) -> None:
+    repository = _repository_with_a_file_ast_grep_skips(tmp_path)
+    index = CodeIndex.from_git(repository, fact_cache_dir=tmp_path / "facts")
+
+    index.functions_in_files(index.files)
+
+    assert index.unavailable_files[SKIPPED_BY_AST_GREP].startswith("not parsed: ast-grep skipped the file")
+    assert set(index.unavailable_files) == {SKIPPED_BY_AST_GREP}
+    cache = FactCache(tmp_path / "facts")
+    assert cache.load(SKIPPED_BY_AST_GREP, (repository / SKIPPED_BY_AST_GREP).read_bytes()) is None
+    assert cache.load("src/comment_only.ts", (repository / "src/comment_only.ts").read_bytes()) is not None
 
 
 SCAN_IN_A_FRESH_PROCESS = """
