@@ -132,16 +132,21 @@ def _skipped_files(chunk: Sequence[str], inspection: str, cwd: Path) -> dict[str
         for line in inspection.splitlines()
         if line.startswith(_SCANNED_FILE_PREFIX)
     }
-    return {
-        file: _not_parsed_reason(cwd / file)
-        for file in chunk
-        if file not in scanned and (cwd / file).stat().st_size
-    }
+    reasons = {file: _not_parsed_reason(cwd / file) for file in chunk if file not in scanned}
+    return {file: reason for file, reason in reasons.items() if reason is not None}
 
 
-def _not_parsed_reason(path: Path) -> str:
+def _not_parsed_reason(path: Path) -> str | None:
+    """Why ast-grep skipped the file, or None when it had nothing to parse: the file is empty, or it
+    left the disk during the scan, which the index reports as disappeared."""
     try:
-        path.read_bytes().decode("utf-8")
+        content = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    if not content:
+        return None
+    try:
+        content.decode("utf-8")
     except UnicodeDecodeError:
         return NOT_UTF8_REASON
     return NOT_PARSED_REASON

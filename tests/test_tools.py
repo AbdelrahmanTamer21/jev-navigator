@@ -156,3 +156,23 @@ def test_a_failed_scan_reports_ast_grep_s_error_without_its_scanned_file_list(
     with pytest.raises(tools.ToolFailedError) as failure:
         list(tools.ast_grep_rules(VALID_RULE, ["a.py", "b.py"], tmp_path, refused={}))
     assert str(failure.value) == f"{tools.AST_GREP} exited 137: ast-grep: out of memory"
+
+
+def test_a_file_that_vanishes_during_the_scan_is_left_to_the_index_not_named_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: ast-grep lists a.py as scanned; b.py is deleted while it runs
+    _write_python_files(tmp_path, "a.py", "b.py")
+    stand_in_ast_grep(
+        tmp_path,
+        monkeypatch,
+        "import os\nos.remove('b.py')\nprint('sg: entity|file|a.py: language=Python', file=sys.stderr)\n",
+    )
+    refused: dict[str, str] = {}
+
+    # Act
+    matches = list(tools.ast_grep_rules(VALID_RULE, ["a.py", "b.py"], tmp_path, refused=refused))
+
+    # Assert
+    assert matches == []
+    assert refused == {}
