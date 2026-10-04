@@ -283,7 +283,9 @@ MODULE_ALIAS_RULES = {
 # of `pkg`, which is the module `pkg.mod` unless the package's `__init__` binds that name itself. The
 # statement is matched with its package captured as `$FROM`, and each name it takes is matched on
 # its own, quietly, with `$SPEC` as imported and `$NAME` as bound, so a list of a hundred names
-# prints the statement once, not a hundred times. A star import takes the name `*`.
+# prints the statement once, not a hundred times. A star import takes the name `*`. A relation's
+# `field` reaches only the first of the names the statement lists under one field, so a plain name is
+# any dotted name directly in the statement other than its module.
 PYTHON_FROM_IMPORT = f"""  kind: import_from_statement
   has: {{field: module_name, pattern: $FROM}}
   {_PYTHON_OUTSIDE_SCOPES}"""
@@ -295,7 +297,9 @@ PYTHON_FROM_IMPORT_NAMES = (
     - not: {not: {inside: {kind: import_from_statement}}}""",
     """  kind: dotted_name
   pattern: $NAME
-  not: {not: {inside: {field: name, kind: import_from_statement}}}""",
+  all:
+    - not: {not: {inside: {kind: import_from_statement}}}
+    - not: {inside: {field: module_name, kind: import_from_statement}}""",
     """  kind: wildcard_import
   pattern: $NAME
   not: {not: {inside: {kind: import_from_statement}}}""",

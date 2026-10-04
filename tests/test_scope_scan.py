@@ -1341,6 +1341,49 @@ def test_a_from_import_takes_the_packages_own_name_before_its_module(
         assert binding.target == Span("pkg/config.py", 9, 10, "get")
 
 
+@pytest.mark.parametrize(
+    ("statement", "alias"),
+    [
+        ("from pkg import mod, other\n", "mod"),
+        ("from pkg import other, mod\n", "mod"),
+        ("from pkg import (\n    other,\n    mod,\n)\n", "mod"),
+        ("from pkg import other as o, mod\n", "mod"),
+        ("from pkg import other, mod as m\n", "m"),
+        (
+            "from pkg import (\n"
+            + "".join(f"    n{n},\n    n{n} as k{n},\n" for n in range(300))
+            + "    mod,\n)\n",
+            "mod",
+        ),
+    ],
+    ids=[
+        "first",
+        "second",
+        "second over several lines",
+        "after an as-name",
+        "second as a name",
+        "last of 601",
+    ],
+)
+def test_a_from_import_names_a_module_wherever_its_list_holds_it(
+    tmp_path: Path, statement: str, alias: str
+) -> None:
+    """Each name a from-import lists may name a module, not only the first: `mod.run()` calls the
+    `run` of `pkg/mod.py` wherever the statement lists `mod`."""
+    # Arrange
+    module = "def run():\n    return 1\n"
+    use = statement + f"{alias}.run()\n"
+    index = committed(
+        tmp_path, {"pkg/__init__.py": "", "pkg/mod.py": module, "pkg/other.py": module, "use.py": use}
+    )
+
+    # Act
+    binding = index.binding_of("use.py", use.count("\n"), "run", alias)
+
+    # Assert
+    assert (binding.status.value, binding.target) == ("resolved", Span("pkg/mod.py", 1, 2, "run"))
+
+
 def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_it(tmp_path: Path) -> None:
     """`db.query()` binds to db.js's `query` where `db` is the module-level alias; a parameter `db`, a
     `const store = require(...)` inside a function, a name module-level code binds to two modules, or
