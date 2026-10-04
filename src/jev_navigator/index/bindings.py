@@ -10,7 +10,7 @@ resolver (a code-intelligence service, a TypeScript alias resolver, an LSP) inje
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -76,14 +76,22 @@ def falls_inside(binding: Binding | None, view: Span) -> bool:
     return target is None or target.overlaps(view)
 
 
-def binding_through_module(receiver: str, definition: Span, exporter: ImportFact) -> Binding:
-    """A call ``receiver.name()`` where ``receiver`` holds a whole module of the scope and
-    ``definition`` is the ``name`` that ``exporter``, the module or one it re-exports from, defines."""
+def binding_through_import(alias: str, definition: Span, exporter: ImportFact) -> Binding:
+    """A use of ``alias``, a name that holds a whole module of the scope (``alias.name()`` after
+    ``import * as alias``) or one definition under another name (``alias()`` after ``import { name as
+    alias }``), where ``definition`` is the ``name`` that ``exporter``, the module or one it re-exports
+    from, defines."""
     if exporter.proven:
-        return Binding(BindingStatus.RESOLVED, f"imported from {definition.file} as {receiver}", definition)
+        return Binding(BindingStatus.RESOLVED, f"imported from {definition.file} as {alias}", definition)
     return Binding(
         BindingStatus.CANDIDATE, f"import suggests {definition.file}: {exporter.reason}", definition
     )
+
+
+def unparsed_binding(name: str, files: Iterable[str]) -> Binding:
+    """``unknown``: a definition of ``name`` may sit in ``files``, which the index could not parse."""
+    listed = ", ".join(sorted(files)[:5])
+    return Binding(BindingStatus.UNKNOWN, f"{name} may be defined in files not parsed: {listed}")
 
 
 def binding_from_facts(facts: CallFacts) -> Binding:
@@ -93,8 +101,7 @@ def binding_from_facts(facts: CallFacts) -> Binding:
     unparsed_import = [fact.path for fact in facts.imported_from if fact.path in facts.unparsed]
     unparsed_definitions = [span.file for span in facts.definitions if span.file in facts.unparsed]
     if facts.unparsed and (not facts.definitions or unparsed_import or unparsed_definitions):
-        files = ", ".join(sorted(unparsed_import or unparsed_definitions or facts.unparsed)[:5])
-        return Binding(BindingStatus.UNKNOWN, f"{facts.name} may be defined in files not parsed: {files}")
+        return unparsed_binding(facts.name, unparsed_import or unparsed_definitions or facts.unparsed)
     if not facts.definitions:
         return Binding(BindingStatus.UNRESOLVED, f"no definition of {facts.name} in the index scope")
     if facts.receiver is not None:

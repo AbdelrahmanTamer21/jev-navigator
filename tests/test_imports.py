@@ -10,6 +10,7 @@ from jev_navigator import operations
 from jev_navigator.directives.places import neighbours
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.imports import (
+    ImportedName,
     imported_modules,
     imported_names,
     module_aliases,
@@ -80,7 +81,7 @@ import { ignored } from "./ignored";
     assert reexported_names("from .orders import create_order", "app/__init__.py") == ()
 
 
-def test_destructuring_a_require_imports_each_local_name() -> None:
+def test_destructuring_a_require_imports_each_local_name_under_its_exported_name() -> None:
     # Arrange
     source = """\
 const { verify, sign: signToken, decode = fallback, ...rest } = require('./jwt');
@@ -91,7 +92,11 @@ const { app } = require("./app")(options);
     names = imported_names(source, "src/main.js")
 
     # Assert
-    assert names == {"verify": "./jwt", "signToken": "./jwt", "decode": "./jwt"}
+    assert names == {
+        "verify": ImportedName("./jwt", "verify"),
+        "signToken": ImportedName("./jwt", "sign"),
+        "decode": ImportedName("./jwt", "decode"),
+    }
 
 
 def test_a_module_alias_is_a_name_holding_a_whole_script_module() -> None:
@@ -388,7 +393,10 @@ def test_a_parenthesised_python_import_over_several_lines_lists_every_name() -> 
     names = imported_names(source, "app/routes.py")
 
     # Assert
-    assert names == {"send_invoice": "app.jobs", "give_back": "app.jobs"}
+    assert names == {
+        "send_invoice": ImportedName("app.jobs", "send_invoice"),
+        "give_back": ImportedName("app.jobs", "refund"),
+    }
 
 
 def test_a_python_import_of_several_modules_imports_each_in_source_order() -> None:
@@ -442,7 +450,7 @@ def test_a_multi_line_import_with_comments_inside_keeps_its_module_and_names() -
 
     # Assert
     assert modules == ["./x"]
-    assert names == {"a": "./x", "b": "./x"}
+    assert names == {"a": ImportedName("./x", "a"), "b": ImportedName("./x", "b")}
 
 
 def test_an_import_after_a_statement_without_semicolon_keeps_its_names() -> None:
@@ -453,7 +461,29 @@ def test_an_import_after_a_statement_without_semicolon_keeps_its_names() -> None
     names = imported_names(source, "src/p.ts")
 
     # Assert
-    assert names == {"a": "./a"}
+    assert names == {"a": ImportedName("./a", "a")}
+
+
+def test_a_script_import_keeps_the_name_its_module_exports() -> None:
+    """`import { stop as halt }` takes `stop`, also as a type; a default import takes no exported
+    name, so there is none to follow."""
+    # Arrange
+    source = (
+        "import main, { stop as halt, type Kind as K, default as entry } from './x';\n"
+        "import { start } from './y';\n"
+    )
+
+    # Act
+    names = imported_names(source, "src/p.ts")
+
+    # Assert
+    assert names == {
+        "main": ImportedName("./x", None),
+        "halt": ImportedName("./x", "stop"),
+        "K": ImportedName("./x", "Kind"),
+        "entry": ImportedName("./x", None),
+        "start": ImportedName("./y", "start"),
+    }
 
 
 def test_the_alias_with_the_longest_prefix_wins_like_typescript(tmp_path: Path) -> None:

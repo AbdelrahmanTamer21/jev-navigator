@@ -813,6 +813,78 @@ def test_a_call_through_a_python_module_import_reads_only_that_module(tmp_path: 
     assert "app/unrelated.py" not in scanned
 
 
+def test_a_name_imported_under_an_alias_binds_to_the_exported_definition(
+    tmp_path: Path, ast_grep_runs
+) -> None:
+    """`halt()` after `import { stop as halt }`, `const { stop: halt } = require()` or, in Python,
+    `from app.jobs import refund as give_back`, calls the name the module exports. It is read from
+    that module's own facts, so another file defining either name is never parsed to bind it."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/x.ts": "export function stop(code: number) {\n  return code;\n}\n",
+            "src/unrelated.ts": "export function stop() {\n  return 0;\n}\nexport function halt() {}\n",
+            "src/esm.ts": (
+                "import { stop as halt } from './x';\n\nexport function quit() {\n  return halt(1);\n}\n"
+            ),
+            "src/cjs.js": (
+                "const { stop: halt } = require('./x');\n\nfunction quit() {\n  return halt(1);\n}\n"
+            ),
+            "app/__init__.py": "",
+            "app/jobs.py": "def refund(order):\n    return order\n",
+            "app/unrelated.py": "def refund():\n    return 0\n\n\ndef give_back():\n    return 0\n",
+            "app/routes.py": (
+                "from app.jobs import refund as give_back\n\n\n"
+                "def undo(order):\n    return give_back(order)\n"
+            ),
+        },
+    )
+    callers = [
+        next(span for span in index.functions_in(file) if span.name == name)
+        for file, name in (("src/esm.ts", "quit"), ("src/cjs.js", "quit"), ("app/routes.py", "undo"))
+    ]
+
+    # Act
+    bindings = [edge.binding for caller in callers for edge in index.callee_edges(caller)]
+    scanned = {file for _, _, files in ast_grep_runs for file in files}
+
+    # Assert
+    assert [(binding.status.value, binding.target) for binding in bindings] == [
+        ("resolved", Span("src/x.ts", 1, 3, "stop")),
+        ("resolved", Span("src/x.ts", 1, 3, "stop")),
+        ("resolved", Span("app/jobs.py", 1, 2, "refund")),
+    ]
+    assert scanned.isdisjoint({"src/unrelated.ts", "app/unrelated.py"})
+
+
+def test_a_definition_in_the_same_file_wins_over_the_alias_it_replaces(tmp_path: Path) -> None:
+    """Python may define a name again after importing it under that alias; the call reaches the
+    file's own definition, as it does for a name imported without an alias."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "app/__init__.py": "",
+            "app/jobs.py": "def refund(order):\n    return order\n",
+            "app/routes.py": (
+                "from app.jobs import refund as give_back\n\n\n"
+                "def give_back(order):\n    return None\n\n\n"
+                "def undo(order):\n    return give_back(order)\n"
+            ),
+        },
+    )
+
+    # Act
+    [site] = index.find_callers("give_back")
+
+    # Assert
+    assert (site.binding.status.value, site.binding.target) == (
+        "resolved",
+        Span("app/routes.py", 4, 5, "give_back"),
+    )
+
+
 def test_the_flow_partition_is_scanned_on_its_own(tmp_path: Path, ast_grep_runs) -> None:
     """The `languageGlobs` config is global per invocation, so `@flow` files are scanned in their own
     invocation and plain JavaScript keeps the JavaScript grammar byte for byte."""
@@ -983,6 +1055,17 @@ BROKEN_FLOW = "// @flow\nexport class Broken {\n  find(a: string:\n"
             "unknown",
             "src/broken.js",
             id="a-name-on-an-unread-line-stays-unknown",
+        ),
+        pytest.param(
+            {
+                "src/broken.js": BROKEN_FLOW,
+                "src/use.js": "import { find as locate } from './broken';\n\n"
+                "export function use() {\n  return locate('a');\n}\n",
+            },
+            "locate",
+            "unknown",
+            "src/broken.js",
+            id="an-alias-of-a-name-on-an-unread-line-stays-unknown",
         ),
         pytest.param(
             {"src/broken.js": BROKEN_FLOW, "src/use.js": "export function use() {\n  return missing();\n}\n"},
