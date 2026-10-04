@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 import tracemalloc
@@ -122,8 +123,24 @@ def test_the_line_cache_holds_at_most_its_bound(tmp_path: Path, monkeypatch: pyt
     again = index.lines("app/orders.py")
 
     # Assert
-    assert index._lines_of.cache_info().currsize == 2
+    assert index.source_memory.line_cache_files == 2
     assert line_counts["app/orders.py"] == len(again) == 5
+
+
+def test_the_source_memory_counts_every_file_read_compressed(tmp_path: Path) -> None:
+    # Arrange
+    commit_files(tmp_path, MIXED_SCOPE)
+    index = CodeIndex.from_git(tmp_path, fact_cache_dir=tmp_path.parent / "facts")
+    raw = sum(len(text.encode()) for text in MIXED_SCOPE.values())
+
+    # Act
+    for file in index.files:
+        index.lines(file)
+    memory = index.source_memory
+
+    # Assert
+    assert memory.first_read_files == len(MIXED_SCOPE)
+    assert 0 < memory.first_read_bytes < raw
 
 
 def test_a_repeated_text_search_starts_no_second_process(sample_index: CodeIndex, spawned) -> None:
@@ -262,12 +279,13 @@ def test_an_index_built_in_a_test_never_writes_the_user_fact_cache(tmp_path: Pat
     assert list(index._fact_cache.root.rglob("*.json"))
 
 
-def test_a_file_changed_after_its_lines_were_evicted_is_reported_not_read(
+def test_a_file_changed_after_its_lines_were_evicted_reads_as_first_read_and_is_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Arrange
+    # Arrange: a.py is read, evicted from a one-file line cache by b.py, then edited
     monkeypatch.setattr(code_index, "LINE_CACHE_FILES", 1)
-    (tmp_path / "a.py").write_text("def a():\n    return 1\n")
+    original = "def a():\n    return 1\n"
+    (tmp_path / "a.py").write_text(original)
     (tmp_path / "b.py").write_text("def b():\n    return 2\n")
     index = CodeIndex(tmp_path, ["a.py", "b.py"])
     first = index.read_slice(index.functions_in("a.py")[0])
@@ -276,10 +294,12 @@ def test_a_file_changed_after_its_lines_were_evicted_is_reported_not_read(
 
     # Act
     again = index.read_slice(first.span)
+    window = index.read_window("a.py", 1, radius=5)
 
     # Assert
-    assert "changed" not in again.text
-    assert again.file_sha256 == first.file_sha256
+    assert again.text == first.text == original.rstrip("\n")
+    assert again.file_sha256 == first.file_sha256 == hashlib.sha256(original.encode()).hexdigest()
+    assert window.text == original.rstrip("\n")
     assert "changed" in index.unavailable_files["a.py"]
 
 
