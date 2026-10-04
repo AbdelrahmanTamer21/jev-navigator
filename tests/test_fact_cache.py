@@ -6,7 +6,7 @@ from threading import Barrier
 import pytest
 from git_repos import commit_files
 
-from jev_navigator.index import fact_cache, languages, spans, tools
+from jev_navigator.index import fact_cache, imports, languages, scope_scan, spans, tools
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.fact_cache import FactCache
 from jev_navigator.index.scope_scan import FileFacts, FileStructure, Unparsed, scan_facts
@@ -173,18 +173,25 @@ def test_facts_cached_under_other_rules_are_parsed_again(tmp_path, monkeypatch, 
     assert any(event[1] == "started" for event in scans)
 
 
-def test_a_change_to_the_code_that_reads_matches_is_a_cache_miss(tmp_path, example, monkeypatch, request):
+@pytest.mark.parametrize(
+    "module",
+    [scope_scan, languages, imports, spans, tools],
+    ids=["scope_scan", "languages", "imports", "spans", "tools"],
+)
+def test_a_change_to_the_code_that_runs_the_parser_or_reads_its_matches_is_a_cache_miss(
+    module, tmp_path, example, monkeypatch, request
+):
     # Arrange
     content, facts = example
     cache = FactCache(tmp_path / "cache")
     cache.save("module.py", content, facts)
-    edited = tmp_path / "spans.py"
-    edited.write_text(Path(spans.__file__).read_text() + "\n# an edit to how matches become facts\n")
+    edited = tmp_path / Path(module.__file__).name
+    edited.write_text(Path(module.__file__).read_text() + "\n# an edit to how matches become facts\n")
     request.addfinalizer(fact_cache._match_reader_source.cache_clear)
     request.addfinalizer(fact_cache._rules_identity.cache_clear)
 
     # Act
-    monkeypatch.setattr(spans, "__file__", str(edited))
+    monkeypatch.setattr(module, "__file__", str(edited))
     fact_cache._match_reader_source.cache_clear()
     fact_cache._rules_identity.cache_clear()
     reused = cache.load("module.py", content)

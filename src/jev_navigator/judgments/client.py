@@ -68,6 +68,10 @@ class MissingAnswerError(LookupError):
     """Replay found no stored answer for a request."""
 
 
+class UnansweredQuestionError(RuntimeError):
+    """The provider's response left out the answer to a question the request asked."""
+
+
 class InputBudgetExceededError(RuntimeError):
     """The provider refused a request whose input exceeded the model's input budget."""
 

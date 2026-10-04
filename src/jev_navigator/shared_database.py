@@ -9,6 +9,10 @@ from contextlib import closing, suppress
 from pathlib import Path
 
 
+class UnusableDatabaseError(RuntimeError):
+    """The file at a shared database path cannot serve as one."""
+
+
 def open_shared_database(path: Path, schema: str, version: int = 0) -> sqlite3.Connection:
     """A connection to the file at ``path``, created first when it is missing. A new file is built
     whole under a temporary name, in WAL mode with ``schema`` and ``version``, then linked into
@@ -17,7 +21,9 @@ def open_shared_database(path: Path, schema: str, version: int = 0) -> sqlite3.C
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         _create(path, schema, version)
-    return sqlite3.connect(path, timeout=30, check_same_thread=False)
+    database = sqlite3.connect(path, timeout=30, check_same_thread=False)
+    _require_database(database, path)
+    return database
 
 
 def _create(path: Path, schema: str, version: int) -> None:
@@ -25,7 +31,7 @@ def _create(path: Path, schema: str, version: int) -> None:
     os.close(descriptor)
     try:
         with closing(sqlite3.connect(temporary)) as database:
-            database.execute("pragma journal_mode=wal")
+            switch_to_wal(database, path)
             database.executescript(schema)
             database.execute(f"pragma user_version = {version}")
             database.commit()
@@ -33,3 +39,22 @@ def _create(path: Path, schema: str, version: int) -> None:
             os.link(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def switch_to_wal(database: sqlite3.Connection, path: Path) -> None:
+    """SQLite answers a WAL request it cannot meet, on a file system without the locks WAL needs,
+    with the mode it kept instead of an error."""
+    mode = database.execute("pragma journal_mode=wal").fetchone()[0]
+    if mode != "wal":
+        raise UnusableDatabaseError(
+            f"{path} cannot be shared between runs: SQLite kept it in {mode} mode instead of WAL, "
+            "so its file system lacks the locks WAL needs; point it at a local disk"
+        )
+
+
+def _require_database(database: sqlite3.Connection, path: Path) -> None:
+    try:
+        database.execute("pragma schema_version").fetchone()
+    except sqlite3.DatabaseError as error:
+        database.close()
+        raise UnusableDatabaseError(f"{path} is not a SQLite database: {error}") from error
