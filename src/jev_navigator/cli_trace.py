@@ -23,6 +23,7 @@ from .judgments.judge import CheckResult, Judge
 from .judgments.store import JsonlAnswerStore
 from .judgments.thresholds import Thresholds
 from .progress import ProgressJournal, TerminalProgress
+from .usage_receipt import usage_receipt, usage_report_lines
 
 SCHEMA_VERSION = "jev-navigator.trace-evidence-pack/v1"
 
@@ -165,7 +166,8 @@ def _manifest(
             "requested_model": getattr(judge.client, "model", "unknown"),
             "served_model": judge.served_model,
             "calls": judge.calls,
-            "input_tokens": judge.input_tokens,
+            "input_tokens": judge.input_total.reported,
+            **usage_receipt(None, judge.input_total, judge.unanswered_requests),
         },
         "trace": {
             "outcome": _outcome(result),
@@ -250,6 +252,7 @@ def _report(manifest: dict) -> str:
         f"- Outcome: **{trace['outcome']}** (static walk: {trace['graph_stop']})",
         f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
         f"`{manifest['provider']['served_model']}`, {manifest['provider']['calls']} live calls",
+        *usage_report_lines(manifest["provider"]),
         "",
         "Connectivity is the index's static view. It is not proof of a correct handoff: only the "
         "obligations below carry source-identified Jev evidence, and uncertain or missing static "
