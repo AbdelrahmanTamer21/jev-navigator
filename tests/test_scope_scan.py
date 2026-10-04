@@ -823,6 +823,43 @@ def test_a_namespace_member_is_a_definition_inside_its_own_namespace(tmp_path: P
     }
 
 
+def test_a_namespace_member_comes_before_an_import_and_after_a_functions_own_name(tmp_path: Path) -> None:
+    """Inside a namespace its own `config` hides the module's import of `config`, while a parameter
+    `config` hides the member. A function or constant a namespace exports is no export of its
+    module, so an import of that name never reaches the module's private function of the same
+    name."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/cfg.ts": "export const config = 3;\n",
+            "src/spaces.ts": (
+                "import { config } from './cfg';\nnamespace B {\n  const config = 2;\n"
+                "  export function read() { return config; }\n"
+                "  export function given(config) { return config; }\n}\n"
+            ),
+            "src/utils.ts": (
+                "function helper() { return 0; }\nfunction run() { return 0; }\n"
+                "export namespace Utils {\n  export function helper() { return 1; }\n"
+                "  export const run = () => 1;\n}\n"
+            ),
+            "src/use.ts": "import { helper, run } from './utils';\nhelper();\nrun();\n",
+        },
+    )
+
+    # Act
+    member = index.binding_of("src/spaces.ts", 4, "config", None, "return")
+    parameter = index.binding_of("src/spaces.ts", 5, "config", None, "return")
+    imported = [
+        index.binding_of("src/use.ts", line, name, None) for line, name in ((2, "helper"), (3, "run"))
+    ]
+
+    # Assert
+    assert (member.status.value, member.target) == ("resolved", Span("src/spaces.ts", 3, 3, "config"))
+    assert (parameter.status.value, parameter.target) == ("candidate", None), parameter
+    assert [(binding.status.value, binding.target) for binding in imported] == [("candidate", None)] * 2
+
+
 def test_several_definitions_of_a_name_in_one_file_make_a_candidate(tmp_path: Path) -> None:
     """Two module-level definitions of one name leave the call open; a declaration and the function
     it holds are one definition, also over several lines and through an import."""

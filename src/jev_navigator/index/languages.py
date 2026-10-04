@@ -504,19 +504,26 @@ REFERENCE_ROLES = {
 REFERENCE_ROLES[FLOW_LANGUAGE] = _TYPED_SCRIPT_ROLES
 
 
-_EXPORT = "{field: declaration, kind: export_statement}"
+# A module's own export statements sit in its program; one in a namespace exports a namespace
+# member, and one in `declare module "m"` describes another module.
+_EXPORT = "{field: declaration, kind: export_statement, inside: {kind: program}}"
 _AMBIENT_EXPORT = f"{{kind: ambient_declaration, inside: {_EXPORT}}}"
 _VARIABLES = "[{kind: lexical_declaration}, {kind: variable_declaration}]"
-_EXPORTED_NAME = f"""  inside:
-    field: name
-    any:
-      - inside: {{field: declaration, kind: export_statement, not: {{has: {{regex: '^default$'}}}}}}
-      - kind: variable_declarator
-        inside: {{any: {_VARIABLES}, inside: {_EXPORT}}}"""
+_NAMED_EXPORT = (
+    "{field: declaration, kind: export_statement, not: {has: {regex: '^default$'}}, inside: {kind: program}}"
+)
+_EXPORTED_NAME = f"""  not:
+    not:
+      inside:
+        field: name
+        any:
+          - inside: {_NAMED_EXPORT}
+          - kind: variable_declarator
+            inside: {{any: {_VARIABLES}, inside: {_EXPORT}}}"""
 _TYPED_EXPORTED_NAME = f"""{_EXPORTED_NAME}
-      - inside: {_AMBIENT_EXPORT}
-      - kind: variable_declarator
-        inside: {{any: {_VARIABLES}, inside: {_AMBIENT_EXPORT}}}"""
+          - inside: {_AMBIENT_EXPORT}
+          - kind: variable_declarator
+            inside: {{any: {_VARIABLES}, inside: {_AMBIENT_EXPORT}}}"""
 # The name node of each declaration an ``export`` statement makes, one match per name, so the
 # declaration's body (a nested function, a template literal) never names the export. A default
 # export has no name of its own.
