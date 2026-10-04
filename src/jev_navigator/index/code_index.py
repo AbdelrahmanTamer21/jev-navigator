@@ -84,6 +84,7 @@ class CodeIndex:
         fact_cache_dir: Path | None = None,
         blob_ids: Mapping[str, str] | None = None,
     ) -> None:
+        memory_limit.index_opened(self)
         self.root = Path(root)
         self.git_root = Path(git_root) if git_root is not None else self.root
         self.binding_resolver = binding_resolver

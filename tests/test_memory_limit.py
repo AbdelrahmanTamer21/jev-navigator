@@ -4,6 +4,7 @@ and real JVN processes contending for real slot files."""
 from __future__ import annotations
 
 import asyncio
+import gc
 import mmap
 import os
 import shutil
@@ -13,13 +14,14 @@ import sys
 import sysconfig
 import threading
 import time
+import weakref
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from git_repos import commit_files
-from test_cli_failures import closable, hashes, journal_failures, manifest_of, use_clients
+from test_cli_failures import closable, hashes, journal_failures, manifest_of, provider_error, use_clients
 from test_cli_run_logs import TARGET, limit_client
 
 from jev_navigator import cli, memory_limit
@@ -266,19 +268,21 @@ def test_a_real_parse_over_the_allowance_is_stopped_and_caches_no_facts(
     assert bundle not in index.unavailable_files
 
 
-def test_growth_past_the_allowance_starts_no_further_process(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: list[list[str]]
+def test_growth_past_the_allowance_while_an_index_is_open_starts_no_further_process(
+    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: list[list[str]]
 ) -> None:
     # Arrange
     _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
+    index = CodeIndex(sample_repo, ["app/orders.py"], fact_cache_dir=tmp_path / "facts")
     tools.git(["--version"], tmp_path)
 
     # Act
     with _holding(200), pytest.raises(MemoryLimitReachedError, match="memory allowance of 100 MB"):
-        tools.git(["--version"], tmp_path)
+        index.functions_in("app/orders.py")
 
     # Assert
-    assert commands == [["git", "--version"]]
+    assert _scans(commands) == []
+    assert "app/orders.py" not in index.parsed_files
 
 
 def test_growth_past_the_allowance_stops_loading_cached_facts(
@@ -471,6 +475,104 @@ def test_memory_held_before_the_slot_is_not_charged_to_jvn(
     # Assert
     assert output.startswith("git version") and again == output
     assert commands == [["git", "--version"], ["git", "--version"]]
+
+
+def _opened(repository: Path, facts: Path, how: str) -> CodeIndex:
+    if how == "from_git":
+        return CodeIndex.from_git(repository, fact_cache_dir=facts)
+    return CodeIndex(repository, ["app/orders.py"], fact_cache_dir=facts)
+
+
+@pytest.mark.parametrize("how", ["from_git", "with_files"])
+def test_what_a_host_grows_between_two_searches_is_not_charged_to_the_second(
+    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    # Arrange: a first index takes the slot, parses and is dropped; then the host grows for its own
+    # reasons, past the whole allowance.
+    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
+    first = _opened(sample_repo, tmp_path / "first", how).functions_in("app/orders.py")
+
+    # Act
+    with _holding(200):
+        second = _opened(sample_repo, tmp_path / "second", how).functions_in("app/orders.py")
+
+    # Assert
+    assert [span.name for span in second] == [span.name for span in first] == ["place", "cancel"]
+
+
+class FailsEveryRequest:
+    """A Jev client whose every request fails, as a provider answering 503 would."""
+
+    model = "jev-scripted"
+
+    def ask(self, state: Mapping, questions: Mapping):
+        raise provider_error()
+
+    def close(self) -> None:
+        pass
+
+
+def _failed_search(repository: Path, facts: Path, how: str) -> tuple[Outcome, weakref.ref[CodeIndex]]:
+    """A search whose requests all fail, and a weak reference to the index it searched."""
+    index = _opened(repository, facts, how)
+    starts = [place_for_line(index, "app/orders.py", 6, "start")]
+    result = find_code(
+        index, Judge(FailsEveryRequest()), "the item limit check", starts, budget=SearchBudget(beam_width=1)
+    )
+    return result.outcome, weakref.ref(index)
+
+
+@pytest.fixture
+def no_automatic_collection() -> Iterator[None]:
+    """A host whose cycle collector has not run since its last search: Python runs it only when its
+    allocation counts say so."""
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
+
+
+@pytest.mark.parametrize("how", ["from_git", "with_files"])
+def test_an_index_a_failed_search_left_in_a_reference_cycle_does_not_charge_the_next_search(
+    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str, no_automatic_collection
+) -> None:
+    # Arrange: the failure's traceback holds the frames that hold the dropped index, so only the
+    # cycle collector frees it; then the host grows past the whole allowance.
+    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
+    outcome, left_behind = _failed_search(sample_repo, tmp_path / "first", how)
+    held_by_the_cycle = left_behind() is not None
+
+    # Act
+    with _holding(200):
+        second = _opened(sample_repo, tmp_path / "second", how).functions_in("app/orders.py")
+
+    # Assert
+    assert outcome == Outcome.FAILED
+    assert held_by_the_cycle
+    assert left_behind() is None
+    assert [span.name for span in second] == ["place", "cancel"]
+
+
+def test_what_the_process_grows_while_one_index_is_open_is_charged_to_the_next_index(
+    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: list[list[str]]
+) -> None:
+    # Arrange
+    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
+    first = CodeIndex(sample_repo, ["app/orders.py"], fact_cache_dir=tmp_path / "first")
+    first.functions_in("app/orders.py")
+
+    # Act
+    with _holding(200), pytest.raises(MemoryLimitReachedError, match="memory allowance of 100 MB"):
+        CodeIndex(sample_repo, ["app/validation.py"], fact_cache_dir=tmp_path / "second").functions_in(
+            "app/validation.py"
+        )
+
+    # Assert
+    assert len(_scans(commands)) == 1
+    assert first.parsed_files == {"app/orders.py"}
 
 
 def test_growth_of_this_process_while_a_child_runs_stops_the_child(
