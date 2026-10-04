@@ -30,13 +30,19 @@ from jev_navigator.testing import ScriptedJevClient
 
 MB = 2**20
 
-GROWS_TO_600_MB = """\
+GROWS_TO_600_MB_THEN_STAYS = """\
 import time
 held = []
 for _ in range(20):
     held.append(b"x" * (30 * 2**20))
     time.sleep(0.03)
-print("grew to 600 MB")
+time.sleep(30)
+"""
+
+PRINTS_A_LINE_THEN_STAYS = """\
+import time
+print('{"line": 1}', flush=True)
+time.sleep(30)
 """
 
 TAKES_A_SLOT_AND_HOLDS_IT = """\
@@ -135,7 +141,7 @@ def test_a_child_that_grows_past_the_allowance_is_stopped_and_named(
 
     # Act
     with pytest.raises(MemoryLimitReachedError) as stopped:
-        tools.run_command([sys.executable, "-c", GROWS_TO_600_MB], tmp_path)
+        tools.run_command([sys.executable, "-c", GROWS_TO_600_MB_THEN_STAYS], tmp_path)
 
     # Assert
     message = str(stopped.value)
@@ -143,6 +149,31 @@ def test_a_child_that_grows_past_the_allowance_is_stopped_and_named(
     assert f"process {os.getpid()}" in message
     assert "stopped" in message and os.path.basename(sys.executable) in message
     assert time.monotonic() - started < 5
+
+
+def test_a_reader_that_stops_early_does_not_wait_for_its_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    started_processes: list[subprocess.Popen] = []
+
+    class RecordedPopen(subprocess.Popen):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            started_processes.append(self)
+
+    monkeypatch.setattr(subprocess, "Popen", RecordedPopen)
+    lines = tools._json_lines([sys.executable, "-c", PRINTS_A_LINE_THEN_STAYS], tmp_path)
+    started = time.monotonic()
+
+    # Act
+    first = next(lines)
+    lines.close()
+
+    # Assert
+    assert first == {"line": 1}
+    assert time.monotonic() - started < 5
+    assert [process.returncode for process in started_processes] == [-signal.SIGKILL]
 
 
 def test_a_real_parse_over_the_allowance_is_stopped_and_caches_no_facts(
