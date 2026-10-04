@@ -61,6 +61,9 @@ POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
+RESUMABLE_OUTCOMES = (Outcome.BUDGET, Outcome.CANCELLED, Outcome.FAILED)
+"""A search that stopped before it finished: it saves its frontier, a Find All does not enumerate
+after it, and ``--resume`` continues it."""
 OUT_HELP = (
     "New or empty output directory, never pruned (default: a unique run under "
     f"$XDG_DATA_HOME/jev-navigator/runs, pruned after {FINISHED_RUN_DAYS} days, {RESUMABLE_RUN_DAYS} "
@@ -156,7 +159,7 @@ def _run_search(args: argparse.Namespace) -> int:
     calls = manifest["provider"]["calls"] if args.command == "trace" else result["calls"]
     resume_directory = (
         str(output.resolve())
-        if args.command in ("find", "findall") and search_outcome in ("budget", "cancelled")
+        if args.command in ("find", "findall") and search_outcome in RESUMABLE_OUTCOMES
         else None
     )
     if args.json:
@@ -381,7 +384,7 @@ def create_evidence_pack(
         seed_calls = judge.calls
         seed_duration_seconds = monotonic() - started
         enumeration = None
-        if workflow == "findall" and result.outcome not in (Outcome.BUDGET, Outcome.CANCELLED):
+        if workflow == "findall" and result.outcome not in RESUMABLE_OUTCOMES:
             progress.phase("expanding seed and checking remaining functions")
             enumeration = find_all(
                 index,
@@ -397,7 +400,7 @@ def create_evidence_pack(
         needs_resume = (
             enumeration.stopped_by in ("budget", "cancelled")
             if enumeration is not None
-            else result.outcome in (Outcome.BUDGET, Outcome.CANCELLED)
+            else result.outcome in RESUMABLE_OUTCOMES
         )
         if needs_resume:
             scope_unavailable = save_resume(
@@ -445,6 +448,8 @@ def create_evidence_pack(
         if enumeration is not None:
             manifest["seed_search"] = previous["seed_search"] if resuming_enumeration else manifest["search"]
             manifest["search"] = _find_all_summary(enumeration, judge.calls, duration_seconds, previous)
+        if result.failure is not None:
+            manifest["search"]["failure"] = _failure_record(result.failure, judge, journal)
         if not keep_requests:
             _drop_code(manifest, index)
         _write_json(output / "manifest.json", manifest)
@@ -452,6 +457,9 @@ def create_evidence_pack(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
         )
         outcome = str(manifest["search"]["outcome"])
+        if result.outcome == Outcome.FAILED:
+            print(f"resume: use --resume {output} with the same target and repository", file=sys.stderr)
+            raise result.failure
         return manifest
     except KeyboardInterrupt:
         outcome = "cancelled"
@@ -459,6 +467,42 @@ def create_evidence_pack(
     finally:
         journal.record_terminal(outcome)
         progress.close(outcome)
+
+
+def _failure_record(error: BaseException, judge: Judge, journal: ProgressJournal) -> dict:
+    """The error that ended the search, with its cause chain and the journal request it failed in."""
+    request_id = judge.failed_request(error)
+    return {
+        **_error_fields(error),
+        "causes": [_error_fields(cause) for cause in _causes(error)],
+        "request_id": request_id,
+        "route": journal.routes.get(request_id) if request_id is not None else None,
+    }
+
+
+def _failure_lines(search: dict, bullet: str) -> list[str]:
+    failure = search.get("failure")
+    return [f"{bullet}Failure: {failure['type']}: {failure['message']}"] if failure else []
+
+
+def _error_fields(error: BaseException) -> dict:
+    return {"type": type(error).__name__, "message": str(error)}
+
+
+def _causes(error: BaseException) -> list[BaseException]:
+    causes = []
+    cause = _cause_of(error)
+    while cause is not None:
+        causes.append(cause)
+        cause = _cause_of(cause)
+    return causes
+
+
+def _cause_of(error: BaseException) -> BaseException | None:
+    """The explicit cause, else the error being handled when this one was raised without ``from``."""
+    if error.__cause__ is not None or error.__suppress_context__:
+        return error.__cause__
+    return error.__context__
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -873,8 +917,8 @@ def _previous_pack(
     previous = json.loads((source / "manifest.json").read_text())
     if not (source / "resume.json").is_file():
         raise ValueError(f"no saved search frontier in {source}")
-    if previous["search"]["outcome"] not in ("budget", "cancelled"):
-        raise ValueError("only a budget-stopped or cancelled search can resume")
+    if previous["search"]["outcome"] not in RESUMABLE_OUTCOMES:
+        raise ValueError("only a budget-stopped, cancelled or failed search can resume")
     if (
         previous.get("workflow", "find") != workflow
         or previous["source"]["repository"] != str(repository)
@@ -1093,6 +1137,7 @@ def _find_all_report(manifest: dict) -> str:
         f"Target: {manifest['target']}",
         "",
         f"Outcome: **{search['outcome']}**. Coverage: **{search['coverage']}**.",
+        *_failure_lines(search, ""),
         f"{search['calls']} live requests; "
         f"{search['duration_seconds']:.3f}s for seed search and enumeration.",
         "",
@@ -1204,6 +1249,7 @@ _FRONTIER_REASONS = {
     "budget": "Configured search limit reached",
     "depth": "Configured depth limit reached",
     "cancelled": "Search cancelled",
+    "failed": "Search stopped on a failed request; Resume opens this place",
     "stop_rule": "Caller stop condition met",
     "scope_incomplete": "Source scope incomplete",
     "neighbours_per_kind": "Configured neighbour limit reached",
@@ -1229,6 +1275,7 @@ def _report(manifest: dict) -> str:
         f"- Scope: {', '.join(f'`{prefix}`' for prefix in source['prefixes']) or 'whole directory'}",
         f"- Target: {manifest['target']}",
         f"- Outcome: **{_outcome_summary(search)}**",
+        *_failure_lines(search, "- "),
         *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{provider['requested_model']}`, served `{provider['served_model']}`",

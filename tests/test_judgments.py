@@ -775,6 +775,30 @@ def test_items_that_would_overflow_one_request_are_packed_so_no_request_exceeds_
     assert sorted(judged_files) == [f"part{index}.py" for index in range(4)]
 
 
+def test_non_ascii_items_are_packed_by_their_escaped_size_so_every_request_fits_the_box() -> None:
+    # Arrange: each item is about 4,000 characters as text but about 24,000 escaped, as Jev counts it
+    client = _boxed_client()
+    items = [
+        {
+            "file": f"part{index}.py",
+            "lines": [1, 2],
+            "code": f"def part{index}():\n    return '{'名' * 4_000}'",
+        }
+        for index in range(6)
+    ]
+
+    # Act
+    results = Judge(client).check_every([DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts")
+
+    # Assert: measured here with json.dumps itself, so a library measure that stopped escaping fails it
+    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 6
+    assert client.refusals == 0
+    assert len(client.requests) > 1
+    for state, questions in client.requests:
+        longest = max(len(json.dumps(question)) for question in questions.values())
+        assert len(json.dumps(state)) + longest <= JEV_INPUT_LIMITS.box_chars
+
+
 def _boxed_client() -> BudgetedClient:
     return BudgetedClient(JEV_INPUT_LIMITS.request_chars, input_box=JEV_INPUT_LIMITS.box_chars)
 

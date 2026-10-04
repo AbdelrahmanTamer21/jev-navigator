@@ -355,26 +355,28 @@ def test_find_code_can_stop_on_the_callers_history_check(sample_index: CodeIndex
     assert opened_files[0] == "app/orders.py" and "app/validation.py" in opened_files
 
 
-def test_a_stop_rule_whose_history_cannot_fit_stops_the_search_with_a_named_error(
+def test_a_stop_rule_whose_history_cannot_fit_fails_the_search_with_a_named_error(
     sample_index: CodeIndex,
 ) -> None:
     start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
     rule = StopRule(HOLDS_LIMIT, sections=("decisions",), budget_chars=5)
 
-    with pytest.raises(StopRuleTooLargeError, match="holds_limit_check") as raised:
-        find_code(
-            sample_index,
-            Judge(ScriptedJevClient()),
-            "the item limit check",
-            start,
-            budget=SearchBudget(beam_width=1),
-            stop_rule=rule,
-        )
+    result = find_code(
+        sample_index,
+        Judge(ScriptedJevClient()),
+        "the item limit check",
+        start,
+        budget=SearchBudget(beam_width=1),
+        stop_rule=rule,
+    )
 
-    assert isinstance(raised.value.__cause__, HistoryTooLargeError)
+    assert result.outcome == Outcome.FAILED
+    assert isinstance(result.failure, StopRuleTooLargeError)
+    assert "holds_limit_check" in str(result.failure)
+    assert isinstance(result.failure.__cause__, HistoryTooLargeError)
 
 
-def test_a_stop_rule_the_provider_refuses_for_size_stops_the_search_with_the_same_named_error(
+def test_a_stop_rule_the_provider_refuses_for_size_fails_the_search_with_the_same_named_error(
     sample_index: CodeIndex,
 ) -> None:
     start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
@@ -386,17 +388,19 @@ def test_a_stop_rule_the_provider_refuses_for_size_stops_the_search_with_the_sam
                 raise InputBudgetExceededError("max_tokens_exceeded")
             return super().send(state, questions)
 
-    with pytest.raises(StopRuleTooLargeError, match="fetched_holds_limit_check") as raised:
-        find_code(
-            sample_index,
-            Judge(RefusesTheStopRequest()),
-            "the item limit check",
-            start,
-            budget=SearchBudget(beam_width=1),
-            stop_rule=rule,
-        )
+    result = find_code(
+        sample_index,
+        Judge(RefusesTheStopRequest()),
+        "the item limit check",
+        start,
+        budget=SearchBudget(beam_width=1),
+        stop_rule=rule,
+    )
 
-    assert isinstance(raised.value.__cause__, InputBudgetExceededError)
+    assert result.outcome == Outcome.FAILED
+    assert isinstance(result.failure, StopRuleTooLargeError)
+    assert "fetched_holds_limit_check" in str(result.failure)
+    assert isinstance(result.failure.__cause__, InputBudgetExceededError)
 
 
 def test_the_ceiling_curve_reports_probability_against_history_size() -> None:
@@ -522,3 +526,45 @@ def test_the_default_stop_view_is_the_fetched_code_and_verdicts_need_the_decisio
     }
     assert "probability" not in json.dumps(steps_with_code)
     assert verdicts["decisions"][-1]["judgments"]["contains_target"]["verdict"] == "no"
+
+
+def test_an_interrupt_in_the_stop_rule_after_a_merged_round_never_reopens_that_rounds_places(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange: the round's place is judged and merged, then Ctrl-C lands while the stop rule asks
+    class InterruptedInTheStopRule(ScriptedJevClient):
+        def send(self, state, questions):
+            if any(question_id.startswith(HOLDS_LIMIT.question_id) for question_id in questions):
+                raise KeyboardInterrupt
+            return super().send(state, questions)
+
+    start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
+    cancelled = find_code(
+        sample_index,
+        Judge(InterruptedInTheStopRule(default_noul=0.1)),
+        "the item limit check",
+        start,
+        budget=SearchBudget(beam_width=1),
+        stop_rule=StopRule(HOLDS_LIMIT),
+    )
+    merged = [entry.fetched[0].source for entry in cancelled.history.steps if entry.operation == "open"]
+    resumed_client = ScriptedJevClient(default_noul=0.1)
+
+    # Act
+    find_code(
+        sample_index,
+        Judge(resumed_client),
+        "the item limit check",
+        [],
+        budget=SearchBudget(beam_width=1, max_steps=2),
+        resume=cancelled,
+    )
+
+    # Assert
+    opened_before = {(source["file"], "{}-{}".format(*source["lines"])) for source in merged}
+    asked = [(state["slice"]["file"], state["slice"]["lines"]) for state, _ in resumed_client.requests]
+    asked_again = [place for place in asked if place in opened_before]
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert len(merged) == 1
+    assert asked, "the resumed search must open the rest of the frontier"
+    assert asked_again == []

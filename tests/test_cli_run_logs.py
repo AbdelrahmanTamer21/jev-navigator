@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -242,6 +243,87 @@ def test_a_capped_run_and_its_resume_send_exactly_the_requests_of_an_uninterrupt
     assert hashes(first_client) + hashes(resumed_client) == hashes(whole_client)
     assert any(MARKER in json.dumps(state) for state, _ in resumed_client.requests)
     assert files_holding_code(tmp_path / "first") == []
+
+
+class InterruptedOnce(ThreadPoolExecutor):
+    """The round's pool, with one Ctrl-C in one window between opening the round and merging it:
+    ``"creating"``, before any request is sent, or ``"shutting_down"``, after the answers landed."""
+
+    window = "creating"
+    interrupts_left = 1
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._interrupt_in("creating")
+        super().__init__(*args, **kwargs)
+
+    def shutdown(self, *args, **kwargs) -> None:
+        super().shutdown(*args, **kwargs)
+        self._interrupt_in("shutting_down")
+
+    def _interrupt_in(self, window: str) -> None:
+        if type(self).window == window and type(self).interrupts_left:
+            type(self).interrupts_left -= 1
+            raise KeyboardInterrupt
+
+
+@pytest.mark.parametrize("window", ["creating", "shutting_down"])
+def test_ctrl_c_before_a_round_is_merged_and_its_resume_send_exactly_the_requests_of_an_uninterrupted_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, window: str
+) -> None:
+    """Ctrl-C lands after a round's places were opened but before its answers are merged: while the
+    round's thread pool is created, or after the answers arrived while it shuts down. The opened
+    place must stay on the saved frontier, so Resume asks it or replays its stored answer and goes
+    on, instead of ending with nothing left to open."""
+    # Arrange
+    from jev_navigator.directives import find_code as find_code_module
+
+    class Interrupted(InterruptedOnce):
+        pass
+
+    Interrupted.window = window
+
+    repository = marked_repository(tmp_path / "repository")
+    whole_client, first_client, resumed_client = limit_client(), limit_client(), limit_client()
+    options = {"fact_cache_dir": tmp_path / "fact-cache"}
+    interrupted = {**options, "answer_store": tmp_path / "interrupted-answers.sqlite"}
+    start = ("app/entry.py:5",)
+    budget = SearchBudget(beam_width=1, max_calls=5)
+    create_evidence_pack(
+        repository,
+        ("app/",),
+        TARGET,
+        start,
+        tmp_path / "whole",
+        budget,
+        whole_client,
+        answer_store=tmp_path / "whole-answers.sqlite",
+        **options,
+    )
+    monkeypatch.setattr(find_code_module, "ThreadPoolExecutor", Interrupted)
+    cancelled = create_evidence_pack(
+        repository, ("app/",), TARGET, start, tmp_path / "first", budget, first_client, **interrupted
+    )
+
+    # Act
+    resumed = create_evidence_pack(
+        repository,
+        ("app/",),
+        TARGET,
+        start,
+        tmp_path / "second",
+        budget,
+        resumed_client,
+        resume_from=tmp_path / "first",
+        **interrupted,
+    )
+
+    # Assert
+    def hashes(client: ScriptedJevClient) -> list[str]:
+        return [request_sha256(state, questions) for state, questions in client.requests]
+
+    assert cancelled["search"]["outcome"] == "cancelled"
+    assert resumed["search"]["outcome"] == "found"
+    assert hashes(first_client) + hashes(resumed_client) == hashes(whole_client)
 
 
 def offered_signatures(manifest: dict) -> list[str]:

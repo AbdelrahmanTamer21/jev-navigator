@@ -230,7 +230,7 @@ def test_trace_report_shows_the_token_total_next_to_the_responses_without_usage(
 
     report = (tmp_path / "pack" / "report.md").read_text()
     calls = manifest["provider"]["calls"]
-    assert f"- Responses without usage: {calls}\n- Requests without a response: 0\n" in report
+    assert f"- Responses without usage: {calls}\n- Requests whose usage is unknown: 0\n" in report
     assert "- Input tokens: at least 0 (not complete)" in report
 
 

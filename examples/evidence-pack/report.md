@@ -9,7 +9,7 @@
 - Search: 2 opened places, 2 live calls
 - Provider: requested `jev-scripted`, served `jev-scripted`
 - Responses without usage: 0
-- Requests without a response: 0
+- Requests whose usage is unknown: 0
 - Input tokens: 200
 - Navigation elapsed: 0.043 seconds (indexing and entry selection excluded)
 - Coverage caveat: 2 candidates were not independently opened; 0 files failed a completed parser scan. Pending parser scans: none.
