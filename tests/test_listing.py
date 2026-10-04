@@ -145,6 +145,28 @@ def test_from_git_names_untracked_and_ignored_files_under_a_folder_inside_anothe
     }
 
 
+def test_from_git_on_a_folder_inside_another_repository_labels_an_edited_file_as_a_worktree_read(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    parent = tmp_path / "parent"
+    commit_files(
+        parent,
+        {"copies/project/kept.py": "def kept():\n    return 0\n", "copies/project/edited.py": APP},
+    )
+    child = parent / "copies" / "project"
+    write_files(child, {"edited.py": "def handle():\n    return 2\n"})
+    commit = git(parent, "rev-parse", "HEAD").strip()
+
+    # Act
+    index = CodeIndex.from_git(child)
+    revisions = {name: index.read_slice(index.find_definition(name)[0]).commit for name in ("kept", "handle")}
+
+    # Assert
+    assert index.files == ("edited.py", "kept.py")
+    assert revisions == {"kept": commit, "handle": f"{commit}+worktree"}
+
+
 def test_from_git_names_a_requested_path_with_no_file(tmp_path: Path) -> None:
     # Arrange
     commit_files(tmp_path, {"app.py": APP})
