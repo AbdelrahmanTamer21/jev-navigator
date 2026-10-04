@@ -176,6 +176,27 @@ def test_the_line_cache_holds_at_most_its_bound(tmp_path: Path, monkeypatch: pyt
     assert set(index.unavailable_files) == {"a.py"}
 
 
+def test_the_line_cache_evicts_the_least_recently_read_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: a two-file line cache reads a.py, b.py, a.py again, then c.py; then a.py and b.py change
+    monkeypatch.setattr(code_index, "LINE_CACHE_FILES", 2)
+    for name in ("a.py", "b.py", "c.py"):
+        (tmp_path / name).write_text(f"def {name[0]}():\n    return 1\n")
+    index = CodeIndex(tmp_path, ["a.py", "b.py", "c.py"])
+    for file in ("a.py", "b.py", "a.py", "c.py"):
+        index.lines(file)
+    for name in ("a.py", "b.py"):
+        (tmp_path / name).write_text("def edited():\n    return 2\n")
+
+    # Act: a.py was read more recently than b.py, so only b.py goes back to the disk
+    for file in ("a.py", "b.py"):
+        index.lines(file)
+
+    # Assert
+    assert set(index.unavailable_files) == {"b.py"}
+
+
 def test_a_repeated_text_search_starts_no_second_process(sample_index: CodeIndex, spawned) -> None:
     # Act
     first = sample_index.search_text("orders.max_items")
