@@ -9,7 +9,6 @@ import pytest
 from jev_navigator import environment
 from jev_navigator.directives.find_code import SearchBudget
 from jev_navigator.environment import (
-    TYPESAFE_SETTINGS,
     _env_file,
     checkout_root,
     load_typesafe_environment,
@@ -21,8 +20,10 @@ INJECTED = ("RIPGREP_CONFIG_PATH", "LD_PRELOAD", "EVIL_MARKER")
 
 
 @pytest.fixture(autouse=True)
-def clean_settings(monkeypatch):
-    for name in (*TYPESAFE_SETTINGS, *INJECTED):
+def no_exported_injected_names(monkeypatch):
+    # conftest clears the tool's own settings; these names are cleared so that a developer's
+    # exported RIPGREP_CONFIG_PATH cannot make the injection checks fail.
+    for name in INJECTED:
         monkeypatch.delenv(name, raising=False)
 
 

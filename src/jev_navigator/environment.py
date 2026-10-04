@@ -25,7 +25,6 @@ import tomllib
 from collections.abc import MutableMapping
 from pathlib import Path
 
-TYPESAFE_SETTINGS = ("TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_DEFAULT_MODEL")
 # The tool's own settings namespace. Only names under these prefixes are honoured from a file, so a
 # file can never inject an operating-system or subprocess variable. `JEV_NAVIGATOR_*` holds the
 # search thresholds and budget; `SYSTEM_ONE_*` names the decision-model routes and their keys.
