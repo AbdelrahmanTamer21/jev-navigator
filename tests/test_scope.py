@@ -8,12 +8,14 @@ from pathlib import Path
 import pytest
 from git_repos import commit_all, git, write_files
 
+from jev_navigator.index.file_shape import Trigger, shape_of
 from jev_navigator.index.scope import (
     KNOWN_LANGUAGES,
     InvalidScopeError,
     ResolvedScope,
     Scope,
     ScopeRefusal,
+    SetAside,
     checked_root,
     is_test_file,
     resolve_scope,
@@ -21,6 +23,7 @@ from jev_navigator.index.scope import (
 
 SOURCE = "def run():\n    return 1\n"
 SCRIPT = "export function run() {\n  return 1;\n}\n"
+BUNDLE = "".join(f"var a{number}=function(){{return {number}}};" for number in range(800)) + "\n"
 
 
 def _repository(root: Path, files: dict[str, str]) -> Path:
@@ -149,6 +152,82 @@ def test_do_not_edit_in_code_rather_than_a_comment_leaves_a_file_in_scope(tmp_pa
     )
 
     assert _files(_scope(repo)) == ("app/form.py", "app/lock.py")
+
+
+def _resolved(scope: Scope) -> ResolvedScope:
+    resolved = resolve_scope(scope)
+    assert isinstance(resolved, ResolvedScope)
+    return resolved
+
+
+def test_a_flagged_file_without_a_marker_awaits_jevs_judgment_and_a_marked_one_does_not(
+    tmp_path: Path,
+) -> None:
+    repo = _repository(
+        tmp_path / "repo",
+        {
+            "app/orders.py": SOURCE,
+            "web/bundle.js": BUNDLE,
+            "web/marked.js": "/* @generated */\n" + BUNDLE,
+            "dist/bundle.js": BUNDLE,
+        },
+    )
+
+    resolved = _resolved(_scope(repo))
+
+    assert resolved.files == ("app/orders.py", "web/bundle.js")
+    assert dict(resolved.awaiting_generated_judgment) == {"web/bundle.js": shape_of(repo, "web/bundle.js")}
+    assert Trigger.LONG_LINE in resolved.awaiting_generated_judgment["web/bundle.js"].triggers
+    assert dict(resolved.set_aside) == {
+        "dist/bundle.js": SetAside("left out as generated: under dist/", shape_of(repo, "dist/bundle.js"))
+    }
+
+
+def test_a_flagged_file_under_build_output_is_left_out_before_the_count(tmp_path: Path) -> None:
+    repo = _repository(tmp_path / "repo", {"app/orders.py": SOURCE, "web/build/app.js": BUNDLE})
+
+    resolved = _resolved(_scope(repo, max_files=1))
+
+    assert resolved.files == ("app/orders.py",)
+    assert resolved.set_aside["web/build/app.js"].reason == "left out as generated: under build/"
+
+
+def test_a_file_awaiting_jevs_judgment_counts_toward_the_cap(tmp_path: Path) -> None:
+    repo = _repository(tmp_path / "repo", {"app/orders.py": SOURCE, "web/bundle.js": BUNDLE})
+
+    refusal = resolve_scope(_scope(repo, max_files=1))
+
+    assert isinstance(refusal, ScopeRefusal)
+    assert refusal.files == 2
+
+
+def test_an_unflagged_file_under_build_output_stays_and_is_not_asked(tmp_path: Path) -> None:
+    repo = _repository(tmp_path / "repo", {"dist/cli.js": SCRIPT})
+
+    resolved = _resolved(_scope(repo))
+
+    assert resolved.files == ("dist/cli.js",)
+    assert (dict(resolved.awaiting_generated_judgment), dict(resolved.set_aside)) == ({}, {})
+
+
+@pytest.mark.parametrize(
+    ("files", "fields"),
+    [
+        ({"web/bundle.js": BUNDLE, "dist/bundle.js": BUNDLE}, {"with_generated": True}),
+        ({"web/bundle.js": BUNDLE, ".gitattributes": "web/bundle.js -linguist-generated\n"}, {}),
+        ({"vendor/bundle.js": BUNDLE}, {"with_vendored": True}),
+    ],
+    ids=["generated-wanted", "attribute-says-hand-written", "vendored-wanted"],
+)
+def test_code_that_has_decided_a_flagged_file_sends_no_question(
+    tmp_path: Path, files: dict[str, str], fields: dict[str, bool]
+) -> None:
+    repo = _repository(tmp_path / "repo", files)
+
+    resolved = _resolved(_scope(repo, **fields))
+
+    assert set(resolved.files) == {path for path in files if path.endswith(".js")}
+    assert (dict(resolved.awaiting_generated_judgment), dict(resolved.set_aside)) == ({}, {})
 
 
 def test_a_false_linguist_attribute_keeps_a_file_the_path_rule_would_leave_out(tmp_path: Path) -> None:

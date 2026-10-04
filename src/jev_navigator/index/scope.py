@@ -1,4 +1,4 @@
-"""Which files a search covers, decided from paths, git and file heads, never by parsing.
+"""Which files a search covers, decided from paths, git and file contents, never by parsing.
 
 A scope starts from the directory's file listing (``tools.listed_files``) and keeps only files JVN
 parses, plus markup when docs are asked for. Tests, generated code, vendored code and docs are left
@@ -11,7 +11,13 @@ out unless asked for:
   ``node_modules`` folder;
 - docs: a ``docs`` folder, or a markup file.
 
-A false linguist attribute keeps a file its path or header would leave out. ``include`` and
+A false linguist attribute keeps a file its path or header would leave out. A file no attribute,
+header or vendored folder decides is measured (``file_shape.shape_of``) when a request does not ask
+for generated code. Under a ``dist`` or ``build`` folder it is measured before the count, and a file
+a trigger flags there is set aside as generated. Anywhere else it is measured after the count, and a
+flagged file stays in the scope, counted, awaiting Jev's generated judgment with its measured facts.
+
+``include`` and
 ``exclude`` entries are folders or files when they hold no ``*``, ``?`` or ``[``; otherwise they are
 globs over the whole path, where ``**`` crosses folders and a glob without ``/`` matches the file
 name at any depth unless a leading ``/`` anchors it at the root. A scope with more files than
@@ -30,6 +36,7 @@ from functools import cache
 from pathlib import Path, PurePosixPath
 
 from . import tools
+from .file_shape import FileShape, shape_of
 from .languages import LANGUAGE_BY_SUFFIX, language_of
 
 HEADER_LINES = 10
@@ -37,6 +44,7 @@ HEADER_BYTES = 4096
 GENERATED_MARKERS = (b"@generated", b"do not edit")
 COMMENT_STARTS = (b"#", b"//", b"/*", b"*", b"<!--")
 VENDORED_FOLDERS = frozenset({"vendor", "third_party", "node_modules"})
+BUILT_OUTPUT_FOLDERS = frozenset({"dist", "build"})
 DOCS_FOLDER = "docs"
 MARKUP_SUFFIXES = frozenset({".md", ".mdx", ".markdown", ".rst", ".adoc", ".asciidoc"})
 MARKUP = "markup"
@@ -75,12 +83,23 @@ class Scope:
 
 
 @dataclass(frozen=True)
+class SetAside:
+    """A file code left out after measuring it: why, and its measured facts."""
+
+    reason: str
+    shape: FileShape
+
+
+@dataclass(frozen=True)
 class ResolvedScope:
-    """The files a search covers, and every filter that chose them."""
+    """The files a search covers and every filter that chose them; the files among them that await
+    Jev's generated judgment, with their measured facts; and the files code set aside after measuring."""
 
     root: Path
     files: tuple[str, ...]
     filters: Mapping[str, object]
+    awaiting_generated_judgment: Mapping[str, FileShape]
+    set_aside: Mapping[str, SetAside]
 
 
 @dataclass(frozen=True)
@@ -100,16 +119,16 @@ def resolve_scope(scope: Scope) -> ResolvedScope | ScopeRefusal:
     root = checked_root(scope)
     _check_languages(scope)
     changed_since_commit = _resolved_ref(root, scope.changed_since)
-    files = [path for path in tools.listed_files(root) if _kept_by_path(scope, path)]
-    if changed_since_commit is not None:
-        files = _changed(root, changed_since_commit, files)
-    files = _kept_by_attributes_and_header(root, scope, files)
+    files, unsure = _kept_by_code(root, scope, _listed(root, scope, changed_since_commit))
+    set_aside = _flagged_built_output(root, [path for path in unsure if _built_output_folder(path)])
+    files = [path for path in files if path not in set_aside]
     filters = _filters(scope, changed_since_commit)
     if len(files) > scope.max_files:
         return ScopeRefusal(
             len(files), scope.max_files, filters, counts_by_folder(files), counts_by_language(files)
         )
-    return ResolvedScope(root, tuple(files), filters)
+    awaiting = _flagged(root, [path for path in unsure if not _built_output_folder(path)])
+    return ResolvedScope(root, tuple(files), filters, awaiting, set_aside)
 
 
 def is_test_file(path: str) -> bool:
@@ -192,6 +211,15 @@ def _in_vendored_folder(path: str) -> bool:
     return not VENDORED_FOLDERS.isdisjoint(PurePosixPath(path).parts[:-1])
 
 
+def _built_output_folder(path: str) -> str | None:
+    return next((folder for folder in PurePosixPath(path).parts[:-1] if folder in BUILT_OUTPUT_FOLDERS), None)
+
+
+def _listed(root: Path, scope: Scope, changed_since_commit: str | None) -> list[str]:
+    files = [path for path in tools.listed_files(root) if _kept_by_path(scope, path)]
+    return files if changed_since_commit is None else _changed(root, changed_since_commit, files)
+
+
 def _changed(root: Path, commit: str, files: Sequence[str]) -> list[str]:
     """The files that differ from ``commit`` in the working tree, untracked files included."""
     differing = tools.git(
@@ -211,24 +239,56 @@ class _Linguist:
     vendored: bool | None = None
 
 
-def _kept_by_attributes_and_header(root: Path, scope: Scope, files: Sequence[str]) -> list[str]:
-    if scope.with_generated and scope.with_vendored:
-        return list(files)
-    attributes = _linguist_attributes(root, files)
-    return [
-        path
-        for path in files
-        if (scope.with_vendored or not _is_vendored(path, attributes.get(path, _Linguist())))
-        and (scope.with_generated or not _is_generated(root, path, attributes.get(path, _Linguist())))
-    ]
+@dataclass(frozen=True)
+class _CodeVerdict:
+    """What code decides before measuring a file. ``generated`` is None when no attribute or header
+    decides, or when the file's other facts already decide what happens to it."""
+
+    vendored: bool
+    generated: bool | None
+
+    def kept(self, scope: Scope) -> bool:
+        return (scope.with_vendored or not self.vendored) and (scope.with_generated or not self.generated)
+
+    def unsure(self, scope: Scope) -> bool:
+        return not scope.with_generated and not self.vendored and self.generated is None
+
+
+def _kept_by_code(root: Path, scope: Scope, files: Sequence[str]) -> tuple[list[str], list[str]]:
+    """The files code keeps, and among them those only a measured shape can show to be generated."""
+    attributes = {} if scope.with_generated and scope.with_vendored else _linguist_attributes(root, files)
+    verdicts = {path: _verdict(root, scope, path, attributes.get(path, _Linguist())) for path in files}
+    kept = [path for path in files if verdicts[path].kept(scope)]
+    return kept, [path for path in kept if verdicts[path].unsure(scope)]
+
+
+def _verdict(root: Path, scope: Scope, path: str, linguist: _Linguist) -> _CodeVerdict:
+    vendored = _is_vendored(path, linguist)
+    if scope.with_generated or (vendored and not scope.with_vendored):
+        return _CodeVerdict(vendored, None)
+    return _CodeVerdict(vendored, _generated(root, path, linguist))
 
 
 def _is_vendored(path: str, linguist: _Linguist) -> bool:
     return linguist.vendored if linguist.vendored is not None else _in_vendored_folder(path)
 
 
-def _is_generated(root: Path, path: str, linguist: _Linguist) -> bool:
-    return linguist.generated if linguist.generated is not None else _has_generated_header(root, path)
+def _generated(root: Path, path: str, linguist: _Linguist) -> bool | None:
+    if linguist.generated is not None:
+        return linguist.generated
+    return True if _has_generated_header(root, path) else None
+
+
+def _flagged(root: Path, files: Sequence[str]) -> dict[str, FileShape]:
+    shapes = {path: shape_of(root, path) for path in files}
+    return {path: shape for path, shape in shapes.items() if shape.triggers}
+
+
+def _flagged_built_output(root: Path, files: Sequence[str]) -> dict[str, SetAside]:
+    return {
+        path: SetAside(f"left out as generated: under {_built_output_folder(path)}/", shape)
+        for path, shape in _flagged(root, files).items()
+    }
 
 
 def _linguist_attributes(root: Path, files: Sequence[str]) -> dict[str, _Linguist]:
