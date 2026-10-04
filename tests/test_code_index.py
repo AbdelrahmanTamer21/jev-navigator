@@ -778,8 +778,9 @@ def test_a_property_assignment_names_no_module_name_but_a_commonjs_export_stays_
 
 def test_destructuring_a_require_imports_its_names_without_declaring_them(tmp_path: Path) -> None:
     """`const { other, stop: halt } = require('./x')` imports `other` and `halt` from x.js the way
-    `import { other, stop as halt }` does: a call to `other` binds to x.js's export, never to the
-    require line as if that line defined it, and the line declares neither name."""
+    `import { other, stop as halt }` does: a call to `other` binds to x.js's export, a call to `halt`
+    to x.js's `stop`, never to the require line as if that line defined them, and the line declares
+    neither name."""
     # Arrange
     files = {
         "x.js": "exports.other = () => 3;\nexports.stop = () => 4;\n",
@@ -798,7 +799,7 @@ def test_destructuring_a_require_imports_its_names_without_declaring_them(tmp_pa
     }
 
     # Assert
-    assert bindings["other"] == ("resolved", "x.js:1-1")
+    assert bindings == {"other": ("resolved", "x.js:1-1"), "halt": ("resolved", "x.js:2-2")}
     assert index.declarations_in("cjs.js") == ()
 
 

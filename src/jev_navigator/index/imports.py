@@ -38,6 +38,15 @@ _PYTHON_ROOTS = ("", "src/")
 
 
 @dataclass(frozen=True)
+class ImportedName:
+    """A name imported by name: the module specifier, and the name the module exports it under
+    (``stop`` for ``import { stop as halt }``). None for a default import, which names no export."""
+
+    specifier: str
+    exported: str | None
+
+
+@dataclass(frozen=True)
 class ImportFact:
     """A discoverable repository path and whether its import mapping proves that path."""
 
@@ -90,7 +99,7 @@ def _python_names(clause: str) -> frozenset[str] | None:
     ]
     if "*" in parts:
         return None
-    return frozenset(part.split(" as ")[0].strip() for part in parts)
+    return frozenset(_exported(part) for part in parts)
 
 
 def _script_names(keyword: str, clause: str) -> frozenset[str] | None:
@@ -98,7 +107,7 @@ def _script_names(keyword: str, clause: str) -> frozenset[str] | None:
     if "*" in clause or (keyword == "import" and _SCRIPT_DEFAULT_NAME.match(clause)):
         return None
     names = frozenset(
-        part.strip().removeprefix("type ").split(" as ")[0].strip()
+        _exported(part)
         for braces in _SCRIPT_BRACES.findall(clause)
         for part in braces.split(",")
         if part.strip()
@@ -240,23 +249,23 @@ _SCRIPT_REQUIRED_MODULE = re.compile(
 _SCRIPT_BRACES = re.compile(r"\{([^}]*)\}")
 
 
-def imported_names(source: str, path: str) -> dict[str, str]:
-    """Local name to module specifier, for names imported by name (``from m import a as b``, also
+def imported_names(source: str, path: str) -> dict[str, ImportedName]:
+    """Local name to what it imports, for names imported by name (``from m import a as b``, also
     parenthesised over several lines; ``import { a as b } from "m"`` and ``import a from "m"``, also
     over several lines; ``const { a, b: c } = require("m")``). Type-only names are included;
     namespace imports are not."""
     if path.endswith(".py"):
         return {
-            _local(part): match.group(1)
+            _local(part): ImportedName(match.group(1), _exported(part))
             for match in _PYTHON_FROM.finditer(source)
             for part in _PYTHON_COMMENT.sub("", match.group(2)).strip("()\n ").split(",")
             if part.strip() and part.strip() != "*"
         }
     code = _without_script_comments(source)
     names = {
-        local: match.group(2)
+        local: ImportedName(match.group(2), exported)
         for match in _SCRIPT_REQUIRED_NAMES.finditer(code)
-        for local in _destructured_names(match.group(1))
+        for exported, local in _destructured_pairs(match.group(1))
     }
     for match in _SCRIPT_FROM.finditer(code):
         keyword, clause, specifier = match.groups()
@@ -264,10 +273,21 @@ def imported_names(source: str, path: str) -> dict[str, str]:
             continue
         default = _SCRIPT_DEFAULT_NAME.match(clause)
         if default:
-            names[default.group(1)] = specifier
+            names[default.group(1)] = ImportedName(specifier, None)
         for braces in _SCRIPT_BRACES.findall(clause):
-            names.update({_local(part): specifier for part in braces.split(",") if part.strip()})
+            names.update(
+                {
+                    _local(part): _script_imported(specifier, _exported(part))
+                    for part in braces.split(",")
+                    if part.strip()
+                }
+            )
     return names
+
+
+def _script_imported(specifier: str, exported: str) -> ImportedName:
+    """``import { default as entry }`` is a default import: it names no export."""
+    return ImportedName(specifier, None if exported == "default" else exported)
 
 
 def module_aliases(source: str, path: str) -> dict[str, str]:
@@ -320,12 +340,22 @@ def _keep_literal(match: re.Match) -> str:
     return "" if text.startswith("/") else text
 
 
-def _destructured_names(pattern: str) -> list[str]:
-    """The local names an object pattern binds: ``a`` and ``c`` in ``a, b: c = 1, ...rest`` but not
-    the rest element."""
-    parts = (part.split("=")[0].split(":")[-1].strip() for part in pattern.split(","))
-    return [part for part in parts if part and not part.startswith("...")]
+def _destructured_pairs(pattern: str) -> list[tuple[str, str]]:
+    """The property each name of an object pattern takes, and the local name it binds: ``(a, a)`` and
+    ``(b, c)`` in ``a, b: c = 1, ...rest``, but not the rest element."""
+    pairs = []
+    for part in pattern.split(","):
+        key, _, local = part.split("=")[0].partition(":")
+        key, local = key.strip(), (local or key).strip()
+        if key and not key.startswith("..."):
+            pairs.append((key, local))
+    return pairs
 
 
 def _local(part: str) -> str:
     return part.split(" as ")[-1].strip().removeprefix("type ").strip()
+
+
+def _exported(part: str) -> str:
+    """The name an import part takes as its module exports it: ``a`` in ``a as b`` or ``type a as b``."""
+    return part.strip().removeprefix("type ").split(" as ")[0].strip()

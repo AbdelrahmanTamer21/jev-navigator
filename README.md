@@ -299,7 +299,11 @@ an import names, proves the target, `candidate` when only the name matches (a me
 definition elsewhere with no import), `unresolved` when nothing in scope defines it, and `unknown` when
 the definition may sit in lines the index could not parse. A call `jwt.verify()` where `jwt` holds a
 whole module of the scope (`import * as jwt`, `const jwt = require(...)`) binds to the `verify` that
-module, or one it re-exports from, defines; only that module's facts are read. A function or class
+module, or one it re-exports from, defines; only that module's facts are read. A call `halt()` where
+`halt` imports a definition under another name (`import { stop as halt }`, `const { stop: halt } =
+require(...)`, `from m import stop as halt`) binds the same way to `stop`, unless the file defines
+`halt` itself; it is `unknown` when that module could not be parsed where it mentions `stop`. A
+default import is looked up by its local name. A function or class
 held by another function, a class or an object literal, or assigned to a property (`foo.bar =
 function () {}`), is no module-level definition. One assigned to `exports.x` or `module.exports.x`,
 or listed in `module.exports = {...}`, is a CommonJS export: an import names it, its own module does not. References carry a binding too. A
