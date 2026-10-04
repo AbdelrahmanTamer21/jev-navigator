@@ -66,7 +66,8 @@ def ast_grep_rules(
     the matches. ast-grep always runs with a JVN-owned sgconfig: ``config``, when given, is sgconfig
     YAML text (a ``languageGlobs`` remapping, say), otherwise ``NEUTRAL_AST_GREP_CONFIG``. It is
     written to a temporary file outside every repository and passed with ``--config``, so the
-    repository being analysed never configures the parser."""
+    repository being analysed never configures the parser. It parses at most as many files at once
+    as JVN's memory allowance affords (``MemoryLimit.parse_threads``)."""
     parseable, skipped = _split_by_parse_peak(files, cwd)
     refused.update(skipped)
     if not parseable:
@@ -75,7 +76,17 @@ def ast_grep_rules(
         directory = resources.enter_context(tempfile.TemporaryDirectory(prefix="jev-navigator-sgconfig-"))
         path = Path(directory) / "sgconfig.yml"
         path.write_text(NEUTRAL_AST_GREP_CONFIG if config is None else config)
-        command = [AST_GREP, "scan", "--inline-rules", rules_yaml, "--config", str(path)]
+        threads = str(memory_limit.process_guard().limit.parse_threads)
+        command = [
+            AST_GREP,
+            "scan",
+            "--threads",
+            threads,
+            "--inline-rules",
+            rules_yaml,
+            "--config",
+            str(path),
+        ]
         for chunk in file_chunks(parseable):
             yield from _json_lines([*command, "--json=stream", *chunk], cwd)
 

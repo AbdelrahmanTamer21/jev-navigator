@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
+from .index.file_shape import MAX_PARSE_PEAK_MB
+
 ALLOWANCE_MB = 1024
 """What one JVN process may grow by, its children included. Measured on 04.10.2026 with the streaming
 parser (#50) and the declaration-rule fix (#72), parsing every file of an app-sized scope: the largest
@@ -53,6 +55,10 @@ SAMPLE_SECONDS = 0.05
 process overshoots its allowance by about 40 MB before it is stopped."""
 
 SLOT_POLL_SECONDS = 0.2
+
+PYTHON_SHARE_MB = 270
+"""Python's measured share of the largest scope (261 MB for saleor/graphql). The rest of the allowance
+pays for ast-grep parsing files side by side, each up to the parse guard's bound."""
 
 ENVIRONMENT_NAMES = {
     "allowance_mb": "JEV_NAVIGATOR_MEMORY_ALLOWANCE_MB",
@@ -99,6 +105,12 @@ class MemoryLimit:
     @property
     def slots(self) -> int:
         return self.ceiling_mb // self.allowance_mb
+
+    @property
+    def parse_threads(self) -> int:
+        """How many files ast-grep may parse at once: the allowance less Python's share, divided by the
+        largest parse the guard admits; at least one."""
+        return max(1, int((self.allowance_mb - PYTHON_SHARE_MB) // MAX_PARSE_PEAK_MB))
 
 
 def slots_directory(environment: Mapping[str, str] | None = None) -> Path:

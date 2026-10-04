@@ -345,6 +345,27 @@ def test_a_slot_folder_that_is_a_symbolic_link_is_refused(
     assert list(elsewhere.iterdir()) == []
 
 
+@pytest.mark.parametrize(("allowance_mb", "threads"), [(1024, "3"), (512, "1"), (2048, "7")])
+def test_ast_grep_gets_the_threads_its_allowance_affords(
+    sample_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    commands: list[list[str]],
+    allowance_mb: int,
+    threads: str,
+) -> None:
+    # Arrange
+    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=allowance_mb, ceiling_mb=allowance_mb)
+    index = CodeIndex.from_git(sample_repo, fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    functions = index.functions_in("app/orders.py")
+
+    # Assert
+    assert [command[command.index("--threads") + 1] for command in _scans(commands)] == [threads]
+    assert [span.name for span in functions] == ["place", "cancel"]
+
+
 def test_a_ceiling_below_the_allowance_is_refused() -> None:
     with pytest.raises(ValueError, match="ceiling"):
         MemoryLimit.from_env(
