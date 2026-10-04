@@ -222,7 +222,7 @@ judgments and remaining coverage to a partial evidence pack.
 The result includes `seed_search`, and `search` records `found`, `unsure`, `searched`, source hashes,
 request identities, the static graph and coverage gaps. `functions_examined` means every enumerated
 function was judged; it does not prove the model found every behavior. `scope_incomplete` retains
-unsupported, unparsed or unavailable files; a file too large to parse safely is unavailable, with the reason. See the library composition in [extending.md](extending.md#compose-a-seed-first-find-all-search).
+unsupported, unparsed or unavailable files; a file too large to parse safely is unavailable, and report.md names each unavailable file with its reason. See the library composition in [extending.md](extending.md#compose-a-seed-first-find-all-search).
 
 `seed_search.calls` counts seed discovery; `search.enumeration_calls` counts the following enumeration.
 Their sum is `search.calls`, the whole workflow's actual model-request count.
@@ -267,7 +267,9 @@ unexamined evidence unresolved. Saved continuation is available for Find and Fin
 
 JSON stdout contains `output_directory`, `manifest`, `report`, `trace`, `provider` and `resume`
 (`null` for trace). Progress and requests stay on stderr. See `trace.outcome`, its obligations and
-`unresolved_links` before interpreting coverage. Ctrl-C stops the command with exit 130; an abrupt
+`unresolved_links` before interpreting coverage; `trace.unavailable_files` names, with the reason, each
+file the index has no facts for (gone or changed on disk, or refused by the parser), and report.md lists
+them. Ctrl-C stops the command with exit 130; an abrupt
 interruption can leave the journal and answer store without a final manifest. The library also
 offers cooperative cancellation between traversal steps and model batches that writes a partial
 pack.
