@@ -165,7 +165,7 @@ def ripgrep_lines(texts: Sequence[str], files: Sequence[str], cwd: Path) -> list
     hits = []
     with _pattern_file(texts) as patterns:
         command = [*_RIPGREP_SAFE, "--json", "--fixed-strings", "-f", patterns]
-        for chunk in file_chunks(files):
+        for chunk in file_chunks(files, bytes_only=True):
             hits += _match_lines(run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT))
     return hits
 
@@ -178,7 +178,7 @@ def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -
     found: list[str] = []
     with _pattern_file(patterns) as pattern_path:
         command = [*_RIPGREP_SAFE, "--files-with-matches", "--null", "--fixed-strings", "-f", pattern_path]
-        for chunk in file_chunks(files):
+        for chunk in file_chunks(files, bytes_only=True):
             output = run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
             found += [path.removeprefix("./") for path in output.split("\0") if path]
     return tuple(found)
