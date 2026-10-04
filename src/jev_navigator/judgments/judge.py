@@ -1050,7 +1050,7 @@ class _CheckPlan:
         caller gave them in, and a new commit does not reorder them."""
         return sorted(
             range(len(self.items)),
-            key=lambda position: (*_unit_place(self.items[position]), self.item_ids[position], position),
+            key=lambda position: (*unit_place(self.items[position]), self.item_ids[position], position),
         )
 
     def question(self, check: Check, slot: int) -> dict:
@@ -1185,8 +1185,9 @@ def _skeleton(list_name: str, questions: Mapping, items: list[Mapping], shared: 
     }
 
 
-def _unit_place(item: Mapping) -> tuple[str, int, int]:
-    """The unit's file and line range, or empty when the item names none."""
+def unit_place(item: Mapping) -> tuple[str, int, int]:
+    """The unit's file and line range, or empty when the item names none: the one order of judged
+    units, which batches are packed in and results are listed in."""
     lines = item.get("lines")
     if not isinstance(lines, list | tuple) or len(lines) != 2:
         return str(item.get("file", "")), 0, 0
