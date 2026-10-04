@@ -110,6 +110,21 @@ def test_roundtrip_keeps_every_fact_a_script_module_records(tmp_path):
     assert restored == facts
 
 
+def test_roundtrip_keeps_whether_a_module_alias_is_a_from_import(tmp_path):
+    """A Python module alias comes back from the cache with its specifier and whether a from-import
+    bound it, which decides whether the package's own name comes first."""
+    content = b"import app.jobs as jobs\nfrom app import mail\n"
+    (tmp_path / "module.py").write_bytes(content)
+    facts = scan_facts(["module.py"], tmp_path, Unparsed())["module.py"]
+    cache = FactCache(tmp_path / "cache")
+
+    cache.save("module.py", content, facts)
+    restored = cache.load("module.py", content)
+
+    assert [alias.from_import for alias in facts.module_aliases] == [False, True]
+    assert restored == facts
+
+
 def test_roundtrip_keeps_the_members_of_each_namespace(tmp_path):
     """A namespace's members come back from the cache with the lines of the namespace holding them."""
     content = (

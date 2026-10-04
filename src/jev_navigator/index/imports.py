@@ -128,6 +128,12 @@ def _script_names(keyword: str, clause: str) -> frozenset[str] | None:
     return None if "default" in names else names
 
 
+def python_submodule(package: str, name: str) -> str:
+    """The specifier of the module ``name`` in ``package``: ``app.jobs`` for ``app`` and ``jobs``,
+    ``.jobs`` for ``.``, ``..lib.text`` for ``..lib`` and ``text``."""
+    return f"{package}{name}" if package.endswith(".") else f"{package}.{name}"
+
+
 def resolve_import(
     specifier: str,
     importer: str,

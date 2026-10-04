@@ -44,6 +44,7 @@ from .scope_scan import (
     CallMatch,
     FileFacts,
     FileStructure,
+    ModuleAlias,
     ReferenceMatch,
     Unparsed,
     first_identifier,
@@ -766,11 +767,39 @@ class CodeIndex:
         self, file: str, name: str, receiver: str, role: str | None
     ) -> Binding | None:
         """The binding of ``receiver.name`` when ``receiver`` holds a whole module of the scope
-        (``import * as receiver``, ``const receiver = require(...)``), decided like an import of
-        ``name`` from that module (see ``_binding_through_exporters``). None when ``receiver`` holds
-        no module of the scope."""
-        specifier = self._module_alias(file, receiver)
-        return None if specifier is None else self._binding_through_exporters(file, specifier, name, role)
+        (``import * as receiver``, ``const receiver = require(...)``, ``from pkg import receiver``),
+        decided like an import of ``name`` from that module (see ``_binding_through_exporters``).
+        None when ``receiver`` holds no module of the scope, or when its from-import may take the
+        package's own name instead (see ``_package_binds_otherwise``)."""
+        alias = self._module_alias(file, receiver)
+        if alias is None or (alias.from_import and self._package_binds_otherwise(file, alias.specifier)):
+            return None
+        return self._binding_through_exporters(file, alias.specifier, name, role)
+
+    def _package_binds_otherwise(self, file: str, specifier: str) -> bool:
+        """Whether ``from package import module`` may give something other than the module
+        ``specifier`` names: Python takes the package's own name first, so the package's
+        ``__init__`` must not define that name, import anything else under it, star-import, or have
+        lines the index could not read that mention it."""
+        module = self._module_path(file, specifier)
+        if module is None:
+            return False
+        path = PurePosixPath(module)
+        holder, member = (
+            (path.parent.parent, path.parent.name) if path.name == "__init__.py" else (path.parent, path.stem)
+        )
+        init = str(holder / "__init__.py")
+        if init not in self._scope:
+            return False
+        bound = [alias for alias in self._facts_in(init).module_aliases if alias.name in (member, "*")]
+        imports_otherwise = any(
+            alias.name == "*" or self._module_path(init, alias.specifier) != module for alias in bound
+        )
+        return imports_otherwise or self._defines(init, member, None) or init in self._files_hiding(member)
+
+    def _module_path(self, file: str, specifier: str) -> str | None:
+        resolved = resolve_import(specifier, file, self._scope, self._script_paths(file), self._packages())
+        return None if resolved is None else resolved.path
 
     def _binding_through_import(self, file: str, name: str, role: str | None) -> Binding | None:
         """The binding of ``name()`` when ``file`` imports ``name``: by that name or under another
@@ -903,11 +932,11 @@ class CodeIndex:
     def _read_imported_names(self, file: str) -> dict[str, ImportedName]:
         return imported_names("\n".join(self._lines_of(file)), file)
 
-    def _module_alias(self, file: str, name: str) -> str | None:
-        """The module ``name`` holds when module-level code binds it to one whole module (see
+    def _module_alias(self, file: str, name: str) -> ModuleAlias | None:
+        """The alias that binds ``name`` when module-level code binds it to one whole module (see
         ``ModuleAlias``); None when it binds it to none or to two."""
-        specifiers = {alias.specifier for alias in self._facts_in(file).module_aliases if alias.name == name}
-        return specifiers.pop() if len(specifiers) == 1 else None
+        aliases = {alias for alias in self._facts_in(file).module_aliases if alias.name == name}
+        return aliases.pop() if len(aliases) == 1 else None
 
     def read_slice(self, span: Span, origin: str = "") -> CodeSlice:
         lines = self._lines_of(span.file)

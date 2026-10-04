@@ -279,6 +279,28 @@ MODULE_ALIAS_RULES = {
     "javascript": _SCRIPT_MODULE_ALIASES,
 }
 
+# In Python, `from pkg import mod` outside any function or class binds `mod` to the attribute `mod`
+# of `pkg`, which is the module `pkg.mod` unless the package's `__init__` binds that name itself. The
+# statement is matched with its package captured as `$FROM`, and each name it takes is matched on
+# its own, quietly, with `$SPEC` as imported and `$NAME` as bound, so a list of a hundred names
+# prints the statement once, not a hundred times. A star import takes the name `*`.
+PYTHON_FROM_IMPORT = f"""  kind: import_from_statement
+  has: {{field: module_name, pattern: $FROM}}
+  {_PYTHON_OUTSIDE_SCOPES}"""
+PYTHON_FROM_IMPORT_NAMES = (
+    """  kind: aliased_import
+  all:
+    - has: {field: name, pattern: $SPEC}
+    - has: {field: alias, pattern: $NAME}
+    - not: {not: {inside: {kind: import_from_statement}}}""",
+    """  kind: dotted_name
+  pattern: $NAME
+  not: {not: {inside: {field: name, kind: import_from_statement}}}""",
+    """  kind: wildcard_import
+  pattern: $NAME
+  not: {not: {inside: {kind: import_from_statement}}}""",
+)
+
 # The names a function binds for its own body, one match per name: its parameters, the names its
 # declarations and destructurings bind, a caught error, a loop variable, and in Python each
 # assignment target. A default value, a computed key, a type annotation, a decorator, an attribute or
