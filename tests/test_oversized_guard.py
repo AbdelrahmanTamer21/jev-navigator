@@ -6,11 +6,11 @@ import sys
 from pathlib import Path
 
 import pytest
-from git_repos import commit_files
+from git_repos import commit_all, commit_files, write_files
 
 from jev_navigator.cli_statistics import create_statistics_pack
 from jev_navigator.comments import find_comments
-from jev_navigator.index import tools
+from jev_navigator.index import file_shape, tools
 from jev_navigator.index.bindings import BindingStatus
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.fact_cache import FactCache
@@ -42,11 +42,11 @@ class _AstGrepRecorder:
         self.commands: list[list[str]] = []
         original = tools._json_lines
 
-        def run(arguments, cwd):
+        def run(arguments, cwd, **callbacks):
             if arguments[0] == tools.AST_GREP and "scan" in arguments:
                 self.commands.append(list(arguments))
                 return iter(())
-            return original(arguments, cwd)
+            return original(arguments, cwd, **callbacks)
 
         monkeypatch.setattr(tools, "_json_lines", run)
 
@@ -156,6 +156,86 @@ def test_the_door_yields_the_matches_of_the_files_it_parsed_and_names_the_ones_i
     assert [match["file"] for match in matches] == ["src/small.py"]
     assert guarded == []
     assert set(refused) == {BUNDLE}
+
+
+SKIPPED_BY_AST_GREP = "src/skipped.ts"
+"""ast-grep 0.45.1 exits 0 and prints nothing for a file of more than 3,000,000 bytes and more than
+200,000 lines, even for a rule on ``kind: program``. This one has 1,000,001 lines of 3 bytes."""
+
+
+def _repository_with_a_file_ast_grep_skips(tmp_path: Path) -> Path:
+    files = {
+        SKIPPED_BY_AST_GREP: "x;\n" * 1_000_001,
+        "src/comment_only.ts": "// nothing to find here\n",
+        "src/empty.ts": "",
+        "src/small.ts": "export function small() { return 1; }\n",
+    }
+    commit_files(tmp_path / "repo", files)
+    return tmp_path / "repo"
+
+
+FUNCTION_RULE = "id: function\nlanguage: typescript\nrule:\n  kind: function_declaration"
+
+
+def _without_the_memory_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests reach ast-grep's own size skip (over 3,000,000 bytes and 200,000 lines) with a file the
+    side-by-side share would refuse, so they lift that share: what they prove is the detection of any
+    file ast-grep skips in a side-by-side run."""
+    monkeypatch.setattr(file_shape, "MAX_PARSE_PEAK_MB", float("inf"))
+
+
+def test_the_door_names_a_file_ast_grep_skipped_without_parsing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without_the_memory_bound(monkeypatch)
+    repository = _repository_with_a_file_ast_grep_skips(tmp_path)
+    refused: dict[str, str] = {}
+
+    matches = list(
+        tools.ast_grep_rules(
+            FUNCTION_RULE,
+            [SKIPPED_BY_AST_GREP, "src/comment_only.ts", "src/empty.ts", "src/small.ts"],
+            repository,
+            refused=refused,
+        )
+    )
+
+    assert [match["file"] for match in matches] == ["src/small.ts"]
+    assert set(refused) == {SKIPPED_BY_AST_GREP}, (
+        "a parsed file with no match, or an empty one, is not a skipped file"
+    )
+    assert refused[SKIPPED_BY_AST_GREP].startswith("not parsed: ast-grep skipped the file")
+
+
+def test_a_file_ast_grep_skipped_is_reported_unavailable_and_never_cached_as_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without_the_memory_bound(monkeypatch)
+    repository = _repository_with_a_file_ast_grep_skips(tmp_path)
+    index = CodeIndex.from_git(repository, fact_cache_dir=tmp_path / "facts")
+
+    index.functions_in_files(index.files)
+
+    assert index.unavailable_files[SKIPPED_BY_AST_GREP].startswith("not parsed: ast-grep skipped the file")
+    assert set(index.unavailable_files) == {SKIPPED_BY_AST_GREP}
+    cache = FactCache(tmp_path / "facts")
+    assert cache.load(SKIPPED_BY_AST_GREP, (repository / SKIPPED_BY_AST_GREP).read_bytes()) is None
+    assert cache.load("src/comment_only.ts", (repository / "src/comment_only.ts").read_bytes()) is not None
+
+
+def test_a_source_file_that_is_not_valid_utf8_is_named_as_such_not_taken_for_empty(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    write_files(repository, {"src/small.ts": "export function small() { return 1; }\n"})
+    (repository / "src/latin.ts").write_bytes("export function caf\u00e9() { return 1 }\n".encode("latin-1"))
+    commit_all(repository)
+    refused: dict[str, str] = {}
+
+    matches = list(
+        tools.ast_grep_rules(FUNCTION_RULE, ["src/latin.ts", "src/small.ts"], repository, refused=refused)
+    )
+
+    assert [match["file"] for match in matches] == ["src/small.ts"]
+    assert refused == {"src/latin.ts": "not parsed: not valid UTF-8"}
 
 
 SCAN_IN_A_FRESH_PROCESS = """
@@ -547,3 +627,18 @@ def test_a_file_parsed_alone_peaks_inside_the_single_file_limit(tmp_path: Path) 
     peak_megabytes = report["peak_bytes"] / (1 if sys.platform == "darwin" else 1024) / 1_000_000
     assert report["refused"] == {} and report["functions"] > 0
     assert peak_megabytes < SINGLE_PARSE_LIMIT_MB
+
+
+def test_a_file_parsed_alone_that_ast_grep_skips_is_named_not_taken_for_empty(tmp_path: Path) -> None:
+    # Arrange: 110,000 small functions, 3.4 MB on 220,000 lines, over ast-grep's own size skip but within
+    # the single-file limit, so the file is parsed alone and ast-grep prints nothing for it
+    many = "".join(f"def f{n}():\n    return {n}\n" for n in range(110_000))
+    commit_files(tmp_path / "repo", {"src/many.py": many, "src/one.py": "def one():\n    return 1\n"})
+    index = CodeIndex.from_git(tmp_path / "repo", fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    index.functions_in_files(index.files)
+
+    # Assert
+    assert index.refused_files == {"src/many.py": tools.NOT_PARSED_REASON}
+    assert [span.name for span in index.functions_in("src/one.py")] == ["one"]

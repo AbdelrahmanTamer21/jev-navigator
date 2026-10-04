@@ -200,7 +200,7 @@ def test_budget_pack_reopens_its_saved_frontier_in_a_second_cli_invocation(
         return instance
 
     monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", client)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: client())
     first = tmp_path / "first"
     second = tmp_path / "second"
     common = ["find", "the item limit", "--repo", str(repository), "--start", "app/entry.py:4"]
@@ -593,7 +593,7 @@ def test_a_full_disk_during_ctrl_c_exits_1_with_that_error_and_its_resume_finish
     clients = iter([interrupted, resuming])
     monkeypatch.setattr(JsonlAnswerStore, "_append", full_disk)
     monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", lambda: next(clients))
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: next(clients))
     starts = ["--start", "first.py:1", "--start", "second.py:1"]
     command = ["find", "the item limit", "--repo", str(repository), "--beam-width", "2", *starts]
     command += ["--answer-store", str(tmp_path / "answers.sqlite")]
@@ -681,7 +681,7 @@ def test_cancelled_run_marks_its_token_total_incomplete_because_a_sent_request_n
     assert provider["unanswered_requests"] == 1
     assert provider["input_tokens_complete"] is False
     report = (output / "report.md").read_text()
-    assert "Requests without a response: 1" in report
+    assert "Requests whose usage is unknown: 1" in report
     assert "Input tokens: at least 100 (not complete)" in report
 
 
@@ -716,7 +716,7 @@ def offline_main(monkeypatch: pytest.MonkeyPatch) -> dict:
         return {"search": {"outcome": calls["outcome"], "calls": 1}, "provider": {"requested_model": "test"}}
 
     monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", Client)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: Client())
     monkeypatch.setattr(cli, "create_evidence_pack", create_evidence_pack)
     return calls
 
@@ -879,8 +879,8 @@ def test_find_defaults_to_unique_results_in_jvns_data_folder(
 
     monkeypatch.setattr(
         cli,
-        "TypeSafeJevClient",
-        lambda: Client(
+        "system_one_client",
+        lambda environment: Client(
             nouls=lambda question_id, question, state: 1.0,
             choices={"open_first": {"0": 1.0}},
         ),
@@ -973,7 +973,7 @@ def test_json_request_errors_fail_before_search(monkeypatch, capsys, request_tex
     def unexpected_client():
         pytest.fail("invalid input reached the model client")
 
-    monkeypatch.setattr(cli, "TypeSafeJevClient", unexpected_client)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: unexpected_client())
     monkeypatch.setattr("sys.stdin", io.StringIO(request_text))
     with pytest.raises(SystemExit) as error:
         main(["--json", "-"])
@@ -1083,7 +1083,7 @@ def test_schema_discovery_needs_no_credentials_or_model(monkeypatch, capsys):
     def unexpected_client():
         pytest.fail("schema discovery reached the model client")
 
-    monkeypatch.setattr(cli, "TypeSafeJevClient", unexpected_client)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: unexpected_client())
     assert main(["schema", "find"]) == 0
     output = capsys.readouterr()
     assert not output.err
@@ -1159,7 +1159,7 @@ def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
     def forbidden_provider():
         raise AssertionError("structural analysis must not construct a model client")
 
-    monkeypatch.setattr(cli, "TypeSafeJevClient", forbidden_provider)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: forbidden_provider())
     assert (
         main(
             [
@@ -1233,7 +1233,7 @@ def test_each_run_names_its_answer_store_and_a_fresh_store_isolates_runs(
         return instance
 
     monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", client)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: client())
     common = ["findall", "the item limit", "--repo", str(repository)]
     arm_a, arm_b = tmp_path / "arm-a.sqlite", tmp_path / "arm-b.sqlite"
     default_store = os.environ.get(SHARED_STORE_VARIABLE)
@@ -1277,7 +1277,7 @@ def test_the_answer_store_variable_chooses_the_shared_store_when_no_flag_is_give
     store = tmp_path / "from-variable.sqlite"
     monkeypatch.setenv(SHARED_STORE_VARIABLE, str(store))
     monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", client)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: client())
     common = ["findall", "the item limit", "--repo", str(repository)]
 
     # Act
@@ -1303,7 +1303,7 @@ def test_a_store_named_inside_jvns_cache_folder_stops_the_run_with_exit_2(
 
     # Arrange: an older JVN's default file name, which housekeeping prunes as an older layout
     monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", ScriptedJevClient)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: ScriptedJevClient())
     store = private_cache_root / "answers.sqlite"
     flag = ["--answer-store", str(store)] if named_by == "flag" else []
     if named_by == "variable":

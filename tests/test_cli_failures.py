@@ -82,7 +82,7 @@ def closable(client: ScriptedJevClient) -> ScriptedJevClient:
 
 def use_clients(monkeypatch: pytest.MonkeyPatch, clients: Iterator) -> None:
     monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", lambda: next(clients))
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: next(clients))
 
 
 def find_command(repository: Path, output: Path, store: Path, *options: str) -> list[str]:
