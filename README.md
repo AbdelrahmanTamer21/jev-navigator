@@ -527,7 +527,7 @@ docstring. The outcome is `found`, `stop_rule`, `budget`, `cancelled`, `failed`,
 (bodies actually judged, start places apart in `starts`); and `not_inspected`, each entry with its
 reason (`budget`, `cancelled`, `failed`, `deprioritized`, `capped` or `depth`) and its `QueueTier`:
 `START`, `PICK` or `MOVE`. A request that fails, such as a provider error or a full disk while
-storing its answer, ends `find_code` as `failed`: `failure` holds that same error object, the answers
+storing its answer, ends `find_code` and `find_code_async` as `failed`: `failure` holds that same error object, the answers
 its round did get stay merged, and the failed place waits in `not_inspected` with reason `failed`.
 A request Ctrl-C stopped is `cancelled` instead. Resume
 preserves that role, so waiting starts still open before picks and are never reported as new finds.
