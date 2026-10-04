@@ -24,6 +24,7 @@ from .client import (
     AsyncJevClient,
     InputBudgetExceededError,
     JevClient,
+    UnansweredQuestionError,
 )
 from .journal import AttemptJournalCallbackError, Journal, JournalRequest, RawResponse
 from .questions import (
@@ -567,6 +568,7 @@ class Judge:
             for judge in self._chain():
                 judge.served_model = response.model
                 judge.input_total.add(response.input_tokens)
+            _refuse_unanswered(prepared.questions, response)
             self._record(
                 prepared, dispatched, thresholds, item_keys or {}, sources or {}, skeleton or {}, batch or {}
             )
@@ -935,6 +937,14 @@ class Judge:
                 sent_exact=dispatched.sent_exact,
             )
         )
+
+
+def _refuse_unanswered(questions: Mapping, response: JevResponse) -> None:
+    """A response that leaves out an asked answer is refused before anything is recorded; the
+    tokens it cost are already counted."""
+    unanswered = [question_id for question_id in questions if question_id not in response.answers]
+    if unanswered:
+        raise UnansweredQuestionError(f"{response.model} returned no answer for {', '.join(unanswered)}")
 
 
 @dataclass(frozen=True)
