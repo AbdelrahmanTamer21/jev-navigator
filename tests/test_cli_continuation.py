@@ -66,7 +66,6 @@ def test_saved_find_frontier_restores_relationship_binding(tmp_path: Path) -> No
 @pytest.mark.parametrize("workflow", ["find", "findall"])
 @pytest.mark.parametrize("answer", ["yes", "no", "eof", "json", "pipe", "zero"])
 def test_search_continues_only_with_terminal_consent(tmp_path: Path, answer: str, workflow: str) -> None:
-    pytest.importorskip("typesafe_sdk")
     repository = tmp_path / "repository"
     commit_files(
         repository,

@@ -32,7 +32,6 @@ def test_unknown_route_needs_endpoint_and_model():
 
 
 def test_known_route_shorthand_needs_only_the_flag():
-    _requires_typesafe()
     routes = routes_from_env(
         {"SYSTEM_ONE_ROUTES": "drex", "SYSTEM_ONE_DREX": "1", "TYPESAFE_API_KEY": "test-key"}
     )
@@ -41,7 +40,6 @@ def test_known_route_shorthand_needs_only_the_flag():
 
 
 def test_per_route_settings_beat_the_shorthand():
-    _requires_typesafe()
     routes = routes_from_env(
         {
             "SYSTEM_ONE_ROUTES": "drex",
@@ -100,7 +98,6 @@ def test_a_route_client_hits_its_own_endpoint_not_the_default():
 
 
 def test_direct_system_one_journal_keeps_each_retry_at_the_sdk_boundary(tmp_path):
-    _requires_typesafe()
     exchanges: list[tuple[bytes, int, bytes]] = []
     server = _retry_server(exchanges)
     client = SystemOneClient(
@@ -135,7 +132,6 @@ def test_direct_system_one_journal_keeps_each_retry_at_the_sdk_boundary(tmp_path
 
 
 def test_direct_system_one_journal_keeps_attempts_before_terminal_sdk_failure(tmp_path):
-    _requires_typesafe()
     from typesafe_sdk import TypeSafeInternalServerError
 
     exchanges: list[tuple[bytes, int, bytes]] = []
@@ -170,7 +166,6 @@ def test_direct_system_one_journal_keeps_attempts_before_terminal_sdk_failure(tm
 
 
 def test_routed_journal_keeps_failed_primary_and_successful_backup_under_one_request(tmp_path):
-    _requires_typesafe()
     primary_exchanges: list[tuple[bytes, int, bytes]] = []
     backup_exchanges: list[tuple[bytes, int, bytes]] = []
     primary_server = _retry_server(primary_exchanges, always_fail=True)
@@ -216,7 +211,6 @@ def test_routed_journal_keeps_failed_primary_and_successful_backup_under_one_req
 
 
 def test_routed_journal_records_all_routes_before_terminal_failure(tmp_path):
-    _requires_typesafe()
 
     first_exchanges: list[tuple[bytes, int, bytes]] = []
     second_exchanges: list[tuple[bytes, int, bytes]] = []
@@ -261,7 +255,6 @@ def test_routed_journal_records_all_routes_before_terminal_failure(tmp_path):
 
 
 def test_routed_parse_failure_keeps_fallback_behavior_and_both_attempts(tmp_path):
-    _requires_typesafe()
     primary_exchanges: list[tuple[bytes, int, bytes]] = []
     backup_exchanges: list[tuple[bytes, int, bytes]] = []
     primary_server = _retry_server(primary_exchanges, malformed_first=True)
@@ -303,7 +296,6 @@ def test_routed_parse_failure_keeps_fallback_behavior_and_both_attempts(tmp_path
 
 
 def test_route_attempt_journal_failure_propagates_without_using_backup(tmp_path):
-    _requires_typesafe()
 
     class RejectFirstAttemptWrite(JsonlJournal):
         def __init__(self, path):
@@ -356,13 +348,7 @@ def test_route_attempt_journal_failure_propagates_without_using_backup(tmp_path)
 # --- local System-One endpoints -------------------------------------------------------------
 
 
-def _requires_typesafe() -> None:
-    pytest.importorskip("httpx2")
-    pytest.importorskip("typesafe_sdk")
-
-
 def _server(exchanges: list[tuple[bytes, bytes]], model: str = "jev-1.13.0") -> SystemOneClient:
-    _requires_typesafe()
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
@@ -393,7 +379,6 @@ def _server(exchanges: list[tuple[bytes, bytes]], model: str = "jev-1.13.0") -> 
 
 
 def _dead_server() -> SystemOneClient:
-    _requires_typesafe()
     client = SystemOneClient(model="test", api_key="test-key", base_url="http://127.0.0.1:1")
     return client
 
@@ -445,7 +430,6 @@ def _retry_server(
 
 def test_a_routed_budget_refusal_reaches_the_judge_and_splits_without_failover():
     """The real route transport preserves a size refusal for the batching owner to split."""
-    _requires_typesafe()
     refused: list[bytes] = []
     accepted: list[bytes] = []
 
