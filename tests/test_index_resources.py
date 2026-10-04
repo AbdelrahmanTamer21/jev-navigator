@@ -182,6 +182,26 @@ def test_a_file_removed_after_inventory_is_reported_when_a_search_meets_it(sampl
     assert "app/settings.py" in index.unavailable_files
 
 
+def test_a_file_changed_during_a_search_is_only_unavailable_and_the_scan_finishes(tmp_path: Path) -> None:
+    # Arrange: a.py is read, then edited before its facts are scanned
+    (tmp_path / "a.py").write_text("def a():\n    return 'needle'\n")
+    (tmp_path / "b.py").write_text("def b():\n    return 'needle'\n")
+    index = CodeIndex(tmp_path, ["a.py", "b.py"])
+    index.lines("a.py")
+    (tmp_path / "a.py").write_text("def a():\n    return 'needle, changed'\n")
+
+    # Act
+    unparsed = index.unparsed_files
+    hits = index.search_text("needle")
+
+    # Assert
+    assert "changed" in index.unavailable_files["a.py"]
+    assert index.available_files == ("b.py",)
+    assert index.parser_scans_pending == ()
+    assert [hit.file for hit in hits] == ["b.py"]
+    assert unparsed == frozenset()
+
+
 def test_facts_on_one_line_are_ordered_by_position_then_name(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "chain.ts").write_text(

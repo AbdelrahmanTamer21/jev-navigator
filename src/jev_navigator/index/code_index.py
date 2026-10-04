@@ -471,11 +471,10 @@ class CodeIndex:
     def _discover(self, names: Iterable[str]) -> None:
         with self._facts_lock:
             new = [name for name in dict.fromkeys(names) if name not in self._discovered]
-            remaining = tuple(
-                file for file in self._code_files if file not in self._facts and file not in self._unavailable
-            )
-        if not new:
-            return
+            if not new:
+                return
+            unparsed = tuple(file for file in self._code_files if file not in self._facts)
+        remaining = self._available_files(unparsed)
         mentioning = self._on_available(remaining, lambda files: tools.ripgrep_files(new, files, self.root))
         found = self._files_by_name(new, mentioning)
         with self._facts_lock:
@@ -538,7 +537,7 @@ class CodeIndex:
         The caller holds the facts lock."""
         to_parse: dict[str, bytes] = {}
         for file in files:
-            if language_of(file) is None or file in self._facts or file in self._unavailable:
+            if language_of(file) is None or file in self._facts:
                 continue
             content = self._read_bytes(file)
             if content is None:
@@ -650,9 +649,9 @@ class CodeIndex:
         return self._text_hits(text, max_hits)
 
     def _search_text(self, text: str, max_hits: int) -> tuple[TextHit, ...]:
-        readable = tuple(file for file in self.files if file not in self._unavailable)
         found = self._on_available(
-            readable, lambda files: tools.ripgrep_fixed(text, files, self.root, max_hits)
+            self._available_files(self.files),
+            lambda files: tools.ripgrep_fixed(text, files, self.root, max_hits),
         )
         hits = sorted(hit for hit in found if hit.file in self._scope)
         return tuple(hits[:max_hits])
@@ -764,8 +763,12 @@ class CodeIndex:
         return content
 
     def _available_files(self, files: Sequence[str]) -> tuple[str, ...]:
+        """The ``files`` still readable as the index first read them: neither reported unavailable
+        before nor gone from disk now."""
         available = []
         for file in files:
+            if file in self._unavailable:
+                continue
             try:
                 if (self.root / file).is_file():
                     available.append(file)
