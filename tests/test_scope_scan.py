@@ -562,17 +562,24 @@ def test_a_namespace_member_is_no_module_level_definition(tmp_path: Path) -> Non
                 "namespace A { export const config = 1; export function read() { return 1; } }\n"
                 "namespace B {\n  export const config = 2;\n  export function show() { return config; }\n}\n"
                 "read();\n"
-            )
+            ),
+            "src/cfg.ts": "export const config = 3;\n",
+            "src/main.ts": (
+                "import { config } from './cfg';\nnamespace A {\n  export const config = 1;\n}\n"
+                "export function show() {\n  return config;\n}\n"
+            ),
         },
     )
 
     # Act
     config = index.binding_of("src/spaces.ts", 4, "config", None, "return")
     read = index.binding_of("src/spaces.ts", 6, "read", None)
+    imported = index.binding_of("src/main.ts", 6, "config", None, "return")
 
     # Assert
     assert config.target != Span("src/spaces.ts", 1, 1, "config"), config
     assert read.status.value != "resolved", read
+    assert (imported.status.value, imported.target) == ("resolved", Span("src/cfg.ts", 1, 1, "config"))
 
 
 def test_several_definitions_of_a_name_in_one_file_make_a_candidate(tmp_path: Path) -> None:
