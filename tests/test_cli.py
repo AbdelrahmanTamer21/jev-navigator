@@ -471,11 +471,11 @@ def test_each_existing_typesafe_environment_value_wins_independently(tmp_path: P
 
 def test_user_dotenv_loads_only_settings_and_never_shell_evaluates(tmp_path: Path) -> None:
     pytest.importorskip("dotenv")
+    marker = tmp_path / "shell-ran"
+    command = f"$(touch {marker})"
     path = tmp_path / "env"
     path.write_text(
-        "TYPESAFE_API_KEY='file-value'\n"
-        "TYPESAFE_BASE_URL='http://127.0.0.1:4777/jvn'\n"
-        "UNRELATED=$(touch should-not-run)\n"
+        f"TYPESAFE_API_KEY='file-value'\nTYPESAFE_DEFAULT_MODEL={command}\nUNRELATED=outside-the-settings\n"
     )
     environment: dict[str, str] = {}
 
@@ -483,9 +483,9 @@ def test_user_dotenv_loads_only_settings_and_never_shell_evaluates(tmp_path: Pat
 
     assert environment == {
         "TYPESAFE_API_KEY": "file-value",
-        "TYPESAFE_BASE_URL": "http://127.0.0.1:4777/jvn",
-    }  # UNRELATED is outside the tool's settings namespace, so it is never loaded
-    assert not (tmp_path / "should-not-run").exists()  # and a file value is never shell-evaluated
+        "TYPESAFE_DEFAULT_MODEL": command,
+    }  # the value arrives as written, and UNRELATED, outside the tool's settings, never loads
+    assert not marker.exists()
 
 
 def test_dotenv_base_url_reaches_the_real_sdk_system_one_endpoint(
