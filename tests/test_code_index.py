@@ -776,6 +776,32 @@ def test_a_property_assignment_names_no_module_name_but_a_commonjs_export_stays_
     assert required == {3: "resolved", 4: "candidate"}
 
 
+def test_destructuring_a_require_imports_its_names_without_declaring_them(tmp_path: Path) -> None:
+    """`const { other, stop: halt } = require('./x')` imports `other` and `halt` from x.js the way
+    `import { other, stop as halt }` does: a call to `other` binds to x.js's export, never to the
+    require line as if that line defined it, and the line declares neither name."""
+    # Arrange
+    files = {
+        "x.js": "exports.other = () => 3;\nexports.stop = () => 4;\n",
+        "cjs.js": (
+            "const { other, stop: halt } = require('./x');\n\n"
+            "function viaRequire() {\n  return other() + halt();\n}\n"
+        ),
+    }
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files), fact_cache_dir=tmp_path.parent / "facts")
+
+    # Act
+    bindings = {
+        edge.name: (edge.binding.status.value, edge.binding.target and edge.binding.target.key)
+        for edge in index.callee_edges(index.find_definition("viaRequire")[0])
+    }
+
+    # Assert
+    assert bindings["other"] == ("resolved", "x.js:1-1")
+    assert index.declarations_in("cjs.js") == ()
+
+
 @pytest.mark.parametrize(
     ("files", "name", "site", "declaration"),
     [

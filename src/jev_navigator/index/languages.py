@@ -156,15 +156,22 @@ TYPE_AND_VALUE_DECLARATIONS = {
 
 # The name nodes a declaration binds, one match per name: both names of `const a = 1, b = 2`, each
 # name a destructuring pulls out, and each target of `first, second = 1, 2`. A default value, a
-# computed key, an attribute or an item binds no name. The scan pairs each name with the innermost
-# declaration holding it, so a name declared inside another declaration's value stays its own.
+# computed key, an attribute or an item binds no name, and destructuring a `require(...)` imports its
+# names rather than declaring them. The scan pairs each name with the innermost declaration holding
+# it, so a name declared inside another declaration's value stays its own.
 _PATTERN_EXCLUSIONS = """  not:
     any:
       - inside:
           stopBy: end
           field: right
           any: [{kind: assignment_pattern}, {kind: object_assignment_pattern}]
-      - inside: {stopBy: end, kind: computed_property_name}"""
+      - inside: {stopBy: end, kind: computed_property_name}
+      - inside:
+          stopBy: end
+          kind: variable_declarator
+          all:
+            - has: {field: name, kind: object_pattern}
+            - has: {field: value, kind: call_expression, has: {field: function, regex: '^require$'}}"""
 _SCRIPT_NAME_KINDS = "{kind: identifier}, {kind: shorthand_property_identifier_pattern}"
 _SCRIPT_DECLARED_NAMES = f"""  any: [{_SCRIPT_NAME_KINDS}]
   inside:

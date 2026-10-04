@@ -448,7 +448,7 @@ def test_a_declaration_names_every_name_it_binds(tmp_path: Path) -> None:
                 "export type Id = string;\n"
                 "const make = function () { const inner = 1; return inner; };\n"
             ),
-            "src/values.js": "const a = 1, b = 2;\nconst { c, d: e } = require('./source');\n",
+            "src/values.js": "const a = 1, b = 2;\nconst { c, d: e } = settings;\n",
             "app/settings.py": (
                 "first, second = 1, 2\n*head, last = [1, 2]\napp.debug = True\nconfig['x'] = 1\n"
                 "TIMEOUT = RETRIES = 3\n"
