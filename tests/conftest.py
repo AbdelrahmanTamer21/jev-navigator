@@ -1,5 +1,5 @@
 """A small real repository (Python and TypeScript, two commits) that the index tests run against,
-and every test's isolation from the developer's own decision-service settings."""
+and every test's isolation from the developer's own decision-model settings."""
 
 from __future__ import annotations
 
@@ -12,14 +12,10 @@ import pytest
 from git_repos import git, write_files
 from isolated_jvn import NO_SETTINGS
 
+from jev_navigator.environment import SETTING_PREFIXES
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
-
-# Variables that can point `jvn` at a live service with a real key: the TypeSafe SDK's settings
-# (`TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, ...) and the route tables with their per-route
-# endpoints and keys (`SYSTEM_ONE_ROUTES`, `SYSTEM_ONE_<NAME>_API_KEY`, ...).
-SERVICE_SETTINGS = ("TYPESAFE_", "SYSTEM_ONE_")
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +27,7 @@ def no_developer_settings(monkeypatch):
     monkeypatch.setattr("jev_navigator.environment.checkout_root", lambda: NO_SETTINGS)
     monkeypatch.setattr("jev_navigator.environment.LEGACY_CONFIG", NO_SETTINGS / "env")
     for name in list(os.environ):
-        if name.startswith(SERVICE_SETTINGS):
+        if name.startswith(SETTING_PREFIXES):
             monkeypatch.delenv(name)
     kept = dict(os.environ)
     yield
