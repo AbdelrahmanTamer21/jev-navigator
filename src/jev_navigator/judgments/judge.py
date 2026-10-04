@@ -185,6 +185,11 @@ class Judge:
         child._parent = self
         return child
 
+    @property
+    def unanswered_requests(self) -> int:
+        """The requests sent whose response never arrived, so whose token usage is unknown."""
+        return self.calls - self.input_total.responses
+
     def calls_left(self) -> int | None:
         """The calls this judge may still send under its own and its parents' caps; None when uncapped."""
         caps = [judge.max_calls - judge.calls for judge in self._chain() if judge.max_calls is not None]

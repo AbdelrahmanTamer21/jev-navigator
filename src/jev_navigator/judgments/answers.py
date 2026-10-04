@@ -145,12 +145,14 @@ def response_to_raw(response: JevResponse) -> dict:
 
 @dataclass
 class TokenTotal:
-    """The tokens responses reported, and how many responses reported none."""
+    """The tokens responses reported, how many responses there were, and how many reported none."""
 
     reported: int = 0
     not_reported: int = 0
+    responses: int = 0
 
     def add(self, tokens: int | None) -> None:
+        self.responses += 1
         if tokens is None:
             self.not_reported += 1
         else:

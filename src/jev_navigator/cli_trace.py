@@ -167,6 +167,8 @@ def _manifest(
             "calls": judge.calls,
             "input_tokens": judge.input_total.reported,
             "responses_without_usage": judge.input_total.not_reported,
+            "unanswered_requests": judge.unanswered_requests,
+            "input_tokens_complete": judge.input_total.not_reported == 0 and judge.unanswered_requests == 0,
         },
         "trace": {
             "outcome": _outcome(result),

@@ -60,6 +60,8 @@ def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -
     assert written["provider"] == {
         "input_tokens": 200,
         "responses_without_usage": 0,
+        "unanswered_requests": 0,
+        "input_tokens_complete": True,
         "requested_model": "jev-scripted",
         "served_model": "jev-scripted",
     }
@@ -471,6 +473,61 @@ def test_cancelled_navigation_writes_a_resumable_evidence_pack(tmp_path: Path) -
     assert any(record["kind"] == "history_step" for record in records)
     assert records[-1]["kind"] == "terminal"
     assert records[-1]["outcome"] == "cancelled"
+
+
+def test_cancelled_run_marks_its_token_total_incomplete_because_a_sent_request_never_answered(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/entry.py": "from .policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "app/policy.py": "def admit(item):\n    return len(item) <= 3\n",
+        },
+    )
+
+    class CancelledOnSecondRequest(ScriptedJevClient):
+        def send(self, state, questions):
+            if self.requests:
+                raise KeyboardInterrupt
+            return super().send(state, questions)
+
+    output = tmp_path / "cancelled-usage"
+
+    # Act
+    manifest = create_evidence_pack(
+        repository,
+        ("app/",),
+        "the check that limits the number of items",
+        ("app/entry.py:4",),
+        output,
+        SearchBudget(max_depth=2, max_steps=3, max_calls=3, beam_width=1),
+        CancelledOnSecondRequest(),
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    # Assert
+    provider = manifest["provider"]
+    assert manifest["search"]["outcome"] == "cancelled"
+    assert manifest["search"]["calls"] == 2
+    assert provider["input_tokens"] == 100
+    assert provider["responses_without_usage"] == 0
+    assert provider["unanswered_requests"] == 1
+    assert provider["input_tokens_complete"] is False
+    report = (output / "report.md").read_text()
+    assert "Requests without a response: 1" in report
+    assert "Input tokens: at least 100 (not complete)" in report
+
+
+def test_answered_run_with_usage_marks_its_token_total_complete(tmp_path: Path) -> None:
+    _, output, _ = _capped_pack(tmp_path, "complete")
+
+    provider = json.loads((output / "manifest.json").read_text())["provider"]
+
+    assert provider["unanswered_requests"] == 0
+    assert provider["input_tokens_complete"] is True
 
 
 @pytest.fixture

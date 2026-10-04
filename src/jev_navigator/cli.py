@@ -380,6 +380,7 @@ def create_evidence_pack(
             requested_model=getattr(client, "model", "unknown"),
             served_model=judge.served_model,
             input_total=judge.input_total,
+            unanswered_requests=judge.unanswered_requests,
             duration_seconds=seed_duration_seconds,
             total_calls=seed_calls,
             entry_selection=selection,
@@ -860,6 +861,7 @@ def _manifest(
     requested_model: str,
     served_model: str | None,
     input_total: TokenTotal,
+    unanswered_requests: int,
     duration_seconds: float,
     total_calls: int,
     entry_selection: EntrySelection | None,
@@ -892,7 +894,7 @@ def _manifest(
             "requested_model": requested_model,
             "served_model": served_model,
             "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_total.reported,
-            "responses_without_usage": _plus_known(_carried_unreported(previous), input_total.not_reported),
+            **_usage_receipt(previous, input_total, unanswered_requests),
         },
         "search": {
             "outcome": result.outcome,
@@ -1002,9 +1004,28 @@ def _find_all_report(manifest: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _carried_unreported(previous: dict | None) -> int | None:
-    """The unreported-response count of an earlier receipt, ``None`` when it predates the field."""
-    return 0 if previous is None else previous["provider"].get("responses_without_usage")
+def _usage_receipt(previous: dict | None, input_total: TokenTotal, unanswered_requests: int) -> dict:
+    """What the provider block says about how far ``input_tokens`` can be trusted: the responses that
+    reported no usage, the requests that got no response, and whether the total is complete. A count
+    an earlier receipt predates stays unknown."""
+    without_usage = _plus_known(_carried_count(previous, "responses_without_usage"), input_total.not_reported)
+    unanswered = _plus_known(_carried_count(previous, "unanswered_requests"), unanswered_requests)
+    return {
+        "responses_without_usage": without_usage,
+        "unanswered_requests": unanswered,
+        "input_tokens_complete": without_usage == 0 and unanswered == 0,
+    }
+
+
+def _carried_count(previous: dict | None, name: str) -> int | None:
+    """A count of an earlier receipt, ``None`` when it predates the field."""
+    return 0 if previous is None else previous["provider"].get(name)
+
+
+def _input_tokens_text(provider: dict) -> str:
+    if provider["input_tokens_complete"]:
+        return str(provider["input_tokens"])
+    return f"at least {provider['input_tokens']} (not complete)"
 
 
 def _unreported_text(count: int | None) -> str:
@@ -1088,6 +1109,7 @@ _FRONTIER_REASONS = {
 def _report(manifest: dict) -> str:
     source = manifest["source"]
     search = manifest["search"]
+    provider = manifest["provider"]
     lines = [
         "# Jev navigator evidence pack",
         "",
@@ -1100,9 +1122,10 @@ def _report(manifest: dict) -> str:
         f"- Outcome: **{search['outcome']}**",
         *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
-        f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
-        f"`{manifest['provider']['served_model']}`",
-        f"- Responses without usage: {_unreported_text(manifest['provider']['responses_without_usage'])}",
+        f"- Provider: requested `{provider['requested_model']}`, served `{provider['served_model']}`",
+        f"- Responses without usage: {_unreported_text(provider['responses_without_usage'])}",
+        f"- Requests without a response: {_unreported_text(provider['unanswered_requests'])}",
+        f"- Input tokens: {_input_tokens_text(provider)}",
         f"- Navigation elapsed: {search['duration_seconds']:.3f} seconds "
         "(indexing and entry selection excluded)",
         f"- Coverage caveat: {len(search['not_inspected'])} candidates were not independently opened; "
