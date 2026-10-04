@@ -33,7 +33,6 @@ from .environment import checkout_root, load_typesafe_environment
 from .housekeeping import FINISHED_RUN_DAYS, RESUMABLE_RUN_DAYS
 from .index.code_index import CodeIndex
 from .index.languages import language_of
-from .judgments.answers import TokenTotal
 from .judgments.client import JevClient
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import (
@@ -420,9 +419,7 @@ def create_evidence_pack(
             index,
             result,
             requested_model=getattr(client, "model", "unknown"),
-            served_model=judge.served_model,
-            input_total=judge.input_total,
-            unanswered_requests=judge.unanswered_requests,
+            judge=judge,
             duration_seconds=seed_duration_seconds,
             total_calls=seed_calls,
             entry_selection=selection,
@@ -993,9 +990,7 @@ def _manifest(
     result: FindResult,
     *,
     requested_model: str,
-    served_model: str | None,
-    input_total: TokenTotal,
-    unanswered_requests: int,
+    judge: Judge,
     duration_seconds: float,
     total_calls: int,
     entry_selection: EntrySelection | None,
@@ -1026,9 +1021,10 @@ def _manifest(
         "thresholds": thresholds.as_dict(),
         "provider": {
             "requested_model": requested_model,
-            "served_model": served_model,
-            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_total.reported,
-            **usage_receipt(previous, input_total, unanswered_requests),
+            "served_model": judge.served_model,
+            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0)
+            + judge.input_total.reported,
+            **usage_receipt(previous, judge),
         },
         "search": {
             "outcome": result.outcome,
