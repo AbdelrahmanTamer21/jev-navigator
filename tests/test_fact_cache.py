@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import Barrier
 
 import pytest
-from git_repos import commit_files
+from git_repos import commit_files, read_files
 
 from jev_navigator.confirmation import day_of, today
 from jev_navigator.index import fact_cache, imports, languages, scope_scan, spans, tools
@@ -70,7 +70,7 @@ def example(tmp_path):
     source = tmp_path / "module.py"
     source.write_bytes(content)
     unparsed = Unparsed()
-    facts = scan_facts(["module.py"], tmp_path, unparsed)
+    facts = scan_facts(read_files(tmp_path, ["module.py"]), tmp_path, unparsed)
     assert not unparsed.files
     assert facts["module.py"].calls
     return content, facts["module.py"]

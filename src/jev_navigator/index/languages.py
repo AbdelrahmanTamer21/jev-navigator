@@ -117,6 +117,11 @@ def grammar_of(language: str) -> str:
     return "tsx" if language == FLOW_LANGUAGE else language
 
 
+def sgconfig_of(language: str) -> str | None:
+    """The sgconfig a scan reading ``language`` passes, or None for the neutral one."""
+    return FLOW_SGCONFIG if language == FLOW_LANGUAGE else None
+
+
 _DECLARED_NAME = re.compile(
     r"^\s*(?:export\s+)?(?:declare\s+)?(?:(?:type|interface|enum|const|let|var)\s+)?(\w+)"
 )

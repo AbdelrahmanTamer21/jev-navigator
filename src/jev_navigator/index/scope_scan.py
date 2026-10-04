@@ -12,7 +12,7 @@ names they may hide.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -23,7 +23,6 @@ from .languages import (
     DECLARATION_RULES,
     EXPRESSION_KINDS,
     FLOW_LANGUAGE,
-    FLOW_SGCONFIG,
     FUNCTION_KINDS,
     NAME_HOLDERS,
     NAME_WRAPPERS,
@@ -33,6 +32,7 @@ from .languages import (
     language_of,
     parse_language,
     reference_rules,
+    sgconfig_of,
 )
 from .spans import Span
 
@@ -95,16 +95,20 @@ class FileFacts:
     unparsed_lines: tuple[tuple[int, int], ...] = ()
     # Why the guard kept the file from the parser; such facts are empty and are never cached.
     refusal: str | None = None
+    # The language the facts were read as: ``flow`` for JavaScript read with the tsx grammar. None
+    # when no grammar read the file.
+    language: str | None = None
 
 
-def scan_facts(files: Sequence[str], root: Path, unparsed: Unparsed) -> dict[str, FileFacts]:
-    """Parse supported source files once; return empty facts for unsupported paths. Each match is
-    turned into its fact as the parser prints it, so memory holds facts, never the parser's output."""
-    found = {file: _FileFound() for file in files}
+def scan_facts(contents: Mapping[str, bytes], root: Path, unparsed: Unparsed) -> dict[str, FileFacts]:
+    """Parse supported source files once; return empty facts for unsupported paths. ``contents`` holds
+    each file's first-read bytes, which decide the language it is read as. Each match is turned
+    into its fact as the parser prints it, so memory holds facts, never the parser's output."""
+    found = {file: _FileFound() for file in contents}
     refused: dict[str, str] = {}
-    supported_files = tuple(file for file in files if language_of(file) is not None)
-    for config, group, languages in _scan_groups(supported_files, root):
-        found.update(_scanned(group, root, config, languages, refused))
+    plain, flow = _split_by_pragma(contents)
+    found.update(_scanned(plain, root, refused))
+    found.update(_scanned(flow, root, refused, as_flow=True))
     found.update(_read_as_flow_where_fewer_lines_fail(found, root, refused))
     unparsed.add("facts", [file for file, facts in found.items() if facts.error_lines])
     incomplete = unparsed.files
@@ -117,15 +121,16 @@ def scan_facts(files: Sequence[str], root: Path, unparsed: Unparsed) -> dict[str
 
 
 def _scanned(
-    files: Sequence[str], root: Path, config: str | None, languages: Sequence[str], refused: dict[str, str]
+    files: Sequence[str], root: Path, refused: dict[str, str], *, as_flow: bool = False
 ) -> dict[str, _FileFound]:
-    found = {file: _FileFound() for file in files}
-    rules = fact_rules(languages)
-    if config is None:
-        matches = tools.ast_grep_rules(rules, files, root, refused=refused)
-    else:
-        matches = tools.ast_grep_rules(rules, files, root, config=config, refused=refused)
-    for match in matches:
+    """The facts of ``files`` from one ast-grep scan, each file read as its own language, or all of
+    them as flow."""
+    if not files:
+        return {}
+    found = {file: _FileFound(FLOW_LANGUAGE if as_flow else language_of(file)) for file in files}
+    languages = [FLOW_LANGUAGE] if as_flow else sorted({found[file].language for file in files})
+    config = sgconfig_of(FLOW_LANGUAGE) if as_flow else None
+    for match in tools.ast_grep_rules(fact_rules(languages), files, root, config=config, refused=refused):
         found[match["file"]].add(match)
     return found
 
@@ -143,7 +148,7 @@ def _read_as_flow_where_fewer_lines_fail(
     ]
     if not partly_read:
         return {}
-    as_flow = _scanned(partly_read, root, FLOW_SGCONFIG, [FLOW_LANGUAGE], refused)
+    as_flow = _scanned(partly_read, root, refused, as_flow=True)
     return {
         file: facts
         for file, facts in as_flow.items()
@@ -167,8 +172,9 @@ def fact_rules(languages: Sequence[str]) -> str:
 
 @dataclass
 class _FileFound:
-    """One file's facts, collected match by match."""
+    """One file's facts, collected match by match, read as ``language``."""
 
+    language: str | None = None
     functions: set[Span] = field(default_factory=set)
     classes: set[Span] = field(default_factory=set)
     declarations: set[Span] = field(default_factory=set)
@@ -210,6 +216,7 @@ class _FileFound:
             incomplete,
             tuple(sorted(self.export_names)),
             _merged_stretches(self.error_lines),
+            language=self.language,
         )
 
     def _references(self) -> tuple[ReferenceMatch, ...]:
@@ -393,35 +400,16 @@ def _named_by(field: str) -> str:
     return f"{{field: {field}, pattern: $NAME}}"
 
 
-def _scan_groups(files: Sequence[str], root: Path) -> list[tuple[str | None, list[str], list[str]]]:
-    """(sgconfig, files, languages) per invocation: every non-flow file scanned together exactly as
-    before, and the ``@flow`` files in their own invocation, where the config's ``languageGlobs``
-    parses the JavaScript suffixes with the tsx grammar. The globs are global per invocation, so
-    mixing the two would re-parse plain JavaScript files too."""
+def _split_by_pragma(contents: Mapping[str, bytes]) -> tuple[list[str], list[str]]:
+    """The supported files read as their own language, and the ``@flow`` files, judged by their
+    first-read bytes. The flow files take their own scan, since its config's ``languageGlobs`` would
+    parse plain JavaScript with the tsx grammar too."""
     plain: list[str] = []
     flow: list[str] = []
-    for file in files:
-        (flow if _is_flow(root, file) else plain).append(file)
-    groups: list[tuple[str | None, list[str], list[str]]] = []
-    if plain:
-        groups.append((None, plain, _languages(plain)))
-    if flow:
-        groups.append((FLOW_SGCONFIG, flow, [FLOW_LANGUAGE]))
-    return groups
-
-
-def _is_flow(root: Path, file: str) -> bool:
-    if language_of(file) != "javascript":
-        return False
-    try:
-        content = (root / file).read_bytes()
-    except FileNotFoundError:
-        return False
-    return parse_language(file, content) == FLOW_LANGUAGE
-
-
-def _languages(files: Sequence[str]) -> list[str]:
-    return sorted({language for file in files if (language := language_of(file))})
+    for file, content in contents.items():
+        if language_of(file) is not None:
+            (flow if parse_language(file, content) == FLOW_LANGUAGE else plain).append(file)
+    return plain, flow
 
 
 def _ordered(spans: set[Span]) -> tuple[Span, ...]:
