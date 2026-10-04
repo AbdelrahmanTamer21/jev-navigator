@@ -321,8 +321,9 @@ kilobytes. Ordinary code adds about 4 MB per 1,000 lines, so a file of more than
 lines is refused as well. A large file that cannot be read to measure it is refused too, with the
 error. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
 peak and the longest line in bytes. A file that ast-grep itself skips without parsing (it prints
-nothing for a file that is not valid UTF-8, or has more than 3,000,000 bytes and more than 200,000
-lines) is refused too, as `not parsed`, and is never taken for a file without functions. A refused
+nothing for a file that is not valid UTF-8; its own size skip, over 3,000,000 bytes and 200,000 lines,
+sits above JVN's bound) is refused too, as `not parsed`, and is never taken for a file without
+functions. A refused
 file is never recorded as parsed: it stays readable and searchable as text, it keeps its path in import relations (also as a re-export target), a name its
 bytes mention binds `unknown`, `jvn stats` names it as never scanned, and `find_comments` lists it in
 `refused_files`. Any ast-grep or ripgrep failure other than that verified disappearance still fails the

@@ -34,7 +34,9 @@ file has more than 3,000,000 bytes and more than 200,000 lines (found by bisecti
 both limits must be exceeded; ``--stdin`` is not affected). Even a rule on ``kind: program`` matches
 nothing then, so a skipped file reads exactly like a file without functions. Only ``--inspect=entity``
 tells them apart: it prints one ``entity|file|PATH`` line for every file ast-grep actually scanned. A
-file that is not valid UTF-8 is skipped the same way (``NOT_UTF8_REASON``)."""
+file that is not valid UTF-8 is skipped the same way (``NOT_UTF8_REASON``). The parse bound
+(``file_shape``) refuses a file of that size before ast-grep sees it; the check still names any file
+ast-grep skips."""
 MAX_FILES_PER_COMMAND = 300
 MAX_ARGUMENT_BYTES = 128 * 1024
 

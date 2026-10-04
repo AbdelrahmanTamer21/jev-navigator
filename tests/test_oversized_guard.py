@@ -10,7 +10,7 @@ from git_repos import commit_all, commit_files, write_files
 
 from jev_navigator.cli_statistics import create_statistics_pack
 from jev_navigator.comments import find_comments
-from jev_navigator.index import tools
+from jev_navigator.index import file_shape, tools
 from jev_navigator.index.bindings import BindingStatus
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.fact_cache import FactCache
@@ -165,7 +165,16 @@ def _repository_with_a_file_ast_grep_skips(tmp_path: Path) -> Path:
 FUNCTION_RULE = "id: function\nlanguage: typescript\nrule:\n  kind: function_declaration"
 
 
-def test_the_door_names_a_file_ast_grep_skipped_without_parsing(tmp_path: Path) -> None:
+def _without_the_memory_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ast-grep's own size skip (over 3,000,000 bytes and 200,000 lines) sits above JVN's bound, so these
+    tests lift the bound to reach it: what they prove is the detection of any file ast-grep skips."""
+    monkeypatch.setattr(file_shape, "MAX_PARSE_PEAK_MB", float("inf"))
+
+
+def test_the_door_names_a_file_ast_grep_skipped_without_parsing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without_the_memory_bound(monkeypatch)
     repository = _repository_with_a_file_ast_grep_skips(tmp_path)
     refused: dict[str, str] = {}
 
@@ -185,7 +194,10 @@ def test_the_door_names_a_file_ast_grep_skipped_without_parsing(tmp_path: Path) 
     assert refused[SKIPPED_BY_AST_GREP].startswith("not parsed: ast-grep skipped the file")
 
 
-def test_a_file_ast_grep_skipped_is_reported_unavailable_and_never_cached_as_empty(tmp_path: Path) -> None:
+def test_a_file_ast_grep_skipped_is_reported_unavailable_and_never_cached_as_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without_the_memory_bound(monkeypatch)
     repository = _repository_with_a_file_ast_grep_skips(tmp_path)
     index = CodeIndex.from_git(repository, fact_cache_dir=tmp_path / "facts")
 
