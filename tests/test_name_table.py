@@ -27,7 +27,8 @@ NAMES = ("check", "LIMIT", "place", "run", "handle", "then", "save", "absent")
 
 
 def every_lookup(index: CodeIndex) -> dict[str, tuple]:
-    return {
+    """Each name's definitions, callers, call count and references, and each file's imports."""
+    names = {
         name: (
             index.find_definition(name),
             index.find_callers(name),
@@ -36,6 +37,7 @@ def every_lookup(index: CodeIndex) -> dict[str, tuple]:
         )
         for name in NAMES
     }
+    return {**names, "imports": tuple(index.imports(file) for file in index.available_files)}
 
 
 def parsed_files(monkeypatch: pytest.MonkeyPatch) -> list[str]:
