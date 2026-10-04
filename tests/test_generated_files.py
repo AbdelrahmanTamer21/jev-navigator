@@ -209,6 +209,29 @@ def test_one_line_naming_two_flagged_files_names_each_of_them(tmp_path: Path) ->
     }
 
 
+def test_a_path_with_regex_characters_is_found_as_written(tmp_path: Path) -> None:
+    # Arrange: Next.js route folders put brackets and parentheses in paths, which a regex would read
+    # as a character class and a group
+    dynamic, grouped = "app/[id]/page.tsx", "app/(shop)/page.tsx"
+    repo = _repository(
+        tmp_path / "repo",
+        {
+            dynamic: "export default function Page() {}\n",
+            grouped: "export default function Shop() {}\n",
+            "scripts/routes.mjs": f'build("{dynamic}");\nbuild("{grouped}");\n',
+        },
+    )
+
+    # Act
+    naming = files_naming(repo, [dynamic, grouped])
+
+    # Assert
+    assert {path: [(hit.file, hit.line) for hit in hits] for path, hits in naming.items()} == {
+        dynamic: [("scripts/routes.mjs", 1)],
+        grouped: [("scripts/routes.mjs", 2)],
+    }
+
+
 def test_a_secret_on_a_naming_line_keeps_the_named_file_unsent(tmp_path: Path) -> None:
     repo = _repository(
         tmp_path / "repo",
