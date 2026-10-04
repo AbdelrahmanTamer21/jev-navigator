@@ -341,35 +341,59 @@ def _script_local_names(language: str, exclusions: str) -> str:
 {exclusions}"""
 
 
+# The places a Python statement binds a name: an assignment's, an augmented assignment's or a loop's
+# target, a walrus, and a with or except target.
+_PYTHON_ASSIGNED_NAMES = """            - inside:
+                stopBy: end
+                field: left
+                any: [{kind: assignment}, {kind: augmented_assignment}, {kind: for_statement}]
+            - inside: {field: name, kind: named_expression}
+            - inside: {kind: as_pattern_target}"""
+_PYTHON_NOT_A_NAME = "inside: {stopBy: end, any: [{kind: attribute}, {kind: subscript}, {kind: type}]}"
+_PYTHON_PARAMETER_LISTS = "{any: [{kind: parameters}, {kind: lambda_parameters}, {kind: typed_parameter}]}"
+_PYTHON_OWN_SCOPES = "any: [{kind: function_definition}, {kind: class_definition}, {kind: lambda}]"
+
 LOCAL_NAME_RULES = {
-    "python": """  kind: identifier
+    "python": f"""  kind: identifier
   all:
     - not:
         not:
           any:
-            - inside: {any: [{kind: parameters}, {kind: lambda_parameters}, {kind: typed_parameter}]}
+            - inside: {_PYTHON_PARAMETER_LISTS}
             - inside:
                 field: name
-                any: [{kind: default_parameter}, {kind: typed_default_parameter}]
+                any: [{{kind: default_parameter}}, {{kind: typed_default_parameter}}]
             - inside:
-                any: [{kind: list_splat_pattern}, {kind: dictionary_splat_pattern}]
-                inside: {any: [{kind: parameters}, {kind: lambda_parameters}, {kind: typed_parameter}]}
-            - inside:
-                stopBy: end
-                field: left
-                any:
-                  - kind: assignment
-                  - kind: augmented_assignment
-                  - kind: for_statement
-                  - kind: for_in_clause
-            - inside: {field: name, kind: named_expression}
-            - inside: {kind: as_pattern_target}
-    - not: {not: {inside: {stopBy: end, kind: function_definition}}}
+                any: [{{kind: list_splat_pattern}}, {{kind: dictionary_splat_pattern}}]
+                inside: {_PYTHON_PARAMETER_LISTS}
+            - inside: {{stopBy: end, field: left, kind: for_in_clause}}
+{_PYTHON_ASSIGNED_NAMES}
+    - not: {{not: {{inside: {{stopBy: end, kind: function_definition}}}}}}
   not:
-    inside: {stopBy: end, any: [{kind: attribute}, {kind: subscript}, {kind: type}]}""",
+    {_PYTHON_NOT_A_NAME}""",
     "typescript": _script_local_names("typescript", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
     "tsx": _script_local_names("tsx", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
     "javascript": _script_local_names("javascript", _SCRIPT_LOCAL_EXCLUSIONS),
+}
+
+# The names module-level code binds otherwise than by an import or by a function or class it
+# defines (those are ``FileStructure.module_symbols``), one match per binding: in Python a
+# statement's target outside every function, class and lambda (a comprehension's names stay its
+# own), a deletion, and every name a function declares `global`, which it may bind for the module.
+MODULE_BINDING_RULES = {
+    "python": f"""  kind: identifier
+  all:
+    - not:
+        not:
+          any:
+{_PYTHON_ASSIGNED_NAMES}
+            - inside: {{stopBy: end, kind: delete_statement}}
+            - inside: {{kind: global_statement}}
+    - any:
+        - not: {{inside: {{stopBy: end, {_PYTHON_OWN_SCOPES}}}}}
+        - not: {{not: {{inside: {{kind: global_statement}}}}}}
+  not:
+    {_PYTHON_NOT_A_NAME}""",
 }
 
 # The installed ast-grep supports tsx but not Flow. Route marked files through tsx;

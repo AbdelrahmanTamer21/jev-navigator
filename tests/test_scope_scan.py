@@ -1299,6 +1299,8 @@ def test_a_call_through_a_module_a_from_import_names_reads_that_module(tmp_path:
         ("config = None\n", "candidate"),
         ("from .config import *\n", "candidate"),
         ("config = Config(:\n", "candidate"),
+        ("for config in sources:\n    pass\n", "candidate"),
+        ("with open('x') as config:\n    pass\n", "candidate"),
         ("from . import config\n", "resolved"),
         ("from pkg import config\n", "resolved"),
         ("", "resolved"),
@@ -1309,6 +1311,8 @@ def test_a_call_through_a_module_a_from_import_names_reads_that_module(tmp_path:
         "assigns",
         "star-imports its module",
         "loses a line that names it",
+        "loops over it",
+        "opens it",
         "imports itself",
         "imports itself by path",
         "empty",
@@ -1440,6 +1444,93 @@ def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_i
         ("gen.js", 2): "candidate",
         ("twice.js", 3): "candidate",
     }
+
+
+_PYTHON_REBINDINGS = {
+    "an assignment": "mod = make()\n",
+    "an augmented assignment": "mod += 1\n",
+    "a tuple target": "mod, other = make()\n",
+    "a function": "def mod():\n    return 0\n",
+    "a class": "class mod:\n    pass\n",
+    "a loop": "for mod in items:\n    pass\n",
+    "a with target": "with open('x') as mod:\n    pass\n",
+    "a caught error": "try:\n    pass\nexcept Exception as mod:\n    pass\n",
+    "a walrus": "if (mod := make()):\n    pass\n",
+    "an assignment in a module-level block": "if flag:\n    mod = make()\n",
+    "a function's global": "def reset():\n    global mod\n    mod = make()\n",
+    "a deletion": "del mod\n",
+}
+_PYTHON_OTHER_SCOPES = {
+    "nothing else": "",
+    "another function's own name": "def local():\n    mod = make()\n    return mod\n",
+    "a class attribute": "class K:\n    mod = make()\n",
+    "a comprehension's name": "names = [mod for mod in items]\n",
+}
+
+
+@pytest.mark.parametrize(
+    "statement", ["import pkg.mod as mod\n", "from pkg import mod\n"], ids=["import as", "from import"]
+)
+def test_a_python_module_alias_holds_its_module_only_where_module_level_code_binds_the_name_once(
+    tmp_path: Path, statement: str
+) -> None:
+    """`mod.run()` reads pkg/mod.py only while the import is the module's one binding of `mod`. An
+    assignment, a definition, a loop, a with or except target, a walrus, a function's `global` or a
+    deletion may leave `mod` holding something else, so the call stays a candidate. A name another
+    function, a class body or a comprehension binds is not the module's."""
+    # Arrange
+    cases = {**_PYTHON_REBINDINGS, **_PYTHON_OTHER_SCOPES}
+    use = "\n\ndef use():\n    return mod.run()\n"
+    files = {f"use_{number}.py": statement + cases[case] + use for number, case in enumerate(cases)}
+    index = committed(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/mod.py": "def run():\n    return 1\n",
+            "pkg/other.py": "def run():\n    return 2\n",
+            **files,
+        },
+    )
+
+    # Act
+    statuses = {
+        case: index.binding_of(file, files[file].count("\n"), "run", "mod").status.value
+        for case, file in zip(cases, files, strict=True)
+    }
+
+    # Assert
+    assert statuses == {
+        **{case: "candidate" for case in _PYTHON_REBINDINGS},
+        **{case: "resolved" for case in _PYTHON_OTHER_SCOPES},
+    }
+
+
+def test_a_dotted_python_import_holds_its_module_only_while_nothing_else_binds_its_first_name(
+    tmp_path: Path,
+) -> None:
+    """`import pkg.mod` makes `pkg.mod.run()` read pkg/mod.py, until module-level code binds `pkg`
+    again: the dotted name is looked up from `pkg`."""
+    # Arrange
+    use = "\n\ndef use():\n    return pkg.mod.run()\n"
+    index = committed(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/mod.py": "def run():\n    return 1\n",
+            "pkg/other.py": "def run():\n    return 2\n",
+            "kept.py": "import pkg.mod\n" + use,
+            "rebound.py": "import pkg.mod\npkg = make()\n" + use,
+        },
+    )
+
+    # Act
+    statuses = {
+        file: index.binding_of(file, line, "run", "pkg.mod").status.value
+        for file, line in (("kept.py", 5), ("rebound.py", 6))
+    }
+
+    # Assert
+    assert statuses == {"kept.py": "resolved", "rebound.py": "candidate"}
 
 
 def test_an_import_alias_replaced_by_a_local_name_binds_nothing_through_the_import(tmp_path: Path) -> None:

@@ -795,7 +795,7 @@ class CodeIndex:
         imports_otherwise = any(
             alias.name == "*" or self._module_path(init, alias.specifier) != module for alias in bound
         )
-        return imports_otherwise or self._defines(init, member, None) or init in self._files_hiding(member)
+        return imports_otherwise or self._binds_otherwise(init, member) or init in self._files_hiding(member)
 
     def _module_path(self, file: str, specifier: str) -> str | None:
         resolved = resolve_import(specifier, file, self._scope, self._script_paths(file), self._packages())
@@ -933,10 +933,20 @@ class CodeIndex:
         return imported_names("\n".join(self._lines_of(file)), file)
 
     def _module_alias(self, file: str, name: str) -> ModuleAlias | None:
-        """The alias that binds ``name`` when module-level code binds it to one whole module (see
-        ``ModuleAlias``); None when it binds it to none or to two."""
+        """The alias that binds ``name`` when module-level code binds it to one whole module and in
+        no other way (see ``ModuleAlias`` and ``_binds_otherwise``); None when it binds it to none,
+        to two, or otherwise too."""
         aliases = {alias for alias in self._facts_in(file).module_aliases if alias.name == name}
-        return aliases.pop() if len(aliases) == 1 else None
+        if len(aliases) != 1 or self._binds_otherwise(file, first_identifier(name)):
+            return None
+        return aliases.pop()
+
+    def _binds_otherwise(self, file: str, name: str) -> bool:
+        """Whether code of ``file`` binds its module-level ``name`` other than by an import: a function
+        or class the module names, or a binding such as `name = make()` (see ``module_bindings``)."""
+        return name in self._facts_in(file).module_bindings or any(
+            span.name == name for span in self._file_structure(file).module_symbols
+        )
 
     def read_slice(self, span: Span, origin: str = "") -> CodeSlice:
         lines = self._lines_of(span.file)
