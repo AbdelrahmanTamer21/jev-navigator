@@ -111,16 +111,31 @@ COMMONJS_EXPORT_PAIR = f"{{kind: pair, inside: {COMMONJS_EXPORTS_OBJECT}}}"
 # negation, `not: {not: ...}`: it holds the same and prints only the match.
 #
 # Module-level declarations by what may name them, each a rule per grammar that has such
-# declarations: a type alias or interface only a type, a constant or variable only a value, and an
-# enum or a Python assignment (which may be a type alias) both.
-_MODULE_VARIABLES = (
-    "{kind: lexical_declaration, not: {not: {inside: {any: [{kind: program}, {kind: export_statement}]}}}}"
+# declarations: a type alias or interface only a type, a `const`, `let` or `var`, or a TypeScript
+# `declare function`, only a value, and an enum or a Python assignment (which may be a type alias)
+# both. A module-level declaration sits in the program, in an export, or, in TypeScript, in a
+# `declare` that does.
+_VARIABLES = "any: [{kind: lexical_declaration}, {kind: variable_declaration}]"
+_IN_MODULE = "inside: {any: [{kind: program}, {kind: export_statement}]}"
+_IN_TYPED_MODULE = (
+    "inside: {any: [{kind: program}, {kind: export_statement}, "
+    f"{{kind: ambient_declaration, {_IN_MODULE}}}]}}"
+)
+_MODULE_VARIABLES = f"{{{_VARIABLES}, not: {{not: {{{_IN_MODULE}}}}}}}"
+_TYPED_MODULE_VARIABLES = f"{{{_VARIABLES}, not: {{not: {{{_IN_TYPED_MODULE}}}}}}}"
+_AMBIENT_FUNCTIONS = (
+    f"{{kind: function_signature, not: {{not: {{inside: {{kind: ambient_declaration, {_IN_MODULE}}}}}}}}}"
 )
 _SCRIPT_TYPES = "  any: [{kind: type_alias_declaration}, {kind: interface_declaration}]"
 _SCRIPT_VALUES = f"  any: [{_MODULE_VARIABLES}]"
+_TYPED_SCRIPT_VALUES = f"  any: [{_TYPED_MODULE_VARIABLES}, {_AMBIENT_FUNCTIONS}]"
 _SCRIPT_ENUMS = "  kind: enum_declaration"
 TYPE_DECLARATIONS = {"typescript": _SCRIPT_TYPES, "tsx": _SCRIPT_TYPES}
-VALUE_DECLARATIONS = {"typescript": _SCRIPT_VALUES, "tsx": _SCRIPT_VALUES, "javascript": _SCRIPT_VALUES}
+VALUE_DECLARATIONS = {
+    "typescript": _TYPED_SCRIPT_VALUES,
+    "tsx": _TYPED_SCRIPT_VALUES,
+    "javascript": _SCRIPT_VALUES,
+}
 TYPE_AND_VALUE_DECLARATIONS = {
     "python": (
         "  kind: assignment\n  not: {not: {inside: {kind: expression_statement, inside: {kind: module}}}}"
@@ -167,7 +182,8 @@ _TYPED_SCRIPT_DECLARED_NAMES = f"""  any: [{_SCRIPT_NAME_KINDS}, {{kind: type_id
             field: name
             any:
               - kind: variable_declarator
-                inside: {_MODULE_VARIABLES}
+                inside: {_TYPED_MODULE_VARIABLES}
+              - {_AMBIENT_FUNCTIONS}
               - kind: type_alias_declaration
               - kind: interface_declaration
               - kind: enum_declaration
@@ -196,7 +212,7 @@ FUNCTION_KINDS[FLOW_LANGUAGE] = FUNCTION_KINDS["tsx"]
 CLASS_KINDS[FLOW_LANGUAGE] = CLASS_KINDS["tsx"]
 OBJECT_KINDS[FLOW_LANGUAGE] = OBJECT_KINDS["tsx"]
 TYPE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_TYPES
-VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_VALUES
+VALUE_DECLARATIONS[FLOW_LANGUAGE] = _TYPED_SCRIPT_VALUES
 TYPE_AND_VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_ENUMS
 DECLARED_NAME_RULES[FLOW_LANGUAGE] = _TYPED_SCRIPT_DECLARED_NAMES
 

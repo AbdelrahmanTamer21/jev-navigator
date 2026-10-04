@@ -322,9 +322,11 @@ def test_module_level_code_offers_what_its_file_imports(
 ) -> None:
     # Arrange
     index = committed_index(tmp_path, files)
+    opened = place_for_line(index, *opened_at, "start").open()
 
     # Act
-    signatures = [place.signature for place in offered_from(index, *opened_at)]
+    offered_places = neighbours(index, opened, moves={"imported": MOVES["imported"]})
+    signatures = [place.signature for place in offered_places]
 
     # Assert
     if offered is not None:
