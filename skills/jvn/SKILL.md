@@ -34,7 +34,7 @@ Output defaults to a unique run folder under `~/.local/share/jev-navigator/runs/
 inspect the returned function, then trace it. Quote the entire natural-language argument once.
 Do not edit files in scope while a search runs: a file that changes is reported unavailable when the index reads it again, and a
 search that finds nothing then ends `scope_incomplete` instead of `nothing_left`. A file too large to
-parse safely (a one-line bundle of about 70,000 bytes or more) is never parsed: it is reported
+parse even alone (a large minified bundle, or many megabytes of generated code) is never parsed: it is reported
 unavailable with the reason "too large to parse", and it ends a not-found search the same way.
 
 For agents and pipelines, discover the current contract with `jvn schema find`, `jvn schema findall`
@@ -89,7 +89,8 @@ JVN prunes its own caches and run folders as runs end (rules: `docs/cli.md`, Dis
 housekeeping); `jvn cache status` shows disk use. Copy a run folder you want to keep, or use `--out`.
 
 Live searches send source to the configured provider: reuse the user's source and spend authorization,
-and never print credentials (environment or `~/.config/jvn/env`). Progress is stderr, JSON stdout.
+and never print credentials (the environment, the `.env` of a jev-navigator checkout `jvn` runs
+from, or `~/.config/jvn/env`). Progress is stderr, JSON stdout.
 Check the exit status first: 0 completed, 1 failed, 2 invalid input, 130 cancelled.
 
 Library compositions and maintained options: `docs/extending.md` and `docs/cli.md` in the
