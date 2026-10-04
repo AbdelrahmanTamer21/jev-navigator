@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+
+from .cache_root import xdg_base
 
 _STAMP = "%Y%m%dT%H%M%S%fZ"
 _DEFAULT_NAME = re.compile(r".+-(\d{8}T\d{12}Z)")
 
 
 def data_root() -> Path:
-    """``$XDG_DATA_HOME/jev-navigator``, or ``~/.local/share/jev-navigator`` when the variable is unset."""
-    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "jev-navigator"
+    """``$XDG_DATA_HOME/jev-navigator``, or ``~/.local/share/jev-navigator`` when the variable is unset
+    or relative."""
+    return xdg_base("XDG_DATA_HOME", Path.home() / ".local" / "share") / "jev-navigator"
 
 
 def runs_root() -> Path:

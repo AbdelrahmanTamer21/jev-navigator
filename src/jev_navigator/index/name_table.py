@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import sqlite3
 import threading
 from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
@@ -35,6 +37,7 @@ CALL = "call"
 REFERENCE = "reference"
 DEFINITION_KINDS = (SYMBOL, DECLARATION)
 _ANONYMOUS = "<anonymous>"
+_logger = logging.getLogger(__name__)
 _QUERY_CHUNK = 500
 
 
@@ -113,16 +116,21 @@ class NameTable:
         return found, stale
 
     def _confirm(self, blobs: set[str]) -> set[str]:
-        """Stamps ``blobs`` confirmed today; returns those the table still held."""
+        """Stamps ``blobs`` confirmed today; returns those the table still held. A stamp that fails is
+        logged and never costs the lookup: the entries the read found are kept."""
         confirmed: set[str] = set()
-        with self._lock, self._db:
-            for chunk in _chunks(sorted(blobs)):
-                marks = ",".join("?" * len(chunk))
-                stamped = self._db.execute(
-                    f"update files set confirmed = ? where blob in ({marks}) returning blob",
-                    (today(), *chunk),
-                )
-                confirmed.update(blob for (blob,) in stamped.fetchall())
+        try:
+            with self._lock, self._db:
+                for chunk in _chunks(sorted(blobs)):
+                    marks = ",".join("?" * len(chunk))
+                    stamped = self._db.execute(
+                        f"update files set confirmed = ? where blob in ({marks}) returning blob",
+                        (today(), *chunk),
+                    )
+                    confirmed.update(blob for (blob,) in stamped.fetchall())
+        except sqlite3.Error as error:
+            _logger.warning("name table %s: %d entries not stamped: %s", self.path, len(blobs), error)
+            return blobs
         return confirmed
 
     def add(self, facts_by_blob: Mapping[str, FileFacts]) -> None:

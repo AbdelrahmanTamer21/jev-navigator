@@ -11,6 +11,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from functools import cache
 from pathlib import Path
+from typing import IO
 
 from .file_shape import refusal_of
 from .spans import TextHit
@@ -73,7 +74,7 @@ def ast_grep_rules(
         path.write_text(NEUTRAL_AST_GREP_CONFIG if config is None else config)
         command = [AST_GREP, "scan", "--inline-rules", rules_yaml, "--config", str(path)]
         for chunk in file_chunks(parseable):
-            yield from _json_lines([*command, "--json=stream", *chunk], cwd)
+            yield from _json_lines([*command, "--json=stream", "--", *chunk], cwd)
 
 
 def _split_by_parse_peak(files: Sequence[str], cwd: Path) -> tuple[list[str], dict[str, str]]:
@@ -111,13 +112,15 @@ def file_chunks(files: Sequence[str], *, bytes_only: bool = False) -> Iterator[S
 
 def _json_lines(arguments: Sequence[str], cwd: Path) -> Iterator[dict]:
     """Each line the command prints, parsed as JSON while it runs. stderr goes to a file, so a full
-    stderr pipe cannot stall the command; the process is killed if the reader stops early."""
+    stderr pipe cannot stall the command; the process is killed if the reader stops early. A line
+    that is no JSON (the process died partway through it) fails with the process's exit code and
+    stderr, which say why it stopped."""
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen(list(arguments), cwd=cwd, stdout=subprocess.PIPE, stderr=errors, text=True)
         try:
             for line in process.stdout:
                 if line.strip():
-                    yield json.loads(line)
+                    yield _json_object(line, process, errors, arguments[0])
         except BaseException:
             process.kill()
             raise
@@ -125,9 +128,20 @@ def _json_lines(arguments: Sequence[str], cwd: Path) -> Iterator[dict]:
             process.stdout.close()
             returncode = process.wait()
         if returncode not in (0, _NO_MATCHES_EXIT):
-            errors.seek(0)
-            detail = errors.read().decode(errors="replace").strip()[:300]
-            raise ToolFailedError(f"{arguments[0]} exited {returncode}: {detail}")
+            raise _tool_failed(arguments[0], returncode, errors)
+
+
+def _json_object(line: str, process: subprocess.Popen, errors: IO[bytes], tool: str) -> dict:
+    try:
+        return json.loads(line)
+    except ValueError as malformed:
+        process.kill()
+        raise _tool_failed(tool, process.wait(), errors) from malformed
+
+
+def _tool_failed(tool: str, returncode: int, errors: IO[bytes]) -> ToolFailedError:
+    errors.seek(0)
+    return ToolFailedError(f"{tool} exited {returncode}: {errors.read().decode(errors='replace').strip()}")
 
 
 def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:

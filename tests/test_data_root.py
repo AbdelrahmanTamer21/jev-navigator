@@ -33,6 +33,17 @@ def test_without_xdg_data_home_runs_live_under_the_home_data_folder(monkeypatch:
     assert root == Path.home() / ".local" / "share" / "jev-navigator" / "runs"
 
 
+def test_a_relative_xdg_data_home_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange: a relative path would put run folders inside whatever directory JVN runs in
+    monkeypatch.setenv("XDG_DATA_HOME", "relative/data")
+
+    # Act
+    root = runs_root()
+
+    # Assert
+    assert root == Path.home() / ".local" / "share" / "jev-navigator" / "runs"
+
+
 def test_a_default_run_folder_names_the_repository_and_when_it_started(
     tmp_path: Path, private_data_root: Path
 ) -> None:

@@ -217,6 +217,32 @@ def test_a_checkout_that_converts_line_endings_answers_warm_lookups(
     assert spawned[tools.AST_GREP] == 0
 
 
+def test_a_checkout_whose_filter_changes_lines_never_lends_its_rows_to_a_plain_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: one commit, checked out plainly and through a filter that adds a first line, so both
+    # report the same blob for app/rules.py while their definitions sit on different lines
+    plain, filtered = tmp_path / "plain", tmp_path / "filtered"
+    commit_files(plain, REPOSITORY)
+    git(tmp_path, "clone", "-q", str(plain), str(filtered))
+    git(filtered, "config", "filter.header.smudge", "sh -c \"printf '# header\\n'; cat\"")
+    git(filtered, "config", "filter.header.clean", "sed 1d")
+    (filtered / ".git/info/attributes").write_text("*.py filter=header\n")
+    git(filtered, "rm", "-q", "--cached", "-r", ".")
+    git(filtered, "reset", "-q", "--hard")
+    assert (filtered / "app/rules.py").read_text().startswith("# header\n")
+    assert git(filtered, "status", "--porcelain") == ""
+    expected = answered_from_scratch(plain, monkeypatch, tmp_path / "fresh-cache")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "shared-cache"))
+    every_lookup(CodeIndex.from_git(filtered))
+
+    # Act
+    answered = every_lookup(CodeIndex.from_git(plain))
+
+    # Assert
+    assert answered == expected
+
+
 def test_a_files_definitions_come_from_the_table_with_their_lines(
     tmp_path: Path, spawned: Counter[str]
 ) -> None:
@@ -450,3 +476,29 @@ def test_opening_the_table_marks_its_file_used(tmp_path: Path, private_cache_roo
 
     # Assert
     assert day_of(path.stat().st_mtime) == today()
+
+
+def test_a_lookup_whose_stamp_cannot_be_written_keeps_its_entries_and_says_so(
+    tmp_path: Path, private_cache_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange: another process holds the write lock past the table's (shortened) busy wait
+    commit_files(tmp_path, REPOSITORY)
+    every_lookup(CodeIndex.from_git(tmp_path))
+    set_confirmed(private_cache_root, 40)
+    table = name_table.NameTable()
+    with sqlite3.connect(table.path) as database:
+        blobs = [blob for (blob,) in database.execute("select blob from files")]
+    table._db.execute("pragma busy_timeout = 50")
+    writer = sqlite3.connect(table.path, isolation_level=None)
+    writer.execute("begin immediate")
+
+    # Act
+    try:
+        entries = table.entries(blobs)
+    finally:
+        writer.execute("rollback")
+
+    # Assert
+    assert set(entries) == set(blobs)
+    assert "not stamped" in caplog.text
+    assert confirmed_days(private_cache_root) == [today() - 40] * len(blobs)
