@@ -6,10 +6,11 @@ no text search and no parse. Rows hold names and line numbers, never code: a rec
 chain of names or ``scope_scan.OPAQUE_RECEIVER``, as the facts hold it.
 
 One table file serves one ``table_identity``: a change to the parser, to any language's rules or to
-the code that turns facts into rows starts a new table. A file's rows are written in one transaction
-with its entry in ``files``, so two processes writing at once leave the table whole and a reader
-never sees half a file. Each entry carries the day a run last confirmed it, by covering a scope that
-holds the file; housekeeping forgets a file's rows and entry together once it goes unconfirmed.
+the code that turns facts into rows starts a new table. A file's rows are written in the same
+transaction as its entry in ``files``, a batch of files per transaction, so two processes writing at
+once leave the table whole and a reader never sees half a file. Each entry carries the day a run
+last confirmed it, by covering a scope that holds the file; housekeeping forgets a file's rows and
+entry together once it goes unconfirmed.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ DEFINITION_KINDS = (SYMBOL, DECLARATION)
 _ANONYMOUS = "<anonymous>"
 _logger = logging.getLogger(__name__)
 _QUERY_CHUNK = 500
+FILES_PER_TRANSACTION = 200
 
 
 @dataclass(frozen=True)
@@ -134,20 +136,25 @@ class NameTable:
         return confirmed
 
     def add(self, facts_by_blob: Mapping[str, FileFacts]) -> None:
-        """Writes the rows of each file content the table does not hold yet, one transaction per
-        content. Contents already held take no write lock, so warm runs never wait on each other;
-        a content another process wrote meanwhile is left as it is."""
+        """Writes the rows of each file content the table does not hold yet, ``FILES_PER_TRANSACTION``
+        contents per transaction: each commit waits for a disk sync, and the table is a cache, so a
+        crash loses at most one batch, which the next run rebuilds. Contents already held take no
+        write lock, so warm runs never wait on each other; a content another process wrote meanwhile
+        is left as it is."""
         held = self.entries(facts_by_blob.keys())
+        missing = [(blob, facts) for blob, facts in facts_by_blob.items() if blob not in held]
         with self._lock:
-            for blob, facts in facts_by_blob.items():
-                if blob not in held:
-                    self._write(blob, facts)
+            for start in range(0, len(missing), FILES_PER_TRANSACTION):
+                self._write(missing[start : start + FILES_PER_TRANSACTION])
 
-    def _write(self, blob: str, facts: FileFacts) -> None:
+    def _write(self, contents: list[tuple[str, FileFacts]]) -> None:
         with self._db:
             self._db.execute("begin immediate")
-            if self._add_entry(blob, facts):
-                self._db.executemany("insert into names values (?, ?, ?, ?, ?, ?, ?, ?)", _rows(blob, facts))
+            for blob, facts in contents:
+                if self._add_entry(blob, facts):
+                    self._db.executemany(
+                        "insert into names values (?, ?, ?, ?, ?, ?, ?, ?)", _rows(blob, facts)
+                    )
 
     def rows(self, name: str) -> tuple[NameRow, ...]:
         with self._lock:

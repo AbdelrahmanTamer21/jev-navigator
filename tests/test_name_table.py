@@ -382,6 +382,32 @@ def test_processes_building_the_table_at_once_leave_it_whole(
                 assert database.execute("pragma integrity_check").fetchone() == ("ok",)
 
 
+def test_a_cold_scope_writes_its_rows_in_a_few_transactions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: 450 file contents, each waiting for a disk sync when its transaction commits
+    files = {f"app/m{n}.py": f"def f{n}():\n    return {n}\n" for n in range(450)}
+    commit_files(tmp_path, files)
+    commits: list[str] = []
+    real_open = name_table.open_shared_database
+
+    def traced_open(*arguments):
+        database = real_open(*arguments)
+        database.set_trace_callback(
+            lambda statement: commits.append(statement) if statement == "COMMIT" else None
+        )
+        return database
+
+    monkeypatch.setattr(name_table, "open_shared_database", traced_open)
+
+    # Act
+    definitions = [CodeIndex.from_git(tmp_path).find_definition(f"f{n}") for n in (0, 449)]
+
+    # Assert
+    assert [[span.file for span in found] for found in definitions] == [["app/m0.py"], ["app/m449.py"]]
+    assert len(commits) == -(-len(files) // name_table.FILES_PER_TRANSACTION)
+
+
 def test_the_table_lives_in_the_cache_root(private_cache_root: Path) -> None:
     # Act
     path = name_table.NameTable().path
