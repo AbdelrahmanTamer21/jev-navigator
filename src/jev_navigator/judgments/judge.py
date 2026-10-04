@@ -71,6 +71,11 @@ _DEFAULT_MASKER = SecretMasker()
 _DEFAULT_SCANNER = SecretScanner()
 
 
+ABORTED_SEND_ERRORS: tuple[type[BaseException], ...] = (CancelledError, KeyboardInterrupt)
+"""What a send ends with when ``Judge.abort_sends`` stopped it: the client's or the pool's
+``CancelledError``, or the caller's interrupt itself. Any other error is a real failure."""
+
+
 class CallCapReachedError(RuntimeError):
     """A call would exceed the ``max_calls`` cap of this judge or of a judge it was scoped from."""
 
@@ -708,6 +713,7 @@ class Judge:
         except KeyboardInterrupt:
             stop.halted.set()
             self.abort_sends(futures)
+            _raise_provider_failure(futures)
             raise
         finally:
             stop.halted.set()
@@ -1235,6 +1241,17 @@ def _wave_failure(failures: Sequence[BaseException]) -> BaseException | None:
         if other is not primary:
             primary.add_note(f"Also in this wave: {type(other).__name__}: {other}")
     return primary
+
+
+def _raise_provider_failure(aborted: list[Future]) -> None:
+    """The first real failure among settled batches an interrupt aborted, so it never lives only in
+    the journal; the abort's own errors are not failures."""
+    for future in aborted:
+        if future.cancelled() or future.exception() is not None:
+            continue
+        error = future.result().error
+        if error is not None and not isinstance(error, ABORTED_SEND_ERRORS):
+            raise error
 
 
 def _is_async(client: object) -> bool:

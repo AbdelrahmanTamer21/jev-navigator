@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import inspect
 import io
 import json
@@ -7,7 +8,7 @@ import os
 import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 
 import pytest
 from git_repos import commit_files
@@ -538,6 +539,64 @@ def test_cancelled_navigation_writes_a_resumable_evidence_pack(tmp_path: Path) -
     assert any(record["kind"] == "history_step" for record in records)
     assert records[-1]["kind"] == "terminal"
     assert records[-1]["outcome"] == "cancelled"
+
+
+class AnswersAfterTheCancel:
+    """The request for ``first.py`` raises the caller's Ctrl-C once ``second.py``'s is in flight; the
+    second is one the cancel cannot stop, so its answer still arrives and is stored."""
+
+    model = "answers-after-the-cancel"
+
+    def __init__(self) -> None:
+        self.second_in_flight = Event()
+        self.cancelled = Event()
+
+    def ask(self, state, questions):
+        if "first" in state["slice"]["code"]:
+            self.second_in_flight.wait(timeout=5)
+            raise KeyboardInterrupt
+        self.second_in_flight.set()
+        self.cancelled.wait(timeout=5)
+        return ScriptedJevClient(default_noul=0.05).ask(state, questions)
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_full_disk_while_storing_an_answer_during_ctrl_c_exits_1_with_that_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Arrange
+    from jev_navigator import cli
+    from jev_navigator.judgments.store import JsonlAnswerStore
+
+    repository = tmp_path / "repository"
+    commit_files(
+        repository, {"first.py": "def first():\n    return 1\n", "second.py": "def second():\n    return 2\n"}
+    )
+
+    def full_disk(store: JsonlAnswerStore, line: dict) -> None:
+        del store, line
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    client = AnswersAfterTheCancel()
+    monkeypatch.setattr(JsonlAnswerStore, "_append", full_disk)
+    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "TypeSafeJevClient", lambda: client)
+    command = ["find", "the item limit", "--repo", str(repository), "--beam-width", "2"]
+    command += ["--start", "first.py:1", "--start", "second.py:1", "--out", str(tmp_path / "out")]
+    command += ["--answer-store", str(tmp_path / "answers.sqlite")]
+
+    # Act
+    status = main(command)
+
+    # Assert
+    assert client.cancelled.is_set()
+    assert status == 1
+    assert "No space left on device" in capsys.readouterr().err
 
 
 def test_cancelled_run_marks_its_token_total_incomplete_because_a_sent_request_never_answered(

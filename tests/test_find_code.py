@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import errno
 import os
 import re
 import signal
 import threading
 import time
 from collections.abc import Callable, Mapping
+from concurrent.futures import CancelledError
 from dataclasses import replace
 from pathlib import Path
 
@@ -1138,6 +1140,113 @@ def test_cancellation_keeps_a_successful_response_from_the_same_beam(tmp_path: P
     ]
 
 
+class ProviderError(RuntimeError):
+    """A failure the provider reports, such as a 503, as opposed to a send the caller aborted."""
+
+
+class FailsWhileCancelling:
+    """Once the second place's request is in flight, the first raises the caller's Ctrl-C. The second
+    waits for the cancel this triggers, then ends the way ``on_abort`` says: the abort's own error,
+    a real provider error that happened to arrive while the interrupt was being handled, or, with
+    ``None``, the answer of a request the cancel could not stop."""
+
+    model = "fails-while-cancelling"
+
+    def __init__(self, on_abort: Exception | None) -> None:
+        self.on_abort = on_abort
+        self.second_in_flight = threading.Event()
+        self.cancelled = threading.Event()
+
+    def ask(self, state, questions):
+        if state["slice"]["code"] == "first":
+            self.second_in_flight.wait(timeout=5)
+            raise KeyboardInterrupt
+        self.second_in_flight.set()
+        self.cancelled.wait(timeout=5)
+        if self.on_abort is None:
+            return ScriptedJevClient(default_noul=0.05).ask(state, questions)
+        raise self.on_abort
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+
+
+def _search_two_places_while_one_is_interrupted(
+    tmp_path: Path, client: FailsWhileCancelling, store: JsonlAnswerStore | None = None
+):
+    (tmp_path / "places.txt").write_text("first\nsecond\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
+    return places, lambda: find_code(
+        index,
+        Judge(client, store=store),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=2),
+        moves={},
+        initial_candidates=[(place, 1.0) for place in places],
+    )
+
+
+def test_a_provider_error_during_cancellation_comes_out_as_that_error(tmp_path: Path) -> None:
+    # Arrange
+    cause = ConnectionResetError("connection reset by peer")
+    error = ProviderError("Jev answered 503")
+    error.__cause__ = cause
+    client = FailsWhileCancelling(on_abort=error)
+    _, search = _search_two_places_while_one_is_interrupted(tmp_path, client)
+
+    # Act
+    with pytest.raises(ProviderError) as raised:
+        search()
+
+    # Assert
+    assert client.cancelled.is_set()
+    assert raised.value is error
+    assert raised.value.__cause__ is cause
+
+
+def test_a_full_disk_while_storing_an_answer_during_cancellation_comes_out_as_that_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    disk_full = OSError(errno.ENOSPC, "No space left on device")
+
+    def full_disk(store: JsonlAnswerStore, line: dict) -> None:
+        del store, line
+        raise disk_full
+
+    monkeypatch.setattr(JsonlAnswerStore, "_append", full_disk)
+    client = FailsWhileCancelling(on_abort=None)
+    _, search = _search_two_places_while_one_is_interrupted(
+        tmp_path, client, JsonlAnswerStore(tmp_path / "answers.jsonl")
+    )
+
+    # Act
+    with pytest.raises(OSError) as raised:
+        search()
+
+    # Assert
+    assert client.cancelled.is_set()
+    assert raised.value is disk_full
+
+
+def test_a_send_the_interrupt_aborted_is_set_aside_as_cancelled(tmp_path: Path) -> None:
+    # Arrange
+    client = FailsWhileCancelling(on_abort=CancelledError())
+    places, search = _search_two_places_while_one_is_interrupted(tmp_path, client)
+
+    # Act
+    cancelled = search()
+
+    # Assert
+    assert client.cancelled.is_set()
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert {(entry.place_key, entry.reason) for entry in cancelled.not_inspected} == {
+        (place.key, "cancelled") for place in places
+    }
+
+
 def test_the_result_and_the_stop_step_name_the_moves_the_search_used(sample_index: CodeIndex) -> None:
     # Arrange
     client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1))
@@ -1476,8 +1585,8 @@ def test_a_real_error_that_settled_before_the_interrupt_is_raised_not_labelled_c
     sample_index: CodeIndex,
 ) -> None:
     # Arrange: the second place's request fails at once while the search waits for the first, which
-    # is still in flight when the interrupt arrives and ends with a connection error because the
-    # client was cancelled.
+    # is still in flight when the interrupt arrives and ends as the real client's aborted send does,
+    # with CancelledError.
     failed = threading.Event()
     cancelled = threading.Event()
 
@@ -1487,7 +1596,7 @@ def test_a_real_error_that_settled_before_the_interrupt_is_raised_not_labelled_c
                 failed.set()
                 raise OSError("disk full")
             cancelled.wait(10)
-            raise ConnectionError("cancelled")
+            raise CancelledError
 
         def cancel(self) -> None:
             cancelled.set()

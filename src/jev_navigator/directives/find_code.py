@@ -43,6 +43,7 @@ from ..index.spans import CodeSlice
 from ..judgments.answers import JevResponse, NoulAnswer
 from ..judgments.client import JEV_INPUT_BOX_CHARS, QUESTION_RESERVE_CHARS, InputBudgetExceededError
 from ..judgments.judge import (
+    ABORTED_SEND_ERRORS,
     CODE_FIELD,
     CallCapReachedError,
     CheckResult,
@@ -495,24 +496,23 @@ def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[l
                 futures.append(pool.submit(_ask_within_cap, judge, search, opening))
             return [future.result() for future in futures], False
         except KeyboardInterrupt:
-            settled_before_cancel = {future for future in futures if future.done()}
-            with _defer_keyboard_interrupts(re_raise=False):
-                judge.abort_sends(futures)
-                responses = [_settled_response(future, future in settled_before_cancel) for future in futures]
-            unsubmitted = len(opened) - len(futures)
-            return [*responses, *[_Unanswered.CANCELLED] * unsubmitted], True
+            return _cancel_round(judge, futures, len(opened)), True
 
 
-def _settled_response(future: Future, settled_before_cancel: bool):
-    """The future's answer. An error that had already settled before the cancel is a real failure and
-    is raised; only a request that ended because of the cancel counts as cancelled."""
+def _cancel_round(judge: Judge, futures: list[Future], asked: int) -> list:
+    """Abort the round's sends and wait until every one has settled. A send the abort stopped is
+    cancelled; any other error is the provider's real failure and is raised as it is, with its own
+    cause."""
+    with _defer_keyboard_interrupts(re_raise=False):
+        judge.abort_sends(futures)
+        responses = [_settled_response(future) for future in futures]
+    return [*responses, *[_Unanswered.CANCELLED] * (asked - len(futures))]
+
+
+def _settled_response(future: Future):
     try:
         return future.result()
-    except Exception:
-        if settled_before_cancel:
-            raise
-        return _Unanswered.CANCELLED
-    except KeyboardInterrupt:
+    except ABORTED_SEND_ERRORS:
         return _Unanswered.CANCELLED
 
 
