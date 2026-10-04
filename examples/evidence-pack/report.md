@@ -13,7 +13,7 @@
 - Input tokens: 120
 - Navigation elapsed: 0.043 seconds (indexing and entry selection excluded)
 - Coverage caveat: 2 candidates were not independently opened; 0 files failed a completed parser scan. Pending parser scans: none.
-- Files that disappeared after inventory: 0.
+- Files unavailable (disappeared or changed on disk): 0.
 
 ## Opened code
 

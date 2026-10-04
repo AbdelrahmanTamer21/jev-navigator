@@ -234,13 +234,10 @@ def test_scan_facts_skips_unsupported_files_and_still_parses_supported_files(tmp
     (tmp_path / "notes.md").write_text("# notes\n")
     (tmp_path / "module.py").write_text("def greet(): return 1\n")
 
-    def lines_of(path: str) -> list[str]:
-        return (tmp_path / path).read_text().splitlines()
-
     empty = FileFacts(FileStructure((), (), ()), (), ())
 
-    unsupported = scan_facts(["notes.md"], tmp_path, lines_of, Unparsed())
-    mixed = scan_facts(["module.py", "notes.md"], tmp_path, lines_of, Unparsed())
+    unsupported = scan_facts(["notes.md"], tmp_path, Unparsed())
+    mixed = scan_facts(["module.py", "notes.md"], tmp_path, Unparsed())
 
     assert unsupported == {"notes.md": empty}
     assert mixed["module.py"].structure.functions == (Span("module.py", 1, 1, "greet"),)
@@ -264,14 +261,14 @@ def test_a_module_declaration_is_printed_without_the_whole_file(
     original_rules = tools.ast_grep_rules
 
     def recorded_rules(rules: str, files, cwd, config=None):
-        matches = original_rules(rules, files, cwd, config=config)
-        printed.extend(matches)
-        return matches
+        for match in original_rules(rules, files, cwd, config=config):
+            printed.append(match)
+            yield match
 
     monkeypatch.setattr(tools, "ast_grep_rules", recorded_rules)
 
     # Act
-    facts = scan_facts([file], tmp_path, lambda path: source.splitlines(), Unparsed())
+    facts = scan_facts([file], tmp_path, Unparsed())
 
     # Assert
     declarations = [match for match in printed if match["ruleId"] == "declaration"]
@@ -308,7 +305,6 @@ def test_calls_on_one_line_keep_their_source_order_on_every_scan(tmp_path: Path)
         "}\n"
     )
     (tmp_path / "order.js").write_text(source)
-    lines = source.split("\n")
     expected = {
         2: ("Date", "merge", "now"),
         3: ("bar", "Foo", "now"),
@@ -320,7 +316,7 @@ def test_calls_on_one_line_keep_their_source_order_on_every_scan(tmp_path: Path)
     orders = {
         tuple(
             (call.line, call.name)
-            for call in scan_facts(["order.js"], tmp_path, lambda path: lines, Unparsed())["order.js"].calls
+            for call in scan_facts(["order.js"], tmp_path, Unparsed())["order.js"].calls
         )
         for _ in range(50)
     }

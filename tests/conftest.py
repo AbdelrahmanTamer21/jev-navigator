@@ -4,6 +4,8 @@ and every test's isolation from the developer's own decision-model settings."""
 from __future__ import annotations
 
 import os
+import subprocess
+from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -11,12 +13,12 @@ import pytest
 from git_repos import git, write_files
 from isolated_jvn import NO_SETTINGS
 
+from jev_navigator.cache_root import cache_root
 from jev_navigator.environment import SETTING_PREFIXES
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
 from jev_navigator.judgments.questions import serialized_chars
-from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
 
 
 @pytest.fixture(autouse=True)
@@ -151,6 +153,47 @@ def sample_repo(tmp_path: Path) -> Path:
     return root
 
 
+OUTER_CACHE_ROOT = cache_root()
+
+
+@pytest.fixture
+def outer_cache_root() -> Path:
+    """The cache folder the suite's own environment names, before any test's private one replaces it."""
+    return OUTER_CACHE_ROOT
+
+
+@pytest.fixture(autouse=True)
+def private_cache_root(
+    no_developer_settings, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Each test starts with an empty cache folder of its own, holding its fact cache and its shared
+    answer store, so no test reads what another run wrote, and no test, or jvn process a test
+    starts, writes the user's caches. It runs after ``no_developer_settings`` has dropped every
+    ``JEV_NAVIGATOR_`` variable, so the answer store variable is unset and the store lives here."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("cache")))
+    return cache_root()
+
+
+@pytest.fixture
+def spawned(monkeypatch: pytest.MonkeyPatch) -> Counter[str]:
+    """How many processes each tool started (``git`` counted by subcommand); every process still runs."""
+    spawns: Counter[str] = Counter()
+
+    class CountedPopen(subprocess.Popen):
+        def __init__(self, arguments, *args, **kwargs) -> None:
+            spawns[_tool_name(arguments)] += 1
+            super().__init__(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", CountedPopen)
+    return spawns
+
+
+def _tool_name(arguments) -> str:
+    if arguments[0] != "git":
+        return arguments[0]
+    return "git " + next(part for part in arguments[1:] if not part.startswith("-") and "=" not in part)
+
+
 @pytest.fixture
 def sample_index(sample_repo: Path) -> CodeIndex:
     return CodeIndex.from_git(sample_repo, fact_cache_dir=sample_repo.parent / "fact-cache")
@@ -195,11 +238,3 @@ class BudgetedClient:
     def _state_and_longest_question(state: Mapping, questions: Mapping) -> int:
         longest = max((serialized_chars(question) for question in questions.values()), default=0)
         return serialized_chars(state) + longest
-
-
-@pytest.fixture(autouse=True)
-def isolated_shared_answer_store(no_developer_settings, tmp_path_factory, monkeypatch) -> None:
-    """Every test gets its own shared answer store, never the machine's real one. It is set after
-    ``no_developer_settings`` drops every ``JEV_NAVIGATOR_`` variable, so the drop never removes it."""
-    store = tmp_path_factory.mktemp("shared-answers") / "answers.sqlite"
-    monkeypatch.setenv(SHARED_STORE_VARIABLE, str(store))
