@@ -99,8 +99,10 @@ const { app } = require("./app")(options);
 
 
 def test_the_export_surface_is_the_ast_grep_statement_nodes(tmp_path: Path) -> None:
-    """The surface names real statements only: a private definition, a default export and a
-    template-literal body contribute nothing."""
+    """The surface names real statements only, and only the module's own definitions: a private
+    definition, a default export, a re-export and a template-literal body contribute nothing. An
+    export list entry under another name and the default export record the definition each
+    exports."""
     # Arrange
     index = indexed(
         tmp_path,
@@ -120,10 +122,11 @@ def test_the_export_surface_is_the_ast_grep_statement_nodes(tmp_path: Path) -> N
     )
 
     # Act
-    names = index._facts_in("src/service.ts").export_names
+    facts = index._facts_in("src/service.ts")
 
     # Assert
-    assert names == ("READY", "placeOrder", "publicLocal", "refund", "run")
+    assert facts.export_names == ("READY", "publicLocal", "run")
+    assert facts.renamed_exports == (("default", "defaultRun"), ("publicLocal", "local"))
 
 
 def test_a_destructured_export_is_part_of_the_export_surface(tmp_path: Path) -> None:

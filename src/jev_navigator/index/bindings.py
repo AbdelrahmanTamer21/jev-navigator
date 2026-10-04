@@ -102,7 +102,8 @@ def binding_from_facts(facts: CallFacts) -> Binding:
         paths = ", ".join(dict.fromkeys(fact.path for fact in facts.imported_from))
         return Binding(
             BindingStatus.CANDIDATE,
-            f"the import names {paths}, where the index finds no exported {facts.name}",
+            f"the import names {paths}, where the index finds no definition exported as {facts.name}; "
+            "a name that module imports and passes on is not followed",
         )
     if not facts.definitions:
         return Binding(BindingStatus.UNRESOLVED, f"no definition of {facts.name} in the index scope")
@@ -137,6 +138,25 @@ def binding_from_facts(facts: CallFacts) -> Binding:
     return Binding(
         BindingStatus.CANDIDATE,
         f"name match only; {count} definitions in scope and no import of a module in scope names it",
+    )
+
+
+def binding_in_namespace(name: str, line: int, lines: tuple[int, int], members: Sequence[Span]) -> Binding:
+    """``members`` define ``name`` in the innermost namespace on ``lines`` around the use on ``line``.
+    Lines are the unit, so a use on the namespace's first or last line may sit outside it, as
+    `namespace A { export const config = 1; } config;` does: only a use between them is proven."""
+    first, last = lines
+    definitions = _one_per_definition(members)
+    if line in (first, last):
+        return Binding(
+            BindingStatus.CANDIDATE,
+            f"{name} is a member of the namespace on lines {first} to {last}, and line {line} may hold "
+            "code outside it",
+        )
+    if len(definitions) == 1:
+        return Binding(BindingStatus.RESOLVED, "defined in the enclosing namespace", definitions[0])
+    return Binding(
+        BindingStatus.CANDIDATE, f"{len(definitions)} definitions of {name} in the enclosing namespace"
     )
 
 

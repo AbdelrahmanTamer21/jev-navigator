@@ -89,11 +89,13 @@ def test_roundtrip_rebinds_paths_without_retaining_source(tmp_path, example):
 
 def test_roundtrip_keeps_every_fact_a_script_module_records(tmp_path):
     """Each fact the scan records comes back from the cache unchanged: a function's own names,
-    module aliases, exported values, CommonJS exports, declarations and the export surface."""
+    module aliases, exported values, CommonJS exports, declarations, the export surface and the
+    exports under another name."""
     content = (
         b"const db = require('./db');\nimport * as jwt from './jwt';\n"
         b"function run(task, { retries }) {\n  const done = db.save(task);\n  return done;\n}\n"
         b"exports.run = run;\nexports.stop = function () { return 0; };\nexport const LIMIT = 3;\n"
+        b"export { run as start };\n"
     )
     (tmp_path / "module.js").write_bytes(content)
     facts = scan_facts(
@@ -105,7 +107,31 @@ def test_roundtrip_keeps_every_fact_a_script_module_records(tmp_path):
     restored = cache.load("module.js", content)
 
     assert facts.structure.local_names and facts.module_aliases and facts.exported_values
-    assert facts.structure.commonjs_exports and facts.export_names
+    assert facts.structure.commonjs_exports and facts.export_names and facts.renamed_exports
+    assert restored == facts
+
+
+def test_roundtrip_keeps_the_members_of_each_namespace(tmp_path):
+    """A namespace's members come back from the cache with the lines of the namespace holding them."""
+    content = (
+        b"namespace Outer {\n  const depth = 1;\n"
+        b"  namespace Inner {\n    export function inner() {}\n  }\n}\n"
+    )
+    (tmp_path / "spaces.ts").write_bytes(content)
+    facts = scan_facts(
+        ["spaces.ts"], tmp_path, lambda file: (tmp_path / file).read_text().splitlines(), Unparsed()
+    )["spaces.ts"]
+    cache = FactCache(tmp_path / "cache")
+
+    cache.save("spaces.ts", content, facts)
+    restored = cache.load("spaces.ts", content)
+
+    assert [
+        (member.first, member.last, member.span.name) for member in facts.structure.namespace_members
+    ] == [
+        (1, 6, "depth"),
+        (3, 5, "inner"),
+    ]
     assert restored == facts
 
 

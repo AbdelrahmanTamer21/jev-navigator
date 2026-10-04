@@ -117,13 +117,18 @@ _IN_TYPED_MODULE = (
     "inside: {any: [{kind: program}, {kind: export_statement, inside: {kind: program}}, "
     f"{{kind: ambient_declaration, {_IN_MODULE}}}]}}"
 )
-_TYPED_MODULE_LEVEL = f"not: {{not: {{{_IN_TYPED_MODULE}}}}}"
 _ANY_VARIABLES = "any: [{kind: lexical_declaration}, {kind: variable_declaration}]"
 _MODULE_VARIABLES = f"{{{_ANY_VARIABLES}, not: {{not: {{{_IN_MODULE}}}}}}}"
-_TYPED_MODULE_VARIABLES = f"{{{_ANY_VARIABLES}, {_TYPED_MODULE_LEVEL}}}"
 _AMBIENT_FUNCTIONS = (
     f"{{kind: function_signature, not: {{not: {{inside: {{kind: ambient_declaration, {_IN_MODULE}}}}}}}}}"
 )
+
+# A TypeScript namespace or module body is a scope of its own: a declaration directly in it, or in an
+# export it holds, is a member of that namespace, never of the module.
+_NAMESPACE_BODY = "{kind: statement_block, inside: {any: [{kind: internal_module}, {kind: module}]}}"
+_IN_NAMESPACE = f"inside: {{any: [{_NAMESPACE_BODY}, {{kind: export_statement, inside: {_NAMESPACE_BODY}}}]}}"
+_TYPED_SCOPE_LEVEL = f"not: {{not: {{any: [{{{_IN_TYPED_MODULE}}}, {{{_IN_NAMESPACE}}}]}}}}"
+_TYPED_SCOPE_VARIABLES = f"{{{_ANY_VARIABLES}, {_TYPED_SCOPE_LEVEL}}}"
 
 # A function or class assigned to a property, `foo.bar = function () {}`, gives its module no name.
 # Assigned to `exports.x` or `module.exports.x`, or listed in `module.exports = {...}`, it is one of
@@ -146,16 +151,16 @@ COMMONJS_EXPORT_PAIR = f"{{kind: pair, inside: {COMMONJS_EXPORTS_OBJECT}}}"
 # parser's output grew with matches times file size. Every such relation sits under a double
 # negation, `not: {not: ...}`: it holds the same and prints only the match.
 #
-# Module-level declarations by what may name them, each a rule per grammar that has such
-# declarations: a type alias or interface only a type, a `const`, `let` or `var`, or a TypeScript
-# `declare function`, only a value, and an enum or a Python assignment (which may be a type alias)
-# both.
+# Module-level and namespace-level declarations by what may name them, each a rule per grammar that
+# has such declarations: a type alias or interface only a type, a `const`, `let` or `var`, or a
+# TypeScript `declare function`, only a value, and an enum or a Python assignment (which may be a type
+# alias) both.
 _SCRIPT_TYPES = (
-    f"  any: [{{kind: type_alias_declaration}}, {{kind: interface_declaration}}]\n  {_TYPED_MODULE_LEVEL}"
+    f"  any: [{{kind: type_alias_declaration}}, {{kind: interface_declaration}}]\n  {_TYPED_SCOPE_LEVEL}"
 )
 _SCRIPT_VALUES = f"  any: [{_MODULE_VARIABLES}]"
-_TYPED_SCRIPT_VALUES = f"  any: [{_TYPED_MODULE_VARIABLES}, {_AMBIENT_FUNCTIONS}]"
-_SCRIPT_ENUMS = f"  kind: enum_declaration\n  {_TYPED_MODULE_LEVEL}"
+_TYPED_SCRIPT_VALUES = f"  any: [{_TYPED_SCOPE_VARIABLES}, {_AMBIENT_FUNCTIONS}]"
+_SCRIPT_ENUMS = f"  kind: enum_declaration\n  {_TYPED_SCOPE_LEVEL}"
 TYPE_DECLARATIONS = {"typescript": _SCRIPT_TYPES, "tsx": _SCRIPT_TYPES}
 VALUE_DECLARATIONS = {
     "typescript": _TYPED_SCRIPT_VALUES,
@@ -209,7 +214,7 @@ _TYPED_SCRIPT_DECLARED_NAMES = f"""  any: [{_SCRIPT_NAME_KINDS}, {{kind: type_id
             field: name
             any:
               - kind: variable_declarator
-                inside: {_TYPED_MODULE_VARIABLES}
+                inside: {_TYPED_SCOPE_VARIABLES}
               - {_AMBIENT_FUNCTIONS}
               - kind: type_alias_declaration
               - kind: interface_declaration
@@ -520,8 +525,12 @@ REFERENCE_ROLES = {
 REFERENCE_ROLES[FLOW_LANGUAGE] = _TYPED_SCRIPT_ROLES
 
 
-_EXPORT = "{field: declaration, kind: export_statement}"
-_NAMED_EXPORT = "{field: declaration, kind: export_statement, not: {has: {regex: '^default$'}}}"
+# A module's own export statements sit in its program; one in a namespace exports a namespace
+# member, and one in `declare module "m"` describes another module.
+_EXPORT = "{field: declaration, kind: export_statement, inside: {kind: program}}"
+_NAMED_EXPORT = (
+    "{field: declaration, kind: export_statement, not: {has: {regex: '^default$'}}, inside: {kind: program}}"
+)
 _AMBIENT_EXPORT = f"{{kind: ambient_declaration, inside: {_EXPORT}}}"
 
 
@@ -563,9 +572,8 @@ EXPORTED_NAMES = {
 }
 
 # The names a module exports as values rather than by an export statement over their declaration,
-# captured as `$NAME`: its default export (`export default build`, `export default function make`,
-# `module.exports = build`) and its CommonJS exports of a definition under its own name
-# (`exports.query = query`, `module.exports = { log, run: run }`).
+# captured as `$NAME`: its CommonJS exports of a definition under its own name (`exports.query =
+# query`, `module.exports = { log, run: run }`).
 _COMMONJS_OBJECT = (
     "not: {not: {inside: {kind: object, inside: {field: right, kind: assignment_expression, "
     "has: {field: left, regex: '^module[.]exports$'}}}}}"
@@ -574,42 +582,62 @@ _EXPORTED_VALUES = (
     """  any:
     - pattern: exports.$NAME = $NAME
     - pattern: module.exports.$NAME = $NAME
-    - pattern: module.exports = $NAME
-    - pattern: export default $NAME
-  not: {not: {any: [{has: {field: right, kind: identifier}}, {has: {field: value, kind: identifier}}]}}""",
+  not: {not: {has: {field: right, kind: identifier}}}""",
     f"""  pattern: {{context: '({{ $NAME: $NAME }})', selector: pair}}
   {_COMMONJS_OBJECT}""",
     f"""  kind: shorthand_property_identifier
   pattern: $NAME
   {_COMMONJS_OBJECT}""",
 )
+EXPORTED_VALUES = {"typescript": _EXPORTED_VALUES, "tsx": _EXPORTED_VALUES, "javascript": _EXPORTED_VALUES}
+
+# The name of the definition a module exports as its default, captured as `$NAME`: `export default
+# build`, `export default function make`, and `module.exports = build`, which a whole-module
+# `require` takes.
+_DEFAULT_VALUE = """  any:
+    - pattern: module.exports = $NAME
+    - pattern: export default $NAME
+  not: {not: {any: [{has: {field: right, kind: identifier}}, {has: {field: value, kind: identifier}}]}}"""
 _DEFAULT_EXPORT = "{field: declaration, kind: export_statement, has: {regex: '^default$'}}"
 _DEFAULT_DECLARATION_NAME = f"""  pattern: $NAME
   not: {{not: {{inside: {{field: name, inside: {_DEFAULT_EXPORT}}}}}}}"""
-_TYPED_EXPORTED_VALUES = (
-    *_EXPORTED_VALUES,
+_TYPED_DEFAULT_EXPORTS = (
+    _DEFAULT_VALUE,
     f"  any: [{{kind: identifier}}, {{kind: type_identifier}}]\n{_DEFAULT_DECLARATION_NAME}",
 )
-EXPORTED_VALUES = {
-    "typescript": _TYPED_EXPORTED_VALUES,
-    "tsx": _TYPED_EXPORTED_VALUES,
-    "javascript": (*_EXPORTED_VALUES, f"  kind: identifier\n{_DEFAULT_DECLARATION_NAME}"),
+DEFAULT_EXPORTS = {
+    "typescript": _TYPED_DEFAULT_EXPORTS,
+    "tsx": _TYPED_DEFAULT_EXPORTS,
+    "javascript": (_DEFAULT_VALUE, f"  kind: identifier\n{_DEFAULT_DECLARATION_NAME}"),
 }
+
+
+# The entries of a module's own `export { ... }` lists, quietly (see the double negation above):
+# `export { inner as outer }` exports the module's definition `inner` as `outer`. A re-export's,
+# `export { a as b } from './m'`, are another module's names (see ``reexported_names``).
+_OWN_EXPORT = "{kind: export_statement, not: {has: {field: source, kind: string}}}"
+OWN_EXPORT_SPECIFIERS = (
+    f"  kind: export_specifier\n  not: {{not: {{inside: {{kind: export_clause, inside: {_OWN_EXPORT}}}}}}}"
+)
 
 
 def export_rules(languages: Iterable[str]) -> str:
     """ast-grep rules for the script export surface: the names exported declarations make, the
-    ``{ ... }`` clause specifiers that carry aliased names, and the names exported as values (see
-    ``EXPORTED_VALUES``). Python has no such kinds, so it contributes no rules."""
+    entries of the module's own ``{ ... }`` lists, the names exported as values (see
+    ``EXPORTED_VALUES``) and the default export's (see ``DEFAULT_EXPORTS``). Python has no such
+    kinds, so it contributes no rules."""
     documents = []
     for language in languages:
         if language == "python":
             continue
         grammar = grammar_of(language)
         documents.append(f"id: export_surface\nlanguage: {grammar}\nrule:\n{EXPORTED_NAMES[grammar]}")
-        documents.append(f"id: export_specifier\nlanguage: {grammar}\nrule:\n  kind: export_specifier")
+        documents.append(f"id: export_specifier\nlanguage: {grammar}\nrule:\n{OWN_EXPORT_SPECIFIERS}")
         documents += [
             f"id: exported_value\nlanguage: {grammar}\nrule:\n{rule}" for rule in EXPORTED_VALUES[grammar]
+        ]
+        documents += [
+            f"id: default_export\nlanguage: {grammar}\nrule:\n{rule}" for rule in DEFAULT_EXPORTS[grammar]
         ]
     return "\n---\n".join(documents)
 

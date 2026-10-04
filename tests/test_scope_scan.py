@@ -677,6 +677,28 @@ def test_a_function_given_as_a_default_value_is_named_by_the_name_it_defaults(tm
     }
 
 
+def test_a_module_level_function_sharing_its_line_and_name_with_a_held_method_stays_top_level(
+    tmp_path: Path,
+) -> None:
+    """Spans are lines and a name, so `handler` and the object's method `handler` on one line are one
+    span. The module-level function among them makes it a module-level definition."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/oneline.js": (
+                "function handler() { return 1; } const table = { handler() { return 2; } }; handler();\n"
+            )
+        },
+    )
+
+    # Act
+    binding = index.find_callers("handler")[0].binding
+
+    # Assert
+    assert (binding.status.value, binding.target) == ("resolved", Span("src/oneline.js", 1, 1, "handler"))
+
+
 def test_symbols_sharing_a_line_are_top_level_only_when_nothing_holds_them(tmp_path: Path) -> None:
     """Symbols on one line each hold the other's first line, so lines cannot say which is top level;
     the syntax tree can. `retry` and the one-line class `Box` stay provable from their file, while
@@ -788,6 +810,100 @@ def test_a_namespace_member_is_no_module_level_definition(tmp_path: Path) -> Non
     assert config.target != Span("src/spaces.ts", 1, 1, "config"), config
     assert read.status.value != "resolved", read
     assert (imported.status.value, imported.target) == ("resolved", Span("src/cfg.ts", 1, 1, "config"))
+
+
+def test_a_namespace_member_is_a_definition_inside_its_own_namespace(tmp_path: Path) -> None:
+    """Inside namespace B, `config` names B's own member, never A's. A namespace's functions and its
+    unexported constants bind from inside it, ahead of a module-level definition, and the innermost
+    namespace holding the use wins. A use sharing the namespace's first or last line may sit outside
+    it, so it stays open, and a method of an object the namespace holds is the object's, not a
+    member."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/spaces.ts": (
+                "namespace A { export const config = 1; }\n"
+                "namespace B {\n  export const config = 2;\n  export function read() { return config; }\n}\n"
+            ),
+            "src/utils.ts": (
+                "export namespace Utils {\n  export function helper() { return 1; }\n  const limit = 3;\n"
+                "  export function main() { return helper() + limit; }\n}\n"
+            ),
+            "src/nested.ts": (
+                "namespace Outer {\n  const depth = 1;\n  namespace Inner {\n    const depth = 2;\n"
+                "    export function inner() { return depth; }\n  }\n"
+                "  export function outer() { return depth; }\n}\nconst depth = 0;\n"
+            ),
+            "src/oneline.ts": "namespace A { export const config = 1; } config;\n",
+            "src/table.ts": (
+                "namespace T {\n  const table = { handler() { return 2; } };\n"
+                "  export function run() { return handler(); }\n}\n"
+            ),
+        },
+    )
+    uses = {
+        "config": ("src/spaces.ts", 4, "config", "return"),
+        "helper": ("src/utils.ts", 4, "helper", None),
+        "limit": ("src/utils.ts", 4, "limit", "return"),
+        "inner depth": ("src/nested.ts", 5, "depth", "return"),
+        "outer depth": ("src/nested.ts", 7, "depth", "return"),
+        "config after a one-line namespace": ("src/oneline.ts", 1, "config", "return"),
+        "a method of a namespace's value": ("src/table.ts", 3, "handler", None),
+    }
+
+    # Act
+    bindings = {
+        use: index.binding_of(file, line, name, None, role) for use, (file, line, name, role) in uses.items()
+    }
+
+    # Assert
+    assert {use: (binding.status.value, binding.target) for use, binding in bindings.items()} == {
+        "config": ("resolved", Span("src/spaces.ts", 3, 3, "config")),
+        "helper": ("resolved", Span("src/utils.ts", 2, 2, "helper")),
+        "limit": ("resolved", Span("src/utils.ts", 3, 3, "limit")),
+        "inner depth": ("resolved", Span("src/nested.ts", 4, 4, "depth")),
+        "outer depth": ("resolved", Span("src/nested.ts", 2, 2, "depth")),
+        "config after a one-line namespace": ("candidate", None),
+        "a method of a namespace's value": ("candidate", None),
+    }
+
+
+def test_a_namespace_member_comes_before_an_import_and_after_a_functions_own_name(tmp_path: Path) -> None:
+    """Inside a namespace its own `config` hides the module's import of `config`, while a parameter
+    `config` hides the member. A function or constant a namespace exports is no export of its
+    module, so an import of that name never reaches the module's private function of the same
+    name."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/cfg.ts": "export const config = 3;\n",
+            "src/spaces.ts": (
+                "import { config } from './cfg';\nnamespace B {\n  const config = 2;\n"
+                "  export function read() { return config; }\n"
+                "  export function given(config) { return config; }\n}\n"
+            ),
+            "src/utils.ts": (
+                "function helper() { return 0; }\nfunction run() { return 0; }\n"
+                "export namespace Utils {\n  export function helper() { return 1; }\n"
+                "  export const run = () => 1;\n}\n"
+            ),
+            "src/use.ts": "import { helper, run } from './utils';\nhelper();\nrun();\n",
+        },
+    )
+
+    # Act
+    member = index.binding_of("src/spaces.ts", 4, "config", None, "return")
+    parameter = index.binding_of("src/spaces.ts", 5, "config", None, "return")
+    imported = [
+        index.binding_of("src/use.ts", line, name, None) for line, name in ((2, "helper"), (3, "run"))
+    ]
+
+    # Assert
+    assert (member.status.value, member.target) == ("resolved", Span("src/spaces.ts", 3, 3, "config"))
+    assert (parameter.status.value, parameter.target) == ("candidate", None), parameter
+    assert [(binding.status.value, binding.target) for binding in imported] == [("candidate", None)] * 2
 
 
 def test_several_definitions_of_a_name_in_one_file_make_a_candidate(tmp_path: Path) -> None:
@@ -1162,6 +1278,119 @@ def test_a_local_name_replaces_an_import_for_values_and_never_for_types(tmp_path
     assert (typed.status.value, typed.target) == ("resolved", Span("src/same.ts", 1, 3, "Config"))
 
 
+def test_an_export_list_entry_under_another_name_exports_its_own_definition(tmp_path: Path) -> None:
+    """`export { inner as outer }` exports `inner` under the name `outer`: an import of `outer`
+    reaches `inner`, never the module's private `outer`, and an import of `inner` reaches nothing.
+    A re-export's names are another module's, so `export { b } from` never exports the module's
+    private `b`."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/ren.ts": (
+                "function inner() { return 1; }\nfunction outer() { return 2; }\nexport { inner as outer };\n"
+            ),
+            "src/use_outer.ts": "import { outer } from './ren';\nouter();\n",
+            "src/use_inner.ts": "import { inner } from './ren';\ninner();\n",
+            "src/barrel.ts": "function b() { return 0; }\nexport { b } from './missing';\n",
+            "src/use_barrel.ts": "import { b } from './barrel';\nb();\n",
+        },
+    )
+
+    # Act
+    outer = index.binding_of("src/use_outer.ts", 2, "outer", None)
+    inner = index.binding_of("src/use_inner.ts", 2, "inner", None)
+    reexported = index.binding_of("src/use_barrel.ts", 2, "b", None)
+
+    # Assert
+    assert (outer.status.value, outer.target) == ("resolved", Span("src/ren.ts", 1, 1, "inner"))
+    assert (inner.status.value, inner.target) == ("candidate", None), inner
+    assert (reexported.status.value, reexported.target) == ("candidate", None), reexported
+
+
+def test_a_default_export_is_imported_only_as_the_default(tmp_path: Path) -> None:
+    """A default import takes the module's default export under any local name, and `{ default as
+    entry }` is one too. The default export's own name is no named export: `import { make }`, a
+    member `defaults.make()` of the whole module, and `const { solo } = require(...)` of a module that
+    assigns `module.exports = solo` reach nothing, and an import named like a private function never
+    reaches it. A re-export passes the default on, and a module that assigns `module.exports` twice
+    leaves it open."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "defaults.ts": "export default function make() {\n  return 1;\n}\n",
+            "jobs.ts": "function run() { return 0; }\nexport default function start() { return run(); }\n",
+            "single.js": "function solo() {\n  return 4;\n}\nmodule.exports = solo;\n",
+            "main.ts": (
+                "import begin from './defaults';\nimport { default as entry } from './defaults';\n"
+                "import { make } from './defaults';\nimport * as defaults from './defaults';\n"
+                "import run from './jobs';\n"
+                "begin();\nentry();\nmake();\ndefaults.make();\nrun();\n"
+            ),
+            "app.js": "const { solo } = require('./single');\nsolo();\n",
+            "barrel.ts": "export { default } from './defaults';\n",
+            "through.ts": "import made from './barrel';\nmade();\n",
+            "twice.js": "function a() {}\nfunction b() {}\nmodule.exports = a;\nmodule.exports = b;\n",
+            "esm.js": "import either from './twice';\neither();\n",
+        },
+    )
+    sites = {
+        "a default import under another name": ("main.ts", 6, "begin", None),
+        "default as entry": ("main.ts", 7, "entry", None),
+        "the default's own name by name": ("main.ts", 8, "make", None),
+        "the default's own name on the module": ("main.ts", 9, "make", "defaults"),
+        "a default import named like a private function": ("main.ts", 10, "run", None),
+        "a destructured require of module.exports": ("app.js", 2, "solo", None),
+        "a default passed on by a re-export": ("through.ts", 2, "made", None),
+        "a default assigned twice": ("esm.js", 2, "either", None),
+    }
+
+    # Act
+    bindings = {
+        site: index.binding_of(file, line, name, receiver)
+        for site, (file, line, name, receiver) in sites.items()
+    }
+
+    # Assert
+    assert {
+        site: (binding.status.value, binding.target and binding.target.key)
+        for site, binding in bindings.items()
+    } == {
+        "a default import under another name": ("resolved", "defaults.ts:1-3"),
+        "default as entry": ("resolved", "defaults.ts:1-3"),
+        "the default's own name by name": ("candidate", None),
+        "the default's own name on the module": ("candidate", None),
+        "a default import named like a private function": ("resolved", "jobs.ts:2-2"),
+        "a destructured require of module.exports": ("candidate", None),
+        "a default passed on by a re-export": ("resolved", "defaults.ts:1-3"),
+        "a default assigned twice": ("candidate", None),
+    }
+
+
+def test_a_default_whose_definition_may_sit_in_unparsed_lines_stays_unknown(tmp_path: Path) -> None:
+    """parse-server's AdapterLoader.js: Flow annotations the JavaScript grammar cannot parse hide the
+    function `export default loadAdapter` names. A default import of it is unknown, since the lines
+    the parser lost mention the definition's own name."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "loader.js": (
+                "export function loadAdapter<T>(adapter): T {\n  return adapter;\n}\n"
+                "export default loadAdapter;\n"
+            ),
+            "use.js": "import load from './loader';\nload();\n",
+        },
+    )
+
+    # Act
+    binding = index.binding_of("use.js", 2, "load", None)
+
+    # Assert
+    assert binding.status.value == "unknown", binding
+
+
 def test_only_what_a_script_module_exports_is_importable(tmp_path: Path) -> None:
     """A script module's own functions are importable only where it exports them: by an `export`
     statement or list, as its default export, or as a CommonJS export (`exports.x = x`, a function
@@ -1297,7 +1526,36 @@ def test_a_member_read_through_an_import_is_decided_like_a_named_import(tmp_path
     assert bindings[("use_lone.js", 2)].reason == "solo may be defined in files not parsed: lone.js"
     assert {
         bindings[site].reason for site in (("use_tools.js", 2), ("use_tools.ts", 3), ("use_tools.ts", 4))
-    } == {"the import names tools.js, where the index finds no exported walk"}
+    } == {
+        "the import names tools.js, where the index finds no definition exported as walk; a name that "
+        "module imports and passes on is not followed"
+    }
+
+
+def test_a_name_a_python_module_imports_and_passes_on_is_not_claimed_unexported(tmp_path: Path) -> None:
+    """A Python module exports the names it imports at module level too, so `from pkg.api import
+    compute` where api.py imports `compute` from pkg.core is no proof that api.py exports none: the
+    candidate says the index found no definition there and does not follow the import."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/core.py": "def compute():\n    return 1\n",
+            "pkg/api.py": "from pkg.core import compute\n\n\ndef compute_local():\n    return 2\n",
+            "use_api.py": "from pkg.api import compute\ncompute()\n",
+        },
+    )
+
+    # Act
+    binding = index.binding_of("use_api.py", 2, "compute", None)
+
+    # Assert
+    assert (binding.status.value, binding.reason) == (
+        "candidate",
+        "the import names pkg/api.py, where the index finds no definition exported as compute; a name "
+        "that module imports and passes on is not followed",
+    )
 
 
 def test_a_name_imported_under_an_alias_binds_to_the_exported_definition(
@@ -1413,9 +1671,9 @@ def test_plain_javascript_is_unchanged_whether_or_not_flow_files_share_the_scope
 
 
 def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> None:
-    """Declaration name nodes and specifier nodes carry the surface: default, wildcard, a multi-line
-    list, two constants in one statement and a template-literal body are each handled by the
-    parser, not by source-text scanning."""
+    """Declaration name nodes and the module's own specifier nodes carry the surface: a default, a
+    wildcard, a multi-line re-export list (another module's names), two constants in one statement
+    and a template-literal body are each handled by the parser, not by source-text scanning."""
     # Arrange
     index = committed(
         tmp_path,
@@ -1438,7 +1696,7 @@ def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> 
     facts = index._facts_in("src/service.ts")
 
     # Assert
-    assert facts.export_names == ("first", "placeOrder", "refund", "run", "second")
+    assert facts.export_names == ("first", "run", "second")
     assert facts.incomplete is False
 
 

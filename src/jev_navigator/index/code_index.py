@@ -21,6 +21,7 @@ from .bindings import (
     BindingResolver,
     CallFacts,
     binding_from_facts,
+    binding_in_namespace,
     local_binding,
 )
 from .fact_cache import FactCache
@@ -110,7 +111,6 @@ class CodeIndex:
         self._references_named = cache(self._references_with_name)
         self._definitions = cache(self._definitions_by_name)
         self._module_scope_in = cache(self._module_scope_spans)
-        self._importable_in = cache(self._importable_spans)
         self._names_imported = cache(self._read_imported_names)
         self._local_scopes = cache(self._read_local_scopes)
         self._binding = cache(self._compute_binding)
@@ -286,11 +286,13 @@ class CodeIndex:
         return self._file_structure(file).symbols
 
     def declarations_in(self, file: str) -> tuple[Span, ...]:
-        """Module-level constants, assignments, types, interfaces and enums."""
+        """Constants, assignments, types, interfaces and enums at module level or directly in a
+        TypeScript namespace."""
         return self._file_structure(file).declarations
 
     def find_definition(self, name: str) -> tuple[Span, ...]:
-        """Functions, classes, and module-level constants, assignments, types, interfaces and enums."""
+        """Functions, classes, and the constants, assignments, types, interfaces and enums of
+        ``declarations_in``."""
         return self._definitions(name)
 
     def find_callers(self, name: str) -> tuple[CallSite, ...]:
@@ -376,16 +378,23 @@ class CodeIndex:
             if injected is not None:
                 return injected
         if not self._binds_locally(file, line, name, receiver, role):
-            through_import = (
-                self._binding_through_import(file, name, role)
-                if receiver is None
-                else self._binding_through_module(file, name, receiver, role)
-            )
-            if through_import is not None:
-                return through_import
+            enclosing = self._binding_beyond_the_function(file, line, name, receiver, role)
+            if enclosing is not None:
+                return enclosing
         elif receiver is None:
             return local_binding(name)
         return binding_from_facts(self._call_facts(file, name, receiver, role))
+
+    def _binding_beyond_the_function(
+        self, file: str, line: int, name: str, receiver: str | None, role: str | None
+    ) -> Binding | None:
+        """A use no function binds for itself names, in this order, a member of a namespace around
+        it, then what its module imports under that name; a method call names the module its
+        receiver holds."""
+        if receiver is not None:
+            return self._binding_through_module(file, name, receiver, role)
+        in_namespace = self._binding_in_namespace(file, line, name, role)
+        return in_namespace if in_namespace is not None else self._binding_through_import(file, name, role)
 
     def _call_facts(self, file: str, name: str, receiver: str | None, role: str | None) -> CallFacts:
         definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
@@ -395,10 +404,29 @@ class CodeIndex:
             receiver,
             definitions,
             tuple(span for span in definitions if span in self._module_scope_in(span.file)),
-            tuple(span for span in definitions if span in self._importable_in(span.file)),
+            (),
             (),
             self._files_hiding(name),
         )
+
+    def _binding_in_namespace(self, file: str, line: int, name: str, role: str | None) -> Binding | None:
+        """A use inside a TypeScript namespace names a member of the innermost namespace around it that
+        defines ``name`` before anything outside, imports included; None when no namespace around
+        the line does, or when lines the index could not parse may hide a definition."""
+        members = [
+            member
+            for member in self._file_structure(file).namespace_members
+            if member.first <= line <= member.last
+            and member.span.name == name
+            and self._can_name(role, member.span)
+        ]
+        if not members or file in self._files_hiding(name):
+            return None
+        first, last = max(
+            ((member.first, member.last) for member in members), key=lambda lines: (lines[0], -lines[1])
+        )
+        innermost = [member.span for member in members if (member.first, member.last) == (first, last)]
+        return binding_in_namespace(name, line, (first, last), innermost)
 
     def _binds_locally(self, file: str, line: int, name: str, receiver: str | None, role: str | None) -> bool:
         """Whether a function holding ``line`` binds the name the use looks up first for its own body:
@@ -560,27 +588,16 @@ class CodeIndex:
         symbols from the syntax tree."""
         return frozenset((*self._file_structure(file).module_symbols, *self._module_declarations(file)))
 
-    def _importable_spans(self, file: str) -> frozenset[Span]:
-        """Symbols and declarations another module can import from ``file`` by name. A Python module
-        exports its whole module scope. A script module exports the module-scope definitions it names
-        in an export statement, as its default export or as a CommonJS export, and the functions and
-        classes it assigns to CommonJS exports."""
-        module_scope = self._module_scope_in(file)
-        if language_of(file) == "python":
-            return module_scope
-        facts = self._facts_in(file)
-        exported = {*facts.export_names, *facts.exported_values}
-        named = (span for span in module_scope if span.name in exported)
-        return frozenset((*named, *facts.structure.commonjs_exports))
-
     def _module_declarations(self, file: str) -> tuple[Span, ...]:
-        """The declarations no class or function contains. A function starting on a declaration's
-        first line is the value it declares, not its container."""
+        """The declarations no class, function or namespace contains. A function starting on a
+        declaration's first line is the value it declares, not its container."""
         structure = self._file_structure(file)
+        members = {member.span for member in structure.namespace_members}
         return tuple(
             span
             for span in structure.declarations
-            if not any(other.start < span.start <= other.end for other in structure.symbols)
+            if span not in members
+            and not any(other.start < span.start <= other.end for other in structure.symbols)
         )
 
     def _binding_through_module(
@@ -596,13 +613,13 @@ class CodeIndex:
     def _binding_through_import(self, file: str, name: str, role: str | None) -> Binding | None:
         """The binding of ``name()`` when ``file`` imports ``name``: by that name or under another
         (``import { stop as name }``, ``const { stop: name } = require(...)``, ``from m import stop as
-        name``), or as a default import, looked up by its local name. Decided from the module the
+        name``), or as a default import, which takes the module's default export. Decided from the module the
         import names (see ``_binding_through_exporters``). None when nothing imports ``name``, when
         ``file`` defines ``name`` itself, or when the import names no module of the scope."""
         imported = self._names_imported(file).get(name)
         if imported is None or self._defines(file, name, role):
             return None
-        return self._binding_through_exporters(file, imported.specifier, imported.exported or name, role)
+        return self._binding_through_exporters(file, imported.specifier, imported.exported or "default", role)
 
     def _binding_through_exporters(
         self, file: str, specifier: str, name: str, role: str | None
@@ -610,15 +627,21 @@ class CodeIndex:
         """The binding of ``name`` imported from the module ``specifier`` names, read from that
         module's own facts and those of the modules it re-exports ``name`` from, never from a search
         of the scope: one definition proves the target, several leave a candidate, an exporter whose
-        unparsed lines mention ``name`` or that vanished leaves it unknown, and no definition leaves a
-        candidate naming the modules. None when ``specifier`` names no module of the scope."""
+        unparsed lines mention ``name`` or the name of a definition it exports as ``name`` (see
+        ``_own_names``), or that vanished, leaves it unknown, and no definition leaves a candidate
+        naming the modules. None when ``specifier`` names no module of the scope."""
         exporters = self._exporters(file, specifier, name)
         if not exporters:
             return None
         definitions = tuple(
             span for exporter in exporters for span in self._importable_definitions(exporter.path, name, role)
         )
-        hiding = self._files_hiding(name) & {exporter.path for exporter in exporters}
+        hiding = {
+            exporter.path
+            for exporter in exporters
+            for looked_up in {name, *self._own_names(exporter.path, name)}
+            if exporter.path in self._files_hiding(looked_up)
+        }
         return binding_from_facts(
             CallFacts(file, name, None, definitions, (), definitions, exporters, hiding)
         )
@@ -628,15 +651,37 @@ class CodeIndex:
         return any(span.name == name and self._can_name(role, span) for span in self._module_scope_in(file))
 
     def _importable_definitions(self, file: str, name: str, role: str | None) -> tuple[Span, ...]:
-        """The definitions of ``name`` in ``file`` that another module can import, symbols before
-        declarations as ``find_definition`` orders them."""
+        """The definitions another module imports from ``file`` as ``name``, symbols before
+        declarations as ``find_definition`` orders them. A Python module exports its whole module
+        scope under its own names. A script module exports the module-scope definition an export
+        statement or list names, its default export or a CommonJS export of that name, under its own
+        name or the one an export list gives it (`export { inner as outer }`), and the functions and
+        classes it assigns to CommonJS exports."""
         structure = self._file_structure(file)
-        importable = self._importable_in(file)
+        own_names = self._own_names(file, name)
+        exported = {span for span in self._module_scope_in(file) if span.name in own_names}
+        exported |= {span for span in structure.commonjs_exports if span.name == name}
         return tuple(
             span
             for span in (*structure.symbols, *structure.declarations)
-            if span.name == name and span in importable and self._can_name(role, span)
+            if span in exported and self._can_name(role, span)
         )
+
+    def _own_names(self, file: str, name: str) -> set[str]:
+        """The names of the definitions ``file`` exports as ``name``: the same name in a Python
+        module, and in a script module the ones ``_export_names_in`` gives."""
+        return {name} if language_of(file) == "python" else self._export_names_in(file).get(name, set())
+
+    def _export_names_in(self, file: str) -> dict[str, set[str]]:
+        """Each name script module ``file`` exports from its own definitions, ``default`` for its
+        default export, with the names of the definitions it may export under it: a module that
+        assigns `module.exports` twice has two."""
+        facts = self._facts_in(file)
+        renamed: dict[str, set[str]] = {}
+        for exported, own in facts.renamed_exports:
+            renamed.setdefault(exported, set()).add(own)
+        own_names = {name: {name} for name in (*facts.export_names, *facts.exported_values)}
+        return own_names | renamed
 
     def _exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
         """The module ``file``'s import of ``specifier`` resolves to, then each module it re-exports
@@ -671,7 +716,7 @@ class CodeIndex:
                 if identity in seen:
                     continue
                 seen.add(identity)
-                if name in self._facts_in(inherited.path).export_names:
+                if name in self._export_names_in(inherited.path):
                     prior = found.get(inherited.path)
                     if prior is None or inherited.proven:
                         found[inherited.path] = inherited
