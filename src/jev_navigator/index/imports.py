@@ -228,6 +228,11 @@ def _script_files(base: str) -> list[str]:
 
 _PYTHON_COMMENT = re.compile(r"#[^\n]*")
 _SCRIPT_DEFAULT_NAME = re.compile(r"^\s*([\w$]+)\s*(?:,|$)")
+_SCRIPT_NAMESPACE = re.compile(r"\*\s*as\s+([\w$]+)")
+# `const jwt = require('./jwt')`, but not `require('./jwt').verify` or `require('./jwt')(options)`.
+_SCRIPT_REQUIRED_MODULE = re.compile(
+    r"""\b(?:const|let|var)\s+([\w$]+)\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)(?!\s*[.(\[])"""
+)
 _SCRIPT_BRACES = re.compile(r"\{([^}]*)\}")
 
 
@@ -253,6 +258,21 @@ def imported_names(source: str, path: str) -> dict[str, str]:
         for braces in _SCRIPT_BRACES.findall(clause):
             names.update({_local(part): specifier for part in braces.split(",") if part.strip()})
     return names
+
+
+def module_aliases(source: str, path: str) -> dict[str, str]:
+    """Local name to module specifier, for names that hold a whole script module:
+    ``import * as jwt from "./jwt"`` and ``const jwt = require("./jwt")``."""
+    if path.endswith(".py"):
+        return {}
+    code = _without_script_comments(source)
+    aliases = {match.group(1): match.group(2) for match in _SCRIPT_REQUIRED_MODULE.finditer(code)}
+    for match in _SCRIPT_FROM.finditer(code):
+        keyword, clause, specifier = match.groups()
+        namespace = _SCRIPT_NAMESPACE.search(clause) if keyword == "import" else None
+        if namespace:
+            aliases[namespace.group(1)] = specifier
+    return aliases
 
 
 def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | None, str], ...]:

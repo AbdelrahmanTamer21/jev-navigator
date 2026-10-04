@@ -297,7 +297,12 @@ Calls are found by name in the syntax tree, which is not a resolved binding. Eve
 `Binding(status, reason, target)`: `resolved` when a module-level definition in the same file, or one
 an import names, proves the target, `candidate` when only the name matches (a method on an unknown receiver, or a
 definition elsewhere with no import), `unresolved` when nothing in scope defines it, and `unknown` when
-the definition may sit in lines the index could not parse. References carry a binding too. A
+the definition may sit in lines the index could not parse. A call `jwt.verify()` where `jwt` holds a
+whole module of the scope (`import * as jwt`, `const jwt = require(...)`) binds to the `verify` that
+module, or one it re-exports from, defines; only that module's facts are read. A function or class
+held by another function, a class or an object literal, or assigned to a property (`foo.bar =
+function () {}`), is no module-level definition. One assigned to `exports.x` or `module.exports.x`,
+or listed in `module.exports = {...}`, is a CommonJS export: an import names it, its own module does not. References carry a binding too. A
 binding counts only the definitions its site can name: a type, a class or a declaration a type can
 name, such as an interface; an export, any definition; and a call or any other reference (an
 argument, receiver, condition or decorator), a function, class or declaration a value can name, such

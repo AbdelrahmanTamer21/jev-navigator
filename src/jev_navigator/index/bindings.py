@@ -76,6 +76,16 @@ def falls_inside(binding: Binding | None, view: Span) -> bool:
     return target is None or target.overlaps(view)
 
 
+def binding_through_module(receiver: str, definition: Span, exporter: ImportFact) -> Binding:
+    """A call ``receiver.name()`` where ``receiver`` holds a whole module of the scope and
+    ``definition`` is the ``name`` that ``exporter``, the module or one it re-exports from, defines."""
+    if exporter.proven:
+        return Binding(BindingStatus.RESOLVED, f"imported from {definition.file} as {receiver}", definition)
+    return Binding(
+        BindingStatus.CANDIDATE, f"import suggests {definition.file}: {exporter.reason}", definition
+    )
+
+
 def binding_from_facts(facts: CallFacts) -> Binding:
     """``unknown`` when the definition may sit where the index could not parse: no definition was
     found, or the import or a definition names a file that could hold one unseen. Missing evidence is
