@@ -538,12 +538,16 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `JEV_NAVIGATOR_CHOICE_MIN_CONFIDENCE`, `JEV_NAVIGATOR_NOUL_YES_AT` and `JEV_NAVIGATOR_NOUL_NO_AT` (via
   `Thresholds.from_env()` at the edge), then a directive's defaults, then per-call overrides
   (`judge.effective(directive, call)`).
-- **Secrets.** `SecretMasker` masks secret values and keeps code. It hides private keys, token
-  shapes, Bearer values, env-file values, quoted, bare and fallback values under secret-named keys,
-  literal arguments to secret-named calls, and high-entropy quoted values in assignments. A value
-  that is a reference (an identifier, dotted path, call, env lookup or interpolation) stays, so
-  `secret: process.env.AUTH_SECRET` reaches Jev unchanged, and so does a secret-named key that names
-  something (`secretName`, `TOKEN_PATH`). Masking works by content: a value of at least 8 characters
+- **Secrets.** `SecretMasker` masks secret values and keeps code (rules in `judgments/secret_shapes.py`).
+  It hides private keys, token shapes, Bearer values, and values under secret-named keys: shell and
+  env-file words, quoted values (with escapes, across lines, or never closed), YAML block and
+  continued values, nested values that hold a literal, plain words, fallbacks after a reference, and
+  literal arguments to secret-named calls; plus high-entropy quoted values that are not identifier
+  words. A secret-named key ends in the secret word (`authToken`, `DB_PASSWORD`; not `max_tokens` or
+  `secretName`). A reference (an identifier, dotted path, call, env lookup or interpolation) stays,
+  so `secret: process.env.AUTH_SECRET` reaches Jev unchanged, and so does nested metadata such as a
+  Kubernetes `secret:` volume. The analysis engine's audit-masker corpus is shared in
+  `tests/test_secret_shape_corpus.py`. Masking works by content: a value of at least 8 characters
   hidden in one place is hidden everywhere in the request, for example where a relation text or
   another candidate quotes it; a shorter value is masked only where it stands. A plain identifier
   under a secret-named key (`password: changeme` in YAML) reads as code and is not masked.

@@ -99,6 +99,8 @@ SECRET_VALUES = {
         "secret: getSecret('sk-live-signing-0042')",
         "sk-live-signing-0042",
     ),
+    "unterminated quoted value": ('password: "unterminated secret', "unterminated secret"),
+    "camelCase secret key": ('const authToken = "hunter2";', "hunter2"),
     "high-entropy value under an ordinary name": (
         'const signingKey = "Zq8vT2mN4xR7pL1wK9sD3fH6";',
         "Zq8vT2mN4xR7pL1wK9sD3fH6",
@@ -132,6 +134,24 @@ CODE_REFERENCES = [
     "_render_reports_block(reports, token_budget=...)",
     'secretAnnotation(kind, "name")',
     'requireSecretEnvironment(config, "RUNNER_AUTH_TOKEN", "engine-secrets", "runner-auth-token")',
+    "        fencing_token=self.identity.fencing_token,",
+    '        hub_token=token or "",',
+    "          csrfToken={csrfToken}",
+    'this.name = "RunAttemptExecutionClaimConflictError";',
+    "secret = {path for file in cited if (path := repo_relative_path(file, repo)) is not None}",
+    "# fixture paths are tagged secret: likely fixture by the scanner",
+    "// Deprecated env token: an exact match resolves without a round-trip.",
+    'RunsRestToken: { in: "header", name: "x-heedvane-runs-rest-token", type: "apiKey" },',
+    "existingSecret: { encryptedSecret: Uint8Array; encryptionKeyVersion: number } | null;",
+    "secret: {\n  name: AUTH_SECRET_NAME,\n"
+    '  items: [{ key: "proxy.htpasswd", path: "proxy.htpasswd", mode: 0o440 }],\n},',
+    "emailAndPassword: {\n  enabled: true,\n  // the bounds are the server's copy\n"
+    "  minPasswordLength: PASSWORD_MIN_LENGTH,\n},",
+    "volumes:\n  - name: runtime\n    secret:\n      secretName: observability-runtime\n"
+    "      items:\n        - key: metrics-token\n          path: metrics_token\n",
+    "secrets:\n  READ_TOKEN:\n    description: Read-only token for the exact checkout.\n"
+    "    required: false\n",
+    'WEBHOOK_SECRET="whsec_$(openssl rand -base64 32)"',
 ]
 
 
