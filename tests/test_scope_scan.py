@@ -257,6 +257,41 @@ def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_p
     assert site.binding.status == "resolved"
 
 
+def test_calls_on_one_line_keep_their_source_order_on_every_scan(tmp_path: Path) -> None:
+    """ast-grep runs its rules in parallel, so the matches of `new Date(...)` and of `merge(...)`
+    arrive in either order. Calls on one line are ordered as the source writes them, on every scan.
+    Of two calls starting at one place, such as `new Foo(a)` and `new Foo(a).bar(...)`, the outer
+    comes first, as one rule already orders `foo.bar().baz()`."""
+    # Arrange
+    source = (
+        "function f(a) {\n"
+        "  const d = new Date(merge(a), now());\n"
+        "  x = new Foo(a).bar(now());\n"
+        "  const t = new Date(merge(a), now()).getTime();\n"
+        "  return foo.bar().baz();\n"
+        "}\n"
+    )
+    (tmp_path / "order.js").write_text(source)
+    expected = {
+        2: ("Date", "merge", "now"),
+        3: ("bar", "Foo", "now"),
+        4: ("getTime", "Date", "merge", "now"),
+        5: ("baz", "bar"),
+    }
+
+    # Act
+    orders = {
+        tuple(
+            (call.line, call.name)
+            for call in scan_facts(["order.js"], tmp_path, Unparsed())["order.js"].calls
+        )
+        for _ in range(50)
+    }
+
+    # Assert
+    assert orders == {tuple((line, name) for line, names in expected.items() for name in names)}
+
+
 def test_the_flow_pragma_is_taken_from_leading_comments_not_from_strings_or_the_body() -> None:
     """Only comments before the first line of code count: `@flow` inside a string, after code, or in
     a lookalike word must not route a plain JavaScript file to the Flow grammar, and a byte-order

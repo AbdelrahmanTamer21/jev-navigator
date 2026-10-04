@@ -130,7 +130,7 @@ class _FileFound:
     functions: set[Span] = field(default_factory=set)
     classes: set[Span] = field(default_factory=set)
     declarations: set[Span] = field(default_factory=set)
-    calls: list[tuple[int, int, CallMatch]] = field(default_factory=list)
+    calls: list[tuple[tuple[int, int], CallMatch]] = field(default_factory=list)
     receivers: dict[tuple[str, int, str, str], set[str | None]] = field(default_factory=dict)
     export_names: set[str] = field(default_factory=set)
     error_lines: list[tuple[int, int]] = field(default_factory=list)
@@ -157,7 +157,7 @@ class _FileFound:
             _ordered(functions | self.classes),
             tuple(sorted(self.declarations)),
         )
-        calls = tuple(call for *_, call in sorted(self.calls, key=_source_order))
+        calls = tuple(call for _, call in sorted(self.calls, key=lambda entry: entry[0]))
         return FileFacts(
             structure,
             calls,
@@ -191,7 +191,7 @@ class _FileFound:
         name = last_identifier(expression)
         if name:
             call = CallMatch(match["file"], _line_of(match), name, receiver_of(expression))
-            self.calls.append((call.line, match["range"]["start"]["column"], call))
+            self.calls.append((_outer_first(match), call))
 
     def _add_reference(self, match: dict) -> None:
         role, text = match["ruleId"], match["text"]
@@ -223,10 +223,12 @@ def _merged_stretches(ranges: list[tuple[int, int]]) -> tuple[tuple[int, int], .
     return tuple(stretches)
 
 
-def _source_order(positioned: tuple[int, int, CallMatch]) -> tuple[int, int, str, str]:
-    """Calls in the order they start in the source; two starting together (``a().b()``) by name."""
-    line, column, call = positioned
-    return line, column, call.name, call.receiver or ""
+def _outer_first(match: dict) -> tuple[int, int]:
+    """A call's place in its file, ordering the outer of two calls that start together first, such as
+    ``new Foo(a).bar()`` before ``new Foo(a)``. ast-grep runs its rules in parallel, so its own order
+    differs between scans for calls that different rules match."""
+    offsets = match["range"]["byteOffset"]
+    return offsets["start"], -offsets["end"]
 
 
 def _reference_name(role: str, text: str) -> str:

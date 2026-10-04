@@ -219,12 +219,9 @@ def test_a_file_changed_during_a_search_is_only_unavailable_and_the_scan_finishe
     assert unparsed == frozenset()
 
 
-def test_facts_on_one_line_are_ordered_by_position_then_name(tmp_path: Path) -> None:
+def test_symbols_on_the_same_lines_are_ordered_by_name_on_every_scan(tmp_path: Path) -> None:
     # Arrange
-    (tmp_path / "chain.ts").write_text(
-        "export const o = { b() { return 1; }, a() { return 2; } };\n"
-        "outer(middle(inner(1)), new Box(2)).then(done);\n"
-    )
+    (tmp_path / "chain.ts").write_text("export const o = { b() { return 1; }, a() { return 2; } };\n")
 
     # Act: a fresh parse each time, since ast-grep may print matches in any order.
     runs = [scan_facts(["chain.ts"], tmp_path, Unparsed())["chain.ts"] for _ in range(5)]
@@ -232,13 +229,6 @@ def test_facts_on_one_line_are_ordered_by_position_then_name(tmp_path: Path) -> 
     # Assert
     assert all(run == runs[0] for run in runs)
     assert [span.name for span in runs[0].structure.functions] == ["a", "b"]
-    assert [call.name for call in runs[0].calls if call.line == 2] == [
-        "outer",
-        "then",
-        "middle",
-        "inner",
-        "Box",
-    ]
 
 
 def test_listing_callees_searches_once_for_every_name_called(tmp_path: Path, spawned: Counter[str]) -> None:
