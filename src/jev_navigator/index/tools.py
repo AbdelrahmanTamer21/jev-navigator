@@ -1,4 +1,5 @@
-"""Thin wrappers over the command-line tools the index runs: ast-grep, ripgrep and git."""
+"""Thin wrappers over the command-line tools the index runs: ast-grep, ripgrep and git. Every process
+starts through ``memory_limit.started``, so JVN's memory allowance and ceiling cover all of them."""
 
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ from contextlib import ExitStack
 from functools import cache
 from pathlib import Path
 
+from .. import memory_limit
 from .file_shape import refusal_of
 from .spans import TextHit
 
@@ -35,11 +37,13 @@ class ToolFailedError(RuntimeError):
 
 def run_command(arguments: Sequence[str], cwd: Path, *, no_match_exit: int | None = None) -> str:
     """The command's output; ``no_match_exit`` is the exit code a search tool uses for "nothing found"."""
-    completed = subprocess.run(list(arguments), cwd=cwd, capture_output=True, text=True)
-    if completed.returncode not in (0, no_match_exit):
-        detail = completed.stderr.strip()[:300]
-        raise ToolFailedError(f"{arguments[0]} exited {completed.returncode}: {detail}")
-    return completed.stdout
+    with memory_limit.started(
+        arguments, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    ) as process:
+        output, errors = process.communicate()
+    if process.returncode not in (0, no_match_exit):
+        raise ToolFailedError(f"{arguments[0]} exited {process.returncode}: {errors.strip()[:300]}")
+    return output
 
 
 @cache
@@ -110,21 +114,16 @@ def _json_lines(arguments: Sequence[str], cwd: Path) -> Iterator[dict]:
     """Each line the command prints, parsed as JSON while it runs. stderr goes to a file, so a full
     stderr pipe cannot stall the command; the process is killed if the reader stops early."""
     with tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(list(arguments), cwd=cwd, stdout=subprocess.PIPE, stderr=errors, text=True)
-        try:
+        with memory_limit.started(
+            arguments, cwd=cwd, stdout=subprocess.PIPE, stderr=errors, text=True
+        ) as process:
             for line in process.stdout:
                 if line.strip():
                     yield json.loads(line)
-        except BaseException:
-            process.kill()
-            raise
-        finally:
-            process.stdout.close()
-            returncode = process.wait()
-        if returncode not in (0, _NO_MATCHES_EXIT):
+        if process.returncode not in (0, _NO_MATCHES_EXIT):
             errors.seek(0)
             detail = errors.read().decode(errors="replace").strip()[:300]
-            raise ToolFailedError(f"{arguments[0]} exited {returncode}: {detail}")
+            raise ToolFailedError(f"{arguments[0]} exited {process.returncode}: {detail}")
 
 
 def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:
@@ -218,17 +217,17 @@ def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) 
     if not blobs:
         return
     requests = "".join(f"{object_id}\n" for object_id in blobs.values()).encode()
-    completed = subprocess.run(
+    with memory_limit.started(
         ["git", "cat-file", "--batch"],
         cwd=repository,
-        input=requests,
-        capture_output=True,
-    )
-    if completed.returncode != 0:
-        raise ToolFailedError(
-            f"git cat-file exited {completed.returncode}: {completed.stderr.decode()[:300]}"
-        )
-    for path, content in zip(blobs, _batch_contents(completed.stdout), strict=True):
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as process:
+        output, errors = process.communicate(requests)
+    if process.returncode != 0:
+        raise ToolFailedError(f"git cat-file exited {process.returncode}: {errors.decode()[:300]}")
+    for path, content in zip(blobs, _batch_contents(output), strict=True):
         _write_inside(destination, path, content)
 
 

@@ -6,7 +6,7 @@ import json
 import signal
 import subprocess
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -17,6 +17,7 @@ from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
 from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
+from jev_navigator.memory_limit import SLOTS_DIR_VARIABLE
 
 ORDER_SERVICE = '''\
 from app.validation import validate_order
@@ -150,6 +151,16 @@ def private_cache_root(tmp_path_factory: pytest.TempPathFactory, monkeypatch: py
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("cache")))
     monkeypatch.delenv(SHARED_STORE_VARIABLE, raising=False)
     return cache_root()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def private_memory_slots(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+    """The suite's JVN processes take their memory slots in a folder of their own, never the
+    machine's, so no test waits for a live JVN run and no test makes one wait."""
+    folder = tmp_path_factory.mktemp("memory-slots")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(SLOTS_DIR_VARIABLE, str(folder))
+        yield folder
 
 
 @pytest.fixture
