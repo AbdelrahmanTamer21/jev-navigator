@@ -456,7 +456,6 @@ def repository_commit(repository: Path) -> str:
 
 
 def test_each_existing_typesafe_environment_value_wins_independently(tmp_path: Path) -> None:
-    pytest.importorskip("dotenv")
     path = tmp_path / "env"
     path.write_text("TYPESAFE_API_KEY=file-key\nTYPESAFE_BASE_URL=http://file.example/gateway\n")
     environment = {"TYPESAFE_API_KEY": "process-key"}
@@ -470,7 +469,6 @@ def test_each_existing_typesafe_environment_value_wins_independently(tmp_path: P
 
 
 def test_user_dotenv_loads_only_settings_and_never_shell_evaluates(tmp_path: Path) -> None:
-    pytest.importorskip("dotenv")
     marker = tmp_path / "shell-ran"
     command = f"$(touch {marker})"
     path = tmp_path / "env"
@@ -492,7 +490,6 @@ def test_dotenv_base_url_reaches_the_real_sdk_system_one_endpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pytest.importorskip("typesafe_sdk")
-    pytest.importorskip("dotenv")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     received: list[tuple[str, bytes]] = []
