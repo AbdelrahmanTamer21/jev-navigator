@@ -302,7 +302,9 @@ whole module of the scope (`import * as jwt`, `const jwt = require(...)`) binds 
 module, or one it re-exports from, defines; only that module's facts are read. A function or class
 held by another function, a class or an object literal, or assigned to a property (`foo.bar =
 function () {}`), is no module-level definition. One assigned to `exports.x` or `module.exports.x`,
-or listed in `module.exports = {...}`, is a CommonJS export: an import names it, its own module does not. References carry a binding too. A
+or listed in `module.exports = {...}`, is a CommonJS export: an import names it, its own module does not.
+Each name an exported destructuring binds, as `a` and `c` in `export const { a, b: c } = ...`, is an
+export. References carry a binding too. A
 binding counts only the definitions its site can name: a type, a class or a declaration a type can
 name, such as an interface; an export, any definition; and a call or any other reference (an
 argument, receiver, condition or decorator), a function, class or declaration a value can name, such

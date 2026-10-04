@@ -13,7 +13,7 @@ from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch
 from .spans import Span
 from .tools import ast_grep_version
 
-FACT_RULE_VERSION = "combined-facts-v22-var-and-declare"
+FACT_RULE_VERSION = "combined-facts-v23-destructured-exports"
 
 
 class FactCache:

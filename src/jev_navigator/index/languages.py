@@ -115,7 +115,8 @@ COMMONJS_EXPORT_PAIR = f"{{kind: pair, inside: {COMMONJS_EXPORTS_OBJECT}}}"
 # `declare function`, only a value, and an enum or a Python assignment (which may be a type alias)
 # both. A module-level declaration sits in the program, in an export, or, in TypeScript, in a
 # `declare` that does.
-_VARIABLES = "any: [{kind: lexical_declaration}, {kind: variable_declaration}]"
+_VARIABLE_KINDS = "[{kind: lexical_declaration}, {kind: variable_declaration}]"
+_VARIABLES = f"any: {_VARIABLE_KINDS}"
 _IN_MODULE = "inside: {any: [{kind: program}, {kind: export_statement}]}"
 _IN_TYPED_MODULE = (
     "inside: {any: [{kind: program}, {kind: export_statement}, "
@@ -149,19 +150,20 @@ TYPE_AND_VALUE_DECLARATIONS = {
 # computed key, an attribute or an item binds no name, and destructuring a `require(...)` imports its
 # names rather than declaring them. The scan pairs each name with the innermost declaration holding
 # it, so a name declared inside another declaration's value stays its own.
-_PATTERN_EXCLUSIONS = """  not:
-    any:
-      - inside:
+_DEFAULTS_AND_COMPUTED_KEYS = """      - inside:
           stopBy: end
           field: right
           any: [{kind: assignment_pattern}, {kind: object_assignment_pattern}]
-      - inside: {stopBy: end, kind: computed_property_name}
+      - inside: {stopBy: end, kind: computed_property_name}"""
+_PATTERN_EXCLUSIONS = f"""  not:
+    any:
+{_DEFAULTS_AND_COMPUTED_KEYS}
       - inside:
           stopBy: end
           kind: variable_declarator
           all:
-            - has: {field: name, kind: object_pattern}
-            - has: {field: value, kind: call_expression, has: {field: function, regex: '^require$'}}"""
+            - has: {{field: name, kind: object_pattern}}
+            - has: {{field: value, kind: call_expression, has: {{field: function, regex: '^require$'}}}}"""
 _SCRIPT_NAME_KINDS = "{kind: identifier}, {kind: shorthand_property_identifier_pattern}"
 _SCRIPT_DECLARED_NAMES = f"""  any: [{_SCRIPT_NAME_KINDS}]
   all:
@@ -378,25 +380,45 @@ REFERENCE_ROLES[FLOW_LANGUAGE] = _TYPED_SCRIPT_ROLES
 
 
 _EXPORT = "{field: declaration, kind: export_statement}"
+_NAMED_EXPORT = "{field: declaration, kind: export_statement, not: {has: {regex: '^default$'}}}"
 _AMBIENT_EXPORT = f"{{kind: ambient_declaration, inside: {_EXPORT}}}"
-_VARIABLES = "[{kind: lexical_declaration}, {kind: variable_declaration}]"
-_EXPORTED_NAME = f"""  inside:
-    field: name
+
+
+def _exported_names(name_kinds: str, exports: str, variable_exports: str) -> str:
+    """Name nodes that an exported declaration's own name field holds, or that the name pattern of
+    an exported variable binds (each name of `export const { a, b: c } = ...`), quietly: the
+    relations print no export statement (see the double negation above)."""
+    return f"""  any: [{name_kinds}]
+  all:
+    - any:
+        - not: {{not: {{inside: {{field: name, any: {exports}}}}}}}
+        - not:
+            not:
+              inside:
+                stopBy: end
+                field: name
+                kind: variable_declarator
+                inside: {{all: [{{any: {_VARIABLE_KINDS}}}, {{any: {variable_exports}}}]}}
+  not:
     any:
-      - inside: {{field: declaration, kind: export_statement, not: {{has: {{regex: '^default$'}}}}}}
-      - kind: variable_declarator
-        inside: {{any: {_VARIABLES}, inside: {_EXPORT}}}"""
-_TYPED_EXPORTED_NAME = f"""{_EXPORTED_NAME}
-      - inside: {_AMBIENT_EXPORT}
-      - kind: variable_declarator
-        inside: {{any: {_VARIABLES}, inside: {_AMBIENT_EXPORT}}}"""
+{_DEFAULTS_AND_COMPUTED_KEYS}"""
+
+
+_SCRIPT_EXPORTED_NAMES = _exported_names(
+    _SCRIPT_NAME_KINDS, f"[{{inside: {_NAMED_EXPORT}}}]", f"[{{inside: {_EXPORT}}}]"
+)
+_TYPED_EXPORTED_NAMES = _exported_names(
+    f"{_SCRIPT_NAME_KINDS}, {{kind: type_identifier}}",
+    f"[{{inside: {_NAMED_EXPORT}}}, {{inside: {_AMBIENT_EXPORT}}}]",
+    f"[{{inside: {_EXPORT}}}, {{inside: {_AMBIENT_EXPORT}}}]",
+)
 # The name node of each declaration an ``export`` statement makes, one match per name, so the
 # declaration's body (a nested function, a template literal) never names the export. A default
-# export has no name of its own.
+# export has no name of its own, and a default value or computed key in a pattern none either.
 EXPORTED_NAMES = {
-    "typescript": f"  any: [{{kind: identifier}}, {{kind: type_identifier}}]\n{_TYPED_EXPORTED_NAME}",
-    "tsx": f"  any: [{{kind: identifier}}, {{kind: type_identifier}}]\n{_TYPED_EXPORTED_NAME}",
-    "javascript": f"  kind: identifier\n{_EXPORTED_NAME}",
+    "typescript": _TYPED_EXPORTED_NAMES,
+    "tsx": _TYPED_EXPORTED_NAMES,
+    "javascript": _SCRIPT_EXPORTED_NAMES,
 }
 
 
