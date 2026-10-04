@@ -12,7 +12,7 @@ from time import monotonic
 
 from .judgments.answers import NOT_REPORTED_TEXT, TokenTotal, reported_input_tokens, reported_output_tokens
 from .judgments.journal import JournalRequest, JsonlJournal, RawAttempt, RawResponse, error_message
-from .run_files import place_location, step_shown
+from .run_files import failure_digested, place_location, step_shown
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -134,15 +134,23 @@ class ProgressJournal(JsonlJournal):
     sets one that adds the symbol name once the index exists) and every relation as a run file keeps
     it."""
 
-    def __init__(self, path: Path, progress: TerminalProgress, *, keep_request_text: bool = False) -> None:
-        super().__init__(path, keep_request_text=keep_request_text)
+    def __init__(
+        self,
+        path: Path,
+        progress: TerminalProgress,
+        *,
+        keep_request_text: bool = False,
+        keep_error_text: bool = True,
+    ) -> None:
+        super().__init__(path, keep_request_text=keep_request_text, keep_error_text=keep_error_text)
         self.progress = progress
         self.place_label: Callable[[str], str] = place_location
         self.routes: dict[str, str] = {}
         self.statuses: dict[str, int] = {}
 
     def record_step(self, step: Mapping) -> None:
-        super().record_step(step if self.keep_request_text else self._shown(step))
+        shown = step if self.keep_request_text else self._shown(step)
+        super().record_step(shown if self.keeps_error_text else failure_digested(shown))
 
     def _shown(self, step: Mapping) -> dict:
         shown = step_shown(step)

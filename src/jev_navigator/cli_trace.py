@@ -46,6 +46,7 @@ def create_trace_evidence_pack(
     answers_from: Path | None = None,
     answer_store: Path | None = None,
     keep_requests: bool = False,
+    keep_error_text: bool = True,
 ) -> dict:
     """Trace the workflow around ``starts`` and write the reviewable evidence pack to ``output``.
 
@@ -59,7 +60,8 @@ def create_trace_evidence_pack(
     replay without a new request. ``answer_store`` is the shared store file behind the pack
     (default ``shared_store_path()``). ``question`` is
     the workflow question every obligation is asked about. By default the pack keeps code locations
-    and request hashes; ``keep_requests`` also keeps the code and request text.
+    and request hashes; ``keep_requests`` also keeps the code and request text. Error messages and
+    error bodies are kept unless ``keep_error_text`` is False.
 
     Returns the manifest that is persisted as ``manifest.json`` next to ``report.md``,
     ``answers.jsonl`` (the shared answer store) and ``journal.jsonl`` (the shared request journal
@@ -86,7 +88,9 @@ def create_trace_evidence_pack(
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
-    journal = ProgressJournal(journal_path, progress, keep_request_text=keep_requests)
+    journal = ProgressJournal(
+        journal_path, progress, keep_request_text=keep_requests, keep_error_text=keep_error_text
+    )
     progress.start()
     outcome = "failed"
     try:

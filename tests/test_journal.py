@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from stored_messages import digested
 
 from jev_navigator.judgments.answers import response_from_raw
 from jev_navigator.judgments.client import UnansweredQuestionError
@@ -257,7 +256,7 @@ def test_a_response_missing_an_asked_answer_leaves_exactly_one_failure_row(
     responses = [line for line in lines if line["kind"] == "response"]
     assert [failure["request_id"] for failure in failures] == [request_id]
     assert failures[0]["error_type"] == "UnansweredQuestionError"
-    assert failures[0].items() >= digested("jev-1.13.0 returned no answer for doubles").items()
+    assert failures[0]["message"] == "jev-1.13.0 returned no answer for doubles"
     assert [(response["request_id"], response["input_tokens"]) for response in responses] == [
         (request_id, 12)
     ]
@@ -418,4 +417,4 @@ def test_a_request_cancelled_after_it_was_sent_is_journaled_as_cancelled_after_i
     failure = json.loads((tmp_path / "journal.jsonl").read_text().splitlines()[1])
     assert failure["kind"] == "failure"
     assert failure["error_type"] == "CancelledError"
-    assert failure.items() >= digested("the request was cancelled after it was sent").items()
+    assert failure["message"] == "the request was cancelled after it was sent"

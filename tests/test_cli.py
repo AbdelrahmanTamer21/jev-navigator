@@ -13,7 +13,6 @@ from threading import Event, Thread
 import pytest
 from git_repos import commit_files
 from isolated_jvn import JVN
-from stored_messages import digested
 
 from jev_navigator.cli import (
     SCHEMA_VERSION,
@@ -630,7 +629,7 @@ def test_a_full_disk_during_ctrl_c_exits_1_with_that_error_and_its_resume_finish
     failures = [
         record["step"]["judgments"].get("failure") for record in steps if record["kind"] == "history_step"
     ]
-    assert {"type": "OSError", **digested("[Errno 28] No space left on device")} in failures
+    assert {"type": "OSError", "message": "[Errno 28] No space left on device"} in failures
     assert (first / "resume.json").is_file()
     assert resumed_status == 0
     assert resumed["search"]["outcome"] == uninterrupted["search"]["outcome"]

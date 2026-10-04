@@ -58,21 +58,23 @@ def source_shown(source: Mapping, place_key: str) -> dict:
 
 
 def step_shown(step: Mapping) -> dict:
-    """A history step with every neighbour relation and fetched ``reached_by``, and the failure that
-    ended a search, as a run file keeps them."""
+    """A history step with every neighbour relation and fetched ``reached_by`` as a run file keeps it."""
     judgments = {
         name: [_entry_shown(entry) for entry in value] if name in _NEIGHBOUR_LISTS else value
         for name, value in step.get("judgments", {}).items()
     }
-    if "message" in judgments.get("failure", {}):
-        judgments["failure"] = _failure_shown(judgments["failure"])
     fetched = [source_shown(source, step["arguments"]["place"]) for source in step.get("fetched", [])]
     return {**step, "judgments": judgments, "fetched": fetched}
 
 
-def _failure_shown(failure: Mapping) -> dict:
-    """A history read back from a saved pack already holds the digest; only a message is reduced."""
-    return {"type": failure["type"], **message_fields(failure["message"], keep_text=False)}
+def failure_digested(step: Mapping) -> Mapping:
+    """A history step whose failure keeps its message only as a digest (``--no-error-text``). A step
+    read back from a saved pack may already hold the digest, and stays as it is."""
+    failure = step.get("judgments", {}).get("failure", {})
+    if "message" not in failure:
+        return step
+    digest = {"type": failure["type"], **message_fields(failure["message"], keep_text=False)}
+    return {**step, "judgments": {**step["judgments"], "failure": digest}}
 
 
 def _entry_shown(entry: Mapping) -> Mapping:

@@ -74,6 +74,7 @@ unlimited unless you set a limit.
 | `--max-line-chars N` | `240`. Clip long lines in opened source, previews and signatures shown to the model. Source files are not edited. | `jvn find "the order limit" --max-line-chars 480` |
 | `--verbose` | Off. Print expanded masked requests on stderr as they are sent. Concise phase/request/elapsed progress is already on by default. | `jvn find "the order limit" --verbose` |
 | `--keep-requests` | Off. Keep the code in `manifest.json` and `report.md` and the exact request text in `journal.jsonl`. Without it the run folder holds code locations and request hashes only; Resume works either way. Use it only for your own or open-source code. | `jvn find "the order limit" --keep-requests` |
+| `--no-error-text` | Off, unless `JEV_NAVIGATOR_ERROR_TEXT=off`. Keep an error's message and the body of a response with an error status only as their length and SHA-256 in every run file. An error can quote its request, so this keeps code out of the run folder when a provider echoes it. stderr still shows the message, and `--keep-requests` keeps the text anyway. `find`, `findall` and `trace` accept it. | `jvn find "the order limit" --no-error-text` |
 | `-h`, `--help` | Print help and exit without searching. | `jvn find --help` |
 
 Limits and context sizes affect how much evidence the search can inspect. Read `search.outcome`,
@@ -192,7 +193,7 @@ Check the command's exit status before reading a result file:
 | Exit code | Meaning |
 |---|---|
 | `0` | A search finished and wrote its result. Read `search.outcome`; this does not guarantee a match. |
-| `1` | Search, configuration, filesystem or provider failure. Read stderr. When a request of a Find or Find All search failed, the pack is written first: `search.outcome` is `failed`, `search.failure` holds the error's type, its causes, the journal `request_id`, the HTTP `status` when known and the message as `message_length` and `message_sha256` (the text itself only with `--keep-requests`), and stderr shows the whole message and names the `--resume` path. |
+| `1` | Search, configuration, filesystem or provider failure. Read stderr. When a request of a Find or Find All search failed, the pack is written first: `search.outcome` is `failed`, `search.failure` holds the error's type, its causes, the journal `request_id`, the HTTP `status` when known and the `message` (only `message_length` and `message_sha256` with `--no-error-text`), and stderr shows the whole message and names the `--resume` path. |
 | `2` | Invalid command or request. Read stderr. |
 | `130` | Cancelled with Ctrl-C. Existing journal records remain available. A failure that arrives while the command is cancelling exits `1` with that failure instead, with the same resume state. |
 
@@ -206,11 +207,12 @@ Budget-stopped, cancelled and failed packs also contain `resume.json`.
 The manifest retains the full record even if a pipeline selects only a few output fields. By default
 the manifest, report, journal and resume state hold no source code: places appear as
 `path:start-end` with file hashes, neighbours as `path:line name`, a key mention as `mentions a key
-(path:line)`, and journal requests as hashes. An error can quote its request (a 422 validation body often
-does), so an error's message and the body of a response with an error status are kept as their length and
-SHA-256; stderr still shows the message. With `--keep-requests` the manifest and report also carry the code,
-the journal the exact request body, and every run file the error messages and error bodies; inspect the
-journal's exact-capture flags when auditing bytes.
+(path:line)`, and journal requests as hashes. Error messages and the bodies of responses with an error
+status are kept as they came; an error can quote its request (a 422 validation body often does), so
+`--no-error-text` (or `JEV_NAVIGATOR_ERROR_TEXT=off`) keeps them only as their length and SHA-256, while
+stderr still shows the message. With `--keep-requests` the manifest and report also carry the code, the
+journal the exact request body, and every run file the error text; inspect the journal's exact-capture
+flags when auditing bytes.
 
 ## Agent workflow
 

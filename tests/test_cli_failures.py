@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 from git_repos import commit_files
-from stored_messages import digested
 from test_cli_run_logs import TARGET, limit_client, marked_repository
 
 from jev_navigator import cli
@@ -210,9 +209,9 @@ def test_a_failed_find_exits_1_with_the_error_and_its_resume_reaches_the_uninter
     assert f"--resume {first.resolve()}" in failed_stderr
     assert failed["search"]["outcome"] == "failed"
     assert failed["search"]["failure"]["type"] == "ProviderError"
-    assert failed["search"]["failure"].items() >= digested("Jev answered 503").items()
+    assert failed["search"]["failure"]["message"] == "Jev answered 503"
     assert failed["search"]["failure"]["causes"] == [
-        {"type": "ConnectionResetError", **digested("connection reset by peer")}
+        {"type": "ConnectionResetError", "message": "connection reset by peer"}
     ]
     assert failed["search"]["failure"]["request_id"] in [row["request_id"] for row in journal_failures(first)]
     assert failed["search"]["failure"]["route"] is None
@@ -307,12 +306,8 @@ def test_a_find_that_finds_its_target_while_a_sibling_fails_reports_both_and_exi
     assert status == 0
     assert manifest["search"]["outcome"] == "found"
     assert manifest["search"]["found"][0]["source"]["file"] == "app/policy.py"
-    assert manifest["search"]["failure"].items() >= digested("Jev answered 503").items()
-    stored = digested("Jev answered 503")
-    assert (
-        f"- Failure: ProviderError; its message ({stored['message_length']} characters, "
-        f"SHA-256 `{stored['message_sha256']}`) was printed to stderr and is kept only with --keep-requests"
-    ) in (output / "report.md").read_text()
+    assert manifest["search"]["failure"]["message"] == "Jev answered 503"
+    assert "- Failure: ProviderError: Jev answered 503" in (output / "report.md").read_text()
 
 
 def test_a_failure_raised_while_handling_another_error_lists_that_error_as_its_cause(
@@ -329,7 +324,7 @@ def test_a_failure_raised_while_handling_another_error_lists_that_error_as_its_c
 
     # Assert
     assert manifest_of(tmp_path / "failed")["search"]["failure"]["causes"] == [
-        {"type": "TimeoutError", **digested("read timed out")}
+        {"type": "TimeoutError", "message": "read timed out"}
     ]
 
 

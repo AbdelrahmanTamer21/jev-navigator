@@ -33,7 +33,7 @@ from .index.code_index import CodeIndex
 from .index.languages import language_of
 from .judgments.answers import TokenTotal
 from .judgments.client import JevClient
-from .judgments.journal import error_message, message_fields
+from .judgments.journal import ERROR_TEXT_VARIABLE, error_message, error_text_kept, message_fields
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import (
     SHARED_STORE_VARIABLE,
@@ -45,13 +45,17 @@ from .judgments.store import (
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
-from .run_files import place_label, source_shown, step_shown
+from .run_files import failure_digested, place_label, source_shown, step_shown
 from .usage_receipt import usage_receipt, usage_report_lines
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 KEEP_REQUESTS_HELP = (
     "Keep the code and full request text in the run folder (default: code locations and request "
     "hashes only); for your own or open-source code"
+)
+NO_ERROR_TEXT_HELP = (
+    "Keep an error's message and an error response's body in the run folder only as their length and "
+    f"SHA-256 (default: the text, or ${ERROR_TEXT_VARIABLE}=off); stderr still shows the message"
 )
 NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
 POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
@@ -103,6 +107,7 @@ def _run_search(args: argparse.Namespace) -> int:
     client: TypeSafeJevClient | None = None
     try:
         _load_typesafe_environment(os.environ)
+        keep_error_text = error_text_kept(args.no_error_text)
         client = TypeSafeJevClient()  # model=None resolves TYPESAFE_DEFAULT_MODEL in the adapter
         if args.command == "trace":
             manifest = create_trace_evidence_pack(
@@ -118,6 +123,7 @@ def _run_search(args: argparse.Namespace) -> int:
                 verbose=args.verbose,
                 answer_store=answer_store,
                 keep_requests=args.keep_requests,
+                keep_error_text=keep_error_text,
             )
         else:
             resume_from = Path(args.resume).expanduser() if getattr(args, "resume", None) else None
@@ -134,6 +140,7 @@ def _run_search(args: argparse.Namespace) -> int:
                     verbose=args.verbose,
                     answer_store=answer_store,
                     keep_requests=args.keep_requests,
+                    keep_error_text=keep_error_text,
                     workflow=args.command,
                     resume_from=resume_from,
                 )
@@ -278,9 +285,12 @@ def create_evidence_pack(
     workflow: str = "find",
     resume_from: Path | None = None,
     keep_requests: bool = False,
+    keep_error_text: bool = True,
 ) -> dict:
     """Run the real index/search owners and persist their reviewable evidence. By default the pack
-    keeps code locations and request hashes; ``keep_requests`` also keeps the code and request text."""
+    keeps code locations and request hashes; ``keep_requests`` also keeps the code and request text.
+    Error messages and error bodies are kept unless ``keep_error_text`` is False (see
+    ``journal.error_text_kept``)."""
     if workflow not in ("find", "findall"):
         raise ValueError(f"unknown search workflow: {workflow}")
     repository = repository.resolve()
@@ -297,7 +307,9 @@ def create_evidence_pack(
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
-    journal = ProgressJournal(journal_path, progress, keep_request_text=keep_requests)
+    journal = ProgressJournal(
+        journal_path, progress, keep_request_text=keep_requests, keep_error_text=keep_error_text
+    )
     progress.start()
     outcome = "failed"
     try:
@@ -448,6 +460,8 @@ def create_evidence_pack(
             manifest["search"]["failure"] = _failure_record(failure, judge, journal)
         if not keep_requests:
             _drop_code(manifest, index)
+        if not journal.keeps_error_text:
+            _digest_history_failures(manifest)
         _write_json(output / "manifest.json", manifest)
         (output / "report.md").write_text(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
@@ -485,7 +499,7 @@ def _failure_record(error: BaseException, judge: Judge, journal: ProgressJournal
     """The error that ended the search, with its cause chain, the journal request it failed in, and
     that request's route and HTTP status when known. Messages are kept as ``message_fields`` allows."""
     request_id = judge.failed_request(error)
-    keep = journal.keep_request_text
+    keep = journal.keeps_error_text
     return {
         **_error_fields(error, keep),
         "causes": [_error_fields(cause, keep) for cause in _causes(error)],
@@ -512,7 +526,7 @@ def _failure_lines(search: dict, bullet: str) -> list[str]:
         return [f"{bullet}Failure: {failure['type']}{status}: {failure['message']}"]
     return [
         f"{bullet}Failure: {failure['type']}{status}; its message ({failure['message_length']} characters, "
-        f"SHA-256 `{failure['message_sha256']}`) was printed to stderr and is kept only with --keep-requests"
+        f"SHA-256 `{failure['message_sha256']}`) was printed to stderr; --no-error-text kept only its digest"
     ]
 
 
@@ -647,6 +661,7 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     trace.add_argument("--verbose", action="store_true", help="Print expanded masked model requests")
     _add_answer_store_argument(trace)
     trace.add_argument("--keep-requests", action="store_true", help=KEEP_REQUESTS_HELP)
+    trace.add_argument("--no-error-text", action="store_true", help=NO_ERROR_TEXT_HELP)
     stats = commands.add_parser(
         "stats",
         help="count and rank parsed functions/classes without model calls",
@@ -787,6 +802,7 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         help="show expanded masked requests on stderr (default: concise live progress)",
     )
     find.add_argument("--keep-requests", action="store_true", help=KEEP_REQUESTS_HELP)
+    find.add_argument("--no-error-text", action="store_true", help=NO_ERROR_TEXT_HELP)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -1090,6 +1106,12 @@ def _manifest(
             ],
         },
     }
+
+
+def _digest_history_failures(manifest: dict) -> None:
+    for name in ("search", "seed_search"):
+        search = manifest.get(name) or {}
+        search["history"] = [failure_digested(step) for step in search.get("history", [])]
 
 
 def _drop_code(manifest: dict, index: CodeIndex) -> None:

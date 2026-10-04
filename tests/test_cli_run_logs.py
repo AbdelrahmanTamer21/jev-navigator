@@ -14,10 +14,12 @@ from pathlib import Path
 import pytest
 from git_repos import commit_files
 from isolated_jvn import JVN
+from stored_messages import digested
 
 from jev_navigator.cli import create_evidence_pack
 from jev_navigator.cli_trace import create_trace_evidence_pack
 from jev_navigator.directives.find_code import SearchBudget
+from jev_navigator.judgments.journal import ERROR_TEXT_VARIABLE, error_text_kept
 from jev_navigator.judgments.questions import request_sha256
 from jev_navigator.testing import ScriptedJevClient
 
@@ -581,15 +583,19 @@ def echoing_server() -> ThreadingHTTPServer:
     return server
 
 
-@pytest.mark.parametrize("command", ["find", "findall", "trace"])
-def test_a_failure_that_echoes_the_request_leaves_no_code_in_the_run_folder(
-    tmp_path: Path, command: str
-) -> None:
-    # Arrange
-    pytest.importorskip("typesafe_sdk")
+ERROR_TEXT_SETTINGS = {
+    "default": ([], {}),
+    "flag": (["--no-error-text"], {}),
+    "variable": ([], {"JEV_NAVIGATOR_ERROR_TEXT": "off"}),
+}
+
+
+def echoed_run(tmp_path: Path, command: str, setting: str) -> tuple[subprocess.CompletedProcess, Path]:
+    """``jvn COMMAND`` through the real TypeSafe client against a provider that echoes every request
+    in a 422, with the error-text setting named by ``setting``."""
     repository = marked_repository(tmp_path / "repository")
     output = tmp_path / "pack"
-    server = echoing_server()
+    options, variables = ERROR_TEXT_SETTINGS[setting]
     arguments = [
         command,
         TARGET,
@@ -600,24 +606,39 @@ def test_a_failure_that_echoes_the_request_leaves_no_code_in_the_run_folder(
         "--out",
         str(output),
     ]
+    server = echoing_server()
     environment = {
         **os.environ,
+        **variables,
         "TYPESAFE_API_KEY": "local-test-key",
         "TYPESAFE_BASE_URL": f"http://127.0.0.1:{server.server_port}",
     }
-
-    # Act
     try:
-        finished = subprocess.run([*JVN, *arguments], capture_output=True, text=True, env=environment)
+        finished = subprocess.run(
+            [*JVN, *arguments, *options], capture_output=True, text=True, env=environment
+        )
     finally:
         server.shutdown()
         server.server_close()
+    return finished, output
+
+
+@pytest.mark.parametrize("command", ["find", "findall", "trace"])
+@pytest.mark.parametrize("setting", ["default", "flag", "variable"])
+def test_an_echoed_error_body_stays_in_the_run_folder_unless_error_text_is_off(
+    tmp_path: Path, command: str, setting: str
+) -> None:
+    # Arrange
+    pytest.importorskip("typesafe_sdk")
+
+    # Act
+    finished, output = echoed_run(tmp_path, command, setting)
 
     # Assert
     assert finished.returncode == 1, finished.stderr
     records = [json.loads(line) for line in (output / "journal.jsonl").read_text().splitlines()]
     assert any(record["kind"] == "failure" for record in records)
-    assert files_holding_code(output) == []
+    assert files_holding_code(output) == (["journal.jsonl"] if setting == "default" else [])
     if command != "trace":
         assert json.loads((output / "manifest.json").read_text())["search"]["failure"]["status"] == 422
 
@@ -641,8 +662,9 @@ class EchoesTheRequest:
 
 
 @pytest.mark.parametrize("workflow", ["find", "findall"])
-def test_an_error_quoting_its_request_reaches_stderr_but_no_run_file(
-    tmp_path: Path, workflow: str, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("keep_error_text", [True, False])
+def test_an_error_quoting_its_request_reaches_stderr_and_the_run_files_unless_error_text_is_off(
+    tmp_path: Path, workflow: str, keep_error_text: bool, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # Arrange
     repository = marked_repository(tmp_path / "repository")
@@ -650,25 +672,56 @@ def test_an_error_quoting_its_request_reaches_stderr_but_no_run_file(
 
     # Act
     with pytest.raises(RuntimeError, match=MARKER):
-        find_pack(repository, output, workflow, 5, EchoesTheRequest())
+        find_pack(repository, output, workflow, 5, EchoesTheRequest(), keep_error_text=keep_error_text)
 
     # Assert
     assert MARKER in capsys.readouterr().err
     assert json.loads((output / "manifest.json").read_text())["search"]["outcome"] == "failed"
-    assert files_holding_code(output) == []
+    expected = ["journal.jsonl", "manifest.json", "report.md"] if keep_error_text else []
+    assert files_holding_code(output) == expected
 
 
-def test_keep_requests_keeps_the_whole_error_message(tmp_path: Path) -> None:
+def test_keep_requests_keeps_the_whole_error_message_even_with_error_text_off(tmp_path: Path) -> None:
     # Arrange
     repository = marked_repository(tmp_path / "repository")
     output = tmp_path / "pack"
 
     # Act
     with pytest.raises(RuntimeError) as raised:
-        find_pack(repository, output, "find", 5, EchoesTheRequest(), keep_requests=True)
+        find_pack(
+            repository, output, "find", 5, EchoesTheRequest(), keep_requests=True, keep_error_text=False
+        )
 
     # Assert
     message = str(raised.value)
     records = [json.loads(line) for line in (output / "journal.jsonl").read_text().splitlines()]
     assert [record["message"] for record in records if record["kind"] == "failure"] == [message]
     assert json.loads((output / "manifest.json").read_text())["search"]["failure"]["message"] == message
+
+
+def test_error_text_off_keeps_each_message_as_its_length_and_sha256(tmp_path: Path) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    output = tmp_path / "pack"
+
+    # Act
+    with pytest.raises(RuntimeError) as raised:
+        find_pack(repository, output, "find", 5, EchoesTheRequest(), keep_error_text=False)
+
+    # Assert
+    stored = digested(str(raised.value))
+    records = [json.loads(line) for line in (output / "journal.jsonl").read_text().splitlines()]
+    failure_rows = [record for record in records if record["kind"] == "failure"]
+    assert [row.items() >= stored.items() and "message" not in row for row in failure_rows] == [True]
+    manifest_failure = json.loads((output / "manifest.json").read_text())["search"]["failure"]
+    assert manifest_failure.items() >= stored.items() and "message" not in manifest_failure
+
+
+@pytest.mark.parametrize("value", ["", "no", "OFF"])
+def test_an_error_text_setting_other_than_on_or_off_is_refused(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(ERROR_TEXT_VARIABLE, value)
+
+    with pytest.raises(ValueError, match=ERROR_TEXT_VARIABLE):
+        error_text_kept(no_error_text=False)
