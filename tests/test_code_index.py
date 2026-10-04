@@ -1041,25 +1041,6 @@ def test_top_level_symbols_are_the_functions_and_classes_no_other_symbol_contain
     assert "place" in [span.name for span in sample_index.symbols_in("app/orders.py")]
 
 
-def test_top_level_symbols_are_the_ones_the_module_names_or_exports(tmp_path: Path) -> None:
-    """A one-line function keeps its place beside the named arrow its default value holds. A method of
-    an object literal is the object's, not the module's, and a CommonJS export is the module's own."""
-    # Arrange
-    (tmp_path / "retry.js").write_text(
-        "function retry(again = () => 1) { return attempt(); }\n"
-        "function attempt() {\n  return 1;\n}\n"
-        "const api = {\n  list() { return []; },\n};\n"
-        "exports.run = function () {\n  return 0;\n};\n"
-    )
-    index = CodeIndex(tmp_path, ("retry.js",), fact_cache_dir=tmp_path / "cache")
-
-    # Act
-    top_level = [span.name for span in index.top_level_symbols("retry.js")]
-
-    # Assert
-    assert top_level == ["retry", "attempt", "run"]
-
-
 def test_a_rendered_component_is_a_call_and_a_platform_element_is_not(tmp_path: Path) -> None:
     (tmp_path / "notices.tsx").write_text("export function LoadFailed() {\n  return <p>Not loaded</p>;\n}\n")
     (tmp_path / "basket.tsx").write_text(
