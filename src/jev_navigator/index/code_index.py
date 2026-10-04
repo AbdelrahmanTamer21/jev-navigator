@@ -16,7 +16,7 @@ from functools import cache
 from pathlib import Path, PurePosixPath
 
 from . import tools
-from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts
+from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts, binding_in_namespace
 from .fact_cache import FactCache
 from .imports import (
     ImportFact,
@@ -279,11 +279,13 @@ class CodeIndex:
         return self._file_structure(file).symbols
 
     def declarations_in(self, file: str) -> tuple[Span, ...]:
-        """Module-level constants, assignments, types, interfaces and enums."""
+        """Constants, assignments, types, interfaces and enums at module level or directly in a
+        TypeScript namespace."""
         return self._file_structure(file).declarations
 
     def find_definition(self, name: str) -> tuple[Span, ...]:
-        """Functions, classes, and module-level constants, assignments, types, interfaces and enums."""
+        """Functions, classes, and the constants, assignments, types, interfaces and enums of
+        ``declarations_in``."""
         return self._definitions(name)
 
     def find_callers(self, name: str) -> tuple[CallSite, ...]:
@@ -368,6 +370,10 @@ class CodeIndex:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
                 return injected
+        if receiver is None and file not in self._files_hiding(name):
+            in_namespace = self._binding_in_namespace(file, line, name, role)
+            if in_namespace is not None:
+                return in_namespace
         definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
         facts = CallFacts(
             file,
@@ -379,6 +385,24 @@ class CodeIndex:
             self._files_hiding(name),
         )
         return binding_from_facts(facts)
+
+    def _binding_in_namespace(self, file: str, line: int, name: str, role: str | None) -> Binding | None:
+        """A use inside a TypeScript namespace names a member of the innermost namespace around it that
+        defines ``name`` before anything outside; None when no namespace around the line does."""
+        members = [
+            member
+            for member in self._file_structure(file).namespace_members
+            if member.first <= line <= member.last
+            and member.span.name == name
+            and self._can_name(role, member.span)
+        ]
+        if not members:
+            return None
+        first, last = max(
+            ((member.first, member.last) for member in members), key=lambda lines: (lines[0], -lines[1])
+        )
+        innermost = [member.span for member in members if (member.first, member.last) == (first, last)]
+        return binding_in_namespace(name, line, (first, last), innermost)
 
     def _files_hiding(self, name: str) -> frozenset[str]:
         """Where a definition of ``name`` could sit unseen: a file gone from the disk, or an unparsed
@@ -519,16 +543,17 @@ class CodeIndex:
         return {}
 
     def _top_level_spans(self, file: str) -> frozenset[Span]:
-        """Symbols and declarations of ``file`` that no class or other function contains: the scan
-        decides it for symbols from the syntax tree. A function starting on a declaration's first
-        line is the value it declares, not its container."""
+        """Symbols and declarations of ``file`` that no class, other function or namespace contains:
+        the scan decides it for symbols and namespace members from the syntax tree. A function
+        starting on a declaration's first line is the value it declares, not its container."""
         structure = self._file_structure(file)
         top_declarations = (
             span
             for span in structure.declarations
             if not any(other.start < span.start <= other.end for other in structure.symbols)
         )
-        return frozenset((*structure.top_level_symbols, *top_declarations))
+        members = {member.span for member in structure.namespace_members}
+        return frozenset((*structure.top_level_symbols, *top_declarations)) - members
 
     def _imported_from(self, file: str, name: str) -> tuple[ImportFact, ...]:
         specifier = self._names_imported(file).get(name)

@@ -9,11 +9,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .languages import language_of
-from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch
+from .scope_scan import CallMatch, FileFacts, FileStructure, NamespaceMember, ReferenceMatch
 from .spans import Span
 from .tools import ast_grep_version
 
-FACT_RULE_VERSION = "combined-facts-v17-namespace-members-and-outer-calls-first"
+FACT_RULE_VERSION = "combined-facts-v18-members-bind-inside-their-namespace"
 
 
 class FactCache:
@@ -69,6 +69,10 @@ def _encode(facts: FileFacts) -> dict:
             "symbols": [asdict(span) for span in facts.structure.symbols],
             "declarations": [asdict(span) for span in facts.structure.declarations],
             "top_level_symbols": [asdict(span) for span in facts.structure.top_level_symbols],
+            "namespace_members": [
+                [member.first, member.last, asdict(member.span)]
+                for member in facts.structure.namespace_members
+            ],
         },
         "calls": [asdict(call) for call in facts.calls],
         "references": [asdict(reference) for reference in facts.references],
@@ -86,6 +90,10 @@ def _decode(file: str, raw: dict) -> FileFacts:
             tuple(_span(file, span) for span in structure["symbols"]),
             tuple(_span(file, span) for span in structure["declarations"]),
             tuple(_span(file, span) for span in structure["top_level_symbols"]),
+            tuple(
+                NamespaceMember(int(first), int(last), _span(file, span))
+                for first, last, span in structure["namespace_members"]
+            ),
         ),
         tuple(CallMatch(file, call["line"], call["name"], call.get("receiver")) for call in raw["calls"]),
         tuple(

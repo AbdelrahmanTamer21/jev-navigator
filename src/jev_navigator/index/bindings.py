@@ -101,6 +101,25 @@ def binding_from_facts(facts: CallFacts) -> Binding:
     )
 
 
+def binding_in_namespace(name: str, line: int, lines: tuple[int, int], members: Sequence[Span]) -> Binding:
+    """``members`` define ``name`` in the innermost namespace on ``lines`` around the use on ``line``.
+    Lines are the unit, so a use on the namespace's first or last line may sit outside it, as
+    `namespace A { export const config = 1; } config;` does: only a use between them is proven."""
+    first, last = lines
+    definitions = _one_per_definition(members)
+    if line in (first, last):
+        return Binding(
+            BindingStatus.CANDIDATE,
+            f"{name} is a member of the namespace on lines {first} to {last}, and line {line} may hold "
+            "code outside it",
+        )
+    if len(definitions) == 1:
+        return Binding(BindingStatus.RESOLVED, "defined in the enclosing namespace", definitions[0])
+    return Binding(
+        BindingStatus.CANDIDATE, f"{len(definitions)} definitions of {name} in the enclosing namespace"
+    )
+
+
 def _one_per_definition(spans: Sequence[Span]) -> list[Span]:
     """The first span of each definition: a declaration and the function or class it holds overlap,
     `const load =\n  () => 2` is one definition of `load` over lines 1 to 2 and 2 to 2."""

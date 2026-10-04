@@ -118,11 +118,19 @@ _IN_TYPED_MODULE = (
     f"{{kind: ambient_declaration, {_IN_MODULE}}}]}}"
 )
 _MODULE_VARIABLES = f"{{kind: lexical_declaration, not: {{not: {{{_IN_MODULE}}}}}}}"
-_MODULE_TYPES = (
-    "{any: [{kind: type_alias_declaration}, {kind: interface_declaration}, {kind: enum_declaration}], "
-    f"not: {{not: {{{_IN_TYPED_MODULE}}}}}}}"
+
+# A namespace or module body is a scope of its own: a declaration directly in it, or in an export it
+# holds, is a member of that namespace, never of the module.
+_NAMESPACE_BODY = "{kind: statement_block, inside: {any: [{kind: internal_module}, {kind: module}]}}"
+_IN_NAMESPACE = f"inside: {{any: [{_NAMESPACE_BODY}, {{kind: export_statement, inside: {_NAMESPACE_BODY}}}]}}"
+_SCOPE_VARIABLES = (
+    f"{{kind: lexical_declaration, not: {{not: {{any: [{{{_IN_MODULE}}}, {{{_IN_NAMESPACE}}}]}}}}}}"
 )
-_SCRIPT_DECLARATIONS = f"  any: [{_MODULE_TYPES}, {_MODULE_VARIABLES}]"
+_SCOPE_TYPES = (
+    "{any: [{kind: type_alias_declaration}, {kind: interface_declaration}, {kind: enum_declaration}], "
+    f"not: {{not: {{any: [{{{_IN_TYPED_MODULE}}}, {{{_IN_NAMESPACE}}}]}}}}}}"
+)
+_SCRIPT_DECLARATIONS = f"  any: [{_SCOPE_TYPES}, {_SCOPE_VARIABLES}]"
 
 DECLARATION_RULES = {
     "python": """  kind: assignment

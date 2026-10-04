@@ -87,6 +87,30 @@ def test_roundtrip_rebinds_paths_without_retaining_source(tmp_path, example):
     assert all(content.decode() not in p.read_text() for p in cache.root.rglob("*.json"))
 
 
+def test_roundtrip_keeps_the_members_of_each_namespace(tmp_path):
+    """A namespace's members come back from the cache with the lines of the namespace holding them."""
+    content = (
+        b"namespace Outer {\n  const depth = 1;\n"
+        b"  namespace Inner {\n    export function inner() {}\n  }\n}\n"
+    )
+    (tmp_path / "spaces.ts").write_bytes(content)
+    facts = scan_facts(
+        ["spaces.ts"], tmp_path, lambda file: (tmp_path / file).read_text().splitlines(), Unparsed()
+    )["spaces.ts"]
+    cache = FactCache(tmp_path / "cache")
+
+    cache.save("spaces.ts", content, facts)
+    restored = cache.load("spaces.ts", content)
+
+    assert [
+        (member.first, member.last, member.span.name) for member in facts.structure.namespace_members
+    ] == [
+        (1, 6, "depth"),
+        (3, 5, "inner"),
+    ]
+    assert restored == facts
+
+
 def test_content_language_parser_and_rules_invalidate(tmp_path, example, monkeypatch):
     content, facts = example
     cache = FactCache(tmp_path / "cache")

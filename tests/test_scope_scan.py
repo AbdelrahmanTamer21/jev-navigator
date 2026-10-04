@@ -618,6 +618,63 @@ def test_a_namespace_member_is_no_module_level_definition(tmp_path: Path) -> Non
     assert (imported.status.value, imported.target) == ("resolved", Span("src/cfg.ts", 1, 1, "config"))
 
 
+def test_a_namespace_member_is_a_definition_inside_its_own_namespace(tmp_path: Path) -> None:
+    """Inside namespace B, `config` names B's own member, never A's. A namespace's functions and its
+    unexported constants bind from inside it, ahead of a module-level definition, and the innermost
+    namespace holding the use wins. A use sharing the namespace's first or last line may sit outside
+    it, so it stays open, and a method of an object the namespace holds is the object's, not a
+    member."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/spaces.ts": (
+                "namespace A { export const config = 1; }\n"
+                "namespace B {\n  export const config = 2;\n  export function read() { return config; }\n}\n"
+            ),
+            "src/utils.ts": (
+                "export namespace Utils {\n  export function helper() { return 1; }\n  const limit = 3;\n"
+                "  export function main() { return helper() + limit; }\n}\n"
+            ),
+            "src/nested.ts": (
+                "namespace Outer {\n  const depth = 1;\n  namespace Inner {\n    const depth = 2;\n"
+                "    export function inner() { return depth; }\n  }\n"
+                "  export function outer() { return depth; }\n}\nconst depth = 0;\n"
+            ),
+            "src/oneline.ts": "namespace A { export const config = 1; } config;\n",
+            "src/table.ts": (
+                "namespace T {\n  const table = { handler() { return 2; } };\n"
+                "  export function run() { return handler(); }\n}\n"
+            ),
+        },
+    )
+    uses = {
+        "config": ("src/spaces.ts", 4, "config", "return"),
+        "helper": ("src/utils.ts", 4, "helper", None),
+        "limit": ("src/utils.ts", 4, "limit", "return"),
+        "inner depth": ("src/nested.ts", 5, "depth", "return"),
+        "outer depth": ("src/nested.ts", 7, "depth", "return"),
+        "config after a one-line namespace": ("src/oneline.ts", 1, "config", "return"),
+        "a method of a namespace's value": ("src/table.ts", 3, "handler", None),
+    }
+
+    # Act
+    bindings = {
+        use: index.binding_of(file, line, name, None, role) for use, (file, line, name, role) in uses.items()
+    }
+
+    # Assert
+    assert {use: (binding.status.value, binding.target) for use, binding in bindings.items()} == {
+        "config": ("resolved", Span("src/spaces.ts", 3, 3, "config")),
+        "helper": ("resolved", Span("src/utils.ts", 2, 2, "helper")),
+        "limit": ("resolved", Span("src/utils.ts", 3, 3, "limit")),
+        "inner depth": ("resolved", Span("src/nested.ts", 4, 4, "depth")),
+        "outer depth": ("resolved", Span("src/nested.ts", 2, 2, "depth")),
+        "config after a one-line namespace": ("candidate", None),
+        "a method of a namespace's value": ("candidate", None),
+    }
+
+
 def test_several_definitions_of_a_name_in_one_file_make_a_candidate(tmp_path: Path) -> None:
     """Two module-level definitions of one name leave the call open; a declaration and the function
     it holds are one definition, also over several lines and through an import."""

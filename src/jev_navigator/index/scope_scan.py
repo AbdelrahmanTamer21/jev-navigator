@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 from . import tools
 from .imports import _local
@@ -57,15 +58,27 @@ class Unparsed:
         return frozenset(file for files in self.files_by_scan.values() for file in files)
 
 
+class NamespaceMember(NamedTuple):
+    """``span`` is a member of the TypeScript namespace on lines ``first`` to ``last``: a function,
+    class or declaration directly in its body."""
+
+    first: int
+    last: int
+    span: Span
+
+
 @dataclass(frozen=True)
 class FileStructure:
-    """``top_level_symbols`` are the symbols no other function or class holds in the syntax tree.
-    Symbols sharing a line each hold the other's first line, so lines alone cannot tell."""
+    """``top_level_symbols`` are the symbols no other function, class or namespace holds in the
+    syntax tree. Symbols sharing a line each hold the other's first line, so lines alone cannot tell.
+    ``declarations`` holds module-level and namespace-level declarations; ``namespace_members`` says
+    which symbols and declarations a namespace holds."""
 
     functions: tuple[Span, ...]
     symbols: tuple[Span, ...]
     declarations: tuple[Span, ...]
     top_level_symbols: tuple[Span, ...]
+    namespace_members: tuple[NamespaceMember, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -164,9 +177,10 @@ def _unparsed_lines_from_matches(matches) -> dict[str, tuple[tuple[int, int], ..
 def _structure_from_matches(files, unparsed, matches):
     functions: dict[str, set[Span]] = {file: set() for file in files}
     classes: dict[str, set[Span]] = {file: set() for file in files}
-    declarations: dict[str, set[Span]] = {file: set() for file in files}
+    declarations: dict[str, set[tuple[int, Span]]] = {file: set() for file in files}
     ranges: dict[str, list[tuple[int, int, Span]]] = {file: [] for file in files}
     held_nodes: dict[str, set[tuple[int, int]]] = {file: set() for file in files}
+    namespaces: dict[str, list[_Namespace]] = {file: [] for file in files}
     for match in matches:
         file, start, end = match["file"], _line_of(match), match["range"]["end"]["line"] + 1
         if match["ruleId"] == _ERROR_RULE:
@@ -177,9 +191,11 @@ def _structure_from_matches(files, unparsed, matches):
         offsets = match["range"]["byteOffset"]
         if match["ruleId"] == _HELD_RULE:
             held_nodes[file].add((offsets["start"], offsets["end"]))
+        elif match["ruleId"] == _NAMESPACE_RULE:
+            namespaces[file].append(_Namespace(offsets["start"], offsets["end"], start, end))
         elif match["ruleId"] == "declaration":
             # Named from its own text: a declaration may start after other code on its line.
-            declarations[file].add(Span(file, start, end, declared_name(match["text"])))
+            declarations[file].add((offsets["start"], Span(file, start, end, declared_name(match["text"]))))
         else:
             target = functions if match["ruleId"] == "function" else classes
             # The syntax tree names the symbol, never a physical line: a method on a one-line class
@@ -195,11 +211,55 @@ def _structure_from_matches(files, unparsed, matches):
         file: FileStructure(
             _ordered(functions[file], positions),
             _ordered(functions[file] | classes[file], positions),
-            tuple(sorted(declarations[file])),
-            _ordered((functions[file] | classes[file]) - _held(ranges[file], held_nodes[file]), positions),
+            tuple(sorted(span for _, span in declarations[file])),
+            _ordered(
+                (functions[file] | classes[file]) - _held(ranges[file], held_nodes[file], namespaces[file]),
+                positions,
+            ),
+            _namespace_members(ranges[file], held_nodes[file], namespaces[file], declarations[file]),
         )
         for file in files
     }
+
+
+@dataclass(frozen=True)
+class _Namespace:
+    """A namespace node's byte range, end exclusive, and its first and last line."""
+
+    start: int
+    end: int
+    first_line: int
+    last_line: int
+
+
+def _namespace_members(
+    ranges: list[tuple[int, int, Span]],
+    held_nodes: set[tuple[int, int]],
+    namespaces: list[_Namespace],
+    declarations: set[tuple[int, Span]],
+) -> tuple[NamespaceMember, ...]:
+    """Each function, class and declaration whose innermost holder is a namespace, with that
+    namespace's lines. A value's function (``held_nodes``) belongs to the value, not the namespace.
+    Nodes nest or are disjoint, so a sweep in source order keeps the nodes still open on a stack, the
+    innermost on top; a declaration enters the sweep as the point it starts at."""
+    if not namespaces:
+        return ()
+    entries = [
+        *((start, end, None if (start, end) in held_nodes else span) for start, end, span in ranges),
+        *((namespace.start, namespace.end, namespace) for namespace in namespaces),
+        *((start, start, span) for start, span in declarations),
+    ]
+    open_nodes: list[tuple[int, Span | _Namespace | None]] = []
+    members: set[NamespaceMember] = set()
+    for start, end, item in sorted(entries, key=lambda entry: (entry[0], -entry[1])):
+        while open_nodes and open_nodes[-1][0] <= start:
+            open_nodes.pop()
+        holder = open_nodes[-1][1] if open_nodes else None
+        if isinstance(holder, _Namespace) and isinstance(item, Span):
+            members.add(NamespaceMember(holder.first_line, holder.last_line, item))
+        if end > start:
+            open_nodes.append((end, item))
+    return tuple(sorted(members))
 
 
 def _source_positions(ranges: Iterable[tuple[int, int, Span]]) -> dict[Span, int]:
@@ -209,15 +269,18 @@ def _source_positions(ranges: Iterable[tuple[int, int, Span]]) -> dict[Span, int
     return positions
 
 
-def _held(ranges: list[tuple[int, int, Span]], held_nodes: set[tuple[int, int]]) -> set[Span]:
-    """The spans whose syntax node is a value or a namespace member (see ``_held_rule``) or lies inside
-    another function or class node, counting the callbacks ``_same_lines_as_a_named_symbol`` drops: a
+def _held(
+    ranges: list[tuple[int, int, Span]], held_nodes: set[tuple[int, int]], namespaces: list[_Namespace]
+) -> set[Span]:
+    """The spans whose syntax node is a value's (see ``_held_rule``) or lies inside another function,
+    class or namespace node, counting the callbacks ``_same_lines_as_a_named_symbol`` drops: a
     function inside a one-line callback is the callback's. Nodes nest or are disjoint, so a node is
     inside another exactly when one starting no later reaches at least as far."""
     held = {span for start, end, span in ranges if (start, end) in held_nodes}
+    nodes = [*ranges, *((namespace.start, namespace.end, None) for namespace in namespaces)]
     furthest = -1
-    for _start, end, span in sorted(ranges, key=lambda range_: (range_[0], -range_[1])):
-        if end <= furthest:
+    for _start, end, span in sorted(nodes, key=lambda node: (node[0], -node[1])):
+        if end <= furthest and span is not None:
             held.add(span)
         furthest = max(furthest, end)
     return held
@@ -303,7 +366,10 @@ def _captured_name(match: dict) -> str:
 
 _ERROR_RULE = "parse_error"
 _HELD_RULE = "held"
-_STRUCTURE_RULE_IDS = frozenset({"function", "class", "declaration", _HELD_RULE, _ERROR_RULE})
+_NAMESPACE_RULE = "namespace"
+_STRUCTURE_RULE_IDS = frozenset(
+    {"function", "class", "declaration", _HELD_RULE, _NAMESPACE_RULE, _ERROR_RULE}
+)
 _EXPORT_STATEMENT_RULE = "export_surface"
 _EXPORT_SPECIFIER_RULE = "export_specifier"
 _EXPORT_RULE_IDS = (_EXPORT_STATEMENT_RULE, _EXPORT_SPECIFIER_RULE)
@@ -328,19 +394,24 @@ def _structure_rules(languages: Sequence[str]) -> str:
             f"id: declaration\nlanguage: {grammar_of(language)}\nrule:\n{DECLARATION_RULES[language]}"
         )
         documents.append(f"id: {_ERROR_RULE}\nlanguage: {grammar_of(language)}\nrule:\n  kind: ERROR")
-        if VALUE_KINDS[language] or NAMESPACE_KINDS[language]:
+        if VALUE_KINDS[language]:
             documents.append(_held_rule(language))
+        if NAMESPACE_KINDS[language]:
+            documents.append(
+                f"id: {_NAMESPACE_RULE}\nlanguage: {grammar_of(language)}\nrule:\n"
+                f"  any: {_kinds(NAMESPACE_KINDS[language])}"
+            )
     return "\n---\n".join(documents)
 
 
 def _held_rule(language: str) -> str:
-    """Every function and class anywhere inside a value or a namespace node (see ``VALUE_KINDS`` and
-    ``NAMESPACE_KINDS``)."""
+    """Every function and class anywhere inside a value node (see ``VALUE_KINDS``). The relation sits
+    under a double negation, so the value is not printed once per match."""
     symbols = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language]))
-    holders = _kinds((*VALUE_KINDS[language], *NAMESPACE_KINDS[language]))
+    holders = _kinds(VALUE_KINDS[language])
     return (
         f"id: {_HELD_RULE}\nlanguage: {grammar_of(language)}\nrule:\n"
-        f"  any: {symbols}\n  inside:\n    stopBy: end\n    any: {holders}"
+        f"  any: {symbols}\n  not: {{not: {{inside: {{stopBy: end, any: {holders}}}}}}}"
     )
 
 
