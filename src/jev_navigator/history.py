@@ -19,9 +19,9 @@ default replaces the oldest code bodies with a stub that keeps the source, and e
 recorded. Checks that select the same sections share one request; different selections run in
 parallel.
 
-A judge holds the selected state within its client's input limit for ``state`` plus the longest
-question, less room for the question (``InputLimits.state_chars``), and within the history's own
-``budget_chars`` when it sets one.
+A judge holds the selected state, together with the shared state beside it, within what its
+client's box for ``state`` plus the longest question (``InputLimits.box_chars``) leaves after the
+longest question actually asked, and within the history's own ``budget_chars`` when it sets one.
 The docs also warn that accuracy falls as unrelated state grows,
 so select only the sections a check needs, and measure with ``ceiling_curve``.
 
@@ -162,7 +162,7 @@ class History:
     """``sections`` declares the caller's own sections with their values; only declared names and the
     built-in ones (``history``, ``fetched``, ``decisions``, ``previous_judgments``) can be selected.
     ``budget_chars`` is the caller's own bound on a selected state; a judge reading the history also
-    holds it within its client's state limit, and ``None`` leaves that limit alone."""
+    holds it within its client's input box, and ``None`` leaves that box alone."""
 
     budget_chars: int | None = None
     evict: EvictionPolicy = drop_oldest_code
@@ -189,20 +189,32 @@ class History:
             raise UnknownSectionError(f"{name} is not a declared section")
         self.sections[name] = value
 
-    def state_for(self, names: Sequence[str], *, within: int | None = None) -> dict:
-        """Exactly the selected sections, each within its limit and all within the smaller of
-        ``budget_chars`` and ``within`` (unbounded when neither is set); ``self.evictions`` lists
-        what this call trimmed."""
+    def state_for(
+        self,
+        names: Sequence[str],
+        shared: Mapping | None = None,
+        question_chars: int = 0,
+        *,
+        box_chars: int | None = None,
+    ) -> dict:
+        """Exactly the selected sections, each within its limit; ``self.evictions`` lists what this
+        call trimmed. Measured together with the ``shared`` state that travels next to them, they stay
+        within ``budget_chars`` and within what ``box_chars``, a client's box for the state plus the
+        longest question, leaves after the question of ``question_chars`` that reads them; unbounded
+        when neither is set."""
         self._require_known(names)
-        budget = min((bound for bound in (self.budget_chars, within) if bound is not None), default=None)
+        room = None if box_chars is None else box_chars - question_chars
+        limit = min((bound for bound in (self.budget_chars, room) if bound is not None), default=None)
 
         def fits(steps: list[HistoryStep]) -> bool:
-            return budget is None or self.size(self._build(names, steps)) <= budget
+            return limit is None or self.size({**(shared or {}), **self._build(names, steps)}) <= limit
 
         reads_code = bool(_SECTIONS_WITH_CODE & set(names))
         kept, self.evictions = self.evict(self.steps, fits) if reads_code else (self.steps, [])
         if not fits(kept):
-            raise HistoryTooLargeError(f"the selected sections need more than {budget} characters")
+            raise HistoryTooLargeError(
+                f"the selected sections, the shared state and the question need more than {limit} characters"
+            )
         return self._build(names, kept)
 
     def size(self, state: Mapping) -> int:
@@ -361,7 +373,7 @@ def _grouped(
     for name, entry in checks.items():
         by_sections.setdefault(entry.sections, {})[name] = entry.check
     return [
-        _Group(sections, _state(history, sections, shared, judge.input_limits.state_chars), grouped)
+        _Group(sections, _state(history, sections, shared, grouped, judge.input_limits.box_chars), grouped)
         for sections, grouped in by_sections.items()
     ]
 
@@ -391,12 +403,14 @@ def _judged(
     return results
 
 
-def _state(history: History, sections: tuple[str, ...], shared: Mapping, within: int) -> dict:
-    selected = history.state_for(sections, within=within)
-    overlap = set(selected) & set(shared)
+def _state(
+    history: History, sections: tuple[str, ...], shared: Mapping, checks: Mapping[str, Check], box_chars: int
+) -> dict:
+    overlap = set(sections) & set(shared)
     if overlap:
         raise ValueError(f"shared state and history sections both use {sorted(overlap)}")
-    return {**shared, **selected}
+    longest_question = max(serialized_chars(check.to_question()) for check in checks.values())
+    return {**shared, **history.state_for(sections, shared, longest_question, box_chars=box_chars)}
 
 
 def _judgment(

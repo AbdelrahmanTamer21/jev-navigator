@@ -19,10 +19,17 @@ MAX_TOKENS_MARKER = "max_tokens_exceeded"
 """The provider's error_type when a request's input exceeds the model's input budget."""
 
 REQUEST_CHARS_PER_TOKEN = 2.4
-"""Serialized characters per input token, the same value and meaning as the Engine's
-``REQUEST_CHARS_PER_TOKEN`` (analysis-engine ``enginepy/host/system_one.py``). Jev's input measured
-about 265 fixed tokens per request plus 0.23 tokens per state byte and 0.31 per question byte on 3,096
-real requests (03.10.2026), so a limit in tokens becomes a box in characters without a tokenizer."""
+"""ASCII-escaped characters (``serialized_chars``) per input token, the same value and meaning as the
+Engine's ``REQUEST_CHARS_PER_TOKEN`` (analysis-engine ``enginepy/host/system_one.py``). A limit in
+tokens becomes a box in characters with ``chars_for_tokens``, never with a second ratio: route boxes
+(Drex's 8,192 tokens is 19,660 characters) use it too.
+
+The fit and its data are in ``jvn-eval-2026-10-03/census/request-size-fit`` (``fit-table-request-size.md``).
+On 3,096 real requests (03.10.2026) Jev's input is 263 tokens plus 0.22 per state character and 0.29
+per question character. The 264 requests of 2,000 tokens or more cost at most 0.38 tokens per
+character (2.63 characters per token), so 2.4 (0.417) keeps a 1.10 margin. The data reaches only 11,652
+tokens; the limit itself rests on the Engine's measurement of the edge (32,883 pass, about 33,200
+refused)."""
 
 
 def chars_for_tokens(tokens: int) -> int:
@@ -36,9 +43,6 @@ docs.typesafe.ai/models). The Engine measured it on 27.09.2026: 32,883 input tok
 
 JEV_REQUEST_TOKEN_LIMIT = 64_000
 """The input Jev accepts for a whole request; a request of 48,951 tokens was accepted."""
-
-_QUESTION_RESERVE_CHARS = chars_for_tokens(2_000)
-"""What a state leaves free for the question that reads it."""
 
 
 @dataclass(frozen=True)
@@ -56,13 +60,9 @@ class InputLimits:
         request_chars = None if request_tokens is None else chars_for_tokens(request_tokens)
         return cls(chars_for_tokens(box_tokens), request_chars)
 
-    @property
-    def state_chars(self) -> int:
-        """What a state may use while leaving room for the question that reads it."""
-        return self.box_chars - _QUESTION_RESERVE_CHARS
-
     def exceeded_by(self, state: Mapping, questions: Mapping) -> bool:
-        """Whether this request is outside the limits, measured on the serialization the body uses."""
+        """Whether this request is outside the limits, measured in ASCII-escaped JSON
+        (``serialized_chars``), the one measure of every size box."""
         longest_question = max((serialized_chars(question) for question in questions.values()), default=0)
         if serialized_chars(state) + longest_question > self.box_chars:
             return True
@@ -106,6 +106,10 @@ class AsyncJevClient(Protocol):
 
 class MissingAnswerError(LookupError):
     """Replay found no stored answer for a request."""
+
+
+class UnansweredQuestionError(RuntimeError):
+    """The provider's response left out the answer to a question the request asked."""
 
 
 class InputBudgetExceededError(RuntimeError):
