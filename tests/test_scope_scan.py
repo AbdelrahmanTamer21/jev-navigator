@@ -237,7 +237,7 @@ def test_scan_facts_skips_unsupported_files_and_still_parses_supported_files(tmp
     def lines_of(path: str) -> list[str]:
         return (tmp_path / path).read_text().splitlines()
 
-    empty = FileFacts(FileStructure((), (), (), ()), (), ())
+    empty = FileFacts(FileStructure((), (), (), (), (), ()), (), ())
 
     unsupported = scan_facts(["notes.md"], tmp_path, lines_of, Unparsed())
     mixed = scan_facts(["module.py", "notes.md"], tmp_path, lines_of, Unparsed())
@@ -487,6 +487,31 @@ def test_a_declaration_names_every_name_it_binds(tmp_path: Path) -> None:
             (5, "TIMEOUT"),
         ],
     }
+
+
+def test_whether_a_type_or_a_value_names_a_declaration_follows_its_own_kind(tmp_path: Path) -> None:
+    """A type alias is named only by a type and a constant only by a value, also when the declaration
+    starts after other code on its line."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/late.ts": (
+                "if (ready) { start(); } const late = 1;\n"
+                "start(); type Shape = { side: number };\n"
+                "export function use(value: late): Shape {\n  late();\n  return Shape();\n}\n"
+            )
+        },
+    )
+    use = index.find_definition("use")[0]
+
+    # Act
+    by_types = {ref.name: ref.binding.status.value for ref in index.references_in(use) if ref.role == "type"}
+    by_calls = {edge.name: edge.binding.status.value for edge in index.callee_edges(use)}
+
+    # Assert
+    assert by_types == {"late": "unresolved", "Shape": "resolved"}
+    assert by_calls == {"late": "resolved", "Shape": "unresolved"}
 
 
 def test_a_function_given_as_a_default_value_is_named_by_the_name_it_defaults(tmp_path: Path) -> None:

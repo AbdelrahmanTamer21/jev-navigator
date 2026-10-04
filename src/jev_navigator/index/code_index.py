@@ -27,8 +27,6 @@ from .imports import (
     resolve_import,
 )
 from .languages import (
-    declares_type,
-    declares_value,
     language_of,
 )
 from .packages import Packages
@@ -45,7 +43,7 @@ _WORD = re.compile(r"[\w$]+")
 ScanObserver = Callable[[str, str, int], None]
 
 
-_NO_STRUCTURE = FileStructure((), (), (), ())
+_NO_STRUCTURE = FileStructure((), (), (), (), (), ())
 
 
 class RevisionMismatchError(ValueError):
@@ -424,8 +422,7 @@ class CodeIndex:
         structure = self._facts_in(span.file).structure
         if span in structure.symbols:
             return role != "type" or span not in structure.functions
-        first_line = self.read_slice(Span(span.file, span.start, span.start)).text
-        return declares_type(first_line) if role == "type" else declares_value(first_line)
+        return span in (structure.type_declarations if role == "type" else structure.value_declarations)
 
     def _calls_with_name(self, name: str):
         files = self._files_for_name(name)

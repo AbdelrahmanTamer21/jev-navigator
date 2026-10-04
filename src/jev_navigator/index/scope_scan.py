@@ -20,7 +20,6 @@ from . import tools
 from .imports import _local
 from .languages import (
     CLASS_KINDS,
-    DECLARATION_RULES,
     DECLARED_NAME_RULES,
     EXPRESSION_KINDS,
     FLOW_LANGUAGE,
@@ -29,6 +28,9 @@ from .languages import (
     NAME_HOLDERS,
     NAME_WRAPPERS,
     OBJECT_KINDS,
+    TYPE_AND_VALUE_DECLARATIONS,
+    TYPE_DECLARATIONS,
+    VALUE_DECLARATIONS,
     export_rules,
     grammar_of,
     language_for,
@@ -60,12 +62,16 @@ class Unparsed:
 @dataclass(frozen=True)
 class FileStructure:
     """``top_level_symbols`` are the symbols no other function or class holds in the syntax tree.
-    Symbols sharing a line each hold the other's first line, so lines alone cannot tell."""
+    Symbols sharing a line each hold the other's first line, so lines alone cannot tell.
+    ``type_declarations`` and ``value_declarations`` are the declarations a type use and a value
+    use may name, decided by each declaration's own syntax node."""
 
     functions: tuple[Span, ...]
     symbols: tuple[Span, ...]
     declarations: tuple[Span, ...]
     top_level_symbols: tuple[Span, ...]
+    type_declarations: tuple[Span, ...]
+    value_declarations: tuple[Span, ...]
 
 
 @dataclass(frozen=True)
@@ -164,7 +170,7 @@ def _unparsed_lines_from_matches(matches) -> dict[str, tuple[tuple[int, int], ..
 def _structure_from_matches(files, unparsed, matches):
     functions: dict[str, set[Span]] = {file: set() for file in files}
     classes: dict[str, set[Span]] = {file: set() for file in files}
-    declaration_nodes: dict[str, list[_Node]] = {file: [] for file in files}
+    declaration_nodes: dict[str, list[_Declaration]] = {file: [] for file in files}
     declared_names: dict[str, list[tuple[int, str]]] = {file: [] for file in files}
     ranges: dict[str, list[tuple[int, int, Span]]] = {file: [] for file in files}
     object_members: dict[str, set[tuple[int, int]]] = {file: set() for file in files}
@@ -180,8 +186,9 @@ def _structure_from_matches(files, unparsed, matches):
             object_members[file].add((offsets["start"], offsets["end"]))
         elif match["ruleId"] == _DECLARED_NAME_RULE:
             declared_names[file].append((offsets["start"], match["text"]))
-        elif match["ruleId"] == "declaration":
-            declaration_nodes[file].append(_Node(offsets["start"], offsets["end"], start, end))
+        elif match["ruleId"] in _DECLARATION_BY_RULE:
+            kind = _DECLARATION_BY_RULE[match["ruleId"]]
+            declaration_nodes[file].append(_Declaration(offsets["start"], offsets["end"], start, end, kind))
         else:
             target = functions if match["ruleId"] == "function" else classes
             # The syntax tree names the symbol, never a physical line: a method on a one-line class
@@ -193,42 +200,68 @@ def _structure_from_matches(files, unparsed, matches):
     positions = _source_positions(range_ for found in ranges.values() for range_ in found)
     for file in files:
         functions[file] -= _same_lines_as_a_named_symbol(functions[file] | classes[file])
-    return {
-        file: FileStructure(
+    structures = {}
+    for file in files:
+        symbols = functions[file] | classes[file]
+        declared = _declarations(file, declaration_nodes[file], declared_names[file])
+        structures[file] = FileStructure(
             _ordered(functions[file], positions),
-            _ordered(functions[file] | classes[file], positions),
-            tuple(sorted(_declarations(file, declaration_nodes[file], declared_names[file]))),
-            _ordered(
-                (functions[file] | classes[file]) - _held(ranges[file], object_members[file]), positions
-            ),
+            _ordered(symbols, positions),
+            _sorted(span for span, _ in declared),
+            _ordered(symbols - _held(ranges[file], object_members[file]), positions),
+            _sorted(span for span, kind in declared if kind.named_by_types),
+            _sorted(span for span, kind in declared if kind.named_by_values),
         )
-        for file in files
-    }
+    return structures
 
 
-@dataclass(frozen=True, order=True)
-class _Node:
-    """A syntax node's byte range, end exclusive, and its first and last line."""
+@dataclass(frozen=True)
+class _DeclarationKind:
+    """What may name the declarations one rule matches: a type use, a value use, or both."""
+
+    rule_id: str
+    named_by_types: bool
+    named_by_values: bool
+
+
+_DECLARATION_RULES = {
+    _DeclarationKind("type_declaration", True, False): TYPE_DECLARATIONS,
+    _DeclarationKind("value_declaration", False, True): VALUE_DECLARATIONS,
+    _DeclarationKind("declaration", True, True): TYPE_AND_VALUE_DECLARATIONS,
+}
+_DECLARATION_BY_RULE = {kind.rule_id: kind for kind in _DECLARATION_RULES}
+
+
+@dataclass(frozen=True)
+class _Declaration:
+    """A declaration's byte range, end exclusive, its first and last line, and its kind."""
 
     start: int
     end: int
     first_line: int
     last_line: int
+    kind: _DeclarationKind
 
 
-def _declarations(file: str, nodes: list[_Node], names: list[tuple[int, str]]) -> set[Span]:
+def _declarations(
+    file: str, nodes: list[_Declaration], names: list[tuple[int, str]]
+) -> set[tuple[Span, _DeclarationKind]]:
     """One span per name a declaration binds, over the lines of the innermost declaration holding
-    the name at ``offset``."""
-    ordered = sorted(nodes)
+    the name, with that declaration's kind."""
+    ordered = sorted(nodes, key=lambda node: node.start)
     starts = [node.start for node in ordered]
     return {
-        Span(file, holder.first_line, holder.last_line, name)
+        (Span(file, holder.first_line, holder.last_line, name), holder.kind)
         for offset, name in names
         if (holder := _innermost(ordered, starts, offset)) is not None
     }
 
 
-def _innermost(ordered: list[_Node], starts: list[int], offset: int) -> _Node | None:
+def _sorted(spans: Iterable[Span]) -> tuple[Span, ...]:
+    return tuple(sorted(set(spans)))
+
+
+def _innermost(ordered: list[_Declaration], starts: list[int], offset: int) -> _Declaration | None:
     """Nodes nest or are disjoint, so the latest-starting node that reaches past ``offset`` holds it
     most closely."""
     for node in reversed(ordered[: bisect_right(starts, offset)]):
@@ -325,7 +358,7 @@ _ERROR_RULE = "parse_error"
 _OBJECT_MEMBER_RULE = "object_member"
 _DECLARED_NAME_RULE = "declared_name"
 _STRUCTURE_RULE_IDS = frozenset(
-    {"function", "class", "declaration", _DECLARED_NAME_RULE, _OBJECT_MEMBER_RULE, _ERROR_RULE}
+    {"function", "class", *_DECLARATION_BY_RULE, _DECLARED_NAME_RULE, _OBJECT_MEMBER_RULE, _ERROR_RULE}
 )
 _EXPORT_STATEMENT_RULE = "export_surface"
 _EXPORT_SPECIFIER_RULE = "export_specifier"
@@ -347,7 +380,11 @@ def _structure_rules(languages: Sequence[str]) -> str:
     for language in languages:
         documents.append(_kind_rule("function", language, FUNCTION_KINDS[language]))
         documents.append(_kind_rule("class", language, CLASS_KINDS[language]))
-        documents.append(_rule_document("declaration", language, DECLARATION_RULES[language]))
+        documents += [
+            _rule_document(kind.rule_id, language, rules[language])
+            for kind, rules in _DECLARATION_RULES.items()
+            if language in rules
+        ]
         documents.append(_rule_document(_DECLARED_NAME_RULE, language, DECLARED_NAME_RULES[language]))
         documents.append(_rule_document(_ERROR_RULE, language, "  kind: ERROR"))
         if OBJECT_KINDS[language]:
