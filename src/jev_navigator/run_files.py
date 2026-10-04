@@ -28,14 +28,12 @@ def place_location(place_key: str) -> str:
 
 
 def place_label(index: CodeIndex, place_key: str) -> str:
-    """``path:line name``, or ``path:line`` where no symbol encloses that line or navigation has not
-    parsed the file. A label shows only what navigation already parsed, so writing the journal or the
+    """``path:line name``, or ``path:line`` where no symbol encloses that line or the index holds no
+    facts of the file yet. A label shows only facts already in memory, so writing the journal or the
     evidence pack starts no parse that JVN's memory limit could refuse."""
     location = place_location(place_key)
     file, _, line = location.rpartition(":")
-    symbol = (
-        index.enclosing_symbol(file, int(line)) if file in index.parsed_files and line.isdigit() else None
-    )
+    symbol = index.known_enclosing_symbol(file, int(line)) if line.isdigit() else None
     return f"{location} {symbol.name}" if symbol is not None and symbol.name else location
 
 

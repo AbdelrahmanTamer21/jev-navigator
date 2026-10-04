@@ -11,7 +11,12 @@ from jev_navigator.cache_root import cache_root
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.fact_cache import FactCache
 from jev_navigator.index.scope_scan import Unparsed, scan_facts
-from jev_navigator.judgments.store import SHARED_STORE_VARIABLE, shared_store_path
+from jev_navigator.judgments.store import (
+    SHARED_STORE_VARIABLE,
+    SHARED_STORE_VERSION,
+    StoreInCacheFolderError,
+    shared_store_path,
+)
 
 
 def test_the_answer_store_and_the_fact_cache_share_the_xdg_cache_folder(
@@ -25,7 +30,7 @@ def test_the_answer_store_and_the_fact_cache_share_the_xdg_cache_folder(
     answers, facts = shared_store_path(), FactCache().root
 
     # Assert
-    assert answers == tmp_path / "jev-navigator" / "answers.sqlite"
+    assert answers == tmp_path / "jev-navigator" / f"answers-v{SHARED_STORE_VERSION}.sqlite"
     assert facts == tmp_path / "jev-navigator" / "facts"
 
 
@@ -40,7 +45,7 @@ def test_without_xdg_cache_home_both_live_under_the_home_cache_folder(
     answers, facts = shared_store_path(), FactCache().root
 
     # Assert
-    assert answers == Path.home() / ".cache" / "jev-navigator" / "answers.sqlite"
+    assert answers == Path.home() / ".cache" / "jev-navigator" / f"answers-v{SHARED_STORE_VERSION}.sqlite"
     assert facts == Path.home() / ".cache" / "jev-navigator" / "facts"
 
 
@@ -56,6 +61,33 @@ def test_a_relative_xdg_cache_home_is_ignored_so_no_cache_lands_in_the_analysed_
 
     # Assert
     assert root == Path.home() / ".cache" / "jev-navigator"
+
+
+def test_a_store_named_in_a_folder_beside_the_cache_folder_is_accepted(private_cache_root: Path) -> None:
+    # Arrange: a folder whose name only starts with the cache folder's name
+    store = Path(f"{private_cache_root}-evals") / "arm.sqlite"
+
+    # Act
+    resolved = shared_store_path(str(store))
+
+    # Assert
+    assert resolved == store
+
+
+@pytest.mark.parametrize("through_link", ["cache folder", "store"])
+def test_a_store_inside_the_cache_folder_is_refused_when_either_path_runs_through_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, through_link: str
+) -> None:
+    # Arrange: one of the two paths reaches the same folder through a link, as macOS's /tmp and /var do
+    real, link = tmp_path / "real", tmp_path / "link"
+    real.mkdir()
+    link.symlink_to(real)
+    cache_home, store_home = (link, real) if through_link == "cache folder" else (real, link)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home))
+
+    # Act / Assert
+    with pytest.raises(StoreInCacheFolderError, match="JVN prunes that folder"):
+        shared_store_path(str(store_home / "jev-navigator" / "answers.sqlite"))
 
 
 def test_facts_planted_in_the_suites_own_cache_never_reach_a_tests_index(

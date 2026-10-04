@@ -263,8 +263,7 @@ def facts_of(index: CodeIndex, scope: Sequence[str] | None = None) -> dict[str, 
     )
     if not wanted:
         return {}
-    index._ensure_facts(wanted)
-    return {path: index._facts[path] for path in wanted if path in index._facts}
+    return index.facts_in_files(wanted)
 
 
 def file_structure(index: CodeIndex, file: str) -> FileStructure | None:
