@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import Counter
 from collections.abc import Mapping
@@ -29,7 +30,7 @@ from jev_navigator.judgments.questions import Check, Criterion, Pick
 from jev_navigator.judgments.secrets import SecretInRequestError, SecretMasker
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.judgments.thresholds import NoulVerdict, Thresholds
-from jev_navigator.testing import ScriptedJevClient
+from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 
 def _asked_item(question_id: str, state: dict) -> str:
@@ -894,6 +895,41 @@ def test_input_budget_error_is_typed_from_the_provider_report_without_the_sdk() 
     assert isinstance(input_budget_error(ProviderError()), InputBudgetExceededError)
     assert input_budget_error(OtherProviderError()) is None
     assert input_budget_error(TypeError("no status at all")) is None
+
+
+WORDING_ONLY_SECRET = "Zq9xW2pL7vB4mNc8"
+"""A value the masker recognises only in a check's wording, where ``api_key = "..."`` marks it."""
+
+
+def _judged_with_wording_secret(path: str, judge: Judge, check: Check, items: list[dict]) -> None:
+    shared = {"doc": {"sentence": "s"}}
+    if path == "check_each":
+        judge.check_each(check, items, shared)
+    elif path == "check_every":
+        judge.check_every([check], items, shared)
+    else:
+        asyncio.run(judge.check_each_async(check, items, shared))
+
+
+@pytest.mark.parametrize("path", ["check_each", "check_every", "check_each_async"])
+def test_a_value_masked_in_check_wording_is_masked_in_the_batch_state_too(path: str) -> None:
+    # Arrange
+    check = Check(
+        "uses_key",
+        f'Does `{{item}}.code` call the service configured with api_key = "{WORDING_ONLY_SECRET}"?',
+        Criterion("yes"),
+        Criterion("no"),
+    )
+    items = [{"file": "a.py", "code": f'client.connect("{WORDING_ONLY_SECRET}")'}]
+    client = AsyncScriptedJevClient() if path == "check_each_async" else ScriptedJevClient()
+
+    # Act
+    _judged_with_wording_secret(path, Judge(client), check, items)
+
+    # Assert
+    [(state, questions)] = client.requests
+    assert WORDING_ONLY_SECRET not in json.dumps(questions)
+    assert WORDING_ONLY_SECRET not in json.dumps(state)
 
 
 def test_a_secret_in_check_wording_is_masked_once_per_plan_and_the_request_still_goes(tmp_path: Path) -> None:

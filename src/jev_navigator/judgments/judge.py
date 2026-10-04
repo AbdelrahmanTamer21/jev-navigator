@@ -802,13 +802,15 @@ class Judge:
         thresholds: Thresholds | None,
     ) -> _CheckPlan:
         """Mask the whole candidate set once, before packing, so copied secret values stay hidden
-        across batches; the final scan before each send still runs. Batches form over every item,
+        across batches. A value found in any check's wording is hidden in the items and shared state
+        too, where it may stand without the context that marks it as secret. The final scan before
+        each send still runs. Batches form over every item,
         answered or not, so they do not depend on the store. Each per-item store key includes its
         masked item, the shared state, the question and the batch it was asked in.
         """
         if len({check.name for check in checks}) != len(checks):
             raise ValueError("independent checks require unique names for their result lists")
-        hidden = masked_values([*items, shared or {}], self.masker) if self.masker else frozenset()
+        hidden = self._hidden_values(checks, items, shared or {})
         *items, shared = self._masked_together([*items, shared or {}], hidden)
         plan = _CheckPlan(
             list_name,
@@ -828,6 +830,14 @@ class Judge:
             batch for batch in (self._batch(plan, members) for members in groups) if batch is not None
         ]
         return plan
+
+    def _hidden_values(
+        self, checks: Sequence[Check], items: Sequence[Mapping], shared: Mapping
+    ) -> frozenset[str]:
+        if not self.masker:
+            return frozenset()
+        wordings = [check.to_question() for check in checks]
+        return masked_values([*items, shared, *wordings], self.masker)
 
     def _look_up_batch(self, plan: _CheckPlan, members: list[int]) -> None:
         """Every question about every member is answered from the store or left open."""
