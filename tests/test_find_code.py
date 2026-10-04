@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import errno
 import os
 import re
@@ -13,7 +14,14 @@ from pathlib import Path
 import pytest
 from git_repos import commit_files
 
-from jev_navigator.directives.find_code import OPEN_FIRST, Outcome, SearchBudget, StopRule, find_code
+from jev_navigator.directives.find_code import (
+    OPEN_FIRST,
+    Outcome,
+    SearchBudget,
+    StopRule,
+    find_code,
+    find_code_async,
+)
 from jev_navigator.directives.places import (
     MOVES,
     Place,
@@ -45,6 +53,16 @@ def scripted(
         return could_contain(state["candidates"][int(slot.group(1))]["signature"])
 
     return answer
+
+
+def find_with(entry: str):
+    """``find_code`` itself, or ``find_code_async`` run to completion with the same arguments."""
+    if entry == "sync":
+        return find_code
+    return lambda *args, **kwargs: asyncio.run(find_code_async(*args, **kwargs))
+
+
+ENTRY_POINTS = pytest.mark.parametrize("entry", ["sync", "async"])
 
 
 def start_at_place(index: CodeIndex) -> list[Place]:
@@ -1290,7 +1308,10 @@ class FailsOnce:
         return self.script.ask(state, questions)
 
 
-def test_a_provider_failure_ends_the_search_failed_and_its_resume_finishes_it(tmp_path: Path) -> None:
+@ENTRY_POINTS
+def test_a_provider_failure_ends_the_search_failed_and_its_resume_finishes_it(
+    tmp_path: Path, entry: str
+) -> None:
     # Arrange
     (tmp_path / "places.txt").write_text("first\nsecond\n")
     index = CodeIndex(tmp_path, ["places.txt"])
@@ -1306,7 +1327,7 @@ def test_a_provider_failure_ends_the_search_failed_and_its_resume_finishes_it(tm
     store = JsonlAnswerStore(tmp_path / "answers.jsonl")
 
     def search(resume=None):
-        return find_code(
+        return find_with(entry)(
             index,
             Judge(client, store=store),
             TARGET,
@@ -1401,7 +1422,10 @@ class FailsOnEveryRequest:
         raise self.error
 
 
-def test_a_failed_round_ends_the_search_failed_without_asking_the_stop_rule(tmp_path: Path) -> None:
+@ENTRY_POINTS
+def test_a_failed_round_ends_the_search_failed_without_asking_the_stop_rule(
+    tmp_path: Path, entry: str
+) -> None:
     # Arrange
     (tmp_path / "places.txt").write_text("first\n")
     index = CodeIndex(tmp_path, ["places.txt"])
@@ -1410,7 +1434,7 @@ def test_a_failed_round_ends_the_search_failed_without_asking_the_stop_rule(tmp_
     client = FailsOnEveryRequest(error)
 
     # Act
-    failed = find_code(
+    failed = find_with(entry)(
         index,
         Judge(client),
         TARGET,
@@ -1427,7 +1451,8 @@ def test_a_failed_round_ends_the_search_failed_without_asking_the_stop_rule(tmp_
     assert not any(question_id.startswith("is_done") for asked in client.questions for question_id in asked)
 
 
-def test_a_failed_stop_check_ends_the_search_failed_with_its_error(tmp_path: Path) -> None:
+@ENTRY_POINTS
+def test_a_failed_stop_check_ends_the_search_failed_with_its_error(tmp_path: Path, entry: str) -> None:
     # Arrange
     (tmp_path / "places.txt").write_text("first\nsecond\n")
     index = CodeIndex(tmp_path, ["places.txt"])
@@ -1443,7 +1468,7 @@ def test_a_failed_stop_check_ends_the_search_failed_with_its_error(tmp_path: Pat
             return ScriptedJevClient(default_noul=0.05).ask(state, questions)
 
     # Act
-    failed = find_code(
+    failed = find_with(entry)(
         index,
         Judge(FailsAtTheStopCheck()),
         TARGET,
