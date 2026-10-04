@@ -241,6 +241,29 @@ def test_a_files_definitions_come_from_the_table_with_their_lines(
     assert spawned[tools.AST_GREP] == 0 and spawned[tools.RIPGREP] == 0
 
 
+@pytest.mark.parametrize("build", [CodeIndex.from_git, CodeIndex.from_directory])
+@pytest.mark.parametrize("staged_first", [False, True])
+def test_rows_follow_the_working_tree_not_the_staged_blob(tmp_path: Path, build, staged_first: bool) -> None:
+    # Arrange: rules.py is edited in the working tree, after an earlier staged edit in one case
+    commit_files(tmp_path, REPOSITORY)
+    every_lookup(build(tmp_path))
+    if staged_first:
+        (tmp_path / "app/rules.py").write_text("def staged_only(order):\n    return order\n")
+        git(tmp_path, "add", "app/rules.py")
+        every_lookup(build(tmp_path))
+    (tmp_path / "app/rules.py").write_text("def in_working_tree(order):\n    return order\n")
+
+    # Act
+    index = build(tmp_path)
+    found = {name: index.find_definition(name) for name in ("in_working_tree", "staged_only", "check")}
+
+    # Assert
+    assert [span.file for span in found["in_working_tree"]] == ["app/rules.py"]
+    assert found["staged_only"] == ()
+    assert "app/rules.py" not in {span.file for span in found["check"]}
+    assert index.unavailable_files == {}
+
+
 def test_no_table_row_holds_a_string_literal(tmp_path: Path, private_cache_root: Path) -> None:
     # Arrange
     commit_files(tmp_path, REPOSITORY)
