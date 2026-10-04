@@ -340,3 +340,26 @@ def test_a_whole_request_replays_the_served_models_answer_when_another_model_ans
     # Assert: model A's answer replays, and model B's never reaches this run's pack
     assert client.requests == []
     assert {record.model for record in JsonlAnswerStore(pack).records()} == {"jev-a"}
+
+
+def test_a_whole_request_replayed_from_the_shared_store_lands_in_the_runs_own_pack(tmp_path: Path) -> None:
+    # Arrange: run 1 asks a whole request; run 2 replays it from the shared store
+    shared = tmp_path / "answers.sqlite"
+    pick = Pick("first", "Which entry of `options` comes first?")
+    options = {"0": "a", "1": "b"}
+    first = Judge(
+        ScriptedJevClient(choices={"first": {"0": 0.1, "1": 0.9}}),
+        store=_run_store(tmp_path / "run1", shared),
+    )
+    first.pick(pick, options, SHARED)
+    second = Judge(
+        ScriptedJevClient(), store=_run_store(tmp_path / "run2", shared), served_model="jev-scripted"
+    )
+    second.pick(pick, options, SHARED)
+
+    # Act: the second run's pack alone, without the shared store, answers offline
+    pack_only = Judge(ReplayOnlyClient(), store=JsonlAnswerStore(tmp_path / "run2" / "answers.jsonl"))
+    replayed = pack_only.pick(pick, options, SHARED)
+
+    # Assert
+    assert replayed is not None and replayed.choice == "1"
