@@ -33,8 +33,9 @@ from `~/.config/jvn/env`. The file uses dotenv syntax and is not executed. When 
 from a jev-navigator checkout (`uv run jvn` there, or an editable install), it also reads that
 checkout's `.env`, after the environment and before the file; any install into site-packages
 (`uv tool install`, `pipx`, a non-editable `pip install`) reads no `.env`. A `.env` in the searched
-directory is never read. Either file may set only `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*`
-names, and `jvn` names on stderr any other name it ignores. The `JEV_NAVIGATOR_*` settings hold the
+directory is never read, unless that directory is the checkout `jvn`'s own code runs from. Either
+file may set only `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names, and
+`jvn` names on stderr any other name it ignores. The `JEV_NAVIGATOR_*` settings hold the
 judgment thresholds only; a search's budget comes from its flags or the request's JSON fields. Help
 and schema discovery need no key and make no model calls.
 

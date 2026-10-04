@@ -55,7 +55,8 @@ completed Findall judgments remain available across the stop. Trace has no saved
 journal without a finished manifest. Preserve the diagnostic and existing output.
 
 Live searches send selected source to the configured provider. Reuse the user's existing source
-and spend authorization. Credentials come from environment or `~/.config/jvn/env`; never print them.
+and spend authorization. Credentials come from the environment, the `.env` of a jev-navigator
+checkout `jvn` runs from, or `~/.config/jvn/env`; never print them.
 Progress is stderr; JSON results are stdout. Check exit status and recorded outcome before claiming
 success, complete coverage, or an absence of matches.
 
