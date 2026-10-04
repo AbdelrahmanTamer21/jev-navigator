@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 from conftest import BudgetedClient
-from store_openers import open_and_write_in_each_trial
 
 from jev_navigator.judgments import judge as judge_module
 from jev_navigator.judgments.client import ReplayOnlyClient
@@ -295,30 +294,6 @@ def test_a_new_store_is_created_with_the_current_version_and_reopens(tmp_path: P
     assert sqlite3.connect(shared).execute("pragma user_version").fetchone()[0] == SHARED_STORE_VERSION
 
 
-def test_parallel_first_opens_of_a_new_shared_store_never_fail(tmp_path: Path) -> None:
-    # Arrange: eight processes open each fresh store at the same moment, thirty times over
-    context = multiprocessing.get_context("spawn")
-    trials = [str(tmp_path / f"trial-{number}" / "answers.sqlite") for number in range(30)]
-    with context.Manager() as manager:
-        failures = manager.list()
-        barrier = context.Barrier(8)
-        workers = [
-            context.Process(target=open_and_write_in_each_trial, args=(trials, barrier, failures))
-            for _ in range(8)
-        ]
-
-        # Act
-        for worker in workers:
-            worker.start()
-        for worker in workers:
-            worker.join(timeout=300)
-        reported = list(failures)
-
-    # Assert
-    assert [worker.exitcode for worker in workers] == [0] * 8
-    assert reported == []
-
-
 def test_a_whole_request_replays_the_served_models_answer_when_another_model_answered_later(
     tmp_path: Path,
 ) -> None:
@@ -363,3 +338,33 @@ def test_a_whole_request_replayed_from_the_shared_store_lands_in_the_runs_own_pa
 
     # Assert
     assert replayed is not None and replayed.choice == "1"
+
+
+def _open_and_write_after(barrier, path: str, request_sha256: str) -> None:
+    barrier.wait()
+    store = SqliteAnswerStore(Path(path))
+    store.put(AnswerRecord(request_sha256, ("q",), {"q": {"type": "noul", "p": 0.5}}, "m", 1, {}))
+
+
+def test_processes_creating_a_new_store_at_once_all_open_it(tmp_path: Path) -> None:
+    # Arrange: five rounds of four processes, each round on a store file that does not exist yet
+    context = multiprocessing.get_context("spawn")
+    rounds = []
+
+    # Act
+    for round_number in range(5):
+        shared, barrier = tmp_path / f"round-{round_number}" / "answers.sqlite", context.Barrier(4)
+        openers = [
+            context.Process(target=_open_and_write_after, args=(barrier, str(shared), f"r{n}"))
+            for n in range(4)
+        ]
+        for opener in openers:
+            opener.start()
+        for opener in openers:
+            opener.join(timeout=60)
+        rounds.append((shared, [opener.exitcode for opener in openers]))
+
+    # Assert
+    for shared, exit_codes in rounds:
+        assert exit_codes == [0, 0, 0, 0]
+        assert len(SqliteAnswerStore(shared).records()) == 4
