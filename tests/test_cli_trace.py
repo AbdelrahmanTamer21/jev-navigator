@@ -221,6 +221,19 @@ def test_pack_counts_responses_that_reported_no_usage_instead_of_adding_zero_tok
     assert manifest["provider"]["input_tokens"] == 0
 
 
+def test_trace_report_shows_the_token_total_next_to_the_responses_without_usage(tmp_path: Path) -> None:
+    repository = _workflow_repository(tmp_path)
+    client = _evidence_client()
+    client.input_tokens_per_call = None
+
+    manifest = _pack(repository, tmp_path / "pack", client)
+
+    report = (tmp_path / "pack" / "report.md").read_text()
+    calls = manifest["provider"]["calls"]
+    assert f"- Responses without usage: {calls}\n- Requests without a response: 0\n" in report
+    assert "- Input tokens: at least 0 (not complete)" in report
+
+
 def test_pack_sums_the_input_tokens_the_provider_reported(tmp_path: Path) -> None:
     repository = _workflow_repository(tmp_path)
     client = _evidence_client()
