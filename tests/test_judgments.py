@@ -693,6 +693,29 @@ def test_oversized_batch_is_split_before_sending_so_no_request_exceeds_the_input
     assert sorted(judged_files) == [f"part{index}.py" for index in range(4)]
 
 
+def test_non_ascii_items_are_packed_by_their_escaped_size_so_no_batch_passes_its_budget() -> None:
+    # Arrange: each item is about 2,000 characters as text but about 12,000 escaped, as it is sent
+    client = BudgetedClient(MAX_REQUEST_CHARS)
+    items = [
+        {
+            "file": f"part{index}.py",
+            "lines": [1, 2],
+            "code": f"def part{index}():\n    return '{'名' * 2_000}'",
+        }
+        for index in range(6)
+    ]
+
+    # Act
+    results = Judge(client).check_every(
+        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=30_000
+    )
+
+    # Assert
+    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 6
+    assert len(client.requests) == 3
+    assert all(serialized_chars(state) <= 30_000 for state, _ in client.requests)
+
+
 def _boxed_client() -> BudgetedClient:
     return BudgetedClient(MAX_REQUEST_CHARS, input_box=JEV_INPUT_BOX_CHARS)
 
