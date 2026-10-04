@@ -78,29 +78,24 @@ NAME_WRAPPERS = {
     "javascript": ("parenthesized_expression",),
 }
 
-_SCRIPT_DECLARATIONS = """  any:
+# ast-grep prints every node a rule's relations match, so asking whether a declaration sits in the
+# program printed the whole file once per declaration. Under a double negation the condition holds
+# the same and only the declaration is printed.
+_MODULE_VARIABLES = (
+    "{kind: lexical_declaration, not: {not: {inside: {any: [{kind: program}, {kind: export_statement}]}}}}"
+)
+_SCRIPT_DECLARATIONS = f"""  any:
     - kind: type_alias_declaration
     - kind: interface_declaration
     - kind: enum_declaration
-    - kind: lexical_declaration
-      inside:
-        any:
-          - kind: program
-          - kind: export_statement"""
+    - {_MODULE_VARIABLES}"""
 
 DECLARATION_RULES = {
     "python": """  kind: assignment
-  inside:
-    kind: expression_statement
-    inside:
-      kind: module""",
+  not: {not: {inside: {kind: expression_statement, inside: {kind: module}}}}""",
     "typescript": _SCRIPT_DECLARATIONS,
     "tsx": _SCRIPT_DECLARATIONS,
-    "javascript": """  kind: lexical_declaration
-  inside:
-    any:
-      - kind: program
-      - kind: export_statement""",
+    "javascript": f"  any: [{_MODULE_VARIABLES}]",
 }
 
 # The installed ast-grep supports tsx but not Flow. Route marked files through tsx;

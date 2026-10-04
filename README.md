@@ -96,9 +96,17 @@ jvn find "where do we reject evidence quotes that are absent from the source?" -
 ```
 
 Explicit `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` process values win independently. Otherwise
-`jvn` reads those settings from `~/.config/jvn/env` with a dotenv parser; it does not execute that
-file or print the values. `TYPESAFE_BASE_URL` is the API root before `/v1/systemone`, such as
-`http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
+`jvn` reads those settings from `~/.config/jvn/env`, a file in dotenv syntax that it parses itself;
+it does not execute that file or print the values. `TYPESAFE_BASE_URL` is the API root before
+`/v1/systemone`, such as `http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
+
+When its code runs from a jev-navigator source checkout (`uv run jvn` there, or an editable
+install), `jvn` first fills what is missing from that checkout's `.env` (see `.env.example`). Any
+install into site-packages (`uv tool install`, `pipx`, a non-editable `pip install`) reads no
+`.env`, and when the directory it runs in holds one, it says on stderr that it did not read it. It
+never reads a `.env` from the directory or repository it searches. A settings file can set only
+`jvn`'s own `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names; `jvn` names on stderr any
+other name it ignores, never its value.
 
 ### JSON input for agents and pipelines
 
@@ -298,15 +306,16 @@ definitions from the table. The table holds names and line numbers, never code. 
 in a Find's counts only when navigation reached it, never because the table covered it. A call's or
 argument's receiver, in the table and in the cached facts alike, is kept only when it is a plain chain
 of names such as `this.store`; any other receiver (`client("k").fetch`, `cfg["token"].get`) is
-recorded as `<expression>`, so no string literal is ever stored. Opening a known span parses its file directly. The resulting
+recorded as `<expression>`, so no string literal is ever stored. Opening a known span parses its file directly. ripgrep, which
+`search_text` runs, always runs with `--no-config`, so a `RIPGREP_CONFIG_PATH` file can neither
+change what the index sees nor run a preprocessor over the searched repository. The resulting
 per-file facts are cached by source bytes, language, ast-grep version, the rule text and the source
 of the code that runs ast-grep and reads its matches, in `$XDG_CACHE_HOME/jev-navigator/facts` (`~/.cache` when the
 variable is unset or relative), so a new index can reuse facts without treating changed source or changed
 parser rules as current. A file that changes on disk after the index first read it is
 reported as unavailable when the index reads it again, and its code still reads as the text the
 index first read, the text its SHA-256 names, never in its new form. The index keeps each file's
-first read compressed for the run (about 2 MB per 1,000 files of Heedvane's web app), and
-`CodeIndex.source_memory` reports that size. Each call
+first read compressed for the run, about 2 MB per 1,000 files of Heedvane's web app. Each call
 site's binding is computed once, and `search_text` and `co_changed_files` each run their tool once
 per argument for the life of the index. The index keeps the lines of a bounded number of recently
 read files (`LINE_CACHE_FILES`). There is no default file-count refusal or parser timeout, and no requested file is silently
@@ -332,10 +341,13 @@ inventory was built, or changes after the index first read it, is reported separ
 unavailable. So is a file too large to parse safely:
 `tools.ast_grep_rules`, the one door every parse passes through, never hands ast-grep a file whose
 estimated parse peak (from the length of each line, `index/file_shape.py`) is over 250 MB, about
-70,000 characters on one line, and `unavailable_files` gives the estimated peak and the longest line.
-The file keeps its path in import relations, a name that may be defined in it binds `unknown`, and
-`find_comments` lists it in `refused_files`. Any ast-grep or ripgrep failure other
-than that verified disappearance still fails the lookup that triggered it.
+70,000 bytes on one line. A large file that cannot be read to measure it is refused too, with the
+error. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
+peak and the longest line in bytes. A refused file is never recorded as parsed: it stays readable and
+searchable as text, it keeps its path in import relations (also as a re-export target), a name its
+bytes mention binds `unknown`, `jvn stats` names it as never scanned, and `find_comments` lists it in
+`refused_files`. Any ast-grep or ripgrep failure other than that verified disappearance still fails the
+lookup that triggered it.
 
 Calls are found by name in the syntax tree, which is not a resolved binding. Every call carries a
 `Binding(status, reason, target)`: `resolved` when a module-level definition in the same file, or one
@@ -468,8 +480,9 @@ on its own scope, so searches sharing one judge never use up each other's budget
   request_id`, `record_response(request_id, response)` and `record_failure(request_id, error,
   response)`). The judge records the masked request before dispatch and the raw response before
   parsing, as a `RawResponse(body, status, content_type, decoded)`: the body bytes as received, the HTTP
-  status, the content type and `input_tokens`, the count the provider reported or the text
-  `not reported`; a missing count is never written as 0. Transport errors and responses that fail to
+  status, the content type and `input_tokens`, the count the provider reported or `null`; a missing
+  count is never written as 0, and the count is on the response line only. A replay from the store
+  sends nothing, is marked `from_store` and carries no count. Transport errors and responses that fail to
   parse are recorded as failures. Clients that offer `send` and `parse` return that `RawResponse`; the TypeSafe adapter
   captures the exact bytes from its HTTP transport. A client that only parses is journaled with its
   decoded JSON and `exact=False`. `request_sha256` never includes the model; cache reuse checks the

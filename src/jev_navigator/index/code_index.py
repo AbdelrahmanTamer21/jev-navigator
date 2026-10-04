@@ -34,7 +34,7 @@ from .languages import (
 from .name_table import CALL, DEFINITION_KINDS, REFERENCE, FileEntry, NameRow, NameTable, git_blob_id
 from .packages import Packages
 from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch, Unparsed, scan_facts
-from .source_files import DISAPPEARED, SourceFiles, SourceMemory
+from .source_files import DISAPPEARED, SourceFiles
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
 
@@ -98,6 +98,7 @@ class CodeIndex:
         self._scope = frozenset(self.files)
         self._code_files = tuple(path for path in self.files if language_of(path))
         self._unavailable: dict[str, str] = {}
+        self._refused: dict[str, str] = {}
         self._sources = SourceFiles(self.root, self._unavailable, LINE_CACHE_FILES, self._first_read_stands)
         self._script_paths_in = cache(self._read_script_paths)
         self._packages = cache(self._read_packages)
@@ -262,7 +263,7 @@ class CodeIndex:
         """Files navigation has reached so far, through their facts or their name rows, never one it
         refused to parse; reading it never starts a scan. Covering the scope for the name table
         reaches no file."""
-        return frozenset(self._reached - self._unavailable.keys())
+        return frozenset(self._reached - self._unavailable.keys() - self._refused.keys())
 
     @property
     def parser_scans_completed(self) -> tuple[str, ...]:
@@ -270,14 +271,22 @@ class CodeIndex:
 
     @property
     def parser_scans_pending(self) -> tuple[str, ...]:
+        """The fact scan is pending until navigation has reached every available code file, through its
+        facts, its name rows or the parser's refusal of it; covering the scope for the table reaches none."""
         available = set(self._available_files(self._code_files))
         return () if available <= self._reached else ("facts",)
 
     @property
     def unavailable_files(self) -> dict[str, str]:
-        """Files this index cannot read facts from, each with the reason: an inventory entry that disappeared,
-        or changed after the index first read it, or a file too large to parse safely."""
-        return dict(self._unavailable)
+        """Files this index has no facts for, each with the reason: an inventory entry that disappeared or
+        changed after the index first read it, or a file the parser refused (see ``refused_files``)."""
+        return {**self._unavailable, **self._refused}
+
+    @property
+    def refused_files(self) -> dict[str, str]:
+        """Readable files the fact scan never parsed, each with the reason, such as too large to parse.
+        Their text stays searchable; what they define is unknown, never absent."""
+        return dict(self._refused)
 
     @property
     def available_files(self) -> tuple[str, ...]:
@@ -448,16 +457,17 @@ class CodeIndex:
         return definitions, tuple(span for span in definitions if span in self._top_level_in(span.file))
 
     def _files_hiding(self, name: str) -> frozenset[str]:
-        """Where a definition of ``name`` could sit unseen: a file gone from the disk, or an unparsed
-        file whose lines under an ERROR node mention the name. A definition names what it defines, so
+        """Where a definition of ``name`` could sit unseen: a file gone from the disk, or an unparsed or
+        refused file whose unread lines mention the name. A definition names what it defines, so
         lines that never mention the name cannot hold one. Every file that mentions it has already
         been scanned to look for its definitions, so the answer does not depend on scan order."""
-        unparsed = (file for file in self._known_unparsed() if name in self._unread_names(file))
-        return frozenset(unparsed) | self.unavailable_files.keys()
+        unread = (*self._known_unparsed(), *self._refused)
+        mentioning = (file for file in unread if name in self._unread_names(file))
+        return frozenset(mentioning) | self._unavailable.keys()
 
     def _read_unread_names(self, file: str) -> frozenset[str]:
         """The words on the lines of ``file`` that its ERROR nodes span; the whole file's words while
-        its facts are still being recorded."""
+        its facts are still being recorded, or when the parser refused it."""
         lines = self._lines_of(file)
         known = self._facts.get(file) or (self._entries or {}).get(file)
         stretches = known.unparsed_lines if known is not None else ((1, len(lines)),)
@@ -562,11 +572,11 @@ class CodeIndex:
         return self._blobs[file]
 
     def _remember_facts(self, file: str, facts: FileFacts) -> None:
-        """Keeps ``file``'s facts in memory and queues its rows for the name table; a file the parse
-        guard refused has no rows."""
+        """Keeps ``file``'s facts in memory and queues its rows for the name table. A file the parse
+        guard refused never gets here, so it has no rows."""
         self._facts[file] = facts
         blob = self._blob_of(file)
-        if facts.refusal is None and blob is not None:
+        if blob is not None:
             self._unwritten[blob] = facts
 
     def _write_names(self) -> None:
@@ -596,11 +606,11 @@ class CodeIndex:
         for file, facts in scanned.items():
             if self._read_bytes(file) is None:
                 continue
+            if facts.refusal is not None:
+                self._refused[file] = facts.refusal
+                continue
             self._remember_facts(file, facts)
-            if facts.refusal is None:
-                self._fact_cache.save(file, contents[file], facts)
-            else:
-                self._unavailable[file] = facts.refusal
+            self._fact_cache.save(file, contents[file], facts)
 
     def _load_cached_facts(self, files: Sequence[str]) -> dict[str, bytes]:
         """Remembers the persisted facts of ``files``; returns the bytes of those still to parse.
@@ -608,7 +618,7 @@ class CodeIndex:
         The caller holds the facts lock."""
         to_parse: dict[str, bytes] = {}
         for file in files:
-            if language_of(file) is None or file in self._facts:
+            if language_of(file) is None or file in self._facts or file in self._refused:
                 continue
             content = self._read_bytes(file)
             if content is None:
@@ -689,7 +699,8 @@ class CodeIndex:
                 if identity in seen:
                     continue
                 seen.add(identity)
-                if name in self._facts_in(inherited.path).export_names:
+                exported = self._facts_in(inherited.path).export_names
+                if inherited.path in self._refused or name in exported:
                     prior = found.get(inherited.path)
                     if prior is None or inherited.proven:
                         found[inherited.path] = inherited
@@ -820,11 +831,6 @@ class CodeIndex:
         """The file's bytes while they equal its first read, so facts and table rows are only built
         from them."""
         return self._sources.current(file)
-
-    @property
-    def source_memory(self) -> SourceMemory:
-        """What the index holds of the files it read: compressed first reads and cached lines."""
-        return self._sources.memory
 
     def _first_read_stands(self, file: str, content: bytes) -> bool:
         """Whether the first bytes read from ``file`` can stand. Bytes that differ from the blob the
