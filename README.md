@@ -332,7 +332,9 @@ held by another function, a class or an object literal, or assigned to a propert
 function () {}`), is no module-level definition. One assigned to `exports.x` or `module.exports.x`,
 or listed in `module.exports = {...}`, is a CommonJS export: an import names it, its own module does not.
 An import reaches only what its module exports. A Python module exports its whole module scope. A
-script module exports the definitions an `export` statement or list names, its default export
+script module exports the definitions an `export` statement or its own list names, under the name the
+list gives them (`export { inner as outer }` exports `inner` as `outer`, never a private `outer`),
+its default export
 (`export default build`, `module.exports = build`), and its CommonJS exports (`exports.query = query`,
 `module.exports = { log }`); a module that exports `new Logger()` exports no `log`, and an
 unexported helper stays its own module's. References carry a binding too. A

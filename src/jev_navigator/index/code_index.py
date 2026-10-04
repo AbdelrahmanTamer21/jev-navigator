@@ -111,7 +111,6 @@ class CodeIndex:
         self._references_named = cache(self._references_with_name)
         self._definitions = cache(self._definitions_by_name)
         self._module_scope_in = cache(self._module_scope_spans)
-        self._importable_in = cache(self._importable_spans)
         self._names_imported = cache(self._read_imported_names)
         self._local_scopes = cache(self._read_local_scopes)
         self._binding = cache(self._compute_binding)
@@ -405,7 +404,7 @@ class CodeIndex:
             receiver,
             definitions,
             tuple(span for span in definitions if span in self._module_scope_in(span.file)),
-            tuple(span for span in definitions if span in self._importable_in(span.file)),
+            (),
             (),
             self._files_hiding(name),
         )
@@ -589,19 +588,6 @@ class CodeIndex:
         symbols from the syntax tree."""
         return frozenset((*self._file_structure(file).module_symbols, *self._module_declarations(file)))
 
-    def _importable_spans(self, file: str) -> frozenset[Span]:
-        """Symbols and declarations another module can import from ``file`` by name. A Python module
-        exports its whole module scope. A script module exports the module-scope definitions it names
-        in an export statement, as its default export or as a CommonJS export, and the functions and
-        classes it assigns to CommonJS exports."""
-        module_scope = self._module_scope_in(file)
-        if language_of(file) == "python":
-            return module_scope
-        facts = self._facts_in(file)
-        exported = {*facts.export_names, *facts.exported_values}
-        named = (span for span in module_scope if span.name in exported)
-        return frozenset((*named, *facts.structure.commonjs_exports))
-
     def _module_declarations(self, file: str) -> tuple[Span, ...]:
         """The declarations no class, function or namespace contains. A function starting on a
         declaration's first line is the value it declares, not its container."""
@@ -659,15 +645,27 @@ class CodeIndex:
         return any(span.name == name and self._can_name(role, span) for span in self._module_scope_in(file))
 
     def _importable_definitions(self, file: str, name: str, role: str | None) -> tuple[Span, ...]:
-        """The definitions of ``name`` in ``file`` that another module can import, symbols before
-        declarations as ``find_definition`` orders them."""
+        """The definitions another module imports from ``file`` as ``name``, symbols before
+        declarations as ``find_definition`` orders them. A Python module exports its whole module
+        scope under its own names. A script module exports the module-scope definition an export
+        statement or list names, its default export or a CommonJS export of that name, under its own
+        name or the one an export list gives it (`export { inner as outer }`), and the functions and
+        classes it assigns to CommonJS exports."""
         structure = self._file_structure(file)
-        importable = self._importable_in(file)
+        own_name = name if language_of(file) == "python" else self._export_names_in(file).get(name)
+        exported = {span for span in self._module_scope_in(file) if span.name == own_name}
+        exported |= {span for span in structure.commonjs_exports if span.name == name}
         return tuple(
             span
             for span in (*structure.symbols, *structure.declarations)
-            if span.name == name and span in importable and self._can_name(role, span)
+            if span in exported and self._can_name(role, span)
         )
+
+    def _export_names_in(self, file: str) -> dict[str, str]:
+        """Each name script module ``file`` exports, with the name of the definition it exports."""
+        facts = self._facts_in(file)
+        own_names = {name: name for name in (*facts.export_names, *facts.exported_values)}
+        return own_names | dict(facts.renamed_exports)
 
     def _exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
         """The module ``file``'s import of ``specifier`` resolves to, then each module it re-exports

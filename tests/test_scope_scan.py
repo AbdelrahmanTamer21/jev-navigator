@@ -1156,6 +1156,36 @@ def test_a_local_name_replaces_an_import_for_values_and_never_for_types(tmp_path
     assert (typed.status.value, typed.target) == ("resolved", Span("src/same.ts", 1, 3, "Config"))
 
 
+def test_an_export_list_entry_under_another_name_exports_its_own_definition(tmp_path: Path) -> None:
+    """`export { inner as outer }` exports `inner` under the name `outer`: an import of `outer`
+    reaches `inner`, never the module's private `outer`, and an import of `inner` reaches nothing.
+    A re-export's names are another module's, so `export { b } from` never exports the module's
+    private `b`."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "src/ren.ts": (
+                "function inner() { return 1; }\nfunction outer() { return 2; }\nexport { inner as outer };\n"
+            ),
+            "src/use_outer.ts": "import { outer } from './ren';\nouter();\n",
+            "src/use_inner.ts": "import { inner } from './ren';\ninner();\n",
+            "src/barrel.ts": "function b() { return 0; }\nexport { b } from './missing';\n",
+            "src/use_barrel.ts": "import { b } from './barrel';\nb();\n",
+        },
+    )
+
+    # Act
+    outer = index.binding_of("src/use_outer.ts", 2, "outer", None)
+    inner = index.binding_of("src/use_inner.ts", 2, "inner", None)
+    reexported = index.binding_of("src/use_barrel.ts", 2, "b", None)
+
+    # Assert
+    assert (outer.status.value, outer.target) == ("resolved", Span("src/ren.ts", 1, 1, "inner"))
+    assert (inner.status.value, inner.target) == ("candidate", None), inner
+    assert (reexported.status.value, reexported.target) == ("candidate", None), reexported
+
+
 def test_only_what_a_script_module_exports_is_importable(tmp_path: Path) -> None:
     """A script module's own functions are importable only where it exports them: by an `export`
     statement or list, as its default export, or as a CommonJS export (`exports.x = x`, a function
@@ -1407,9 +1437,9 @@ def test_plain_javascript_is_unchanged_whether_or_not_flow_files_share_the_scope
 
 
 def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> None:
-    """Declaration name nodes and specifier nodes carry the surface: default, wildcard, a multi-line
-    list, two constants in one statement and a template-literal body are each handled by the
-    parser, not by source-text scanning."""
+    """Declaration name nodes and the module's own specifier nodes carry the surface: a default, a
+    wildcard, a multi-line re-export list (another module's names), two constants in one statement
+    and a template-literal body are each handled by the parser, not by source-text scanning."""
     # Arrange
     index = committed(
         tmp_path,
@@ -1432,7 +1462,7 @@ def test_the_export_surface_facts_come_from_the_parser_nodes(tmp_path: Path) -> 
     facts = index._facts_in("src/service.ts")
 
     # Assert
-    assert facts.export_names == ("first", "placeOrder", "refund", "run", "second")
+    assert facts.export_names == ("first", "run", "second")
     assert facts.incomplete is False
 
 

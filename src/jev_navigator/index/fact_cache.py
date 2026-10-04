@@ -21,7 +21,7 @@ from .scope_scan import (
 from .spans import Span
 from .tools import ast_grep_version
 
-FACT_RULE_VERSION = "combined-facts-v27-only-the-programs-exports"
+FACT_RULE_VERSION = "combined-facts-v28-renamed-exports"
 
 
 class FactCache:
@@ -93,6 +93,7 @@ def _encode(facts: FileFacts) -> dict:
         "unparsed_lines": [list(stretch) for stretch in facts.unparsed_lines],
         "module_aliases": [list(alias) for alias in facts.module_aliases],
         "exported_values": list(facts.exported_values),
+        "renamed_exports": [list(pair) for pair in facts.renamed_exports],
     }
 
 
@@ -125,4 +126,5 @@ def _decode(file: str, raw: dict) -> FileFacts:
         tuple((int(start), int(end)) for start, end in raw["unparsed_lines"]),
         tuple(ModuleAlias(name, specifier) for name, specifier in raw["module_aliases"]),
         tuple(raw["exported_values"]),
+        tuple((exported, own) for exported, own in raw["renamed_exports"]),
     )

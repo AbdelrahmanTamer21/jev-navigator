@@ -568,9 +568,18 @@ EXPORTED_VALUES = {
 }
 
 
+# The entries of a module's own `export { ... }` lists, quietly (see the double negation above):
+# `export { inner as outer }` exports the module's definition `inner` as `outer`. A re-export's,
+# `export { a as b } from './m'`, are another module's names (see ``reexported_names``).
+_OWN_EXPORT = "{kind: export_statement, not: {has: {field: source, kind: string}}}"
+OWN_EXPORT_SPECIFIERS = (
+    f"  kind: export_specifier\n  not: {{not: {{inside: {{kind: export_clause, inside: {_OWN_EXPORT}}}}}}}"
+)
+
+
 def export_rules(languages: Iterable[str]) -> str:
     """ast-grep rules for the script export surface: the names exported declarations make, the
-    ``{ ... }`` clause specifiers that carry aliased names, and the names exported as values (see
+    entries of the module's own ``{ ... }`` lists, and the names exported as values (see
     ``EXPORTED_VALUES``). Python has no such kinds, so it contributes no rules."""
     documents = []
     for language in languages:
@@ -578,7 +587,7 @@ def export_rules(languages: Iterable[str]) -> str:
             continue
         grammar = grammar_of(language)
         documents.append(f"id: export_surface\nlanguage: {grammar}\nrule:\n{EXPORTED_NAMES[grammar]}")
-        documents.append(f"id: export_specifier\nlanguage: {grammar}\nrule:\n  kind: export_specifier")
+        documents.append(f"id: export_specifier\nlanguage: {grammar}\nrule:\n{OWN_EXPORT_SPECIFIERS}")
         documents += [
             f"id: exported_value\nlanguage: {grammar}\nrule:\n{rule}" for rule in EXPORTED_VALUES[grammar]
         ]

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import NamedTuple, Protocol, TypeVar
 
 from . import tools
-from .imports import _local
+from .imports import _exported, _local
 from .languages import (
     CLASS_KINDS,
     COMMONJS_EXPORT_PAIR,
@@ -149,6 +149,9 @@ class FileFacts:
     # The names a script module exports as values: its default export and its CommonJS exports of a
     # definition under its own name (see ``EXPORTED_VALUES``).
     exported_values: tuple[str, ...] = ()
+    # Each name a script module's own export list gives a definition of another name, with that
+    # name: ("outer", "inner") for `export { inner as outer }`.
+    renamed_exports: tuple[tuple[str, str], ...] = ()
 
 
 def scan_facts(
@@ -190,6 +193,9 @@ def scan_facts(
     )
     surface = _export_names_from_matches(match for match in matches if match["ruleId"] in _EXPORT_RULE_IDS)
     values = _captured_names_by_file(match for match in matches if match["ruleId"] == _EXPORTED_VALUE_RULE)
+    renamed = _renamed_exports_from_matches(
+        match for match in matches if match["ruleId"] == _EXPORT_SPECIFIER_RULE
+    )
     unread = _unparsed_lines_from_matches(match for match in matches if match["ruleId"] == _ERROR_RULE)
     return {
         file: FileFacts(
@@ -201,6 +207,7 @@ def scan_facts(
             unread.get(file, ()),
             aliases.get(file, ()),
             values.get(file, ()),
+            renamed.get(file, ()),
         )
         for file in files
     }
@@ -554,13 +561,24 @@ _EXPORTED_VALUE_RULE = "exported_value"
 
 
 def _export_names_from_matches(matches) -> dict[str, tuple[str, ...]]:
-    """The names each file's parser says it exports: exported declarations' name nodes, and the
-    specifier nodes of ``{ ... }`` lists."""
+    """The names each file's parser says it exports from its own definitions: exported
+    declarations' name nodes, and the names the entries of its own ``{ ... }`` lists export."""
     names: dict[str, set[str]] = {}
     for match in matches:
         found = names.setdefault(match["file"], set())
-        found.add(_local(match["text"]) if match["ruleId"] == _EXPORT_SPECIFIER_RULE else match["text"])
+        found.add(match["text"] if match["ruleId"] == _EXPORT_STATEMENT_RULE else _local(match["text"]))
     return {file: tuple(sorted(found)) for file, found in names.items()}
+
+
+def _renamed_exports_from_matches(matches) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Each file's own export list entries that export a definition under another name, as the
+    exported name and the definition's: ``outer`` and ``inner`` for ``inner as outer``."""
+    pairs: dict[str, set[tuple[str, str]]] = {}
+    for match in matches:
+        exported, own = _local(match["text"]), _exported(match["text"])
+        if exported != own:
+            pairs.setdefault(match["file"], set()).add((exported, own))
+    return {file: tuple(sorted(found)) for file, found in pairs.items()}
 
 
 def _captured_names_by_file(matches) -> dict[str, tuple[str, ...]]:
