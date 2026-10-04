@@ -23,7 +23,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import sqlite3
 import threading
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
@@ -32,6 +31,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..cache_root import cache_root
+from ..shared_database import open_shared_database
 from .answers import Answer, JevResponse, answer_from_json
 from .relations import without_quoted_code
 
@@ -205,19 +205,13 @@ class SqliteAnswerStore:
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._db = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
-        self._db.execute("pragma journal_mode=wal")
-        self._open_current_layout()
+        self._db = open_shared_database(self.path, _SCHEMA, SHARED_STORE_VERSION)
+        self._refuse_another_layout()
 
-    def _open_current_layout(self) -> None:
-        """Create the layout in a new file; refuse a file written in any other layout."""
+    def _refuse_another_layout(self) -> None:
+        """A new file is created in the current layout; any other layout is refused."""
         version = self._db.execute("pragma user_version").fetchone()[0]
-        if version == 0 and not self._db.execute("select name from sqlite_master").fetchall():
-            self._db.executescript(_SCHEMA)
-            self._db.execute(f"pragma user_version = {SHARED_STORE_VERSION}")
-            return
         if version != SHARED_STORE_VERSION:
             self._db.close()
             raise UnsupportedAnswerStoreError(

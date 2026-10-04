@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import sqlite3
 import threading
 from pathlib import Path
@@ -285,3 +286,33 @@ def test_a_new_store_is_created_with_the_current_version_and_reopens(tmp_path: P
     # Assert
     assert reopened.records() == ()
     assert sqlite3.connect(shared).execute("pragma user_version").fetchone()[0] == SHARED_STORE_VERSION
+
+
+def _open_and_write_after(barrier, path: str, request_sha256: str) -> None:
+    barrier.wait()
+    store = SqliteAnswerStore(Path(path))
+    store.put(AnswerRecord(request_sha256, ("q",), {"q": {"type": "noul", "p": 0.5}}, "m", 1, {}))
+
+
+def test_processes_creating_a_new_store_at_once_all_open_it(tmp_path: Path) -> None:
+    # Arrange: five rounds of four processes, each round on a store file that does not exist yet
+    context = multiprocessing.get_context("spawn")
+    rounds = []
+
+    # Act
+    for round_number in range(5):
+        shared, barrier = tmp_path / f"round-{round_number}" / "answers.sqlite", context.Barrier(4)
+        openers = [
+            context.Process(target=_open_and_write_after, args=(barrier, str(shared), f"r{n}"))
+            for n in range(4)
+        ]
+        for opener in openers:
+            opener.start()
+        for opener in openers:
+            opener.join(timeout=60)
+        rounds.append((shared, [opener.exitcode for opener in openers]))
+
+    # Assert
+    for shared, exit_codes in rounds:
+        assert exit_codes == [0, 0, 0, 0]
+        assert len(SqliteAnswerStore(shared).records()) == 4
