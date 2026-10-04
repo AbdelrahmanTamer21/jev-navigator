@@ -5,8 +5,19 @@ most one stamp per entry per day and a same-day warm run writes none."""
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 
 SECONDS_PER_DAY = 86_400
+
+
+@dataclass(frozen=True)
+class Confirmations:
+    """How many entries a store holds, how many of them were last confirmed before a given day, and
+    the oldest confirmation day, None for an empty store."""
+
+    held: int
+    unconfirmed: int
+    oldest: int | None
 
 
 def today() -> int:

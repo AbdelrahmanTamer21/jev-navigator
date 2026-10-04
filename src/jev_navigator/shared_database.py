@@ -13,11 +13,22 @@ def open_shared_database(path: Path, schema: str, version: int = 0) -> sqlite3.C
     """A connection to the file at ``path``, created first when it is missing. A new file is built
     whole under a temporary name, in WAL mode with ``schema`` and ``version``, then linked into
     place. Linking fails when another process got there first, so every process opens one finished
-    file and none has to change its journal mode, which needs the file to itself."""
+    file and none has to change its journal mode, which needs the file to itself. Opening stamps the
+    file's modification time, so that time says when a JVN process last used the file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         _create(path, schema, version)
-    return sqlite3.connect(path, timeout=30, check_same_thread=False)
+    database = sqlite3.connect(path, timeout=30, check_same_thread=False)
+    os.utime(path)
+    return database
+
+
+def release_free_pages(database: sqlite3.Connection) -> None:
+    """Returns the pages deleted rows left free to the disk: they move to the end of the file, and a
+    checkpoint cuts them off and empties the write-ahead log, as far as no reader still needs it. The
+    vacuum frees one page per step, so its rows are fetched to the end."""
+    database.execute("pragma incremental_vacuum").fetchall()
+    database.execute("pragma wal_checkpoint(truncate)").fetchall()
 
 
 def _create(path: Path, schema: str, version: int) -> None:
@@ -25,6 +36,7 @@ def _create(path: Path, schema: str, version: int) -> None:
     os.close(descriptor)
     try:
         with closing(sqlite3.connect(temporary)) as database:
+            database.execute("pragma auto_vacuum = incremental")
             database.execute("pragma journal_mode=wal")
             database.executescript(schema)
             database.execute(f"pragma user_version = {version}")

@@ -288,7 +288,7 @@ def test_the_scan_and_the_fact_cache_agree_that_a_file_is_flow(tmp_path: Path) -
     # Assert: the tsx grammar read the type annotations, and the facts are cached as flow.
     assert names == ["typed"]
     assert "typed.js" not in index.observed_unparsed_files
-    assert [path.parent.name for path in cache_root.rglob("*.json")] == ["flow"]
+    assert [path.relative_to(cache_root).parts[0] for path in cache_root.rglob("*.json")] == ["flow"]
 
 
 def test_a_file_saved_while_the_parser_runs_is_reported_and_its_facts_dropped(

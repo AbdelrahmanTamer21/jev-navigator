@@ -6,9 +6,10 @@ no text search and no parse. Rows hold names and line numbers, never code: a rec
 chain of names or ``scope_scan.OPAQUE_RECEIVER``, as the facts hold it.
 
 One table file serves one ``table_identity``: a change to the parser, to any language's rules or to
-the code that turns facts into rows starts a new table. Rows are only ever inserted, and a file's
-rows are written in one transaction with its entry in ``files``, so two processes writing at once
-leave the table whole and a reader never sees half a file.
+the code that turns facts into rows starts a new table. A file's rows are written in one transaction
+with its entry in ``files``, so two processes writing at once leave the table whole and a reader
+never sees half a file. Each entry carries the day a run last confirmed it, by covering a scope that
+holds the file; housekeeping forgets a file's rows and entry together once it goes unconfirmed.
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ from itertools import islice
 from pathlib import Path
 
 from ..cache_root import cache_root
-from ..shared_database import open_shared_database
+from ..confirmation import Confirmations, today
+from ..shared_database import open_shared_database, release_free_pages
 from .fact_cache import facts_identity
 from .scope_scan import FileFacts
 
@@ -66,15 +68,62 @@ class NameTable:
         self._db = open_shared_database(self.path, _SCHEMA)
 
     def entries(self, blobs: Collection[str]) -> dict[str, FileEntry]:
-        """The entries of those ``blobs`` whose rows the table holds."""
+        """The entries of those ``blobs`` whose rows the table holds, each confirmed today. An entry
+        last confirmed on an earlier day is stamped first and returned only when the stamp still
+        found it, so a prune running meanwhile never leaves a returned entry without its rows. Only
+        that stamp writes, so a same-day warm run takes no write lock."""
+        found, stale = self._read_entries(blobs)
+        for blob in stale - self._confirm(stale):
+            del found[blob]
+        return found
+
+    def forget_unconfirmed(self, before: int, limit: int) -> int:
+        """Deletes the rows and entries of at most ``limit`` file contents last confirmed before the
+        day ``before``, least recently confirmed first; returns how many, and frees their space."""
+        chosen = "select blob from files where confirmed < ? order by confirmed, blob limit ?"
+        with self._lock:
+            with self._db:
+                self._db.execute(f"delete from names where blob in ({chosen})", (before, limit))
+                forgotten = self._db.execute(f"delete from files where blob in ({chosen})", (before, limit))
+            release_free_pages(self._db)
+        return forgotten.rowcount
+
+    def confirmations(self, before: int) -> Confirmations:
+        with self._lock:
+            held, unconfirmed, oldest = self._db.execute(
+                "select count(*), count(*) filter (where confirmed < ?), min(confirmed) from files",
+                (before,),
+            ).fetchone()
+        return Confirmations(held, unconfirmed, oldest)
+
+    def _read_entries(self, blobs: Collection[str]) -> tuple[dict[str, FileEntry], set[str]]:
         found: dict[str, FileEntry] = {}
+        stale: set[str] = set()
+        current = today()
         with self._lock:
             for chunk in _chunks(sorted(blobs)):
                 marks = ",".join("?" * len(chunk))
-                query = f"select blob, incomplete, unparsed_lines from files where blob in ({marks})"
-                for blob, incomplete, stretches in self._db.execute(query, chunk):
+                query = (
+                    f"select blob, incomplete, unparsed_lines, confirmed from files where blob in ({marks})"
+                )
+                for blob, incomplete, stretches, confirmed in self._db.execute(query, chunk):
                     found[blob] = FileEntry(bool(incomplete), tuple(map(tuple, json.loads(stretches))))
-        return found
+                    if confirmed < current:
+                        stale.add(blob)
+        return found, stale
+
+    def _confirm(self, blobs: set[str]) -> set[str]:
+        """Stamps ``blobs`` confirmed today; returns those the table still held."""
+        confirmed: set[str] = set()
+        with self._lock, self._db:
+            for chunk in _chunks(sorted(blobs)):
+                marks = ",".join("?" * len(chunk))
+                stamped = self._db.execute(
+                    f"update files set confirmed = ? where blob in ({marks}) returning blob",
+                    (today(), *chunk),
+                )
+                confirmed.update(blob for (blob,) in stamped.fetchall())
+        return confirmed
 
     def add(self, facts_by_blob: Mapping[str, FileFacts]) -> None:
         """Writes the rows of each file content the table does not hold yet, one transaction per
@@ -114,7 +163,8 @@ class NameTable:
     def _add_entry(self, blob: str, facts: FileFacts) -> bool:
         stretches = json.dumps([list(stretch) for stretch in facts.unparsed_lines])
         added = self._db.execute(
-            "insert or ignore into files values (?, ?, ?)", (blob, int(facts.incomplete), stretches)
+            "insert or ignore into files values (?, ?, ?, ?)",
+            (blob, int(facts.incomplete), stretches, today()),
         )
         return added.rowcount == 1
 
@@ -155,8 +205,10 @@ _SCHEMA = """
 create table files (
     blob text primary key,
     incomplete integer not null,
-    unparsed_lines text not null
+    unparsed_lines text not null,
+    confirmed integer not null
 ) without rowid;
+create index files_by_confirmation on files (confirmed, blob);
 create table names (
     name text not null,
     blob text not null,
