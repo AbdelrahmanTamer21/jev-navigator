@@ -312,7 +312,12 @@ require(...)`, `from m import stop as halt`) binds the same way to `stop`, unles
 default import is looked up by its local name. A function or class
 held by another function, a class or an object literal, or assigned to a property (`foo.bar =
 function () {}`), is no module-level definition. One assigned to `exports.x` or `module.exports.x`,
-or listed in `module.exports = {...}`, is a CommonJS export: an import names it, its own module does not. References carry a binding too. A
+or listed in `module.exports = {...}`, is a CommonJS export: an import names it, its own module does not.
+An import reaches only what its module exports. A Python module exports its whole module scope. A
+script module exports the definitions an `export` statement or list names, its default export
+(`export default build`, `module.exports = build`), and its CommonJS exports (`exports.query = query`,
+`module.exports = { log }`); a module that exports `new Logger()` exports no `log`, and an
+unexported helper stays its own module's. References carry a binding too. A
 binding counts only the definitions its site can name: a type, a class or a declaration a type can
 name, such as an interface; an export, any definition; and a call or any other reference (an
 argument, receiver, condition or decorator), a function, class or declaration a value can name, such

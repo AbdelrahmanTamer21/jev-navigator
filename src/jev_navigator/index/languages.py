@@ -515,11 +515,45 @@ EXPORTED_NAMES = {
     "javascript": f"  kind: identifier\n{_EXPORTED_NAME}",
 }
 
+# The names a module exports as values rather than by an export statement over their declaration,
+# captured as `$NAME`: its default export (`export default build`, `export default function make`,
+# `module.exports = build`) and its CommonJS exports of a definition under its own name
+# (`exports.query = query`, `module.exports = { log, run: run }`).
+_COMMONJS_OBJECT = (
+    "not: {not: {inside: {kind: object, inside: {field: right, kind: assignment_expression, "
+    "has: {field: left, regex: '^module[.]exports$'}}}}}"
+)
+_EXPORTED_VALUES = (
+    """  any:
+    - pattern: exports.$NAME = $NAME
+    - pattern: module.exports.$NAME = $NAME
+    - pattern: module.exports = $NAME
+    - pattern: export default $NAME
+  not: {not: {any: [{has: {field: right, kind: identifier}}, {has: {field: value, kind: identifier}}]}}""",
+    f"""  pattern: {{context: '({{ $NAME: $NAME }})', selector: pair}}
+  {_COMMONJS_OBJECT}""",
+    f"""  kind: shorthand_property_identifier
+  pattern: $NAME
+  {_COMMONJS_OBJECT}""",
+)
+_DEFAULT_EXPORT = "{field: declaration, kind: export_statement, has: {regex: '^default$'}}"
+_DEFAULT_DECLARATION_NAME = f"""  pattern: $NAME
+  not: {{not: {{inside: {{field: name, inside: {_DEFAULT_EXPORT}}}}}}}"""
+_TYPED_EXPORTED_VALUES = (
+    *_EXPORTED_VALUES,
+    f"  any: [{{kind: identifier}}, {{kind: type_identifier}}]\n{_DEFAULT_DECLARATION_NAME}",
+)
+EXPORTED_VALUES = {
+    "typescript": _TYPED_EXPORTED_VALUES,
+    "tsx": _TYPED_EXPORTED_VALUES,
+    "javascript": (*_EXPORTED_VALUES, f"  kind: identifier\n{_DEFAULT_DECLARATION_NAME}"),
+}
+
 
 def export_rules(languages: Iterable[str]) -> str:
-    """ast-grep rules for the script export surface: the names exported declarations make, and the
-    ``{ ... }`` clause specifiers that carry aliased names. Python has no such kinds, so it
-    contributes no rules."""
+    """ast-grep rules for the script export surface: the names exported declarations make, the
+    ``{ ... }`` clause specifiers that carry aliased names, and the names exported as values (see
+    ``EXPORTED_VALUES``). Python has no such kinds, so it contributes no rules."""
     documents = []
     for language in languages:
         if language == "python":
@@ -527,6 +561,9 @@ def export_rules(languages: Iterable[str]) -> str:
         grammar = grammar_of(language)
         documents.append(f"id: export_surface\nlanguage: {grammar}\nrule:\n{EXPORTED_NAMES[grammar]}")
         documents.append(f"id: export_specifier\nlanguage: {grammar}\nrule:\n  kind: export_specifier")
+        documents += [
+            f"id: exported_value\nlanguage: {grammar}\nrule:\n{rule}" for rule in EXPORTED_VALUES[grammar]
+        ]
     return "\n---\n".join(documents)
 
 

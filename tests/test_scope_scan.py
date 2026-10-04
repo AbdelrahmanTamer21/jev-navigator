@@ -277,7 +277,7 @@ def _wide_script_function() -> str:
             "module.js",
             _many("const {{ c{n} }} = settings;\nfoo.p{n} = function () {{ return {n}; }};\n")
             + "module.exports = {\n"
-            + _many("  e{n}() {{ return {n}; }},\n")
+            + _many("  e{n}() {{ return {n}; }},\n  s{n},\n  p{n}: p{n},\n")
             + "};\n"
             + _wide_script_function(),
         ),
@@ -996,6 +996,84 @@ def test_a_local_name_replaces_an_import_for_values_and_never_for_types(tmp_path
     assert (method.status.value, method.target) == ("resolved", Span("app/jobs.py", 1, 2, "refund"))
     assert (imported.status.value, imported.target) == ("resolved", Span("src/x.ts", 1, 3, "stop"))
     assert (typed.status.value, typed.target) == ("resolved", Span("src/same.ts", 1, 3, "Config"))
+
+
+def test_only_what_a_script_module_exports_is_importable(tmp_path: Path) -> None:
+    """A script module's own functions are importable only where it exports them: by an `export`
+    statement or list, as its default export, or as a CommonJS export (`exports.x = x`, a function
+    assigned to `exports.x`, a member of `module.exports = {...}`). A module exporting `new Logger()`
+    exports no `log`, and an unexported helper stays the module's own."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "logger.js": (
+                "function log(message) { return message; }\nclass Logger {\n"
+                "  log(message) { return log(message); }\n}\nmodule.exports = new Logger();\n"
+            ),
+            "named.js": (
+                "function log(message) { return message; }\nfunction query() { return 1; }\n"
+                "function walk() { return 2; }\nmodule.exports = { log, walk: walk };\n"
+                "exports.query = query;\n"
+            ),
+            "app.js": (
+                "const logger = require('./logger');\nconst { log } = require('./logger');\n"
+                "const named = require('./named');\nlogger.log('hello');\nlog('hello');\n"
+                "named.log('x');\nnamed.query();\nnamed.walk();\n"
+            ),
+            "service.ts": (
+                "function helper() {\n  return 1;\n}\nexport function run() {\n  return helper();\n}\n"
+            ),
+            "defaults.ts": "export default function make() {\n  return 1;\n}\n",
+            "aliased.ts": "function build() {\n  return 2;\n}\nexport default build;\n",
+            "listed.ts": "function listed() {\n  return 3;\n}\nexport { listed };\n",
+            "single.js": "function solo() {\n  return 4;\n}\nmodule.exports = solo;\n",
+            "made.js": "export default function made() {\n  return 5;\n}\n",
+            "esm.js": "import made from './made';\nmade();\n",
+            "main.ts": (
+                "import * as service from './service';\nimport { helper } from './service';\n"
+                "import make from './defaults';\nimport build from './aliased';\n"
+                "import { listed } from './listed';\nimport solo from './single';\n"
+                "service.helper();\nhelper();\nmake();\nbuild();\nlisted();\nsolo();\n"
+            ),
+        },
+    )
+    sites = {
+        ("app.js", 4): ("log", "logger"),
+        ("app.js", 5): ("log", None),
+        ("app.js", 6): ("log", "named"),
+        ("app.js", 7): ("query", "named"),
+        ("app.js", 8): ("walk", "named"),
+        ("main.ts", 7): ("helper", "service"),
+        ("main.ts", 8): ("helper", None),
+        ("main.ts", 9): ("make", None),
+        ("main.ts", 10): ("build", None),
+        ("main.ts", 11): ("listed", None),
+        ("main.ts", 12): ("solo", None),
+        ("esm.js", 2): ("made", None),
+    }
+
+    # Act
+    bindings = {site: index.binding_of(*site, name, receiver) for site, (name, receiver) in sites.items()}
+
+    # Assert
+    assert {
+        site: (binding.status.value, binding.target and binding.target.key)
+        for site, binding in bindings.items()
+    } == {
+        ("app.js", 4): ("candidate", None),
+        ("app.js", 5): ("candidate", None),
+        ("app.js", 6): ("resolved", "named.js:1-1"),
+        ("app.js", 7): ("resolved", "named.js:2-2"),
+        ("app.js", 8): ("resolved", "named.js:3-3"),
+        ("main.ts", 7): ("candidate", None),
+        ("main.ts", 8): ("candidate", None),
+        ("main.ts", 9): ("resolved", "defaults.ts:1-3"),
+        ("main.ts", 10): ("resolved", "aliased.ts:1-3"),
+        ("main.ts", 11): ("resolved", "listed.ts:1-3"),
+        ("main.ts", 12): ("resolved", "single.js:1-3"),
+        ("esm.js", 2): ("resolved", "made.js:1-3"),
+    }
 
 
 def test_a_name_imported_under_an_alias_binds_to_the_exported_definition(

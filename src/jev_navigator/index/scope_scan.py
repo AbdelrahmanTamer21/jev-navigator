@@ -86,8 +86,9 @@ class ModuleAlias(NamedTuple):
 class FileStructure:
     """``module_symbols`` are the symbols their module names: no function, class or object literal
     holds them in the syntax tree, and no property assignment names them. Symbols sharing a line
-    each hold the other's first line, so lines alone cannot tell. ``importable_symbols`` adds the
-    CommonJS exports, which another module imports by name but their own module never names.
+    each hold the other's first line, so lines alone cannot tell. ``commonjs_exports`` are the
+    functions and classes assigned to CommonJS exports (``exports.run = function () {}``), which
+    another module imports by name but their own module never names.
     ``type_declarations`` and ``value_declarations`` are the declarations a type use and a value
     use may name, decided by each declaration's own syntax node. ``local_names`` are the names each
     function binds for its own body (see ``LOCAL_NAME_RULES``); a name a module-level block binds
@@ -97,7 +98,7 @@ class FileStructure:
     symbols: tuple[Span, ...]
     declarations: tuple[Span, ...]
     module_symbols: tuple[Span, ...]
-    importable_symbols: tuple[Span, ...]
+    commonjs_exports: tuple[Span, ...]
     type_declarations: tuple[Span, ...]
     value_declarations: tuple[Span, ...]
     local_names: tuple[LocalName, ...] = ()
@@ -133,6 +134,9 @@ class FileFacts:
     # The first and last line of each stretch the grammar's ERROR nodes span, in file order.
     unparsed_lines: tuple[tuple[int, int], ...] = ()
     module_aliases: tuple[ModuleAlias, ...] = ()
+    # The names a script module exports as values: its default export and its CommonJS exports of a
+    # definition under its own name (see ``EXPORTED_VALUES``).
+    exported_values: tuple[str, ...] = ()
 
 
 def scan_facts(
@@ -166,12 +170,14 @@ def scan_facts(
     references = _references_from_matches(
         match
         for match in matches
-        if match["ruleId"] not in {*_STRUCTURE_RULE_IDS, "call", *_EXPORT_RULE_IDS, _MODULE_ALIAS_RULE}
+        if match["ruleId"]
+        not in {*_STRUCTURE_RULE_IDS, "call", *_EXPORT_RULE_IDS, _EXPORTED_VALUE_RULE, _MODULE_ALIAS_RULE}
     )
     aliases = _module_aliases_from_matches(
         match for match in matches if match["ruleId"] == _MODULE_ALIAS_RULE
     )
     surface = _export_names_from_matches(match for match in matches if match["ruleId"] in _EXPORT_RULE_IDS)
+    values = _captured_names_by_file(match for match in matches if match["ruleId"] == _EXPORTED_VALUE_RULE)
     unread = _unparsed_lines_from_matches(match for match in matches if match["ruleId"] == _ERROR_RULE)
     return {
         file: FileFacts(
@@ -182,6 +188,7 @@ def scan_facts(
             surface.get(file, ()),
             unread.get(file, ()),
             aliases.get(file, ()),
+            values.get(file, ()),
         )
         for file in files
     }
@@ -253,7 +260,7 @@ def _structure_from_matches(files, unparsed, matches):
             _ordered(symbols, positions),
             _sorted(span for span, _ in declared),
             _ordered(module_symbols, positions),
-            _ordered(module_symbols | _marked(ranges[file], marks[file][_MODULE_EXPORT_RULE]), positions),
+            _ordered(_marked(ranges[file], marks[file][_MODULE_EXPORT_RULE]), positions),
             _sorted(span for span, kind in declared if kind.named_by_types),
             _sorted(span for span, kind in declared if kind.named_by_values),
             _local_names(ranges[file], classes[file], bound_names[file]),
@@ -470,6 +477,7 @@ _STRUCTURE_RULE_IDS = frozenset(
 _EXPORT_STATEMENT_RULE = "export_surface"
 _EXPORT_SPECIFIER_RULE = "export_specifier"
 _EXPORT_RULE_IDS = (_EXPORT_STATEMENT_RULE, _EXPORT_SPECIFIER_RULE)
+_EXPORTED_VALUE_RULE = "exported_value"
 
 
 def _export_names_from_matches(matches) -> dict[str, tuple[str, ...]]:
@@ -479,6 +487,13 @@ def _export_names_from_matches(matches) -> dict[str, tuple[str, ...]]:
     for match in matches:
         found = names.setdefault(match["file"], set())
         found.add(_local(match["text"]) if match["ruleId"] == _EXPORT_SPECIFIER_RULE else match["text"])
+    return {file: tuple(sorted(found)) for file, found in names.items()}
+
+
+def _captured_names_by_file(matches) -> dict[str, tuple[str, ...]]:
+    names: dict[str, set[str]] = {}
+    for match in matches:
+        names.setdefault(match["file"], set()).add(_captured_name(match))
     return {file: tuple(sorted(found)) for file, found in names.items()}
 
 

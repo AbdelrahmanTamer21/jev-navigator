@@ -563,9 +563,17 @@ class CodeIndex:
         return frozenset((*self._file_structure(file).module_symbols, *self._module_declarations(file)))
 
     def _importable_spans(self, file: str) -> frozenset[Span]:
-        """Symbols and declarations another module can import from ``file`` by name: those its
-        module scope names and its CommonJS exports."""
-        return frozenset((*self._file_structure(file).importable_symbols, *self._module_declarations(file)))
+        """Symbols and declarations another module can import from ``file`` by name. A Python module
+        exports its whole module scope. A script module exports the module-scope definitions it names
+        in an export statement, as its default export or as a CommonJS export, and the functions and
+        classes it assigns to CommonJS exports."""
+        module_scope = self._module_scope_in(file)
+        if language_of(file) == "python":
+            return module_scope
+        facts = self._facts_in(file)
+        exported = {*facts.export_names, *facts.exported_values}
+        named = (span for span in module_scope if span.name in exported)
+        return frozenset((*named, *facts.structure.commonjs_exports))
 
     def _module_declarations(self, file: str) -> tuple[Span, ...]:
         """The declarations no class or function contains. A function starting on a declaration's
