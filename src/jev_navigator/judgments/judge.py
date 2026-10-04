@@ -528,8 +528,8 @@ class Judge:
             state, questions, masked = self._masked_request(state, questions)
         refuse_if_secret(state, questions, self.scanner, masked)
         request_hash = request_sha256(state, questions)
-        stored = self.store.by_request(request_hash) if self.store else None
-        accepted = stored.response() if stored is not None and self._accepts(stored.model) else None
+        stored = self._stored_request(request_hash)
+        accepted = stored.response() if stored is not None else None
         return _Prepared(state, questions, request_hash, request_body(state, questions), accepted)
 
     def _masked_request(self, state: Mapping, questions: Mapping) -> tuple[Mapping, Mapping, frozenset[str]]:
@@ -874,8 +874,12 @@ class Judge:
         the batch the item was asked in."""
         return f"{content_hash(item)}|{content_hash(shared)}|{check.question_id}|{mates}"
 
-    def _accepts(self, stored_model: str) -> bool:
-        return self._knows_model() and self._model_filter() in (None, stored_model)
+    def _stored_request(self, request_hash: str) -> AnswerRecord | None:
+        """The stored record this judge may replay for one request: none while its served model is
+        unknown, else one from that model, or from any model for a replay-only client."""
+        if self.store is None or not self._knows_model():
+            return None
+        return self.store.by_request(request_hash, self._model_filter())
 
     def _knows_model(self) -> bool:
         return self._replays_any_model() or self.served_model is not None

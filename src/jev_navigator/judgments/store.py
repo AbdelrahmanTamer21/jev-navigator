@@ -88,7 +88,7 @@ class StoredItemAnswer:
 
 
 class AnswerStore(Protocol):
-    def by_request(self, request_sha256: str) -> AnswerRecord | None: ...
+    def by_request(self, request_sha256: str, served_model: str | None) -> AnswerRecord | None: ...
 
     def by_item(self, item_key: str, served_model: str | None) -> StoredItemAnswer | None: ...
 
@@ -108,17 +108,21 @@ class JsonlAnswerStore:
     def __init__(self, path: Path, *, keep_requests: bool = False) -> None:
         self.path = Path(path)
         self.keep_requests = keep_requests
-        self._records: dict[str, AnswerRecord] = {}
+        self._records: dict[str, dict[str, AnswerRecord]] = {}
         self._items: dict[str, dict[str, StoredItemAnswer]] = {}
         self._refusals: set[tuple[str, str, int]] = set()
         self._write_lock = threading.Lock()
         self._load()
 
-    def by_request(self, request_sha256: str) -> AnswerRecord | None:
-        return self._records.get(request_sha256)
+    def by_request(self, request_sha256: str, served_model: str | None) -> AnswerRecord | None:
+        """``served_model`` None accepts a record from any model (replay), the newest first."""
+        by_model = self._records.get(request_sha256, {})
+        if served_model is None:
+            return next(reversed(by_model.values()), None)
+        return by_model.get(served_model)
 
     def records(self) -> tuple[AnswerRecord, ...]:
-        return tuple(self._records.values())
+        return tuple(record for by_model in self._records.values() for record in by_model.values())
 
     def by_item(self, item_key: str, served_model: str | None) -> StoredItemAnswer | None:
         """``served_model`` None accepts an answer from any model (replay)."""
@@ -164,7 +168,9 @@ class JsonlAnswerStore:
                 self._index(_record_from_json(raw))
 
     def _index(self, record: AnswerRecord) -> None:
-        self._records[record.request_sha256] = record
+        by_model = self._records.setdefault(record.request_sha256, {})
+        by_model.pop(record.model, None)
+        by_model[record.model] = record
         for item_key, question_id in record.item_keys.items():
             by_model = self._items.setdefault(item_key, {})
             by_model[record.model] = StoredItemAnswer(
@@ -210,18 +216,14 @@ class SqliteAnswerStore:
         _open_current_layout(self.path)
         self._db = sqlite3.connect(self.path, timeout=_BUSY_SECONDS, check_same_thread=False)
 
-    def by_request(self, request_sha256: str) -> AnswerRecord | None:
-        row = self._one(
-            "select record from answers where request_sha256 = ? order by rowid desc limit 1",
-            (request_sha256,),
-        )
-        return _record_from_json(json.loads(row[0])) if row else None
-
-    def record_for(self, request_sha256: str, model: str) -> AnswerRecord | None:
-        row = self._one(
-            "select record from answers where request_sha256 = ? and model = ? order by rowid desc limit 1",
-            (request_sha256, model),
-        )
+    def by_request(self, request_sha256: str, served_model: str | None) -> AnswerRecord | None:
+        """``served_model`` None accepts a record from any model (replay), the newest first."""
+        if served_model is None:
+            query, parameters = "select record from answers where request_sha256 = ?", (request_sha256,)
+        else:
+            query = "select record from answers where request_sha256 = ? and model = ?"
+            parameters = (request_sha256, served_model)
+        row = self._one(f"{query} order by rowid desc limit 1", parameters)
         return _record_from_json(json.loads(row[0])) if row else None
 
     def records(self) -> tuple[AnswerRecord, ...]:
@@ -325,11 +327,11 @@ class LayeredAnswerStore:
         self.run = run
         self.shared = shared
 
-    def by_request(self, request_sha256: str) -> AnswerRecord | None:
-        found = self.run.by_request(request_sha256)
+    def by_request(self, request_sha256: str, served_model: str | None) -> AnswerRecord | None:
+        found = self.run.by_request(request_sha256, served_model)
         if found is not None:
             return found
-        shared = self.shared.by_request(request_sha256)
+        shared = self.shared.by_request(request_sha256, served_model)
         if shared is not None:
             self.run.put(shared)
         return shared
@@ -339,8 +341,8 @@ class LayeredAnswerStore:
         if found is not None:
             return found
         shared = self.shared.by_item(item_key, served_model)
-        if shared is not None and self.run.by_request(shared.request_sha256) is None:
-            self.run.put(self.shared.record_for(shared.request_sha256, shared.model))
+        if shared is not None and self.run.by_request(shared.request_sha256, shared.model) is None:
+            self.run.put(self.shared.by_request(shared.request_sha256, shared.model))
         return shared
 
     def records(self) -> tuple[AnswerRecord, ...]:

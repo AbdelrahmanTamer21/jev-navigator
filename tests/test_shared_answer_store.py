@@ -317,3 +317,26 @@ def test_parallel_first_opens_of_a_new_shared_store_never_fail(tmp_path: Path) -
     # Assert
     assert [worker.exitcode for worker in workers] == [0] * 8
     assert reported == []
+
+
+def test_a_whole_request_replays_the_served_models_answer_when_another_model_answered_later(
+    tmp_path: Path,
+) -> None:
+    # Arrange: model A answers a pick, then model B answers the same pick
+    shared = tmp_path / "answers.sqlite"
+    pick = Pick("first", "Which entry of `options` comes first?")
+    for model in ("jev-a", "jev-b"):
+        Judge(ScriptedJevClient(model=model), store=_run_store(tmp_path / model, shared)).pick(
+            pick, {"0": "a", "1": "b"}, SHARED
+        )
+    client = ScriptedJevClient(model="jev-a")
+    pack = tmp_path / "third" / "answers.jsonl"
+
+    # Act
+    Judge(client, store=_run_store(tmp_path / "third", shared), served_model="jev-a").pick(
+        pick, {"0": "a", "1": "b"}, SHARED
+    )
+
+    # Assert: model A's answer replays, and model B's never reaches this run's pack
+    assert client.requests == []
+    assert {record.model for record in JsonlAnswerStore(pack).records()} == {"jev-a"}
