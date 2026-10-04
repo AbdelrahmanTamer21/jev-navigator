@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import subprocess
 import sys
 import tracemalloc
+import weakref
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
@@ -110,6 +112,50 @@ def test_a_file_list_longer_than_the_argument_limit_is_split_across_processes(
     assert spawned[tools.AST_GREP] > 2
     assert spawned[tools.RIPGREP] > 1
     assert split == together
+
+
+def every_cache_filled(index: CodeIndex) -> frozenset[str]:
+    """Uses every lookup that caches, so each per-index cache holds an entry."""
+    for name in ("check", "place", "handle", "LIMIT", "absent"):
+        index.find_definition(name)
+        index.find_callers(name)
+        index.find_references(name)
+        index.call_site_count(name)
+    for file in index.files:
+        index.lines(file)
+        index.imports(file)
+        index.functions_in(file)
+        index.co_changed_files(file)
+    index.search_text("order")
+    return index.unparsed_files
+
+
+@pytest.fixture
+def no_cycle_collector():
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.enable()
+
+
+@pytest.mark.parametrize("build", ["from_git", "from_directory"])
+def test_a_dropped_index_is_freed_at_once_without_the_cycle_collector(
+    tmp_path: Path, build: str, no_cycle_collector: None
+) -> None:
+    # Arrange: an index whose facts, lines, name rows and every cache have been filled
+    commit_files(tmp_path, MIXED_SCOPE)
+    index = getattr(CodeIndex, build)(tmp_path, fact_cache_dir=tmp_path.parent / "facts")
+    every_cache_filled(index)
+    alive = weakref.ref(index)
+    sources_alive = weakref.ref(index._sources)
+
+    # Act
+    del index
+
+    # Assert: the index and its reader, which holds the compressed first reads, are both gone
+    assert alive() is None
+    assert sources_alive() is None
 
 
 def test_the_line_cache_holds_at_most_its_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
