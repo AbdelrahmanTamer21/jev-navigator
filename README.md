@@ -288,10 +288,14 @@ tracked file and hashed from its bytes otherwise (also when its bytes differ fro
 on a checkout that converts line endings), so a new index maps its files to table rows without
 reading them, and a warm lookup starts no text search and parses no file. The first name lookup of an
 index covers its whole scope: each file the table lacks is read from the fact cache, or parsed, and
-its rows are written. A changed file gets new rows under its new content, a deleted file answers no
-lookup, and a change to the parser or to any language's rules starts a new table. The table holds
-names and line numbers, never code: a receiver is kept only when it is a plain chain of names such as
-`this.store`, and string literals are never stored. Opening a known span parses its file directly. The resulting
+its rows are written. A changed file gets new rows under its new content, a file deleted before the
+first lookup answers none, one deleted later is reported unavailable and proves nothing, and a change
+to the parser or to any language's rules starts a new table. `definitions_in(file)` reads one file's
+definitions from the table. The table holds names and line numbers, never code. A file counts as read
+in a Find's counts only when navigation reached it, never because the table covered it. A call's or
+argument's receiver, in the table and in the cached facts alike, is kept only when it is a plain chain
+of names such as `this.store`; any other receiver (`client("k").fetch`, `cfg["token"].get`) is
+recorded as `<expression>`, so no string literal is ever stored. Opening a known span parses its file directly. The resulting
 per-file facts are cached by source bytes, language, ast-grep version, the rule text and the source
 of the code that reads the matches, in `$XDG_CACHE_HOME/jev-navigator/facts` (`~/.cache` when the
 variable is unset), so a new index can reuse facts without treating changed source or changed

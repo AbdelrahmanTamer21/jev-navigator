@@ -249,9 +249,11 @@ shapes facts belongs in that tuple.
 Name lookups read `name_table.NameTable`: one SQLite file per `table_identity()`, which hashes
 `fact_cache.facts_identity()` (the parser version and every language's rules) with the source of
 `name_table.py`. Rows are written only from facts, at `CodeIndex._remember_facts`, keyed by the git
-blob id of the file content, and hold names, kinds, lines, roles and plain receivers. A receiver that
-is not a plain chain of names, and therefore may quote a string literal, is left in the fact cache and
-the row only marks it. Two processes may write the table at once: a new file is created whole and
+blob id of the file content, and hold names, kinds, lines, roles and receivers as the facts hold them:
+`scope_scan.receiver_of` keeps a receiver only as a plain chain of names and records anything else,
+which could quote a string literal, as `OPAQUE_RECEIVER`. `CodeIndex` records the files navigation
+reaches apart from the table's coverage, and `parsed_files`, `parser_scans_pending` and
+`observed_unparsed_files` read only the reached files. Two processes may write the table at once: a new file is created whole and
 linked into place (`shared_database.open_shared_database`), and each content's rows are written in
 one transaction. A bidirectional
 trace prepares the scoped fact inventory in one batch before walking incoming and outgoing links;
