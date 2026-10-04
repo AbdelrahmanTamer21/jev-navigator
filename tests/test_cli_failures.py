@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 import pytest
+from git_repos import commit_files
 from test_cli_run_logs import TARGET, limit_client, marked_repository
 
 from jev_navigator import cli
@@ -41,7 +42,7 @@ class FailsOnRequest:
     receives, answered or not."""
 
     def __init__(
-        self, script: ScriptedJevClient, fails: Callable[[int, Mapping], bool], error: Exception
+        self, script: ScriptedJevClient, fails: Callable[[int, Mapping], bool], error: BaseException
     ) -> None:
         self.script = script
         self.fails = fails
@@ -85,6 +86,69 @@ def use_clients(monkeypatch: pytest.MonkeyPatch, clients: Iterator) -> None:
 def find_command(repository: Path, output: Path, store: Path, *options: str) -> list[str]:
     command = ["find", TARGET, "--repo", str(repository), "--prefix", "app/", "--start", START]
     return [*command, "--max-calls", "5", "--out", str(output), "--answer-store", str(store), *options]
+
+
+def unstarted_command(workflow: str, repository: Path, output: Path, store: Path, *options: str) -> list[str]:
+    """A search that chooses its own entry point: no ``--start``."""
+    command = [workflow, TARGET, "--repo", str(repository), "--prefix", "app/", "--max-calls", "none"]
+    return [*command, "--out", str(output), "--answer-store", str(store), *options]
+
+
+def once(fails: Callable[[int, Mapping], bool]) -> Callable[[int, Mapping], bool]:
+    fired = threading.Event()
+
+    def first_match(position: int, state: Mapping) -> bool:
+        if fired.is_set() or not fails(position, state):
+            return False
+        fired.set()
+        return True
+
+    return first_match
+
+
+def first_request(position: int, state: Mapping) -> bool:
+    del state
+    return position == 1
+
+
+def enumerating(name: str) -> Callable[[int, Mapping], bool]:
+    """A Find All enumeration batch whose items include the function ``name``."""
+
+    def holds(position: int, state: Mapping) -> bool:
+        del position
+        return any(item.get("name") == name for item in state.get("items", []))
+
+    return holds
+
+
+def many_functions_repository(root: Path) -> Path:
+    """The marked policy code plus 40 small functions, so Find All enumerates in three batches."""
+    marked_repository(root)
+    helpers = "".join(f"def helper_{number}(value):\n    return value + {number}\n\n" for number in range(40))
+    commit_files(root, {"app/helpers.py": helpers})
+    return root
+
+
+def uninterrupted(workflow: str, repository: Path, tmp_path: Path) -> tuple[dict, ScriptedJevClient]:
+    client = limit_client()
+    manifest = create_evidence_pack(
+        repository,
+        ("app/",),
+        TARGET,
+        (),
+        tmp_path / f"whole-{workflow}",
+        SearchBudget(max_calls=None),
+        client,
+        answer_store=tmp_path / f"whole-{workflow}.sqlite",
+        workflow=workflow,
+    )
+    return manifest, client
+
+
+def items_asked(requests: list[tuple[Mapping, Mapping]]) -> list[str]:
+    """Each enumerated item once per request that asked it, by span key: batches regroup on Resume,
+    so request hashes differ while the items asked must not."""
+    return sorted(item["span_key"] for state, _ in requests for item in state.get("items", []))
 
 
 def uninterrupted_requests(repository: Path, tmp_path: Path) -> tuple[dict, list[str]]:
@@ -274,3 +338,66 @@ def test_a_find_all_whose_seed_search_fails_never_starts_its_enumeration(
     assert manifest_of(tmp_path / "findall")["search"]["outcome"] == "failed"
     assert not any(map(asks(CONTAINS_IMPLEMENTATION.question_id), failing.received))
     assert (tmp_path / "findall" / "resume.json").is_file()
+
+
+@pytest.mark.parametrize(
+    ("interruption", "status"), [(provider_error(), 1), (KeyboardInterrupt(), 130)], ids=["failure", "ctrl_c"]
+)
+def test_an_entry_selection_stopped_by_a_failure_or_ctrl_c_resumes_to_the_uninterrupted_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: BaseException, status: int
+) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    whole, whole_client = uninterrupted("find", repository, tmp_path)
+    store = tmp_path / "answers.sqlite"
+    stopping = FailsOnRequest(limit_client(), first_request, interruption)
+    resuming = closable(limit_client())
+    use_clients(monkeypatch, iter([stopping, resuming]))
+    first, second = tmp_path / "first", tmp_path / "second"
+
+    # Act
+    stopped_status = cli.main(unstarted_command("find", repository, first, store))
+    resumed_status = cli.main(unstarted_command("find", repository, second, store, "--resume", str(first)))
+
+    # Assert
+    assert stopped_status == status
+    assert manifest_of(first)["search"]["entry_selection_pending"] is True
+    assert (first / "resume.json").is_file()
+    assert resumed_status == 0
+    assert manifest_of(second)["search"]["found"] == whole["search"]["found"]
+    asked = hashes(stopping.received)
+    stopped_request = asked.pop(0)
+    assert sorted(asked + hashes(resuming.requests)) == sorted(hashes(whole_client.requests))
+    assert stopped_request in hashes(resuming.requests)
+
+
+@pytest.mark.parametrize(
+    ("interruption", "status"), [(provider_error(), 1), (KeyboardInterrupt(), 130)], ids=["failure", "ctrl_c"]
+)
+def test_a_find_all_enumeration_stopped_by_a_failure_or_ctrl_c_resumes_to_the_uninterrupted_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: BaseException, status: int
+) -> None:
+    # Arrange
+    repository = many_functions_repository(tmp_path / "repository")
+    whole, whole_client = uninterrupted("findall", repository, tmp_path)
+    store = tmp_path / "answers.sqlite"
+    stopping = FailsOnRequest(limit_client(), once(enumerating("helper_20")), interruption)
+    resuming = closable(limit_client())
+    use_clients(monkeypatch, iter([stopping, resuming]))
+    first, second = tmp_path / "first", tmp_path / "second"
+
+    # Act
+    stopped_status = cli.main(unstarted_command("findall", repository, first, store))
+    resumed_status = cli.main(unstarted_command("findall", repository, second, store, "--resume", str(first)))
+
+    # Assert
+    stopped, resumed = manifest_of(first), manifest_of(second)
+    assert stopped_status == status
+    assert stopped["search"]["outcome"] == ("failed" if status == 1 else "cancelled")
+    assert (first / "resume.json").is_file()
+    assert resumed_status == 0
+    assert resumed["search"]["outcome"] == whole["search"]["outcome"] == "scope_examined"
+    assert resumed["search"]["matched"] == whole["search"]["matched"]
+    stopped_batch = next(request for request in stopping.received if enumerating("helper_20")(0, request[0]))
+    answered = [request for request in stopping.received if request is not stopped_batch]
+    assert items_asked(answered + resuming.requests) == items_asked(whole_client.requests)
