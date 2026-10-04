@@ -18,13 +18,16 @@ configures routes exactly like the real environment does.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 from ..judgments.answers import JevResponse, response_from_raw
 from ..judgments.client import LATEST_JEV, InputBudgetExceededError, input_budget_error
 from ..judgments.journal import AttemptJournalCallbackError, RawResponse
+
+if TYPE_CHECKING:
+    from .typesafe import TypeSafeJevClient
 
 ROUTES_ENV = "SYSTEM_ONE_ROUTES"
 
@@ -45,10 +48,18 @@ class Route:
     client: SystemOneClient
 
 
-def routes_from_env(
-    environment: Mapping[str, str] | None = None,
-    transport=None,
-) -> tuple[Route, ...]:
+def system_one_client(environment: Mapping[str, str]) -> TypeSafeJevClient | RoutedJevClient:
+    """The client every CLI command judges with: the route table when `SYSTEM_ONE_ROUTES` names
+    routes, otherwise the default Jev client. Call it after `.env` has filled ``environment``."""
+    routes = routes_from_env(environment)
+    if routes:
+        return RoutedJevClient(routes)
+    from .typesafe import TypeSafeJevClient
+
+    return TypeSafeJevClient(model=None)
+
+
+def routes_from_env(environment: Mapping[str, str], transport=None) -> tuple[Route, ...]:
     """Resolve the route table from the environment (after `.env` chain loading).
 
     `SYSTEM_ONE_ROUTES=drex,jev` builds one client per name. A known name with
@@ -57,7 +68,6 @@ def routes_from_env(
     `SYSTEM_ONE_<NAME>_API_KEY`, else `TYPESAFE_API_KEY`), so a misconfigured route fails at
     resolution instead of mid-run.
     """
-    environment = os.environ if environment is None else environment
     names = tuple(name.strip().lower() for name in environment.get(ROUTES_ENV, "").split(",") if name.strip())
     if not names:
         return ()
@@ -179,6 +189,10 @@ class SystemOneClient:
                 attempts=tuple(collection.attempts),
             )
 
+    def close(self) -> None:
+        """Release the SDK and its HTTP transport."""
+        self._sdk.close()
+
     def parse(self, raw: RawResponse) -> JevResponse:
         # jev-navigator's parser, not the SDK's strict response schemas: the SDK builds and
         # sends the request, but Drex and the finetuned models echo score legends in shapes
@@ -235,3 +249,8 @@ class RoutedJevClient:
 
     def parse(self, raw: RawResponse) -> JevResponse:
         return response_from_raw(raw.json())
+
+    def close(self) -> None:
+        """Release every route's client."""
+        for route in self.routes:
+            route.client.close()

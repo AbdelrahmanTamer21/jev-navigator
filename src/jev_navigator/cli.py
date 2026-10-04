@@ -17,6 +17,7 @@ from functools import partial
 from pathlib import Path
 from time import monotonic
 
+from .adapters.routes import RoutedJevClient, system_one_client
 from .adapters.typesafe import TypeSafeJevClient
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
@@ -75,10 +76,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     repository = Path(args.repo).resolve()
     output = Path(args.out).expanduser() if args.out else _default_output(repository)
     answer_store = _answer_store(args)
-    client: TypeSafeJevClient | None = None
+    client: TypeSafeJevClient | RoutedJevClient | None = None
     try:
         _load_typesafe_environment(os.environ)
-        client = TypeSafeJevClient()  # model=None resolves TYPESAFE_DEFAULT_MODEL in the adapter
+        client = system_one_client(os.environ)
         if args.command == "trace":
             manifest = create_trace_evidence_pack(
                 repository,

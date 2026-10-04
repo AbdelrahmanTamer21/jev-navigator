@@ -116,7 +116,7 @@ def test_direct_system_one_journal_keeps_each_retry_at_the_sdk_boundary(tmp_path
             thresholds=Thresholds(),
         )
     finally:
-        client._sdk.close()  # noqa: SLF001 - release the test SDK's local HTTP transport
+        client.close()
         server.shutdown()
         server.server_close()
 
@@ -154,7 +154,7 @@ def test_direct_system_one_journal_keeps_attempts_before_terminal_sdk_failure(tm
                 thresholds=Thresholds(),
             )
     finally:
-        client._sdk.close()  # noqa: SLF001 - release the test SDK's local HTTP transport
+        client.close()
         server.shutdown()
         server.server_close()
 
@@ -195,8 +195,8 @@ def test_routed_journal_keeps_failed_primary_and_successful_backup_under_one_req
             thresholds=Thresholds(),
         )
     finally:
-        primary._sdk.close()  # noqa: SLF001 - release the local route SDKs
-        backup._sdk.close()  # noqa: SLF001
+        primary.close()
+        backup.close()
         primary_server.shutdown()
         backup_server.shutdown()
         primary_server.server_close()
@@ -241,8 +241,8 @@ def test_routed_journal_records_all_routes_before_terminal_failure(tmp_path):
                 thresholds=Thresholds(),
             )
     finally:
-        first._sdk.close()  # noqa: SLF001 - release the local route SDKs
-        second._sdk.close()  # noqa: SLF001
+        first.close()
+        second.close()
         first_server.shutdown()
         second_server.shutdown()
         first_server.server_close()
@@ -288,8 +288,8 @@ def test_routed_parse_failure_keeps_fallback_behavior_and_both_attempts(tmp_path
             thresholds=Thresholds(),
         )
     finally:
-        primary._sdk.close()  # noqa: SLF001 - release the local route SDKs
-        backup._sdk.close()  # noqa: SLF001
+        primary.close()
+        backup.close()
         primary_server.shutdown()
         backup_server.shutdown()
         primary_server.server_close()
@@ -341,8 +341,8 @@ def test_route_attempt_journal_failure_propagates_without_using_backup(tmp_path)
                 thresholds=Thresholds(),
             )
     finally:
-        primary._sdk.close()  # noqa: SLF001 - release the local route SDKs
-        backup._sdk.close()  # noqa: SLF001
+        primary.close()
+        backup.close()
         primary_server.shutdown()
         backup_server.shutdown()
         primary_server.server_close()

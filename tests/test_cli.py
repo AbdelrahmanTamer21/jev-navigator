@@ -197,7 +197,7 @@ def test_budget_pack_reopens_its_saved_frontier_in_a_second_cli_invocation(
         return instance
 
     monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", client)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: client())
     first = tmp_path / "first"
     second = tmp_path / "second"
     common = ["find", "the item limit", "--repo", str(repository), "--start", "app/entry.py:4"]
@@ -558,7 +558,7 @@ def offline_main(monkeypatch: pytest.MonkeyPatch) -> dict:
         return {"search": {"outcome": calls["outcome"], "calls": 1}, "provider": {"requested_model": "test"}}
 
     monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", Client)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: Client())
     monkeypatch.setattr(cli, "create_evidence_pack", create_evidence_pack)
     return calls
 
@@ -725,8 +725,8 @@ def test_find_defaults_to_unique_results_under_invocation_directory(
 
     monkeypatch.setattr(
         cli,
-        "TypeSafeJevClient",
-        lambda: Client(
+        "system_one_client",
+        lambda environment: Client(
             nouls=lambda question_id, question, state: 1.0,
             choices={"open_first": {"0": 1.0}},
         ),
@@ -820,7 +820,7 @@ def test_json_request_errors_fail_before_search(monkeypatch, capsys, request_tex
     def unexpected_client():
         pytest.fail("invalid input reached the model client")
 
-    monkeypatch.setattr(cli, "TypeSafeJevClient", unexpected_client)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: unexpected_client())
     monkeypatch.setattr("sys.stdin", io.StringIO(request_text))
     with pytest.raises(SystemExit) as error:
         main(["--json", "-"])
@@ -936,7 +936,7 @@ def test_schema_discovery_needs_no_credentials_or_model(monkeypatch, capsys):
     def unexpected_client():
         pytest.fail("schema discovery reached the model client")
 
-    monkeypatch.setattr(cli, "TypeSafeJevClient", unexpected_client)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: unexpected_client())
     assert main(["schema", "find"]) == 0
     output = capsys.readouterr()
     assert not output.err
@@ -1009,7 +1009,7 @@ def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
     def forbidden_provider():
         raise AssertionError("structural analysis must not construct a model client")
 
-    monkeypatch.setattr(cli, "TypeSafeJevClient", forbidden_provider)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: forbidden_provider())
     assert (
         main(
             [
@@ -1080,7 +1080,7 @@ def test_each_run_names_its_answer_store_and_a_fresh_store_isolates_runs(
         return instance
 
     monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", client)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: client())
     common = ["findall", "the item limit", "--repo", str(repository)]
     arm_a, arm_b = tmp_path / "arm-a.sqlite", tmp_path / "arm-b.sqlite"
     default_store = os.environ.get(SHARED_STORE_VARIABLE)
