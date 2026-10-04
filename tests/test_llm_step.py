@@ -165,6 +165,21 @@ def test_the_reply_is_durable_in_the_store_by_the_time_the_parser_runs(tmp_path:
     assert observed == ["raw reply\n"]
 
 
+def test_a_failing_connector_keeps_its_whole_error_output() -> None:
+    # Arrange: a CLI that prints its cause after a long preamble
+    cause = "provider down: the cause is on the last line"
+    failing = CommandConnector(
+        ["sh", "-c", f"printf 'preamble %.0s' $(seq 60) >&2; echo '{cause}' >&2; exit 3"], name="failing"
+    )
+
+    # Act
+    with pytest.raises(ConnectorError) as raised:
+        failing.complete("prompt")
+
+    # Assert
+    assert str(raised.value).endswith(cause)
+
+
 def test_a_failing_connector_attempt_is_recorded_and_its_exception_still_propagates(tmp_path: Path) -> None:
     # Arrange
     store = tmp_path / "llm.jsonl"

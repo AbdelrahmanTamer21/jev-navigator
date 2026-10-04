@@ -445,14 +445,6 @@ def test_find_packets_and_history_keep_parsed_relationship_bindings(tmp_path: Pa
     } == {"resolved", "candidate"}
 
 
-def test_beam_width_and_budgets_can_come_from_the_environment() -> None:
-    # Act
-    budget = SearchBudget.from_env({"JEV_NAVIGATOR_BEAM_WIDTH": "1", "JEV_NAVIGATOR_MAX_STEPS": "5"})
-
-    # Assert
-    assert budget == SearchBudget(beam_width=1, max_steps=5)
-
-
 def test_empty_neighbours_are_never_offered(sample_index: CodeIndex) -> None:
     # Arrange
     client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1))

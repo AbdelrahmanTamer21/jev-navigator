@@ -35,9 +35,12 @@ Credentials come from `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` in the process 
 from `~/.config/jvn/env`. The file uses dotenv syntax and is not executed. When `jvn`'s code runs
 from a jev-navigator checkout (`uv run jvn` there, or an editable install), it also reads that
 checkout's `.env`, after the environment and before the file; any install into site-packages
-(`uv tool install`, `pipx`, a non-editable `pip install`) reads no `.env`. A `.env` in the searched directory is never read. Either file may set only `TYPESAFE_*`,
-`JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names, and `jvn` names on stderr any other name it ignores.
-Help and schema discovery need no key and make no model calls.
+(`uv tool install`, `pipx`, a non-editable `pip install`) reads no `.env`. A `.env` in the searched
+directory is never read, unless that directory is the checkout `jvn`'s own code runs from. Either
+file may set only `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names, and
+`jvn` names on stderr any other name it ignores. The `JEV_NAVIGATOR_*` settings hold the
+judgment thresholds only; a search's budget comes from its flags or the request's JSON fields. Help
+and schema discovery need no key and make no model calls.
 
 ## Discover commands and request fields
 
@@ -178,7 +181,7 @@ JSON mode writes one result object to stdout. It contains:
 | `manifest` | Absolute path to the complete `manifest.json`. |
 | `report` | Absolute path to the readable `report.md`. |
 | `search` | Outcome, matched spans, source code, decisions, request counts and coverage details. |
-| `provider` | Requested/served model and `input_tokens`, the sum of the counts the provider reported. `responses_without_usage` counts responses that reported none (null when resumed from an older pack), so 0 tokens with a non-zero count means unknown, not free. `unanswered_requests` counts requests that were sent but never answered (a cancelled or failed call), whose usage is unknown too. `input_tokens_complete` is true only when both counts are 0; otherwise `input_tokens` is a lower bound. |
+| `provider` | Requested/served model and `input_tokens`, the sum of the counts the provider reported. `responses_without_usage` counts responses that reported none (null when resumed from an older pack), so 0 tokens with a non-zero count means unknown, not free. `unanswered_requests` counts requests that were sent but got no response carrying usage (a cancelled call, or one that failed with an error), so their usage is unknown too; report.md calls them "Requests whose usage is unknown". `input_tokens_complete` is true only when both counts are 0; otherwise `input_tokens` is a lower bound. |
 | `resume` | Evidence pack path to pass to `--resume` when the outcome is `budget` or `cancelled`; otherwise `null`. |
 
 Progress, expanded requests and errors go to stderr, so stdout remains parseable. For example:

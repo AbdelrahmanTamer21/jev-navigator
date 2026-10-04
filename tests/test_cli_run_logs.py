@@ -187,8 +187,8 @@ def test_the_json_request_field_keep_requests_reaches_the_run_folder(
         instance.close = lambda: None
         return instance
 
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", client)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: client())
     request = {
         "target": TARGET,
         "repo": str(repository),
@@ -563,10 +563,12 @@ def test_a_key_mention_outside_any_function_is_shown_at_its_mention_line_everywh
 
 def echoing_server() -> ThreadingHTTPServer:
     """A provider that refuses every request with 422 and echoes the request it got, as many
-    validation errors do: the request, and so the code, comes back in the error."""
+    validation errors do: the request, and so the code, comes back in the error. ``served`` counts
+    the requests it received."""
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            self.server.served += 1
             sent = json.loads(self.rfile.read(int(self.headers["content-length"])))
             served = json.dumps({"detail": [{"msg": "unprocessable request", "input": sent}]}).encode()
             self.send_response(422)
@@ -579,6 +581,7 @@ def echoing_server() -> ThreadingHTTPServer:
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.served = 0
     threading.Thread(target=server.serve_forever, name="echoing-jev", daemon=True).start()
     return server
 
@@ -590,9 +593,10 @@ ERROR_TEXT_SETTINGS = {
 }
 
 
-def echoed_run(tmp_path: Path, command: str, setting: str) -> tuple[subprocess.CompletedProcess, Path]:
+def echoed_run(tmp_path: Path, command: str, setting: str) -> tuple[subprocess.CompletedProcess, Path, int]:
     """``jvn COMMAND`` through the real TypeSafe client against a provider that echoes every request
-    in a 422, with the error-text setting named by ``setting``."""
+    in a 422, with the error-text setting named by ``setting``; also how many requests the provider
+    received."""
     repository = marked_repository(tmp_path / "repository")
     output = tmp_path / "pack"
     options, variables = ERROR_TEXT_SETTINGS[setting]
@@ -620,7 +624,7 @@ def echoed_run(tmp_path: Path, command: str, setting: str) -> tuple[subprocess.C
     finally:
         server.shutdown()
         server.server_close()
-    return finished, output
+    return finished, output, server.served
 
 
 @pytest.mark.parametrize("command", ["find", "findall", "trace"])
@@ -632,12 +636,13 @@ def test_an_echoed_error_body_stays_in_the_run_folder_unless_error_text_is_off(
     pytest.importorskip("typesafe_sdk")
 
     # Act
-    finished, output = echoed_run(tmp_path, command, setting)
+    finished, output, served = echoed_run(tmp_path, command, setting)
 
     # Assert
     assert finished.returncode == 1, finished.stderr
     records = [json.loads(line) for line in (output / "journal.jsonl").read_text().splitlines()]
     assert any(record["kind"] == "failure" for record in records)
+    assert served == sum(record["kind"] == "http_attempt" for record in records) > 0
     assert files_holding_code(output) == (["journal.jsonl"] if setting == "default" else [])
     if command != "trace":
         assert json.loads((output / "manifest.json").read_text())["search"]["failure"]["status"] == 422

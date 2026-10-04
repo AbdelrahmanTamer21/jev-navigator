@@ -10,14 +10,15 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import MutableMapping, Sequence
+from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from time import monotonic
+from typing import TYPE_CHECKING
 
-from .adapters.typesafe import TypeSafeJevClient
+from .adapters.routes import RoutedJevClient, system_one_client
 from .cache_root import cache_root
 from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
 from .cli_resume import SavedSearch, load_resume, save_resume
@@ -28,6 +29,7 @@ from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code, search_failure
 from .directives.places import Place, place_for_line
+from .environment import checkout_root, load_typesafe_environment
 from .housekeeping import FINISHED_RUN_DAYS, RESUMABLE_RUN_DAYS
 from .index.code_index import CodeIndex
 from .index.languages import language_of
@@ -47,6 +49,9 @@ from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
 from .run_files import failure_digested, place_label, source_shown, step_shown
 from .usage_receipt import usage_receipt, usage_report_lines
+
+if TYPE_CHECKING:
+    from .adapters.typesafe import TypeSafeJevClient
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 KEEP_REQUESTS_HELP = (
@@ -104,11 +109,11 @@ def _run_search(args: argparse.Namespace) -> int:
     repository = Path(args.repo).resolve()
     output = Path(args.out).expanduser() if args.out else _default_output(repository)
     answer_store = _answer_store(args)
-    client: TypeSafeJevClient | None = None
+    client: TypeSafeJevClient | RoutedJevClient | None = None
     try:
-        _load_typesafe_environment(os.environ)
+        load_typesafe_environment(os.environ)
         keep_error_text = error_text_kept(args.no_error_text)
-        client = TypeSafeJevClient()  # model=None resolves TYPESAFE_DEFAULT_MODEL in the adapter
+        client = system_one_client(os.environ)
         if args.command == "trace":
             manifest = create_trace_evidence_pack(
                 repository,
@@ -565,7 +570,8 @@ def _parser() -> argparse.ArgumentParser:
 For agents: jvn schema find prints the request's JSON Schema without making model calls.
 JSON mode writes results to stdout; progress goes to stderr. Ctrl-C cancels.
 Results default to <directory>-<timestamp> under $XDG_DATA_HOME/jev-navigator/runs (~/.local/share).
-Credentials: process environment, then ~/.config/jvn/env (TYPESAFE_API_KEY / TYPESAFE_BASE_URL).
+Credentials: process environment, then the .env of the jev-navigator checkout jvn runs from (if any),
+then ~/.config/jvn/env (TYPESAFE_API_KEY / TYPESAFE_BASE_URL).
 Use jvn help find for options and examples. Exit codes: 0 completed, 1 failed, 2 invalid input, 130 cancelled.
 A completed search can have a non-found outcome; inspect search.outcome in JSON output.""",
     )
@@ -991,18 +997,6 @@ def _scope_warning(file_count: int) -> str | None:
     return f"jvn: large scope contains {file_count:,} tracked files; indexing may take longer"
 
 
-def _load_typesafe_environment(
-    environment: MutableMapping[str, str],
-    path: Path | None = None,
-) -> None:
-    """Load official TypeSafe SDK settings: process environment, then this tool's checkout `.env`
-    (never a repository under analysis), then the legacy `~/.config/jvn/env`; a process value always
-    takes precedence."""
-    from .environment import load_typesafe_environment
-
-    load_typesafe_environment(environment, legacy=path)
-
-
 def _parse_start(index: CodeIndex, value: str) -> Place:
     path, separator, raw_line = value.rpartition(":")
     if not separator or not path:
@@ -1229,18 +1223,30 @@ def _navigator_provenance() -> dict:
         digest.update(b"\0")
         digest.update(path.read_bytes())
         digest.update(b"\0")
-    repository = next((parent for parent in package_root.parents if (parent / ".git").exists()), None)
-    revision = None
-    dirty = None
-    if repository is not None:
-        revision = _git(repository, "rev-parse", "HEAD")
-        dirty = bool(_git(repository, "status", "--porcelain", "--untracked-files=all"))
     return {
         "package_version": importlib.metadata.version("jev-navigator"),
-        "source_revision": revision,
-        "source_dirty": dirty,
+        **_checkout_revision(checkout_root()),
         "source_tree_sha256": digest.hexdigest(),
     }
+
+
+def _checkout_revision(checkout: Path | None) -> dict:
+    """jvn's own checkout's HEAD and whether it has changes. Without a checkout there is no
+    revision to record; when git cannot answer, its message is kept instead of stopping a search
+    that has already finished."""
+    revision: dict = {"source_revision": None, "source_dirty": None, "source_revision_error": None}
+    if checkout is None:
+        return revision
+    try:
+        head = _git(checkout, "rev-parse", "HEAD")
+        dirty = bool(_git(checkout, "status", "--porcelain", "--untracked-files=all"))
+    except subprocess.CalledProcessError as error:
+        return revision | {
+            "source_revision_error": f"git {' '.join(error.cmd[1:])} failed: {error.stderr.strip()}"
+        }
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return revision | {"source_revision_error": f"git failed: {error}"}
+    return revision | {"source_revision": head, "source_dirty": dirty}
 
 
 def _git(repository: Path, *args: str) -> str:

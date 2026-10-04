@@ -49,9 +49,9 @@ def parsed_files(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     parsed: list[str] = []
     real_rules = tools.ast_grep_rules
 
-    def recorded_rules(rules, files, cwd, config=None, *, refused):
+    def recorded_rules(rules, files, *arguments, **options):
         parsed.extend(files)
-        return real_rules(rules, files, cwd, config=config, refused=refused)
+        return real_rules(rules, files, *arguments, **options)
 
     monkeypatch.setattr(tools, "ast_grep_rules", recorded_rules)
     return parsed
@@ -266,6 +266,49 @@ def test_a_place_answered_from_the_table_reads_as_its_listed_blob_after_the_file
     assert code.text == original.rstrip("\n")
     assert code.file_sha256 == hashlib.sha256(original.encode()).hexdigest()
     assert "a.py" in index.unavailable_files
+
+
+@pytest.mark.parametrize("lookup", ["find_callers", "find_references"])
+def test_a_warm_table_with_an_empty_fact_cache_loads_a_names_facts_in_one_scan(
+    tmp_path: Path, spawned: Counter[str], lookup: str
+) -> None:
+    # Arrange: check is defined twice, and six files call it and pass it on; the table is warm, the
+    # facts are not
+    uses = {
+        f"app/use_{n}.py": f"from app.rules import check\n\n\ndef use_{n}(order):\n"
+        "    run(check)\n    return check(order)\n"
+        for n in range(6)
+    }
+    repository = tmp_path / "repository"
+    commit_files(repository, {**REPOSITORY, **uses})
+    expected = getattr(CodeIndex.from_git(repository, fact_cache_dir=tmp_path / "warm-facts"), lookup)(
+        "check"
+    )
+    index = CodeIndex.from_git(repository, fact_cache_dir=tmp_path / "empty-facts")
+    spawned.clear()
+
+    # Act
+    found = getattr(index, lookup)("check")
+
+    # Assert
+    assert found == expected
+    assert spawned[tools.AST_GREP] == 1
+
+
+def test_a_name_nothing_uses_loads_no_facts_on_a_warm_table(tmp_path: Path, spawned: Counter[str]) -> None:
+    # Arrange: place is defined but never called or passed on; the table is warm, the facts are not
+    repository = tmp_path / "repository"
+    commit_files(repository, REPOSITORY)
+    every_lookup(CodeIndex.from_git(repository, fact_cache_dir=tmp_path / "warm-facts"))
+    index = CodeIndex.from_git(repository, fact_cache_dir=tmp_path / "empty-facts")
+    spawned.clear()
+
+    # Act
+    found = (index.find_callers("place"), index.find_references("place"))
+
+    # Assert
+    assert found == ((), ())
+    assert spawned[tools.AST_GREP] == 0
 
 
 def test_a_files_definitions_come_from_the_table_with_their_lines(
