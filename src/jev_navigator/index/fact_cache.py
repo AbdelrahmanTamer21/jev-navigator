@@ -21,7 +21,7 @@ from .scope_scan import (
 from .spans import Span
 from .tools import ast_grep_version
 
-FACT_RULE_VERSION = "combined-facts-v31-siblings-with-commonjs-renames"
+FACT_RULE_VERSION = "combined-facts-v32-siblings-with-expression-names"
 
 
 class FactCache:

@@ -331,7 +331,9 @@ vanished, leaves it `unknown`, and a module with no definition exported under th
 `candidate` that says so. A name a module imports and passes on without an `export ... from`, as a
 Python module's own `from pkg.core import compute`, is not followed. A function or class
 held by another function, a class or an object literal, or assigned to a property (`foo.bar =
-function () {}`), is no module-level definition. One assigned to `exports.x` or `module.exports.x`,
+function () {}`), is no module-level definition, and neither is a function or class expression's own
+name (`run(function handler() {})`), which is bound only inside it. One assigned to `exports.x` or
+`module.exports.x`,
 or listed in `module.exports = {...}`, is a CommonJS export: an import names it, its own module does not.
 An import reaches only what its module exports. A Python module exports its whole module scope. A
 script module exports the definitions an `export` statement or its own list names, under the name the

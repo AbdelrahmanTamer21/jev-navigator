@@ -287,10 +287,10 @@ def _structure_from_matches(files, unparsed, matches):
     for file in files:
         symbols = functions[file] | classes[file]
         declared = _declarations(file, declaration_nodes[file], declared_names[file])
-        # A function held by a value or assigned to a property is the value's or the property's.
-        nodes = _Nodes(
-            ranges[file], marks[file][_HELD_RULE] | marks[file][_PROPERTY_VALUE_RULE], namespaces[file]
-        )
+        # A function held by a value or assigned to a property is the value's or the property's, and
+        # one named only by itself names nothing outside itself.
+        owned = marks[file][_HELD_RULE] | marks[file][_PROPERTY_VALUE_RULE] | marks[file][_SELF_NAMED_RULE]
+        nodes = _Nodes(ranges[file], owned, namespaces[file])
         structures[file] = FileStructure(
             _ordered(functions[file], positions),
             _ordered(symbols, positions),
@@ -415,9 +415,10 @@ class _Namespace:
 
 @dataclass(frozen=True)
 class _Nodes:
-    """A file's function and class nodes (``ranges``), the ones a value or a property holds
-    (``owned``), and its namespace nodes. Nodes nest or are disjoint, so a sweep in source order
-    keeps the nodes still open on a stack, the innermost on top."""
+    """A file's function and class nodes (``ranges``), the ones a value or a property holds or
+    that only their own name names (``owned``), and its namespace nodes. Nodes nest or are
+    disjoint, so a sweep in source order keeps the nodes still open on a stack, the innermost on
+    top."""
 
     ranges: list[tuple[int, int, Span]]
     owned: set[tuple[int, int]]
@@ -552,8 +553,9 @@ _DECLARED_NAME_RULE = "declared_name"
 _LOCAL_NAME_RULE = "local_name"
 _MODULE_ALIAS_RULE = "module_alias"
 _PROPERTY_VALUE_RULE = "property_value"
+_SELF_NAMED_RULE = "self_named"
 _MODULE_EXPORT_RULE = "module_export"
-_MARK_RULES = (_HELD_RULE, _PROPERTY_VALUE_RULE, _MODULE_EXPORT_RULE)
+_MARK_RULES = (_HELD_RULE, _PROPERTY_VALUE_RULE, _MODULE_EXPORT_RULE, _SELF_NAMED_RULE)
 _STRUCTURE_RULE_IDS = frozenset(
     {
         "function",
@@ -663,6 +665,7 @@ def _structure_rules(languages: Sequence[str]) -> str:
         if VALUE_KINDS[language]:
             documents.append(_held_rule(language))
             documents += _property_rules(language)
+            documents.append(_self_named_rule(language))
         if NAMESPACE_KINDS[language]:
             documents.append(
                 _rule_document(_NAMESPACE_RULE, language, f"  any: {_kinds(NAMESPACE_KINDS[language])}")
@@ -749,18 +752,35 @@ def _kind_rule(rule_id: str, language: str, kinds: Sequence[str]) -> str:
     expressions = [kind for kind in kinds if kind in EXPRESSION_KINDS]
     alternatives = [f"{{any: {_kinds(declarations)}, has: {_named_by('name')}}}"] if declarations else []
     if expressions:
-        # The search stops at the first ancestor that is no wrapper, and that one must be the holder.
-        past_wrappers = _past_wrappers(language)
-        holders = ", ".join(
-            f"{{kind: {holder}, has: {_named_by(field)}}}" for holder, field in NAME_HOLDERS[grammar]
-        )
         alternatives += [
-            f"{{any: {_kinds(expressions)}, inside: {{stopBy: {past_wrappers}, any: [{holders}]}}}}",
+            f"{{any: {_kinds(expressions)}, {_inside_a_holder(language)}}}",
             f"{{any: {_kinds(expressions)}, has: {_named_by('name')}}}",
         ]
     alternatives.append(f"{{any: {_kinds(kinds)}}}")
     listed = "".join(f"\n    - {alternative}" for alternative in alternatives)
     return f"id: {rule_id}\nlanguage: {grammar}\nrule:\n  any:{listed}"
+
+
+def _inside_a_holder(language: str) -> str:
+    """The relation of an expression to the holder that names it (see ``NAME_HOLDERS``): the search
+    stops at the first ancestor that is no wrapper, and that one must be the holder."""
+    holders = ", ".join(
+        f"{{kind: {holder}, has: {_named_by(field)}}}" for holder, field in NAME_HOLDERS[grammar_of(language)]
+    )
+    return f"inside: {{stopBy: {_past_wrappers(language)}, any: [{holders}]}}"
+
+
+def _self_named_rule(language: str) -> str:
+    """Every function or class expression no holder names, which takes its own name:
+    `run(function handler() {})`. That name is bound only inside the expression, so it names
+    nothing in its module or namespace."""
+    expressions = [
+        kind for kind in (*FUNCTION_KINDS[language], *CLASS_KINDS[language]) if kind in EXPRESSION_KINDS
+    ]
+    rule = (
+        f"  any: {_kinds(expressions)}\n  has: {_named_by('name')}\n  not: {{{_inside_a_holder(language)}}}"
+    )
+    return _rule_document(_SELF_NAMED_RULE, language, rule)
 
 
 def _kinds(kinds: Sequence[str]) -> str:
