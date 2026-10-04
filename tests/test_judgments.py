@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from jev_navigator.judgments.client import (
     InputBudgetExceededError,
     MissingAnswerError,
     ReplayOnlyClient,
+    UnansweredQuestionError,
 )
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import (
@@ -634,6 +636,39 @@ def test_a_scoped_judge_adds_unreported_responses_to_its_parent() -> None:
     scoped.ask({"s": 1}, {"q": {"type": "noul"}}, thresholds=Thresholds())
 
     assert (scoped.input_total.not_reported, judge.input_total.not_reported) == (1, 1)
+
+
+class _DropsAnAnswer(ScriptedJevClient):
+    """A provider whose response leaves out the answer to the question about the second item."""
+
+    def _answer_all(self, state: Mapping, questions: Mapping) -> JevResponse:
+        answered = super()._answer_all(state, questions)
+        kept = {
+            question_id: answer
+            for question_id, answer in answered.answers.items()
+            if not question_id.endswith("#1")
+        }
+        return replace(answered, answers=kept)
+
+
+def test_a_response_missing_an_asked_answer_is_refused_and_leaves_the_run_pack_readable(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    path = tmp_path / "answers.jsonl"
+    client = _DropsAnAnswer(default_noul=0.9)
+    judge = Judge(client, store=JsonlAnswerStore(path))
+
+    # Act
+    with pytest.raises(UnansweredQuestionError) as refused:
+        judge.check_each(DESCRIBES, [{"code": "x = 1"}, {"code": "y = 2"}], {"doc": {"sentence": "s"}})
+
+    # Assert: the refusal names the unanswered question, the paid response still counts, and the
+    # pack a later run opens holds nothing it cannot read
+    unanswered = list(client.requests[0][1])[1]
+    assert unanswered in str(refused.value)
+    assert judge.input_total.reported == 100
+    assert JsonlAnswerStore(path).records() == ()
 
 
 def test_every_result_carries_the_hash_of_the_masked_request_that_answered_it(tmp_path: Path) -> None:
