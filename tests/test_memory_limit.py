@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import mmap
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -546,6 +547,27 @@ def test_a_breach_during_a_round_ends_the_search_failed_and_its_resume_finishes_
     assert resumed.outcome == uninterrupted.outcome == Outcome.FOUND
     assert [visit.place_key for visit in resumed.found] == [visit.place_key for visit in uninterrupted.found]
     assert len(client.requests) == len(uninterrupted_client.requests)
+
+
+@pytest.mark.parametrize("entry", ["sync", "async"])
+def test_any_other_error_while_opening_a_round_still_raises(
+    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    # Arrange: the start is parsed, then the parser and ripgrep disappear from the PATH.
+    index = CodeIndex.from_git(sample_repo, fact_cache_dir=tmp_path / "facts")
+    starts = [place_for_line(index, "app/orders.py", 6, "start")]
+    only_git = tmp_path / "bin"
+    only_git.mkdir()
+    (only_git / "git").symlink_to(shutil.which("git"))
+    monkeypatch.setenv("PATH", str(only_git))
+    arguments = (index, Judge(ScriptedJevClient()), "the item limit check", starts)
+
+    # Act
+    with pytest.raises(FileNotFoundError):
+        if entry == "sync":
+            find_code(*arguments, budget=SearchBudget(beam_width=1))
+        else:
+            asyncio.run(find_code_async(*arguments, budget=SearchBudget(beam_width=1)))
 
 
 def test_the_process_guard_follows_the_settings_it_is_read_with(

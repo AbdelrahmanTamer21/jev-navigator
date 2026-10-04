@@ -457,12 +457,12 @@ def _begin(
 
 
 def _open_round_or_fail(index: CodeIndex, search: _Search, judge: Judge) -> list[_Opening]:
-    """``_open_round``, except that JVN's memory limit stopping it ends the search ``failed``: the
-    round's places are back on the frontier, so Resume opens them once there is room."""
+    """``_open_round``. An error it raises has already put the round's places back on the frontier,
+    and ``search_failure`` decides whether it ends the search ``failed`` or raises."""
     try:
         return _open_round(index, search, judge)
-    except MemoryLimitReachedError as error:
-        search.failure = search_failure(error)
+    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
+        search.failure = search_failure(error, opening=True)
         return []
 
 
@@ -549,12 +549,19 @@ class _Failed:
     error: Exception
 
 
-def search_failure(error: Exception) -> Exception:
+OPENING_FAILURES: tuple[type[Exception], ...] = (MemoryLimitReachedError,)
+"""The errors that end a search ``failed`` while it opens places. Opening runs the index, and an index
+or parser error there raises; JVN's memory limit is the exception, because Resume opens the same places
+again once there is room."""
+
+
+def search_failure(error: Exception, *, opening: bool = False) -> Exception:
     """The one rule for what ends a search ``failed``: every error a request raises gets resume
     state, the search holding this same error, and the CLI re-raises it after saving, so its edge
     still decides between one line and a traceback. Only a send the abort stopped is re-raised, to
-    count as cancelled. Find, entry selection and Find All all apply it."""
-    if isinstance(error, ABORTED_SEND_ERRORS):
+    count as cancelled. While the search is ``opening`` places, only ``OPENING_FAILURES`` end it
+    failed, and any other error is re-raised. Find, entry selection and Find All all apply it."""
+    if isinstance(error, ABORTED_SEND_ERRORS) or (opening and not isinstance(error, OPENING_FAILURES)):
         raise error
     return error
 
