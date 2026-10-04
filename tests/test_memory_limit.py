@@ -12,14 +12,16 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from git_repos import commit_files
+from test_cli_failures import closable, hashes, journal_failures, manifest_of, use_clients
+from test_cli_run_logs import TARGET, limit_client
 
-from jev_navigator import memory_limit
+from jev_navigator import cli, memory_limit
 from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code, find_code_async
 from jev_navigator.directives.places import place_for_line
 from jev_navigator.index import tools
@@ -109,17 +111,64 @@ def _scans(commands: list[list[str]]) -> list[list[str]]:
     return [command for command in commands if command[:2] == [tools.AST_GREP, "scan"]]
 
 
-@contextmanager
-def _holding(megabytes: int) -> Iterator[None]:
-    """This process grows by ``megabytes`` of touched memory, returned to the system on exit. A freed
-    Python object can stay in the footprint and be reused, which would hide a later test's growth."""
+def _touched(megabytes: int) -> mmap.mmap:
+    """``megabytes`` of memory this process really holds until the map is closed. A freed Python object
+    can stay in the footprint and be reused, which would hide a later test's growth."""
     held = mmap.mmap(-1, megabytes * MB)
     for page in range(0, megabytes * MB, mmap.PAGESIZE):
         held[page] = 1
+    return held
+
+
+@contextmanager
+def _holding(megabytes: int) -> Iterator[None]:
+    """This process grows by ``megabytes`` of touched memory, returned to the system on exit."""
+    held = _touched(megabytes)
     try:
         yield
     finally:
         held.close()
+
+
+class GrowsAfterTheFirstOpening:
+    """Answers like ``script``. Once it has answered the first request about opened code, this process
+    holds 200 MB more until ``release``, as a search that grew past its allowance would."""
+
+    def __init__(self, script: ScriptedJevClient) -> None:
+        self.script = script
+        self.model = script.model
+        self.received: list[tuple[Mapping, Mapping]] = []
+        self.held: mmap.mmap | None = None
+
+    def ask(self, state: Mapping, questions: Mapping):
+        self.received.append((state, questions))
+        answer = self.script.ask(state, questions)
+        if self.held is None and "slice" in state:
+            self.held = _touched(200)
+        return answer
+
+    def release(self) -> None:
+        self.held.close()
+
+    def close(self) -> None:
+        pass
+
+
+def _three_file_repository(root: Path) -> Path:
+    """The target is in ``admit``, two steps from the start; opening ``admit`` looks up ``record`` in a
+    file nothing before it needed, so the second round must start a process."""
+    commit_files(
+        root,
+        {
+            "app/__init__.py": "",
+            "app/entry.py": "from .policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "app/policy.py": (
+                "from .audit import record\n\ndef admit(item):\n    record(item)\n    return len(item) <= 3\n"
+            ),
+            "app/audit.py": "def record(item):\n    return item\n",
+        },
+    )
+    return root
 
 
 def _limit_the_process(
@@ -568,6 +617,64 @@ def test_any_other_error_while_opening_a_round_still_raises(
             find_code(*arguments, budget=SearchBudget(beam_width=1))
         else:
             asyncio.run(find_code_async(*arguments, budget=SearchBudget(beam_width=1)))
+
+
+@pytest.mark.parametrize("start", [("--start", "app/entry.py:3"), ()], ids=["given_start", "chosen_entry"])
+def test_jvn_find_stopped_by_the_allowance_while_opening_resumes_to_the_uninterrupted_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    start: tuple[str, ...],
+) -> None:
+    # Arrange
+    repository = _three_file_repository(tmp_path / "repository")
+
+    def jvn_find(output: Path, store: Path, *options: str) -> list[str]:
+        command = [
+            "find",
+            TARGET,
+            "--repo",
+            str(repository),
+            "--prefix",
+            "app/",
+            *start,
+            "--max-calls",
+            "none",
+        ]
+        return [*command, "--out", str(output), "--answer-store", str(store), *options]
+
+    whole_client = closable(limit_client())
+    use_clients(monkeypatch, iter([whole_client]))
+    assert cli.main(jvn_find(tmp_path / "whole", tmp_path / "whole.sqlite")) == 0
+    whole = manifest_of(tmp_path / "whole")
+    growing = GrowsAfterTheFirstOpening(limit_client())
+    resuming = closable(limit_client())
+    use_clients(monkeypatch, iter([growing, resuming]))
+    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
+    first, second, store = tmp_path / "first", tmp_path / "second", tmp_path / "answers.sqlite"
+    capsys.readouterr()
+
+    # Act
+    stopped_status = cli.main(jvn_find(first, store))
+    stopped_stderr = capsys.readouterr().err
+    growing.release()
+    resumed_status = cli.main(jvn_find(second, store, "--resume", str(first)))
+
+    # Assert
+    stopped = manifest_of(first)
+    assert stopped_status == 1
+    assert "memory allowance of 100 MB" in stopped_stderr
+    assert f"--resume {first.resolve()}" in stopped_stderr
+    assert stopped["search"]["outcome"] == "failed"
+    assert stopped["search"]["failure"]["type"] == "MemoryLimitReachedError"
+    assert stopped["search"]["failure"]["request_id"] is None
+    assert journal_failures(first) == []
+    assert (first / "resume.json").is_file()
+    resumed = manifest_of(second)
+    assert resumed_status == 0
+    assert resumed["search"]["outcome"] == whole["search"]["outcome"] == "found"
+    assert resumed["search"]["found"] == whole["search"]["found"]
+    assert sorted(hashes(growing.received + resuming.requests)) == sorted(hashes(whole_client.requests))
 
 
 def test_the_process_guard_follows_the_settings_it_is_read_with(
