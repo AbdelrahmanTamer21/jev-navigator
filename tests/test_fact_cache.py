@@ -87,6 +87,28 @@ def test_roundtrip_rebinds_paths_without_retaining_source(tmp_path, example):
     assert all(content.decode() not in p.read_text() for p in cache.root.rglob("*.json"))
 
 
+def test_roundtrip_keeps_every_fact_a_script_module_records(tmp_path):
+    """Each fact the scan records comes back from the cache unchanged: a function's own names,
+    module aliases, exported values, CommonJS exports, declarations and the export surface."""
+    content = (
+        b"const db = require('./db');\nimport * as jwt from './jwt';\n"
+        b"function run(task, { retries }) {\n  const done = db.save(task);\n  return done;\n}\n"
+        b"exports.run = run;\nexports.stop = function () { return 0; };\nexport const LIMIT = 3;\n"
+    )
+    (tmp_path / "module.js").write_bytes(content)
+    facts = scan_facts(
+        ["module.js"], tmp_path, lambda file: (tmp_path / file).read_text().splitlines(), Unparsed()
+    )["module.js"]
+    cache = FactCache(tmp_path / "cache")
+
+    cache.save("module.js", content, facts)
+    restored = cache.load("module.js", content)
+
+    assert facts.structure.local_names and facts.module_aliases and facts.exported_values
+    assert facts.structure.commonjs_exports and facts.export_names
+    assert restored == facts
+
+
 def test_content_language_parser_and_rules_invalidate(tmp_path, example, monkeypatch):
     content, facts = example
     cache = FactCache(tmp_path / "cache")

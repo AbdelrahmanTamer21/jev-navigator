@@ -977,8 +977,8 @@ def test_a_call_through_a_python_module_import_reads_only_that_module(tmp_path: 
 
 def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_it(tmp_path: Path) -> None:
     """`db.query()` binds to db.js's `query` where `db` is the module-level alias; a parameter `db`, a
-    `const store = require(...)` inside a function, or an alias that only a template string spells,
-    leave the call a candidate."""
+    `const store = require(...)` inside a function, a name module-level code binds to two modules, or
+    an alias that only a template string spells, leave the call a candidate."""
     # Arrange
     index = committed(
         tmp_path,
@@ -997,12 +997,17 @@ def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_i
                 "const template = `const api = require('./db');`;\n"
                 "function emit(api) { return api.query(); }\n"
             ),
+            "twice.js": (
+                "var store = require('./db');\nvar store = require('./fake');\n"
+                "function use() { return store.query(); }\n"
+            ),
         },
     )
     sites = {
         "handler.js": ((2, "db"), (3, "db")),
         "two.js": ((1, "store"), (2, "store")),
         "gen.js": ((2, "api"),),
+        "twice.js": ((3, "store"),),
     }
 
     # Act
@@ -1021,6 +1026,7 @@ def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_i
         ("two.js", 1): "candidate",
         ("two.js", 2): "candidate",
         ("gen.js", 2): "candidate",
+        ("twice.js", 3): "candidate",
     }
 
 
