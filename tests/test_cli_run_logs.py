@@ -661,6 +661,34 @@ class EchoesTheRequest:
         pass
 
 
+class CausedByTheRequest(EchoesTheRequest):
+    """Fails its second request with a plain message, raised from a cause that quotes the request."""
+
+    def ask(self, state, questions):
+        try:
+            return super().ask(state, questions)
+        except RuntimeError as quoting:
+            raise RuntimeError("the provider rejected the request") from quoting
+
+
+@pytest.mark.parametrize("keep_error_text", [True, False])
+def test_a_cause_quoting_its_request_stays_out_of_the_run_files_when_error_text_is_off(
+    tmp_path: Path, keep_error_text: bool
+) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    output = tmp_path / "pack"
+
+    # Act
+    with pytest.raises(RuntimeError, match="the provider rejected the request"):
+        find_pack(repository, output, "find", 5, CausedByTheRequest(), keep_error_text=keep_error_text)
+
+    # Assert
+    [cause] = json.loads((output / "manifest.json").read_text())["search"]["failure"]["causes"]
+    assert (MARKER in cause.get("message", "")) is keep_error_text
+    assert files_holding_code(output) == (["manifest.json"] if keep_error_text else [])
+
+
 @pytest.mark.parametrize("workflow", ["find", "findall"])
 @pytest.mark.parametrize("keep_error_text", [True, False])
 def test_an_error_quoting_its_request_reaches_stderr_and_the_run_files_unless_error_text_is_off(
