@@ -3,20 +3,24 @@
 ``scope.resolve_scope`` decides a file whose shape flags it wherever code can (a linguist attribute, a
 generated header, a vendored or output folder) and hands the rest on in
 ``ResolvedScope.awaiting_generated_judgment``. Each reaches Jev as one entry: its path, its measured
-facts, up to ``MAX_IMPORTERS`` files that import it with their true count, and two excerpts. The
+facts, up to ``MAX_IMPORTERS`` files that import it with their true count, up to ``MAX_NAMED_BY``
+files that name its path with the line that names it and their true count, and two excerpts. The
 line the answer draws is André's (04.10.2026, 12:55): generated means no person edits the file
 as source. A file the secret scan refuses is never sent; it is named as not judged.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from ..index import tools
 from ..index.code_index import CodeIndex
 from ..index.file_shape import FileShape
+from ..index.scope import is_test_file
+from ..index.spans import TextHit
 from .judge import CheckResult, Judge
 from .questions import Check, Criterion
 from .secrets import SecretInRequestError, mask_request, refuse_if_secret
@@ -24,8 +28,11 @@ from .secrets import SecretInRequestError, mask_request, refuse_if_secret
 FILES = "files"
 EXCERPT_CHARS = 2_000
 MAX_IMPORTERS = 10
-NOT_JUDGED_SECRET = "not judged: the secret scan refused its excerpts"
+MAX_NAMED_BY = 5
+NAMING_LINE_CHARS = 200
+NOT_JUDGED_SECRET = "not judged: the secret scan refused its entry"
 _PACKAGE_ENTRY_STEMS = frozenset({"index", "__init__"})
+_PATH_CHARACTERS = r"A-Za-z0-9_\-"
 
 GENERATED_FILE = Check(
     name="generated_file",
@@ -53,7 +60,10 @@ class GeneratedJudgments:
 def judge_generated_files(
     judge: Judge, index: CodeIndex, awaiting: Mapping[str, FileShape]
 ) -> GeneratedJudgments:
-    entries = {path: generated_file_entry(index, path, awaiting[path]) for path in sorted(awaiting)}
+    naming = files_naming(index.root, sorted(awaiting))
+    entries = {
+        path: generated_file_entry(index, path, awaiting[path], naming[path]) for path in sorted(awaiting)
+    }
     refused = {path for path, entry in entries.items() if _refused_by_secret_scan(judge, entry)}
     sendable = [path for path in entries if path not in refused]
     results = judge.check_each(GENERATED_FILE, [entries[path] for path in sendable], list_name=FILES)
@@ -62,10 +72,10 @@ def judge_generated_files(
     )
 
 
-def generated_file_entry(index: CodeIndex, path: str, shape: FileShape) -> dict:
-    """One file as Jev sees it: path, measured facts, importers and the two excerpts. Every field is a
-    measurement or the file's own text, never a verdict: no trigger names and no reasons. ``file_shape``
-    measures lines in bytes, so the line fields say so."""
+def generated_file_entry(index: CodeIndex, path: str, shape: FileShape, naming: Sequence[TextHit]) -> dict:
+    """One file as Jev sees it: path, measured facts, importers, the files naming it (``naming``, from
+    ``files_naming``) and the two excerpts. Every field is a measurement or real text, never a verdict:
+    no trigger names and no reasons. ``file_shape`` measures lines in bytes, so the line fields say so."""
     importers = importers_of(index, path)
     text = "\n".join(index.lines(path))
     return {
@@ -76,8 +86,24 @@ def generated_file_entry(index: CodeIndex, path: str, shape: FileShape) -> dict:
         "average_line_bytes": round(shape.chars_per_line, 1),
         "importers": list(importers[:MAX_IMPORTERS]),
         "importer_count": len(importers),
+        "named_by": [_naming_entry(hit, path) for hit in naming[:MAX_NAMED_BY]],
+        "named_by_count": len(naming),
         **_excerpts(text),
     }
+
+
+def files_naming(root: Path, paths: Sequence[str]) -> dict[str, tuple[TextHit, ...]]:
+    """For each of ``paths``, the first line of every other file in the directory listing that names
+    it as a whole path, non-test files first, then by file. All paths are searched in one ripgrep pass."""
+    if not paths:
+        return {}
+    first_lines: dict[str, dict[str, TextHit]] = {path: {} for path in paths}
+    tokens = {path: _whole_path(path) for path in paths}
+    for hit in tools.ripgrep_lines(paths, tools.listed_files(root), root):
+        for path, token in tokens.items():
+            if hit.file != path and hit.file not in first_lines[path] and token.search(hit.text):
+                first_lines[path][hit.file] = hit
+    return {path: tuple(sorted(hits.values(), key=_naming_order)) for path, hits in first_lines.items()}
 
 
 def importers_of(index: CodeIndex, path: str) -> tuple[str, ...]:
@@ -92,6 +118,32 @@ def _import_stem(path: str) -> str:
     """The name an import of ``path`` spells: the file's stem, or its folder's name for a package entry."""
     pure = PurePosixPath(path)
     return pure.parent.name if pure.stem in _PACKAGE_ENTRY_STEMS else pure.stem
+
+
+def _whole_path(path: str) -> re.Pattern[str]:
+    """``path`` as a whole token: an optional ``./`` or ``/`` after a character no path holds, and no
+    path character or file extension after it. ``lib/web/a.js``, ``web/a.json`` and a URL ending in
+    ``/web/a.js`` do not name ``web/a.js``."""
+    before = rf"(?:^|[^{_PATH_CHARACTERS}./])(?:\./|/)?"
+    after = rf"(?![{_PATH_CHARACTERS}/]|\.[A-Za-z0-9])"
+    return re.compile(before + re.escape(path) + after)
+
+
+def _naming_order(hit: TextHit) -> tuple[bool, str]:
+    return is_test_file(hit.file), hit.file
+
+
+def _naming_entry(hit: TextHit, path: str) -> dict:
+    return {"file": hit.file, "line": hit.line, "text": _window(hit.text.strip(), path)}
+
+
+def _window(text: str, path: str) -> str:
+    """``text`` when it fits ``NAMING_LINE_CHARS``, otherwise that many characters around ``path``."""
+    if len(text) <= NAMING_LINE_CHARS:
+        return text
+    centre = text.index(path) + len(path) // 2
+    start = min(max(0, centre - NAMING_LINE_CHARS // 2), len(text) - NAMING_LINE_CHARS)
+    return text[start : start + NAMING_LINE_CHARS]
 
 
 def _excerpts(text: str) -> dict[str, str]:

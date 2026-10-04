@@ -16,6 +16,10 @@ from jev_navigator.judgments.generated_files import (
     EXCERPT_CHARS,
     GENERATED_FILE,
     MAX_IMPORTERS,
+    MAX_NAMED_BY,
+    NAMING_LINE_CHARS,
+    NOT_JUDGED_SECRET,
+    files_naming,
     generated_file_entry,
     importers_of,
     judge_generated_files,
@@ -56,7 +60,7 @@ def test_a_flagged_file_reaches_jev_as_its_path_measured_facts_and_two_excerpts(
     shape = shape_of(repo, "web/bundle.js")
     middle_start = (len(text) - EXCERPT_CHARS) // 2
 
-    entry = generated_file_entry(index, "web/bundle.js", awaiting["web/bundle.js"])
+    entry = generated_file_entry(index, "web/bundle.js", awaiting["web/bundle.js"], naming=())
 
     assert entry == {
         "file": "web/bundle.js",
@@ -66,6 +70,8 @@ def test_a_flagged_file_reaches_jev_as_its_path_measured_facts_and_two_excerpts(
         "average_line_bytes": round(shape.chars_per_line, 1),
         "importers": [],
         "importer_count": 0,
+        "named_by": [],
+        "named_by_count": 0,
         "opening": text[:EXCERPT_CHARS],
         "middle": text[middle_start : middle_start + EXCERPT_CHARS],
     }
@@ -79,7 +85,7 @@ def test_importers_are_the_files_whose_imports_resolve_to_it_capped_with_the_tru
     repo = _repository(tmp_path / "repo", {"web/bundle.js": BUNDLE, **importers, **mention_only})
     index, _ = _awaiting(repo)
 
-    entry = generated_file_entry(index, "web/bundle.js", shape_of(repo, "web/bundle.js"))
+    entry = generated_file_entry(index, "web/bundle.js", shape_of(repo, "web/bundle.js"), naming=())
 
     assert entry["importers"] == sorted(importers)[:MAX_IMPORTERS]
     assert entry["importer_count"] == 12
@@ -130,7 +136,95 @@ def test_a_file_the_secret_scanner_refuses_stays_named_as_not_judged(tmp_path: P
     judgments = judge_generated_files(Judge(client, scanner=_MarkScanner()), index, awaiting)
 
     assert list(judgments.judged) == ["web/a.js"]
-    assert dict(judgments.not_judged) == {"web/keyed.js": "not judged: the secret scan refused its excerpts"}
+    assert dict(judgments.not_judged) == {"web/keyed.js": NOT_JUDGED_SECRET}
+    assert all(SECRET_MARK not in str(state) for state, _ in client.requests)
+
+
+def test_files_that_name_a_flagged_path_reach_jev_non_test_files_first_capped_with_the_true_count(
+    tmp_path: Path,
+) -> None:
+    test_namers = {
+        f"app/t{number}.test.mjs": 'const copy = join(dir, "web/bundle.js");\n' for number in range(5)
+    }
+    lookalikes = (
+        "// web/bundle.json, lib/web/bundle.js, https://x.test/main/web/bundle.js\nexport const n = 1;\n"
+    )
+    repo = _repository(
+        tmp_path / "repo",
+        {
+            "web/bundle.js": "// web/bundle.js\n" + BUNDLE,
+            "scripts/build.mjs": 'writeFileSync("./web/bundle.js", out);\nlog("wrote web/bundle.js");\n',
+            "README.md": "The build rewrites [/web/bundle.js](web/bundle.js).\n",
+            "web/notes.ts": lookalikes,
+            **test_namers,
+        },
+    )
+    index, awaiting = _awaiting(repo)
+
+    naming = files_naming(repo, list(awaiting))
+    entry = generated_file_entry(index, "web/bundle.js", awaiting["web/bundle.js"], naming["web/bundle.js"])
+
+    assert entry["named_by"] == [
+        {"file": "README.md", "line": 1, "text": "The build rewrites [/web/bundle.js](web/bundle.js)."},
+        {"file": "scripts/build.mjs", "line": 1, "text": 'writeFileSync("./web/bundle.js", out);'},
+        *(
+            {"file": file, "line": 1, "text": 'const copy = join(dir, "web/bundle.js");'}
+            for file in sorted(test_namers)[: MAX_NAMED_BY - 2]
+        ),
+    ]
+    assert entry["named_by_count"] == 7
+
+
+def test_a_long_naming_line_reaches_jev_as_a_window_that_keeps_the_path(tmp_path: Path) -> None:
+    line = "a" * 500 + ' copy("web/bundle.js") ' + "b" * 500
+    repo = _repository(tmp_path / "repo", {"web/bundle.js": BUNDLE, "scripts/copy.mjs": line + "\n"})
+    index, awaiting = _awaiting(repo)
+
+    naming = files_naming(repo, list(awaiting))
+    [named] = generated_file_entry(
+        index, "web/bundle.js", awaiting["web/bundle.js"], naming["web/bundle.js"]
+    )["named_by"]
+
+    assert len(named["text"]) == NAMING_LINE_CHARS
+    assert 'copy("web/bundle.js")' in named["text"]
+    assert named["text"] in line
+
+
+def test_one_line_naming_two_flagged_files_names_each_of_them(tmp_path: Path) -> None:
+    repo = _repository(
+        tmp_path / "repo",
+        {
+            "web/a.js": BUNDLE,
+            "web/b.js": "/*b*/" + BUNDLE,
+            "scripts/pack.mjs": 'pack("web/a.js", "web/b.js");\n',
+        },
+    )
+    _, awaiting = _awaiting(repo)
+
+    naming = files_naming(repo, list(awaiting))
+
+    assert {path: [(hit.file, hit.line) for hit in hits] for path, hits in naming.items()} == {
+        "web/a.js": [("scripts/pack.mjs", 1)],
+        "web/b.js": [("scripts/pack.mjs", 1)],
+    }
+
+
+def test_a_secret_on_a_naming_line_keeps_the_named_file_unsent(tmp_path: Path) -> None:
+    repo = _repository(
+        tmp_path / "repo",
+        {
+            "web/a.js": BUNDLE,
+            "web/named.js": "/*n*/" + BUNDLE,
+            "scripts/build.mjs": f'writeFileSync("web/named.js", "{SECRET_MARK}");\n',
+        },
+    )
+    index, awaiting = _awaiting(repo)
+    client = ScriptedJevClient(default_noul=0.9)
+
+    judgments = judge_generated_files(Judge(client, scanner=_MarkScanner()), index, awaiting)
+
+    assert list(judgments.judged) == ["web/a.js"]
+    assert dict(judgments.not_judged) == {"web/named.js": NOT_JUDGED_SECRET}
     assert all(SECRET_MARK not in str(state) for state, _ in client.requests)
 
 

@@ -8,7 +8,7 @@ import logging
 import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from functools import cache
 from pathlib import Path
 
@@ -131,35 +131,58 @@ def _json_lines(arguments: Sequence[str], cwd: Path) -> Iterator[dict]:
 
 
 def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:
-    """The lines holding ``text``. JSON events are split at newlines only, since a line of code may
-    hold a Unicode line separator that ``str.splitlines`` would split."""
+    """The lines holding ``text``, at most ``max_hits`` per file."""
     command = [RIPGREP, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
     hits = []
     for chunk in file_chunks(files):
-        output = run_command([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
-        events = (json.loads(line) for line in output.split("\n") if line.strip())
-        hits += [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
+        hits += _match_lines(run_command([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT))
+    return hits
+
+
+def ripgrep_lines(texts: Sequence[str], files: Sequence[str], cwd: Path) -> list[TextHit]:
+    """Every line of the supplied files holding any of the exact ``texts``, all texts searched in one
+    pass over the files."""
+    if not files or not texts:
+        return []
+    hits = []
+    with _pattern_file(texts) as patterns:
+        command = [RIPGREP, "--json", "--fixed-strings", "-f", patterns]
+        for chunk in file_chunks(files):
+            hits += _match_lines(run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT))
     return hits
 
 
 def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -> tuple[str, ...]:
-    """Every supplied file containing any of the exact ``texts``, without a result-count cutoff. The
-    texts go to ripgrep in a pattern file, one per line, so their number never meets the argument
-    limit."""
+    """Every supplied file containing any of the exact ``texts``, without a result-count cutoff."""
     patterns = [texts] if isinstance(texts, str) else list(texts)
     if not files or not patterns:
         return ()
-    if any("\n" in pattern for pattern in patterns):
-        raise ValueError("a text searched for by file cannot hold a line break")
-    with tempfile.NamedTemporaryFile("w", prefix="jev-navigator-patterns-", suffix=".txt") as pattern_file:
-        pattern_file.write("".join(f"{pattern}\n" for pattern in patterns))
-        pattern_file.flush()
-        command = [RIPGREP, "--files-with-matches", "--null", "--fixed-strings", "-f", pattern_file.name]
-        found: list[str] = []
+    found: list[str] = []
+    with _pattern_file(patterns) as pattern_path:
+        command = [RIPGREP, "--files-with-matches", "--null", "--fixed-strings", "-f", pattern_path]
         for chunk in file_chunks(files):
             output = run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
             found += [path.removeprefix("./") for path in output.split("\0") if path]
     return tuple(found)
+
+
+@contextmanager
+def _pattern_file(texts: Sequence[str]) -> Iterator[str]:
+    """The path of a temporary ripgrep pattern file holding ``texts``, one per line, so their number
+    never meets the argument limit."""
+    if any("\n" in text for text in texts):
+        raise ValueError("a text searched for by file cannot hold a line break")
+    with tempfile.NamedTemporaryFile("w", prefix="jev-navigator-patterns-", suffix=".txt") as pattern_file:
+        pattern_file.write("".join(f"{text}\n" for text in texts))
+        pattern_file.flush()
+        yield pattern_file.name
+
+
+def _match_lines(output: str) -> list[TextHit]:
+    """The match events of ripgrep's JSON output. Events are split at newlines only, since a line of
+    code may hold a Unicode line separator that ``str.splitlines`` would split."""
+    events = (json.loads(line) for line in output.split("\n") if line.strip())
+    return [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
 
 
 def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
