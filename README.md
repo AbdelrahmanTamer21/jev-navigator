@@ -334,7 +334,10 @@ reading them, and a warm lookup starts no text search and parses no file. The fi
 index covers its whole scope: each file the table lacks is read from the fact cache, or parsed, and
 its rows are written. A changed file gets new rows under its new content, a file deleted before the
 first lookup answers none, one deleted later is reported unavailable and proves nothing, and a change
-to the parser or to any language's rules starts a new table. `definitions_in(file)` reads one file's
+to the parser or to any language's rules starts a new table. When the table is warm but the fact
+cache is not (after a change to the fact rules, or after housekeeping pruned it), callers and
+references load the facts their bindings read, the files of the uses and of the definitions, in one
+scan instead of one per file. `definitions_in(file)` reads one file's
 definitions from the table. The table holds names and line numbers, never code. A file counts as read
 in a Find's counts only when navigation reached it, never because the table covered it. A call's or
 argument's receiver, in the table and in the cached facts alike, is kept only when it is a plain chain
