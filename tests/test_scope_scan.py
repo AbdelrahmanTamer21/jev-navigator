@@ -943,7 +943,8 @@ def test_a_python_module_alias_is_read_from_module_level_imports_only(tmp_path: 
 def test_a_call_through_a_python_module_import_reads_only_that_module(tmp_path: Path, ast_grep_runs) -> None:
     """`jobs.run()` after `import app.jobs as jobs`, and `app.jobs.run()` after `import app.jobs`,
     call the `run` that module defines, read from its own facts like a script module import. A
-    parameter named `jobs` replaces the import inside its function."""
+    parameter named `jobs` replaces the import inside its function, and a name a `try` binds to one
+    module and its `except` to another holds neither."""
     # Arrange
     index = committed(
         tmp_path,
@@ -957,6 +958,12 @@ def test_a_call_through_a_python_module_import_reads_only_that_module(tmp_path: 
                 "def dotted(task):\n    return app.jobs.run(task)\n\n\n"
                 "def injected(jobs, task):\n    return jobs.run(task)\n"
             ),
+            "app/fast.py": "def loads(text):\n    return text\n",
+            "app/slow.py": "def loads(text):\n    return text\n",
+            "app/reader.py": (
+                "try:\n    import app.fast as codec\nexcept ImportError:\n    import app.slow as codec\n\n\n"
+                "def read(text):\n    return codec.loads(text)\n"
+            ),
         },
     )
     caller = {span.name: span for span in index.functions_in("app/worker.py")}
@@ -967,12 +974,14 @@ def test_a_call_through_a_python_module_import_reads_only_that_module(tmp_path: 
     ]
     scanned = {file for _, _, files in ast_grep_runs for file in files}
     injected = index.callee_edges(caller["injected"])[0].binding
+    either = index.binding_of("app/reader.py", 8, "loads", "codec")
 
     # Assert
     run = Span("app/jobs.py", 1, 2, "run")
     assert [(binding.status.value, binding.target) for binding in through_imports] == [("resolved", run)] * 2
     assert "app/unrelated.py" not in scanned
     assert (injected.status.value, injected.target) == ("candidate", None)
+    assert (either.status.value, either.target) == ("candidate", None)
 
 
 def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_it(tmp_path: Path) -> None:
