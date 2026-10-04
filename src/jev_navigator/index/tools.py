@@ -24,7 +24,7 @@ RIPGREP = "rg"
 # `--no-config` keeps ripgrep from reading `RIPGREP_CONFIG_PATH`: over an untrusted repository, a
 # config file could otherwise inject flags such as `--pre=<program>`, which runs an arbitrary
 # program. It also keeps a personal rg config from changing what the index sees.
-_RIPGREP_SAFE = (RIPGREP, "--no-config")
+RIPGREP_SAFE = (RIPGREP, "--no-config")
 _NO_MATCHES_EXIT = 1
 _SCANNED_FILE_PREFIX = "sg: entity|file|"
 NEUTRAL_AST_GREP_CONFIG = "ruleDirs: []\n"
@@ -259,7 +259,7 @@ def _stderr_text(errors: IO[bytes]) -> str:
 
 def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:
     """The lines holding ``text``, at most ``max_hits`` per file."""
-    command = [*_RIPGREP_SAFE, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
+    command = [*RIPGREP_SAFE, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
     hits = []
     for chunk in file_chunks(files, bytes_only=True):
         hits += _match_lines(run_command([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT))
@@ -273,7 +273,7 @@ def ripgrep_lines(texts: Sequence[str], files: Sequence[str], cwd: Path) -> list
         return []
     hits = []
     with _pattern_file(texts) as patterns:
-        command = [*_RIPGREP_SAFE, "--json", "--fixed-strings", "-f", patterns]
+        command = [*RIPGREP_SAFE, "--json", "--fixed-strings", "-f", patterns]
         for chunk in file_chunks(files, bytes_only=True):
             hits += _match_lines(run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT))
     return hits
@@ -288,7 +288,7 @@ def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -
         return ()
     found: list[str] = []
     with _pattern_file(patterns) as pattern_path:
-        command = [*_RIPGREP_SAFE, "--files-with-matches", "--null", "--fixed-strings", "-f", pattern_path]
+        command = [*RIPGREP_SAFE, "--files-with-matches", "--null", "--fixed-strings", "-f", pattern_path]
         for chunk in file_chunks(files, bytes_only=True):
             output = run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
             found += [path.removeprefix("./") for path in output.split("\0") if path]
@@ -312,38 +312,6 @@ def _match_lines(output: str) -> list[TextHit]:
     code may hold a Unicode line separator that ``str.splitlines`` would split."""
     events = (json.loads(line) for line in output.split("\n") if line.strip())
     return [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
-
-
-def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
-    """Regular, non-symlink files owned by this working directory, including hidden paths.
-
-    A Git worktree uses its tracked and untracked, non-ignored inventory, which naturally excludes
-    nested repositories and managed worktrees. A non-Git directory uses ripgrep's ignore policy.
-    """
-    if inside_git_worktree(cwd):
-        output = git(["ls-files", "-z", "-c", "-o", "--exclude-standard", "--", *prefixes], cwd)
-    else:
-        output = run_command(
-            [
-                *_RIPGREP_SAFE,
-                "--files",
-                "--hidden",
-                "--null",
-                "--glob",
-                "!.git",
-                "--glob",
-                "!.git/**",
-                *prefixes,
-            ],
-            cwd,
-        )
-    files = []
-    for raw in output.split("\0"):
-        path = raw.removeprefix("./")
-        candidate = cwd / path
-        if path and candidate.is_file() and not candidate.is_symlink():
-            files.append(path)
-    return tuple(sorted(dict.fromkeys(files)))
 
 
 def inside_git_worktree(cwd: Path) -> bool:
