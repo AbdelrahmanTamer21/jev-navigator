@@ -13,7 +13,7 @@ from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch
 from .spans import Span
 from .tools import ast_grep_version
 
-FACT_RULE_VERSION = "combined-facts-v19-declaration-kinds-from-the-tree"
+FACT_RULE_VERSION = "combined-facts-v20-commonjs-export-names"
 
 
 class FactCache:
@@ -68,7 +68,8 @@ def _encode(facts: FileFacts) -> dict:
             "functions": [asdict(span) for span in facts.structure.functions],
             "symbols": [asdict(span) for span in facts.structure.symbols],
             "declarations": [asdict(span) for span in facts.structure.declarations],
-            "top_level_symbols": [asdict(span) for span in facts.structure.top_level_symbols],
+            "module_symbols": [asdict(span) for span in facts.structure.module_symbols],
+            "importable_symbols": [asdict(span) for span in facts.structure.importable_symbols],
             "type_declarations": [asdict(span) for span in facts.structure.type_declarations],
             "value_declarations": [asdict(span) for span in facts.structure.value_declarations],
         },
@@ -87,7 +88,8 @@ def _decode(file: str, raw: dict) -> FileFacts:
             tuple(_span(file, span) for span in structure["functions"]),
             tuple(_span(file, span) for span in structure["symbols"]),
             tuple(_span(file, span) for span in structure["declarations"]),
-            tuple(_span(file, span) for span in structure["top_level_symbols"]),
+            tuple(_span(file, span) for span in structure["module_symbols"]),
+            tuple(_span(file, span) for span in structure["importable_symbols"]),
             tuple(_span(file, span) for span in structure["type_declarations"]),
             tuple(_span(file, span) for span in structure["value_declarations"]),
         ),

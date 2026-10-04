@@ -20,6 +20,9 @@ from . import tools
 from .imports import _local
 from .languages import (
     CLASS_KINDS,
+    COMMONJS_EXPORT_PAIR,
+    COMMONJS_EXPORT_TARGET,
+    COMMONJS_EXPORTS_OBJECT,
     DECLARED_NAME_RULES,
     EXPRESSION_KINDS,
     FLOW_LANGUAGE,
@@ -28,6 +31,7 @@ from .languages import (
     NAME_HOLDERS,
     NAME_WRAPPERS,
     OBJECT_KINDS,
+    PROPERTY_TARGET,
     TYPE_AND_VALUE_DECLARATIONS,
     TYPE_DECLARATIONS,
     VALUE_DECLARATIONS,
@@ -61,15 +65,18 @@ class Unparsed:
 
 @dataclass(frozen=True)
 class FileStructure:
-    """``top_level_symbols`` are the symbols no other function or class holds in the syntax tree.
-    Symbols sharing a line each hold the other's first line, so lines alone cannot tell.
+    """``module_symbols`` are the symbols their module names: no function, class or object literal
+    holds them in the syntax tree, and no property assignment names them. Symbols sharing a line
+    each hold the other's first line, so lines alone cannot tell. ``importable_symbols`` adds the
+    CommonJS exports, which another module imports by name but their own module never names.
     ``type_declarations`` and ``value_declarations`` are the declarations a type use and a value
     use may name, decided by each declaration's own syntax node."""
 
     functions: tuple[Span, ...]
     symbols: tuple[Span, ...]
     declarations: tuple[Span, ...]
-    top_level_symbols: tuple[Span, ...]
+    module_symbols: tuple[Span, ...]
+    importable_symbols: tuple[Span, ...]
     type_declarations: tuple[Span, ...]
     value_declarations: tuple[Span, ...]
 
@@ -173,7 +180,9 @@ def _structure_from_matches(files, unparsed, matches):
     declaration_nodes: dict[str, list[_Declaration]] = {file: [] for file in files}
     declared_names: dict[str, list[tuple[int, str]]] = {file: [] for file in files}
     ranges: dict[str, list[tuple[int, int, Span]]] = {file: [] for file in files}
-    object_members: dict[str, set[tuple[int, int]]] = {file: set() for file in files}
+    marks: dict[str, dict[str, set[tuple[int, int]]]] = {
+        file: {rule: set() for rule in _MARK_RULES} for file in files
+    }
     for match in matches:
         file, start, end = match["file"], _line_of(match), match["range"]["end"]["line"] + 1
         if match["ruleId"] == _ERROR_RULE:
@@ -182,8 +191,8 @@ def _structure_from_matches(files, unparsed, matches):
             unparsed.add("facts", [file])
             continue
         offsets = match["range"]["byteOffset"]
-        if match["ruleId"] == _OBJECT_MEMBER_RULE:
-            object_members[file].add((offsets["start"], offsets["end"]))
+        if match["ruleId"] in _MARK_RULES:
+            marks[file][match["ruleId"]].add((offsets["start"], offsets["end"]))
         elif match["ruleId"] == _DECLARED_NAME_RULE:
             declared_names[file].append((offsets["start"], match["text"]))
         elif match["ruleId"] in _DECLARATION_BY_RULE:
@@ -204,11 +213,14 @@ def _structure_from_matches(files, unparsed, matches):
     for file in files:
         symbols = functions[file] | classes[file]
         declared = _declarations(file, declaration_nodes[file], declared_names[file])
+        held = _held(ranges[file], marks[file][_OBJECT_MEMBER_RULE])
+        module_symbols = symbols - held - _marked(ranges[file], marks[file][_PROPERTY_VALUE_RULE])
         structures[file] = FileStructure(
             _ordered(functions[file], positions),
             _ordered(symbols, positions),
             _sorted(span for span, _ in declared),
-            _ordered(symbols - _held(ranges[file], object_members[file]), positions),
+            _ordered(module_symbols, positions),
+            _ordered(module_symbols | _marked(ranges[file], marks[file][_MODULE_EXPORT_RULE]), positions),
             _sorted(span for span, kind in declared if kind.named_by_types),
             _sorted(span for span, kind in declared if kind.named_by_values),
         )
@@ -277,12 +289,16 @@ def _source_positions(ranges: Iterable[tuple[int, int, Span]]) -> dict[Span, int
     return positions
 
 
+def _marked(ranges: list[tuple[int, int, Span]], marked: set[tuple[int, int]]) -> set[Span]:
+    return {span for start, end, span in ranges if (start, end) in marked}
+
+
 def _held(ranges: list[tuple[int, int, Span]], object_members: set[tuple[int, int]]) -> set[Span]:
     """The spans whose syntax node is an object literal's member or lies inside another function or
     class node, counting the callbacks ``_same_lines_as_a_named_symbol`` drops: a function inside a
     one-line callback is the callback's. Nodes nest or are disjoint, so a node is inside another
     exactly when one starting no later reaches at least as far."""
-    held = {span for start, end, span in ranges if (start, end) in object_members}
+    held = _marked(ranges, object_members)
     furthest = -1
     for _start, end, span in sorted(ranges, key=lambda range_: (range_[0], -range_[1])):
         if end <= furthest:
@@ -357,8 +373,11 @@ def _captured_name(match: dict) -> str:
 _ERROR_RULE = "parse_error"
 _OBJECT_MEMBER_RULE = "object_member"
 _DECLARED_NAME_RULE = "declared_name"
+_PROPERTY_VALUE_RULE = "property_value"
+_MODULE_EXPORT_RULE = "module_export"
+_MARK_RULES = (_OBJECT_MEMBER_RULE, _PROPERTY_VALUE_RULE, _MODULE_EXPORT_RULE)
 _STRUCTURE_RULE_IDS = frozenset(
-    {"function", "class", *_DECLARATION_BY_RULE, _DECLARED_NAME_RULE, _OBJECT_MEMBER_RULE, _ERROR_RULE}
+    {"function", "class", *_DECLARATION_BY_RULE, _DECLARED_NAME_RULE, *_MARK_RULES, _ERROR_RULE}
 )
 _EXPORT_STATEMENT_RULE = "export_surface"
 _EXPORT_SPECIFIER_RULE = "export_specifier"
@@ -389,11 +408,44 @@ def _structure_rules(languages: Sequence[str]) -> str:
         documents.append(_rule_document(_ERROR_RULE, language, "  kind: ERROR"))
         if OBJECT_KINDS[language]:
             documents.append(_object_member_rule(language))
+            documents += _property_rules(language)
     return "\n---\n".join(documents)
 
 
 def _rule_document(rule_id: str, language: str, rule: str) -> str:
     return f"id: {rule_id}\nlanguage: {grammar_of(language)}\nrule:\n{rule}"
+
+
+def _property_rules(language: str) -> list[str]:
+    """Every function and class assigned to a property, and every one that is a CommonJS export
+    (see ``PROPERTY_TARGET``)."""
+    symbol_kinds = (*FUNCTION_KINDS[language], *CLASS_KINDS[language])
+    symbols = _kinds(symbol_kinds)
+    expressions = _kinds([kind for kind in symbol_kinds if kind in EXPRESSION_KINDS])
+    export = (
+        "  any:\n"
+        f"    - {{any: {symbols}, {_held_past_wrappers(language, COMMONJS_EXPORT_TARGET)}}}\n"
+        f"    - {{kind: method_definition, inside: {COMMONJS_EXPORTS_OBJECT}}}\n"
+        f"    - {{any: {expressions}, {_held_past_wrappers(language, COMMONJS_EXPORT_PAIR)}}}"
+    )
+    return [
+        _rule_document(
+            _PROPERTY_VALUE_RULE,
+            language,
+            f"  any: {symbols}\n  {_held_past_wrappers(language, PROPERTY_TARGET)}",
+        ),
+        _rule_document(_MODULE_EXPORT_RULE, language, export),
+    ]
+
+
+def _held_past_wrappers(language: str, holder: str) -> str:
+    """An ``inside`` relation: the first ancestor no wrapper (see ``NAME_WRAPPERS``) is ``holder``."""
+    return f"inside: {{stopBy: {_past_wrappers(language)}, any: [{holder}]}}"
+
+
+def _past_wrappers(language: str) -> str:
+    """A ``stopBy`` that ends an ancestor search at the first node no wrapper (see ``NAME_WRAPPERS``)."""
+    return f"{{not: {{any: {_kinds(NAME_WRAPPERS[grammar_of(language)])}}}}}"
 
 
 def _object_member_rule(language: str) -> str:
@@ -439,7 +491,7 @@ def _kind_rule(rule_id: str, language: str, kinds: Sequence[str]) -> str:
     alternatives = [f"{{any: {_kinds(declarations)}, has: {_named_by('name')}}}"] if declarations else []
     if expressions:
         # The search stops at the first ancestor that is no wrapper, and that one must be the holder.
-        past_wrappers = f"{{not: {{any: {_kinds(NAME_WRAPPERS[grammar])}}}}}"
+        past_wrappers = _past_wrappers(language)
         holders = ", ".join(
             f"{{kind: {holder}, has: {_named_by(field)}}}" for holder, field in NAME_HOLDERS[grammar]
         )

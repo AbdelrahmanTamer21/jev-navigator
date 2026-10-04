@@ -43,7 +43,7 @@ _WORD = re.compile(r"[\w$]+")
 ScanObserver = Callable[[str, str, int], None]
 
 
-_NO_STRUCTURE = FileStructure((), (), (), (), (), ())
+_NO_STRUCTURE = FileStructure((), (), (), (), (), (), ())
 
 
 class RevisionMismatchError(ValueError):
@@ -102,7 +102,8 @@ class CodeIndex:
         self._calls_named = cache(self._calls_with_name)
         self._references_named = cache(self._references_with_name)
         self._definitions = cache(self._definitions_by_name)
-        self._top_level_in = cache(self._top_level_spans)
+        self._module_scope_in = cache(self._module_scope_spans)
+        self._importable_in = cache(self._importable_spans)
         self._names_imported = cache(self._read_imported_names)
         self._binding = cache(self._compute_binding)
         self._unread_names = cache(self._read_unread_names)
@@ -372,7 +373,8 @@ class CodeIndex:
             name,
             receiver,
             definitions,
-            tuple(span for span in definitions if span in self._top_level_in(span.file)),
+            tuple(span for span in definitions if span in self._module_scope_in(span.file)),
+            tuple(span for span in definitions if span in self._importable_in(span.file)),
             self._imported_from(file, name),
             self._files_hiding(name),
         )
@@ -515,17 +517,25 @@ class CodeIndex:
                 remaining = available
         return {}
 
-    def _top_level_spans(self, file: str) -> frozenset[Span]:
-        """Symbols and declarations of ``file`` that no class or other function contains: the scan
-        decides it for symbols from the syntax tree. A function starting on a declaration's first
-        line is the value it declares, not its container."""
+    def _module_scope_spans(self, file: str) -> frozenset[Span]:
+        """Symbols and declarations that ``file``'s module scope names; the scan decides it for
+        symbols from the syntax tree."""
+        return frozenset((*self._file_structure(file).module_symbols, *self._module_declarations(file)))
+
+    def _importable_spans(self, file: str) -> frozenset[Span]:
+        """Symbols and declarations another module can import from ``file`` by name: those its
+        module scope names and its CommonJS exports."""
+        return frozenset((*self._file_structure(file).importable_symbols, *self._module_declarations(file)))
+
+    def _module_declarations(self, file: str) -> tuple[Span, ...]:
+        """The declarations no class or function contains. A function starting on a declaration's
+        first line is the value it declares, not its container."""
         structure = self._file_structure(file)
-        top_declarations = (
+        return tuple(
             span
             for span in structure.declarations
             if not any(other.start < span.start <= other.end for other in structure.symbols)
         )
-        return frozenset((*structure.top_level_symbols, *top_declarations))
 
     def _imported_from(self, file: str, name: str) -> tuple[ImportFact, ...]:
         specifier = self._names_imported(file).get(name)

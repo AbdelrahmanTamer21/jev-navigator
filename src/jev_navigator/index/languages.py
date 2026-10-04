@@ -89,6 +89,22 @@ NAME_WRAPPERS = {
 # `api.fetch`, never a name `fetch` that its module or an importer can call.
 OBJECT_KINDS = {"python": (), "typescript": ("object",), "tsx": ("object",), "javascript": ("object",)}
 
+# A function or class assigned to a property, `foo.bar = function () {}`, gives its module no name.
+# Assigned to `exports.x` or `module.exports.x`, or listed in `module.exports = {...}`, it is one of
+# the module's CommonJS exports, which another module imports by its name.
+PROPERTY_TARGET = "{kind: assignment_expression, has: {field: left, kind: member_expression}}"
+_MODULE_EXPORTS = "kind: member_expression, regex: '^module[.]exports$'"
+_EXPORTS = f"[{{kind: identifier, regex: '^exports$'}}, {{{_MODULE_EXPORTS}}}]"
+COMMONJS_EXPORT_TARGET = (
+    "{kind: assignment_expression, has: {field: left, kind: member_expression, "
+    f"has: {{field: object, any: {_EXPORTS}}}}}}}"
+)
+COMMONJS_EXPORTS_OBJECT = (
+    "{kind: object, inside: {field: right, kind: assignment_expression, "
+    f"has: {{field: left, {_MODULE_EXPORTS}}}}}}}"
+)
+COMMONJS_EXPORT_PAIR = f"{{kind: pair, inside: {COMMONJS_EXPORTS_OBJECT}}}"
+
 # Module-level declarations by what may name them, each a rule per grammar that has such
 # declarations: a type alias or interface only a type, a constant or variable only a value, and an
 # enum or a Python assignment (which may be a type alias) both.
