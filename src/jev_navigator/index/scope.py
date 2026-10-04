@@ -13,9 +13,10 @@ out unless asked for:
 
 A false linguist attribute keeps a file its path or header would leave out. A file no attribute,
 header or vendored folder decides is measured (``file_shape.shape_of``) when a request does not ask
-for generated code. Under a ``dist`` or ``build`` folder it is measured before the count, and a file
-a trigger flags there is set aside as generated. Anywhere else it is measured after the count, and a
-flagged file stays in the scope, counted, awaiting Jev's generated judgment with its measured facts.
+for generated code. Under an output folder (``dist``, ``build``, ``generated``, ``__generated__`` or
+one starting with ``generated-``) it is measured before the count, and a file a trigger flags there is
+set aside as generated. Anywhere else it is measured after the count, and a flagged file stays in the
+scope, counted, awaiting Jev's generated judgment with its measured facts.
 
 ``include`` and
 ``exclude`` entries are folders or files when they hold no ``*``, ``?`` or ``[``; otherwise they are
@@ -44,7 +45,8 @@ HEADER_BYTES = 4096
 GENERATED_MARKERS = (b"@generated", b"do not edit")
 COMMENT_STARTS = (b"#", b"//", b"/*", b"*", b"<!--")
 VENDORED_FOLDERS = frozenset({"vendor", "third_party", "node_modules"})
-BUILT_OUTPUT_FOLDERS = frozenset({"dist", "build"})
+OUTPUT_FOLDERS = frozenset({"dist", "build", "generated", "__generated__"})
+OUTPUT_FOLDER_PREFIX = "generated-"
 DOCS_FOLDER = "docs"
 MARKUP_SUFFIXES = frozenset({".md", ".mdx", ".markdown", ".rst", ".adoc", ".asciidoc"})
 MARKUP = "markup"
@@ -120,14 +122,14 @@ def resolve_scope(scope: Scope) -> ResolvedScope | ScopeRefusal:
     _check_languages(scope)
     changed_since_commit = _resolved_ref(root, scope.changed_since)
     files, unsure = _kept_by_code(root, scope, _listed(root, scope, changed_since_commit))
-    set_aside = _flagged_built_output(root, [path for path in unsure if _built_output_folder(path)])
+    set_aside = _flagged_output(root, [path for path in unsure if _output_folder(path)])
     files = [path for path in files if path not in set_aside]
     filters = _filters(scope, changed_since_commit)
     if len(files) > scope.max_files:
         return ScopeRefusal(
             len(files), scope.max_files, filters, counts_by_folder(files), counts_by_language(files)
         )
-    awaiting = _flagged(root, [path for path in unsure if not _built_output_folder(path)])
+    awaiting = _flagged(root, [path for path in unsure if not _output_folder(path)])
     return ResolvedScope(root, tuple(files), filters, awaiting, set_aside)
 
 
@@ -211,8 +213,13 @@ def _in_vendored_folder(path: str) -> bool:
     return not VENDORED_FOLDERS.isdisjoint(PurePosixPath(path).parts[:-1])
 
 
-def _built_output_folder(path: str) -> str | None:
-    return next((folder for folder in PurePosixPath(path).parts[:-1] if folder in BUILT_OUTPUT_FOLDERS), None)
+def _output_folder(path: str) -> str | None:
+    """The first folder of ``path`` that holds build or generator output, if any."""
+    return next((folder for folder in PurePosixPath(path).parts[:-1] if _is_output_folder(folder)), None)
+
+
+def _is_output_folder(folder: str) -> bool:
+    return folder in OUTPUT_FOLDERS or folder.startswith(OUTPUT_FOLDER_PREFIX)
 
 
 def _listed(root: Path, scope: Scope, changed_since_commit: str | None) -> list[str]:
@@ -284,9 +291,9 @@ def _flagged(root: Path, files: Sequence[str]) -> dict[str, FileShape]:
     return {path: shape for path, shape in shapes.items() if shape.triggers}
 
 
-def _flagged_built_output(root: Path, files: Sequence[str]) -> dict[str, SetAside]:
+def _flagged_output(root: Path, files: Sequence[str]) -> dict[str, SetAside]:
     return {
-        path: SetAside(f"left out as generated: under {_built_output_folder(path)}/", shape)
+        path: SetAside(f"left out as generated: under {_output_folder(path)}/", shape)
         for path, shape in _flagged(root, files).items()
     }
 

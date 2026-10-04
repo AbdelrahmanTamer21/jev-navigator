@@ -183,13 +183,37 @@ def test_a_flagged_file_without_a_marker_awaits_jevs_judgment_and_a_marked_one_d
     }
 
 
-def test_a_flagged_file_under_build_output_is_left_out_before_the_count(tmp_path: Path) -> None:
-    repo = _repository(tmp_path / "repo", {"app/orders.py": SOURCE, "web/build/app.js": BUNDLE})
+@pytest.mark.parametrize(
+    ("bundle", "folder"),
+    [
+        ("dist/app.js", "dist"),
+        ("web/build/app.js", "build"),
+        ("pkg/generated/runtime/app.js", "generated"),
+        ("src/__generated__/app.js", "__generated__"),
+        ("protocol/generated-pinned/app.js", "generated-pinned"),
+    ],
+)
+def test_a_flagged_file_under_output_folders_is_left_out_before_the_count(
+    tmp_path: Path, bundle: str, folder: str
+) -> None:
+    repo = _repository(tmp_path / "repo", {"app/orders.py": SOURCE, bundle: BUNDLE})
 
     resolved = _resolved(_scope(repo, max_files=1))
 
     assert resolved.files == ("app/orders.py",)
-    assert resolved.set_aside["web/build/app.js"].reason == "left out as generated: under build/"
+    assert resolved.set_aside[bundle].reason == f"left out as generated: under {folder}/"
+
+
+@pytest.mark.parametrize("bundle", ["web/generators/app.js", "web/regenerated/app.js", "web/generated.js"])
+def test_a_flagged_file_outside_output_folders_still_awaits_jevs_judgment(
+    tmp_path: Path, bundle: str
+) -> None:
+    repo = _repository(tmp_path / "repo", {bundle: BUNDLE})
+
+    resolved = _resolved(_scope(repo))
+
+    assert resolved.files == (bundle,)
+    assert list(resolved.awaiting_generated_judgment) == [bundle]
 
 
 def test_a_file_awaiting_jevs_judgment_counts_toward_the_cap(tmp_path: Path) -> None:
