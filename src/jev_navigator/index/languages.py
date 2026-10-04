@@ -255,7 +255,8 @@ _SCRIPT_MODULE_ALIASES = (
 )
 # In Python, `import app.jobs as jobs` binds `jobs` to `app.jobs`, and `import app.jobs` makes the
 # dotted name `app.jobs` reach that module, outside any function or class. A plain import captures
-# no `$SPEC`: the name is the module.
+# no `$SPEC`: the name is the module. Every dotted name directly in the statement is one it imports;
+# a relation's `field` would reach only the first (see ``PYTHON_FROM_IMPORT``).
 _PYTHON_OUTSIDE_SCOPES = (
     "not: {inside: {stopBy: end, any: [{kind: function_definition}, {kind: class_definition}]}}"
 )
@@ -269,7 +270,7 @@ _PYTHON_MODULE_ALIASES = (
     f"""  kind: dotted_name
   pattern: $NAME
   all:
-    - not: {{not: {{inside: {{field: name, kind: import_statement}}}}}}
+    - not: {{not: {{inside: {{kind: import_statement}}}}}}
     - {_PYTHON_OUTSIDE_SCOPES}""",
 )
 MODULE_ALIAS_RULES = {

@@ -1176,7 +1176,8 @@ def test_a_python_module_alias_is_read_from_module_level_imports_only(tmp_path: 
         {
             "app/main.py": (
                 "import app.jobs as jobs\nimport app.mail  # sends receipts\n"
-                "import json, app.billing as billing\nfrom app import tools\n# import app.old as old\n"
+                "import json, app.billing as billing\nimport os, app.tasks\nfrom app import tools\n"
+                "# import app.old as old\n"
                 "from . import mail as post\nfrom ..lib.text import (\n    slug,\n    words as split,\n)\n"
                 "try:\n    import ujson as fast\nexcept ImportError:\n    pass\n\n\n"
                 "def f():\n    import app.local as local\n    from app import nearby\n    return local\n\n\n"
@@ -1195,6 +1196,8 @@ def test_a_python_module_alias_is_read_from_module_level_imports_only(tmp_path: 
         "app.mail": ("app.mail", False),
         "json": ("json", False),
         "billing": ("app.billing", False),
+        "os": ("os", False),
+        "app.tasks": ("app.tasks", False),
         "tools": ("app.tools", True),
         "post": (".mail", True),
         "slug": ("..lib.text.slug", True),
