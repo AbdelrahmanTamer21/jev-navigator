@@ -35,9 +35,7 @@ from .imports import (
     reexported_names,
     resolve_import,
 )
-from .languages import (
-    language_of,
-)
+from .languages import export_words, language_of
 from .name_table import CALL, DEFINITION_KINDS, REFERENCE, FileEntry, NameRow, NameTable, git_blob_id
 from .packages import Packages
 from .scope_scan import (
@@ -804,11 +802,12 @@ class CodeIndex:
 
     def _hides(self, exporter: str, name: str) -> bool:
         """Whether ``exporter`` may export ``name`` where the index cannot see it: the parser refused
-        the file, so nothing it exports was read, or its unparsed lines mention ``name`` or the name
-        of a definition it exports as ``name`` (see ``_own_names``), or it vanished."""
+        the file, so nothing it exports was read, or its unparsed lines say a word the export of
+        ``name`` is written with (see ``export_words``) or the name of a definition it exports as
+        ``name`` (see ``_own_names``), or it vanished."""
         if self._refused_parse(exporter):
             return True
-        looked_up = {name, *self._own_names(exporter, name)}
+        looked_up = {*export_words(name), *self._own_names(exporter, name)}
         return any(exporter in self._files_hiding(each) for each in looked_up)
 
     def _refused_parse(self, file: str) -> bool:

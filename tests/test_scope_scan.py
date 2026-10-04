@@ -1521,6 +1521,26 @@ def test_a_default_whose_definition_may_sit_in_unparsed_lines_stays_unknown(tmp_
     assert binding.status.value == "unknown", binding
 
 
+def test_a_commonjs_default_export_the_parser_lost_stays_unknown(tmp_path: Path) -> None:
+    """A Flow cast the JavaScript grammar cannot parse hides `module.exports = (build: Builder)`,
+    which never says `default`. A default import of the module is unknown, never a module with no
+    definition exported as the default."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "lib.js": "function build() { return 1; }\nmodule.exports = (build: Builder);\n",
+            "use.js": "import make from './lib';\nmake();\n",
+        },
+    )
+
+    # Act
+    binding = index.binding_of("use.js", 2, "make", None)
+
+    # Assert
+    assert binding.status.value == "unknown", binding
+
+
 def test_only_what_a_script_module_exports_is_importable(tmp_path: Path) -> None:
     """A script module's own functions are importable only where it exports them: by an `export`
     statement or list, as its default export, or as a CommonJS export (`exports.x = x`, a function
