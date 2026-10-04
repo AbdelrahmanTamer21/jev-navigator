@@ -11,10 +11,10 @@ import asyncio
 import base64
 import copy
 import inspect
-import json
 import logging
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 
 from .answers import JevResponse, NoulAnswer, TokenTotal, response_to_raw
@@ -53,6 +53,9 @@ from .thresholds import NoulVerdict, Thresholds
 logger = logging.getLogger(__name__)
 
 MAX_STATE_CHARS = 60_000
+"""The state a packed batch carries, in ``serialized_chars``. It sits below ``JEV_INPUT_BOX_CHARS``
+(76,800), so normal packing leaves room for the question and never reaches the preflight; that fires
+only for a batch that a single item overflows."""
 CODE_FIELD = "code"
 ROUTE_QUESTION = "route"
 _DEFAULT_MASKER = SecretMasker()
@@ -184,6 +187,11 @@ class Judge:
         child.input_total = TokenTotal()
         child._parent = self
         return child
+
+    @property
+    def unanswered_requests(self) -> int:
+        """The requests sent whose response never arrived, so whose token usage is unknown."""
+        return self.calls - self.input_total.responses
 
     def calls_left(self) -> int | None:
         """The calls this judge may still send under its own and its parents' caps; None when uncapped."""
@@ -628,7 +636,7 @@ class Judge:
 
     def _journal_failure(self, request_id: str | None, error: Exception, raw: RawResponse | None) -> None:
         if self.journal is not None and request_id is not None:
-            self.journal.record_failure(request_id, f"{type(error).__name__}: {error}", raw)
+            self.journal.record_failure(request_id, _failure_text(error), raw)
 
     def _propagate_attempt_journal_error(
         self, request_id: str | None, error: AttemptJournalCallbackError, raw: RawResponse | None
@@ -1003,12 +1011,18 @@ def _argument_id(operation: str, offer: CallOffer) -> str:
     return f"{operation}.{offer.argument.question_id}"
 
 
+def _failure_text(error: Exception) -> str:
+    if isinstance(error, CancelledError) and not str(error):
+        return f"{type(error).__name__}: the request was cancelled after it was sent"
+    return f"{type(error).__name__}: {error}"
+
+
 def _batches(plan: _CheckPlan) -> list[list[int]]:
     """Fills a batch until the request that would carry it would be larger than the budget allows.
     An item is measured together with the question wording asked about it, because that is what one
     request has to fit, and a single question is measured exactly as the batch around it is.
     """
-    budget = plan.budget - len(json.dumps(plan.shared))
+    budget = plan.budget - serialized_chars(plan.shared)
     batches: list[list[int]] = []
     current: list[int] = []
     used = 0
@@ -1025,4 +1039,4 @@ def _batches(plan: _CheckPlan) -> list[list[int]]:
 def _open_size(plan: _CheckPlan, position: int) -> int:
     """What one item and the wording of the questions still open about it would cost on their own."""
     wording = [check.to_question(item_path(plan.list_name, 0)) for check in plan.open_at(position).values()]
-    return len(json.dumps(plan.items[position])) + sum(len(json.dumps(question)) for question in wording)
+    return serialized_chars(plan.items[position]) + sum(serialized_chars(question) for question in wording)

@@ -3,7 +3,6 @@ and every test's isolation from the developer's own decision-model settings."""
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -16,6 +15,7 @@ from jev_navigator.environment import SETTING_PREFIXES
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
+from jev_navigator.judgments.questions import serialized_chars
 
 
 @pytest.fixture(autouse=True)
@@ -159,9 +159,9 @@ class BudgetedClient:
     """A Jev client that refuses any request over a measured input budget, the way the real
     endpoint answered request 5 of the saved trace run: HTTP 400 ``max_tokens_exceeded``.
 
-    ``budget`` bounds the whole body in UTF-8 bytes. ``input_box`` bounds the state plus the longest
-    single question, the way the provider measures its documented input limit, and counts serialized
-    characters.
+    ``budget`` bounds the whole body and ``input_box`` the state plus the longest single question,
+    the way the provider measures its documented input limit. Both count characters of the
+    ASCII-escaped serialization (``serialized_chars``), the one measure of the library and the Engine.
 
     It records the requests it accepted, so a test can prove no request over the budget was ever
     sent, and how many times the provider had to refuse one.
@@ -177,7 +177,7 @@ class BudgetedClient:
         self.refusals = 0
 
     def ask(self, state: Mapping, questions: Mapping) -> JevResponse:
-        body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
+        body = serialized_chars({"state": state, "questions": questions})
         box = self._state_and_longest_question(state, questions)
         if body > self.budget or (self.input_box is not None and box > self.input_box):
             self.refusals += 1
@@ -192,7 +192,5 @@ class BudgetedClient:
 
     @staticmethod
     def _state_and_longest_question(state: Mapping, questions: Mapping) -> int:
-        longest = max(
-            (len(json.dumps(question, ensure_ascii=False)) for question in questions.values()), default=0
-        )
-        return len(json.dumps(state, ensure_ascii=False)) + longest
+        longest = max((serialized_chars(question) for question in questions.values()), default=0)
+        return serialized_chars(state) + longest
