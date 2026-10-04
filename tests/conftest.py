@@ -1,5 +1,6 @@
 """A small real repository (Python and TypeScript, two commits) that the index tests run against,
-and every test's isolation from the developer's own decision-model settings."""
+every test's isolation from the developer's own decision-model settings, and a session that refuses
+to start without the optional packages the suite needs."""
 
 from __future__ import annotations
 
@@ -11,11 +12,16 @@ from pathlib import Path
 import pytest
 from git_repos import git, write_files
 from isolated_jvn import NO_SETTINGS
+from optional_packages import require_optional_packages
 
 from jev_navigator.environment import SETTING_PREFIXES
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
+
+
+def pytest_configure(config):
+    require_optional_packages()
 
 
 @pytest.fixture(autouse=True)
