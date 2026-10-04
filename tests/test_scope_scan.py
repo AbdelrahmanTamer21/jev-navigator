@@ -973,6 +973,39 @@ def test_a_namespace_member_comes_before_an_import_and_after_a_functions_own_nam
     assert [(binding.status.value, binding.target) for binding in imported] == [("candidate", None)] * 2
 
 
+def test_a_namespace_member_is_never_passed_over_for_an_import_because_of_unparsed_lines(
+    tmp_path: Path,
+) -> None:
+    """Lines the parser lost outside the namespace cannot hide a closer definition, so the member
+    still wins over the module's import of its name. Lost lines inside the namespace that mention
+    the name could hide one, so the use is unknown there, and never the import's."""
+    # Arrange
+    namespace = (
+        "namespace B {\n  export function config() { return 2; }\n"
+        "  export function f() {\n    return config();\n  }\n"
+    )
+    index = committed(
+        tmp_path,
+        {
+            "src/cfg.ts": "export function config() { return 1; }\n",
+            "src/outside.ts": (
+                "import { config } from './cfg';\n" + namespace + "}\nconst broken = config(((;\n"
+            ),
+            "src/inside.ts": (
+                "import { config } from './cfg';\n" + namespace + "  const broken = config(((;\n}\n"
+            ),
+        },
+    )
+
+    # Act
+    outside = index.binding_of("src/outside.ts", 5, "config", None)
+    inside = index.binding_of("src/inside.ts", 5, "config", None)
+
+    # Assert
+    assert (outside.status.value, outside.target) == ("resolved", Span("src/outside.ts", 3, 3, "config"))
+    assert (inside.status.value, inside.target) == ("unknown", None), inside
+
+
 def test_several_definitions_of_a_name_in_one_file_make_a_candidate(tmp_path: Path) -> None:
     """Two module-level definitions of one name leave the call open; a declaration and the function
     it holds are one definition, also over several lines and through an import."""

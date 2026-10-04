@@ -311,7 +311,8 @@ the definition may sit in lines the index could not parse. Inside a TypeScript n
 names a member of the innermost namespace around it that defines the name, exported or not, so
 `config` in `namespace B` is B's own and never namespace A's, nor an import's; outside it, a member is
 no module-level definition. Lines are the unit, so a use on the namespace's first or last line stays a
-candidate, and one namespace split over two blocks is not merged. A call `jwt.verify()` where module-level
+candidate, and one namespace split over two blocks is not merged. Lines the parser lost inside the
+namespace that mention the name leave the use `unknown`; lost lines elsewhere never pass the member over. A call `jwt.verify()` where module-level
 code binds `jwt` to a whole module of the scope (`import * as jwt`, `const jwt = require('./jwt')`,
 in Python `import app.jwt as jwt`, and `app.jwt.verify()` after `import app.jwt`, all read from the
 syntax tree) binds to the `verify` that module, or one it re-exports from, defines; only that module's

@@ -23,6 +23,7 @@ from .bindings import (
     binding_from_facts,
     binding_in_namespace,
     local_binding,
+    unparsed_binding,
 )
 from .fact_cache import FactCache
 from .imports import (
@@ -415,7 +416,8 @@ class CodeIndex:
     def _binding_in_namespace(self, file: str, line: int, name: str, role: str | None) -> Binding | None:
         """A use inside a TypeScript namespace names a member of the innermost namespace around it that
         defines ``name`` before anything outside, imports included; None when no namespace around
-        the line does, or when lines the index could not parse may hide a definition."""
+        the line does. Lines the index could not parse inside that namespace which mention ``name``
+        may hide a closer definition, which leaves the use unknown; lost lines outside it cannot."""
         members = [
             member
             for member in self._file_structure(file).namespace_members
@@ -423,13 +425,24 @@ class CodeIndex:
             and member.span.name == name
             and self._can_name(role, member.span)
         ]
-        if not members or file in self._files_hiding(name):
+        if not members:
             return None
         first, last = max(
             ((member.first, member.last) for member in members), key=lambda lines: (lines[0], -lines[1])
         )
+        if self._unread_lines_mention(file, name, first, last):
+            return unparsed_binding(name, (file,))
         innermost = [member.span for member in members if (member.first, member.last) == (first, last)]
         return binding_in_namespace(name, line, (first, last), innermost)
+
+    def _unread_lines_mention(self, file: str, name: str, first: int, last: int) -> bool:
+        """Whether lines ``first`` to ``last`` of ``file`` that its ERROR nodes span mention ``name``."""
+        lines = self._lines_of(file)
+        return any(
+            name in _WORD.findall(text)
+            for start, end in self._facts_in(file).unparsed_lines
+            for text in lines[max(start, first) - 1 : min(end, last)]
+        )
 
     def _binds_locally(self, file: str, line: int, name: str, receiver: str | None, role: str | None) -> bool:
         """Whether a function holding ``line`` binds the name the use looks up first for its own body:
