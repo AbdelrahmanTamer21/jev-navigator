@@ -10,9 +10,10 @@ from pathlib import Path
 from threading import Thread
 
 import pytest
-from git_repos import commit_files
+from git_repos import commit_files, git
 from isolated_jvn import JVN
 
+from jev_navigator import cli, environment
 from jev_navigator.cli import (
     SCHEMA_VERSION,
     _load_typesafe_environment,
@@ -21,6 +22,7 @@ from jev_navigator.cli import (
     main,
 )
 from jev_navigator.directives.find_code import SearchBudget
+from jev_navigator.environment import checkout_root
 from jev_navigator.testing import ScriptedJevClient
 
 
@@ -68,6 +70,60 @@ def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -
     assert written["search"]["history"][-1]["operation"] == "stop"
     assert "Candidates not independently opened" in (output / "report.md").read_text()
     assert (output / "journal.jsonl").read_text()
+
+
+def test_jvn_installed_in_a_host_repository_without_commits_still_writes_its_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The host project's Git repository is not jvn's checkout: its HEAD is never recorded as jvn's
+    # revision, and a host with no commits yet cannot stop a finished search from writing its pack.
+    host = tmp_path / "host"
+    host.mkdir()
+    git(host, "init", "-q")
+    installed = host / ".venv/lib/python3.13/site-packages/jev_navigator"
+    monkeypatch.setattr(cli, "__file__", str(installed / "cli.py"))
+    monkeypatch.setattr(environment, "__file__", str(installed / "environment.py"))
+    monkeypatch.setattr(environment, "checkout_root", checkout_root)  # the real lookup, not conftest's
+
+    manifest = _small_search_manifest(tmp_path)
+
+    assert manifest["navigator"]["source_revision"] is None
+    assert manifest["navigator"]["source_dirty"] is None
+    assert manifest["navigator"]["source_revision_error"] is None
+
+
+def test_a_git_failure_in_jvns_checkout_is_recorded_instead_of_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "jvn-checkout"
+    checkout.mkdir()
+    git(checkout, "init", "-q")
+    monkeypatch.setattr(cli, "checkout_root", lambda: checkout)
+
+    manifest = _small_search_manifest(tmp_path)
+
+    provenance = manifest["navigator"]
+    assert provenance["source_revision"] is None
+    assert provenance["source_dirty"] is None
+    assert provenance["source_revision_error"].startswith("git rev-parse HEAD failed: ")
+    assert len(provenance["source_revision_error"]) > len("git rev-parse HEAD failed: ")
+
+
+def _small_search_manifest(tmp_path: Path) -> dict:
+    """The manifest of a finished one-call search over a small committed repository."""
+    repository = tmp_path / "repository"
+    commit_files(repository, {"app/policy.py": "def admit(item):\n    return len(item) <= 3\n"})
+    client = ScriptedJevClient(nouls=lambda question_id, question, state: 0.96)
+    return create_evidence_pack(
+        repository,
+        ("app/",),
+        "the check that limits the number of items",
+        ("app/policy.py:2",),
+        tmp_path / "evidence",
+        SearchBudget(max_depth=0, max_steps=1, max_calls=1, beam_width=1),
+        client,
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
 
 
 def test_budget_pack_reopens_its_saved_frontier_in_a_second_cli_invocation(

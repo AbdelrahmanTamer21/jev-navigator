@@ -24,6 +24,7 @@ from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
 from .directives.places import Place, place_for_line
+from .environment import checkout_root, load_typesafe_environment
 from .index.code_index import CodeIndex
 from .index.languages import language_of
 from .judgments.client import JevClient
@@ -829,8 +830,6 @@ def _load_typesafe_environment(
     """Load official TypeSafe SDK settings: process environment, then this tool's checkout `.env`
     (never a repository under analysis), then the legacy `~/.config/jvn/env`; a process value always
     takes precedence."""
-    from .environment import load_typesafe_environment
-
     load_typesafe_environment(environment, legacy=path)
 
 
@@ -1010,18 +1009,30 @@ def _navigator_provenance() -> dict:
         digest.update(b"\0")
         digest.update(path.read_bytes())
         digest.update(b"\0")
-    repository = next((parent for parent in package_root.parents if (parent / ".git").exists()), None)
-    revision = None
-    dirty = None
-    if repository is not None:
-        revision = _git(repository, "rev-parse", "HEAD")
-        dirty = bool(_git(repository, "status", "--porcelain", "--untracked-files=all"))
     return {
         "package_version": importlib.metadata.version("jev-navigator"),
-        "source_revision": revision,
-        "source_dirty": dirty,
+        **_checkout_revision(checkout_root()),
         "source_tree_sha256": digest.hexdigest(),
     }
+
+
+def _checkout_revision(checkout: Path | None) -> dict:
+    """jvn's own checkout's HEAD and whether it has changes. Without a checkout there is no
+    revision to record; when git cannot answer, its message is kept instead of stopping a search
+    that has already finished."""
+    revision: dict = {"source_revision": None, "source_dirty": None, "source_revision_error": None}
+    if checkout is None:
+        return revision
+    try:
+        head = _git(checkout, "rev-parse", "HEAD")
+        dirty = bool(_git(checkout, "status", "--porcelain", "--untracked-files=all"))
+    except subprocess.CalledProcessError as error:
+        return revision | {
+            "source_revision_error": f"git {' '.join(error.cmd[1:])} failed: {error.stderr.strip()}"
+        }
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return revision | {"source_revision_error": f"git failed: {error}"}
+    return revision | {"source_revision": head, "source_dirty": dirty}
 
 
 def _git(repository: Path, *args: str) -> str:
