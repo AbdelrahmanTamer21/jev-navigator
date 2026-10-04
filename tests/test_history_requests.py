@@ -281,3 +281,29 @@ def answered_choice(records: list[dict], source: dict) -> dict:
     """The option probabilities the journal's response holds for ``source``'s Choice question."""
     response = journal_response(records, source)
     return response["answers"][source["question_id"]]["probabilities"]
+
+
+def test_each_find_all_verdict_joins_to_the_answer_that_judged_it(tmp_path: Path) -> None:
+    # Arrange
+    output = tmp_path / "pack"
+    manifest = create_evidence_pack(
+        marked_repository(tmp_path / "repository"),
+        ("app/",),
+        TARGET,
+        ("app/entry.py:5",),
+        output,
+        SearchBudget(max_calls=8, beam_width=1),
+        limit_client(),
+        fact_cache_dir=tmp_path / "fact-cache",
+        workflow="findall",
+    )
+
+    # Act
+    records = journal(output)
+
+    # Assert
+    search = manifest["search"]
+    verdicts = [*search["found"], *search["unsure"], *search["searched"]]
+    assert verdicts
+    for verdict in verdicts:
+        assert answered_probability(records, verdict["answered_by"]) == verdict["probability"]
