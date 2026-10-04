@@ -88,6 +88,28 @@ def test_a_folder_outside_git_names_what_its_ignore_files_leave_out(tmp_path: Pa
     assert index.not_indexed_files == {"build/": "ignored", "src/generated.py": "ignored"}
 
 
+def test_a_folder_outside_git_names_its_symbolic_links_without_following_them(tmp_path: Path) -> None:
+    # Arrange: one link to a file, one to a folder outside the root, one inside an ignored folder
+    outside = tmp_path / "outside"
+    write_files(outside, {"secret.py": "def secret():\n    return 0\n"})
+    root = tmp_path / "plain"
+    write_files(root, {".ignore": "build/\n", "app.py": APP, "build/out.py": APP})
+    (root / "link.py").symlink_to(root / "app.py")
+    (root / "shared").symlink_to(outside)
+    (root / "build" / "again.py").symlink_to(root / "app.py")
+
+    # Act
+    index = CodeIndex.from_directory(root)
+
+    # Assert
+    assert index.files == (".ignore", "app.py")
+    assert index.not_indexed_files == {
+        "build/": "ignored",
+        "link.py": "a symbolic link",
+        "shared": "a symbolic link",
+    }
+
+
 def test_a_nested_repository_and_a_symbolic_link_are_named_not_indexed(tmp_path: Path) -> None:
     # Arrange
     commit_files(tmp_path, {"app.py": APP})
