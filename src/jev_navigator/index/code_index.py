@@ -262,8 +262,9 @@ class CodeIndex:
     def parsed_files(self) -> frozenset[str]:
         """Files navigation has reached so far, through their facts or their name rows, never one it
         refused to parse; reading it never starts a scan. Covering the scope for the name table
-        reaches no file."""
-        return frozenset(self._reached - self._unavailable.keys() - self._refused.keys())
+        reaches no file. A file that changed or vanished after it was reached still counts, since its
+        facts and rows come from the bytes first read, and it is listed in ``unavailable_files`` too."""
+        return frozenset(self._reached - self._refused.keys())
 
     @property
     def parser_scans_completed(self) -> tuple[str, ...]:

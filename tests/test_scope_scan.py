@@ -813,3 +813,20 @@ def test_a_receiver_is_kept_only_as_a_plain_chain_of_names(tmp_path: Path) -> No
     assert {("handler", "this"), ("read", "cfg")} <= references
     receivers = " ".join(str(call.receiver) for fact in facts.values() for call in fact.calls)
     assert "literal" not in receivers and "secret" not in receivers and "template" not in receivers
+
+
+def test_a_parsed_file_that_vanished_still_counts_as_read_and_is_listed_unavailable(tmp_path: Path) -> None:
+    # Arrange: its facts come from the bytes read before it vanished, which slices keep
+    index = committed(
+        tmp_path, {"app/a.py": "def a():\n    return 1\n", "app/b.py": "def b():\n    return 2\n"}
+    )
+    index.functions_in("app/a.py")
+    (tmp_path / "app" / "a.py").unlink()
+
+    # Act
+    pending = index.parser_scans_pending
+
+    # Assert
+    assert pending == ("facts",)
+    assert "app/a.py" in index.parsed_files
+    assert "app/a.py" in index.unavailable_files
