@@ -18,6 +18,7 @@ from pathlib import Path
 from time import monotonic
 
 from .adapters.typesafe import TypeSafeJevClient
+from .cache_root import cache_root
 from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
@@ -33,7 +34,13 @@ from .index.languages import language_of
 from .judgments.answers import TokenTotal
 from .judgments.client import JevClient
 from .judgments.judge import CallCapReachedError, Judge
-from .judgments.store import SHARED_STORE_VARIABLE, default_shared_store, run_answer_store, shared_store_path
+from .judgments.store import (
+    SHARED_STORE_VARIABLE,
+    StoreInCacheFolderError,
+    default_shared_store,
+    run_answer_store,
+    shared_store_path,
+)
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
@@ -596,9 +603,12 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
 
 
 def _answer_store(args: argparse.Namespace) -> Path:
-    """The shared store this run uses: ``--answer-store`` when given, else ``shared_store_path()``.
-    The run says which on stderr."""
-    path = Path(args.answer_store).expanduser().resolve() if args.answer_store else shared_store_path()
+    """The shared store this run uses (``shared_store_path``), which the run names on stderr. A named
+    store inside JVN's cache folder is a usage error."""
+    try:
+        path = shared_store_path(args.answer_store)
+    except StoreInCacheFolderError as error:
+        _parser().error(str(error))
     print(f"answer store: {path}", file=sys.stderr)
     return path
 
@@ -609,7 +619,8 @@ def _add_answer_store_argument(parser: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help=(
             f"Shared answer store file (default: ${SHARED_STORE_VARIABLE}, else {default_shared_store()}); "
-            "a new file keeps this run from replaying another run's answers"
+            "a new file keeps this run from replaying another run's answers; it must lie outside "
+            f"JVN's cache folder {cache_root()}, which JVN prunes"
         ),
     )
 

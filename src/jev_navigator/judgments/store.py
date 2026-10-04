@@ -193,6 +193,10 @@ class UnsupportedAnswerStoreError(RuntimeError):
     """The shared store file was written in a layout this JVN does not read."""
 
 
+class StoreInCacheFolderError(ValueError):
+    """A store the user names lies inside JVN's cache folder, which housekeeping prunes."""
+
+
 _SCHEMA = """
 create table answers (request_sha256 text not null, model text not null, record text not null);
 create index answers_by_request on answers (request_sha256, model);
@@ -398,10 +402,25 @@ def run_answer_store(pack: Path, shared: Path | None = None) -> LayeredAnswerSto
     return LayeredAnswerStore(JsonlAnswerStore(pack), SqliteAnswerStore(shared or shared_store_path()))
 
 
-def shared_store_path(environment: Mapping[str, str] | None = None) -> Path:
-    """The shared store's file: ``SHARED_STORE_VARIABLE`` when set, else ``default_shared_store()``."""
-    environment = os.environ if environment is None else environment
-    return Path(environment.get(SHARED_STORE_VARIABLE) or default_shared_store())
+def shared_store_path(named: str | None = None) -> Path:
+    """The shared store's file: ``named`` (the ``--answer-store`` flag) when given, else
+    ``SHARED_STORE_VARIABLE`` when set, else ``default_shared_store()``. A store the user names lies
+    outside ``cache_root()``, because housekeeping prunes that folder and never touches a named store."""
+    if named:
+        return _named_store(named, "--answer-store")
+    if variable := os.environ.get(SHARED_STORE_VARIABLE):
+        return _named_store(variable, SHARED_STORE_VARIABLE)
+    return default_shared_store()
+
+
+def _named_store(named: str, source: str) -> Path:
+    path, folder = Path(named).expanduser().resolve(), cache_root().resolve()
+    if path.is_relative_to(folder):
+        raise StoreInCacheFolderError(
+            f"{source} names {path}, inside JVN's cache folder {folder}; JVN prunes that folder, so keep "
+            "a store you name elsewhere"
+        )
+    return path
 
 
 def default_shared_store() -> Path:

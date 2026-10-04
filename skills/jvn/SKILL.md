@@ -77,8 +77,9 @@ store, `$XDG_CACHE_HOME/jev-navigator/answers-v2.sqlite` (`~/.cache` when unset 
 holds hashes, locations and answers, never code, and forgets a request no run reused for 30 days. A later run at the same commit replays from it after the
 requests that learn the served model: one for Find All and Trace, one per place a Find's first round
 opens. Give each experiment or eval arm its own store with `--answer-store PATH` (or
-`JEV_NAVIGATOR_ANSWER_STORE`) so arms never reuse each other's answers; stderr names the store in
-use. `jvn trace` reports `replayed_answers` beside its live `calls`.
+`JEV_NAVIGATOR_ANSWER_STORE`) outside the cache folder so arms never reuse each other's answers;
+stderr names the store in use, and a store inside the cache folder is refused with exit status 2.
+`jvn trace` reports `replayed_answers` beside its live `calls`.
 
 The first search in a scope parses every file in it once and records each name and its lines in the
 name table under the same cache folder; later searches over unchanged files look names up there

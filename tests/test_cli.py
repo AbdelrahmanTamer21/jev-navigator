@@ -1140,3 +1140,34 @@ def test_the_answer_store_variable_chooses_the_shared_store_when_no_flag_is_give
     assert capsys.readouterr().err.count(f"answer store: {store}") == 2
     first, repeat = (len(instance.requests) for instance in clients)
     assert store.is_file() and first > 1 and repeat == 1
+
+
+@pytest.mark.parametrize("named_by", ["flag", "variable"])
+def test_a_store_named_inside_jvns_cache_folder_stops_the_run_with_exit_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    private_cache_root: Path,
+    private_data_root: Path,
+    named_by: str,
+) -> None:
+    from jev_navigator import cli
+
+    # Arrange: an older JVN's default file name, which housekeeping prunes as an older layout
+    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "TypeSafeJevClient", ScriptedJevClient)
+    store = private_cache_root / "answers.sqlite"
+    flag = ["--answer-store", str(store)] if named_by == "flag" else []
+    if named_by == "variable":
+        monkeypatch.setenv(SHARED_STORE_VARIABLE, str(store))
+
+    # Act
+    with pytest.raises(SystemExit) as stopped:
+        main(["find", "the order limit", "--repo", str(tmp_path), *flag])
+
+    # Assert
+    error = capsys.readouterr().err
+    assert stopped.value.code == 2
+    assert str(store) in error and "JVN prunes" in error
+    assert not store.exists()
+    assert not (private_data_root / "runs").exists()

@@ -215,7 +215,8 @@ values most, but only while they represent real files, so JVN cleans up after it
 - A cached file's facts or names go once no run has met that exact file content for 30 days.
 - An answer in the default shared store goes once no run has reused it for 30 days, with its item
   answers and refusals. A store you name with `--answer-store` or `JEV_NAVIGATOR_ANSWER_STORE` keeps
-  every answer and is never touched.
+  every answer and is never touched; it must lie outside the cache folder, so a run naming a store
+  inside it stops with exit status 2.
 - A run folder goes 14 days after its run started, or 30 days while it can still be resumed (it holds
   `resume.json`). A folder you name with `--out` is never touched.
 - Above the disk budget, 5 GB unless `JEV_NAVIGATOR_DISK_BUDGET` says otherwise (`750MB`, `20GB` or
