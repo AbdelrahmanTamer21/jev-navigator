@@ -4,21 +4,23 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from functools import cache
 from pathlib import Path
+from typing import IO
 
 from .file_shape import refusal_of
 from .spans import TextHit
 
-logger = logging.getLogger(__name__)
-
 AST_GREP = "ast-grep"
 RIPGREP = "rg"
+# `--no-config` keeps ripgrep from reading `RIPGREP_CONFIG_PATH`: over an untrusted repository, a
+# config file could otherwise inject flags such as `--pre=<program>`, which runs an arbitrary
+# program. It also keeps a personal rg config from changing what the index sees.
+_RIPGREP_SAFE = (RIPGREP, "--no-config")
 _NO_MATCHES_EXIT = 1
 NEUTRAL_AST_GREP_CONFIG = "ruleDirs: []\n"
 """The smallest sgconfig ast-grep accepts. Passed with ``--config`` it replaces the discovery of the
@@ -76,7 +78,7 @@ def ast_grep_rules(
         path.write_text(NEUTRAL_AST_GREP_CONFIG if config is None else config)
         command = [AST_GREP, "scan", "--inline-rules", rules_yaml, "--config", str(path)]
         for chunk in file_chunks(parseable):
-            yield from _json_lines([*command, "--json=stream", *chunk], cwd)
+            yield from _json_lines([*command, "--json=stream", "--", *chunk], cwd)
 
 
 def _split_by_parse_peak(files: Sequence[str], cwd: Path) -> tuple[list[str], dict[str, str]]:
@@ -85,8 +87,8 @@ def _split_by_parse_peak(files: Sequence[str], cwd: Path) -> tuple[list[str], di
     for file in files:
         try:
             reason = refusal_of(cwd, file)
-        except OSError:
-            reason = None
+        except OSError as error:
+            reason = f"could not be measured: {type(error).__name__}: {error}"
         if reason is None:
             parseable.append(file)
         else:
@@ -111,13 +113,15 @@ def file_chunks(files: Sequence[str]) -> Iterator[Sequence[str]]:
 
 def _json_lines(arguments: Sequence[str], cwd: Path) -> Iterator[dict]:
     """Each line the command prints, parsed as JSON while it runs. stderr goes to a file, so a full
-    stderr pipe cannot stall the command; the process is killed if the reader stops early."""
+    stderr pipe cannot stall the command; the process is killed if the reader stops early. A line
+    that is no JSON (the process died partway through it) fails with the process's exit code and
+    stderr, which say why it stopped."""
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen(list(arguments), cwd=cwd, stdout=subprocess.PIPE, stderr=errors, text=True)
         try:
             for line in process.stdout:
                 if line.strip():
-                    yield json.loads(line)
+                    yield _json_object(line, process, errors, arguments[0])
         except BaseException:
             process.kill()
             raise
@@ -125,15 +129,26 @@ def _json_lines(arguments: Sequence[str], cwd: Path) -> Iterator[dict]:
             process.stdout.close()
             returncode = process.wait()
         if returncode not in (0, _NO_MATCHES_EXIT):
-            errors.seek(0)
-            detail = errors.read().decode(errors="replace").strip()[:300]
-            raise ToolFailedError(f"{arguments[0]} exited {returncode}: {detail}")
+            raise _tool_failed(arguments[0], returncode, errors)
+
+
+def _json_object(line: str, process: subprocess.Popen, errors: IO[bytes], tool: str) -> dict:
+    try:
+        return json.loads(line)
+    except ValueError as malformed:
+        process.kill()
+        raise _tool_failed(tool, process.wait(), errors) from malformed
+
+
+def _tool_failed(tool: str, returncode: int, errors: IO[bytes]) -> ToolFailedError:
+    errors.seek(0)
+    return ToolFailedError(f"{tool} exited {returncode}: {errors.read().decode(errors='replace').strip()}")
 
 
 def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:
     """The lines holding ``text``. JSON events are split at newlines only, since a line of code may
     hold a Unicode line separator that ``str.splitlines`` would split."""
-    command = [RIPGREP, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
+    command = [*_RIPGREP_SAFE, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
     hits = []
     for chunk in file_chunks(files):
         output = run_command([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
@@ -154,7 +169,14 @@ def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -
     with tempfile.NamedTemporaryFile("w", prefix="jev-navigator-patterns-", suffix=".txt") as pattern_file:
         pattern_file.write("".join(f"{pattern}\n" for pattern in patterns))
         pattern_file.flush()
-        command = [RIPGREP, "--files-with-matches", "--null", "--fixed-strings", "-f", pattern_file.name]
+        command = [
+            *_RIPGREP_SAFE,
+            "--files-with-matches",
+            "--null",
+            "--fixed-strings",
+            "-f",
+            pattern_file.name,
+        ]
         found: list[str] = []
         for chunk in file_chunks(files):
             output = run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
@@ -173,7 +195,7 @@ def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
     else:
         output = run_command(
             [
-                RIPGREP,
+                *_RIPGREP_SAFE,
                 "--files",
                 "--hidden",
                 "--null",
