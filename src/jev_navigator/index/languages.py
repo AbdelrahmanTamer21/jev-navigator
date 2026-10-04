@@ -117,20 +117,25 @@ _IN_TYPED_MODULE = (
     "inside: {any: [{kind: program}, {kind: export_statement, inside: {kind: program}}, "
     f"{{kind: ambient_declaration, {_IN_MODULE}}}]}}"
 )
+_TYPED_MODULE_LEVEL = f"not: {{not: {{{_IN_TYPED_MODULE}}}}}"
 _MODULE_VARIABLES = f"{{kind: lexical_declaration, not: {{not: {{{_IN_MODULE}}}}}}}"
-_MODULE_TYPES = (
-    "{any: [{kind: type_alias_declaration}, {kind: interface_declaration}, {kind: enum_declaration}], "
-    f"not: {{not: {{{_IN_TYPED_MODULE}}}}}}}"
-)
-_SCRIPT_DECLARATIONS = f"  any: [{_MODULE_TYPES}, {_MODULE_VARIABLES}]"
 
-DECLARATION_RULES = {
-    "python": """  kind: assignment
-  not: {not: {inside: {kind: expression_statement, inside: {kind: module}}}}""",
-    "typescript": _SCRIPT_DECLARATIONS,
-    "tsx": _SCRIPT_DECLARATIONS,
-    "javascript": f"""  any:
-    - {_MODULE_VARIABLES}""",
+# Module-level declarations by what may name them, each a rule per grammar that has such
+# declarations: a type alias or interface only a type, a constant or variable only a value, and an
+# enum or a Python assignment (which may be a type alias) both.
+_SCRIPT_TYPES = (
+    f"  any: [{{kind: type_alias_declaration}}, {{kind: interface_declaration}}]\n  {_TYPED_MODULE_LEVEL}"
+)
+_SCRIPT_VALUES = f"  any: [{_MODULE_VARIABLES}]"
+_SCRIPT_ENUMS = f"  kind: enum_declaration\n  {_TYPED_MODULE_LEVEL}"
+TYPE_DECLARATIONS = {"typescript": _SCRIPT_TYPES, "tsx": _SCRIPT_TYPES}
+VALUE_DECLARATIONS = {"typescript": _SCRIPT_VALUES, "tsx": _SCRIPT_VALUES, "javascript": _SCRIPT_VALUES}
+TYPE_AND_VALUE_DECLARATIONS = {
+    "python": (
+        "  kind: assignment\n  not: {not: {inside: {kind: expression_statement, inside: {kind: module}}}}"
+    ),
+    "typescript": _SCRIPT_ENUMS,
+    "tsx": _SCRIPT_ENUMS,
 }
 
 # The name nodes a declaration binds, one match per name: both names of `const a = 1, b = 2`, each
@@ -184,7 +189,9 @@ FUNCTION_KINDS[FLOW_LANGUAGE] = FUNCTION_KINDS["tsx"]
 CLASS_KINDS[FLOW_LANGUAGE] = CLASS_KINDS["tsx"]
 VALUE_KINDS[FLOW_LANGUAGE] = VALUE_KINDS["tsx"]
 NAMESPACE_KINDS[FLOW_LANGUAGE] = NAMESPACE_KINDS["tsx"]
-DECLARATION_RULES[FLOW_LANGUAGE] = _SCRIPT_DECLARATIONS
+TYPE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_TYPES
+VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_VALUES
+TYPE_AND_VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_ENUMS
 DECLARED_NAME_RULES[FLOW_LANGUAGE] = _TYPED_SCRIPT_DECLARED_NAMES
 
 # ast-grep reads `languageGlobs` only from a config file: a scan of flow files passes this sgconfig,
@@ -196,10 +203,6 @@ FLOW_SGCONFIG = 'languageGlobs:\n  tsx:\n    - "*.js"\n    - "*.jsx"\n    - "*.m
 def grammar_of(language: str) -> str:
     """The ast-grep language whose grammar parses ``language`` (flow rides on the tsx grammar)."""
     return "tsx" if language == FLOW_LANGUAGE else language
-
-
-_SCRIPT_VALUE_DECLARATION = re.compile(r"^\s*(?:export\s+)?(?:const|let)\s+(?!enum\b)[A-Za-z_$]")
-_SCRIPT_TYPE_DECLARATION = re.compile(r"^\s*(?:export\s+)?(?:declare\s+)?(?:type|interface)\s+[A-Za-z_$]")
 
 
 def language_of(path: str) -> str | None:
@@ -253,18 +256,6 @@ def has_flow_pragma(lines: Sequence[str]) -> bool:
             else:
                 return False
     return False
-
-
-def declares_type(first_line: str) -> bool:
-    """Whether a type can name what a module-level declaration declares: a type alias, interface or
-    enum, or a Python assignment (which may be a type alias), but not a script constant or variable."""
-    return not _SCRIPT_VALUE_DECLARATION.match(first_line)
-
-
-def declares_value(first_line: str) -> bool:
-    """Whether a value can name what a module-level declaration declares: a script constant, variable
-    or enum, or a Python assignment, but not a script type alias or interface."""
-    return not _SCRIPT_TYPE_DECLARATION.match(first_line)
 
 
 @dataclass(frozen=True)
