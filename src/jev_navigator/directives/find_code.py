@@ -51,6 +51,7 @@ from ..judgments.judge import (
 )
 from ..judgments.questions import ITEM_PLACEHOLDER, MAX_CHOICE_OPTIONS, Check, Criterion, Pick, content_hash
 from ..judgments.thresholds import NoulVerdict, Thresholds
+from ..memory_limit import MemoryLimitReachedError
 from .places import MOVES, Move, Place, neighbours_and_omissions, place_relationship
 from .shown import MAX_LINE_CHARS, MAX_SLICE_CHARS, cut_long_line, shown_slice
 
@@ -357,7 +358,7 @@ def find_code(
     unmerged: list[_Opening] = []
     try:
         while (stop := _stop_reason(search, index)) is None:
-            unmerged = _open_round(index, search, judge)
+            unmerged = _open_round_or_fail(index, search, judge)
             if not unmerged:
                 continue
             responses, cancelled = _ask_round(judge, search, unmerged)
@@ -399,7 +400,7 @@ async def find_code_async(
     )
     search, judge = _begin(index, judge, target_description, start, options)
     while (stop := _stop_reason(search, index)) is None:
-        opened = await asyncio.to_thread(_open_round, index, search, judge)
+        opened = await asyncio.to_thread(_open_round_or_fail, index, search, judge)
         if not opened:
             continue
         responses = await asyncio.gather(
@@ -453,6 +454,16 @@ def _begin(
     scoped_judge = judge.scope()
     scoped_judge.max_calls = search.budget.max_calls
     return search, scoped_judge
+
+
+def _open_round_or_fail(index: CodeIndex, search: _Search, judge: Judge) -> list[_Opening]:
+    """``_open_round``, except that JVN's memory limit stopping it ends the search ``failed``: the
+    round's places are back on the frontier, so Resume opens them once there is room."""
+    try:
+        return _open_round(index, search, judge)
+    except MemoryLimitReachedError as error:
+        search.failure = search_failure(error)
+        return []
 
 
 def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Opening]:

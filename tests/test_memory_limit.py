@@ -3,6 +3,7 @@ and real JVN processes contending for real slot files."""
 
 from __future__ import annotations
 
+import asyncio
 import mmap
 import os
 import signal
@@ -18,10 +19,14 @@ import pytest
 from git_repos import commit_files
 
 from jev_navigator import memory_limit
+from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code, find_code_async
+from jev_navigator.directives.places import place_for_line
 from jev_navigator.index import tools
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.fact_cache import FactCache
+from jev_navigator.judgments.judge import Judge
 from jev_navigator.memory_limit import MemoryLimit, MemoryLimitReachedError
+from jev_navigator.testing import ScriptedJevClient
 
 MB = 2**20
 
@@ -396,6 +401,53 @@ def test_the_defaults_are_a_gigabyte_per_process_four_slots_and_two_minutes() ->
     limit = MemoryLimit.from_env({})
 
     assert (limit.allowance_mb, limit.ceiling_mb, limit.slots, limit.wait_seconds) == (1024, 4096, 4, 120.0)
+
+
+@pytest.mark.parametrize("entry", ["sync", "async"])
+def test_a_breach_during_a_round_ends_the_search_failed_and_its_resume_finishes_it(
+    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    # Arrange: the uninterrupted search, with its own index and client.
+    def answer(question_id: str, question, state) -> float:
+        if "candidates[" in question["instructions"]:
+            return 0.9
+        return 0.95 if "len(order.items) <= limit" in state["slice"]["code"] else 0.05
+
+    def search(index: CodeIndex, client: ScriptedJevClient, starts, resume=None):
+        arguments = (index, Judge(client), "the item limit check", starts)
+        options = {"budget": SearchBudget(beam_width=1), "resume": resume}
+        if entry == "sync":
+            return find_code(*arguments, **options)
+        return asyncio.run(find_code_async(*arguments, **options))
+
+    def fresh_index() -> CodeIndex:
+        return CodeIndex.from_git(sample_repo, fact_cache_dir=tmp_path / f"facts-{time.monotonic_ns()}")
+
+    def start_in(index: CodeIndex):
+        return [place_for_line(index, "app/orders.py", 6, "start")]
+
+    uninterrupted_client = ScriptedJevClient(nouls=answer)
+    whole = fresh_index()
+    uninterrupted = search(whole, uninterrupted_client, start_in(whole))
+    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
+    index = fresh_index()
+    starts = start_in(index)
+    client = ScriptedJevClient(nouls=answer)
+
+    # Act
+    with _holding(200):
+        failed = search(index, client, starts)
+    asked_before_resume = len(client.requests)
+    resumed = search(index, client, [], resume=failed)
+
+    # Assert
+    assert failed.outcome == Outcome.FAILED
+    assert isinstance(failed.failure, MemoryLimitReachedError)
+    assert [entry.place.key for entry in failed.not_inspected] == [place.key for place in starts]
+    assert asked_before_resume == 0
+    assert resumed.outcome == uninterrupted.outcome == Outcome.FOUND
+    assert [visit.place_key for visit in resumed.found] == [visit.place_key for visit in uninterrupted.found]
+    assert len(client.requests) == len(uninterrupted_client.requests)
 
 
 def test_the_process_guard_follows_the_settings_it_is_read_with(
