@@ -101,7 +101,7 @@ def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
     A Git worktree uses its tracked and untracked, non-ignored inventory, which naturally excludes
     nested repositories and managed worktrees. A non-Git directory uses ripgrep's ignore policy.
     """
-    if _inside_git_worktree(cwd):
+    if inside_git_worktree(cwd):
         output = git(["ls-files", "-z", "-c", "-o", "--exclude-standard", "--", *prefixes], cwd)
     else:
         output = run_command(
@@ -127,7 +127,7 @@ def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
     return tuple(sorted(dict.fromkeys(files)))
 
 
-def _inside_git_worktree(cwd: Path) -> bool:
+def inside_git_worktree(cwd: Path) -> bool:
     """Whether ``cwd`` lies in a Git worktree. Only git's own "not a git repository" means no; any
     other failure, such as a repository git refuses for dubious ownership, is raised, so it is never
     listed as a plain directory. Git runs in the C locale so that message is never translated."""
@@ -143,6 +143,12 @@ def _inside_git_worktree(cwd: Path) -> bool:
     if "not a git repository" in completed.stderr:
         return False
     raise _tool_failure("git", completed.returncode, completed.stderr)
+
+
+def head_commit(cwd: Path) -> str:
+    """HEAD's commit in the Git worktree at ``cwd``; empty before its first commit, which is the one
+    case `git rev-parse -q --verify` reports with exit 1 and no message. Any other failure raises."""
+    return run_command(["git", "rev-parse", "-q", "--verify", "HEAD"], cwd, no_match_exit=1).strip()
 
 
 def _text_hit(match: dict) -> TextHit:

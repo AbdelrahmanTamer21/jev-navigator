@@ -770,11 +770,12 @@ def _changed_paths(status: str) -> list[str]:
 
 
 def _working_git_metadata(root: Path, prefixes: Sequence[str]) -> tuple[str, list[str]]:
-    try:
-        commit = tools.git(["rev-parse", "HEAD"], root).strip()
-        status = tools.git(["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root)
-    except tools.ToolFailedError:
+    """HEAD and the changed paths in scope; no revision outside Git or before the first commit. A
+    repository git refuses raises rather than reading as a plain folder."""
+    if not tools.inside_git_worktree(root):
         return "", []
+    commit = tools.head_commit(root)
+    status = tools.git(["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root)
     return commit, _changed_paths(status)
 
 
