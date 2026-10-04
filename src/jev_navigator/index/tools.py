@@ -100,8 +100,8 @@ def _split_by_parse_peak(files: Sequence[str], cwd: Path) -> tuple[list[str], di
     for file in files:
         try:
             reason = refusal_of(cwd, file)
-        except OSError:
-            reason = None
+        except OSError as error:
+            reason = f"could not be measured: {type(error).__name__}: {error}"
         if reason is None:
             parseable.append(file)
         else:

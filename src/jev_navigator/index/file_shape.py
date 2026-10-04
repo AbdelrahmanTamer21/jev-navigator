@@ -89,7 +89,7 @@ class FileShape:
             return None
         return (
             f"too large to parse: estimated parse peak {_peak_text(self.parse_peak_mb)}, "
-            f"longest line {self.longest_line:,} characters"
+            f"longest line {self.longest_line:,} bytes"
         )
 
 

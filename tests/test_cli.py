@@ -1071,3 +1071,42 @@ def test_the_answer_store_variable_chooses_the_shared_store_when_no_flag_is_give
     assert capsys.readouterr().err.count(f"answer store: {store}") == 2
     first, repeat = (len(instance.requests) for instance in clients)
     assert store.is_file() and first > 1 and repeat == 1
+
+
+REFUSED_BUNDLE = ("export function admit(){return 1};" * 6_000)[:200_000]
+
+
+def test_find_and_findall_reports_name_each_refused_file_with_its_reason(tmp_path: Path) -> None:
+    # Arrange
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "entry.py": "from policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "policy.py": "def admit(item):\n    return len(item) <= 3\n",
+            "dist/bundle.js": REFUSED_BUNDLE,
+        },
+    )
+    reports = {}
+
+    # Act
+    for workflow in ("find", "findall"):
+        output = tmp_path / workflow
+        manifest = create_evidence_pack(
+            repository,
+            (),
+            "the item count limit check",
+            ("entry.py:4",),
+            output,
+            SearchBudget(beam_width=1),
+            ScriptedJevClient(default_noul=0.04),
+            workflow=workflow,
+            fact_cache_dir=tmp_path / "facts",
+        )
+        reports[workflow] = ((output / "report.md").read_text(), manifest["search"]["unavailable_files"])
+
+    # Assert
+    for report, unavailable in reports.values():
+        reason = unavailable["dist/bundle.js"]
+        assert reason.startswith("too large to parse")
+        assert f"`dist/bundle.js`: {reason}" in report

@@ -64,7 +64,7 @@ def test_the_refusal_names_the_estimated_peak_and_the_longest_line() -> None:
 
     assert reason is not None
     assert reason.startswith("too large to parse: estimated parse peak ")
-    assert reason.endswith(" GB, longest line 668,777 characters")
+    assert reason.endswith(" GB, longest line 668,777 bytes")
     assert measure(_one_line(20_000)).refusal is None
 
 
