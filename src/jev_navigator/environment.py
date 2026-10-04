@@ -102,10 +102,17 @@ def _env_file(path: Path) -> dict[str, str]:
     if not path.is_file():
         return {}
     values: dict[str, str] = {}
-    for line in path.read_text().splitlines():
+    for line in _settings_text(path).splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         name, _, value = line.removeprefix("export ").partition("=")
         values[name.strip()] = value.strip().strip("'\"")
     return values
+
+
+def _settings_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        raise RuntimeError(f"cannot read settings file {path}: {error}") from error

@@ -204,6 +204,17 @@ def test_an_installed_jvn_has_no_checkout_whatever_directory_it_runs_in(tmp_path
     assert checkout_root() is None
 
 
+def test_a_settings_file_that_is_not_utf_8_is_named_in_the_error(tmp_path):
+    settings = tmp_path / ".env"
+    settings.write_bytes(b"TYPESAFE_API_KEY=caf\xe9\n")
+
+    with pytest.raises(RuntimeError) as raised:
+        load_typesafe_environment({}, root=tmp_path, legacy=tmp_path / "absent")
+
+    assert str(settings) in str(raised.value)
+    assert isinstance(raised.value.__cause__, UnicodeDecodeError)
+
+
 def test_env_file_parsing_is_tolerant(tmp_path):
     path = _written(
         tmp_path, {"A": "plain", "B": "quoted"}, extra=["", "# comment", "no equals sign", "=novalue"]
