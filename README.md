@@ -681,7 +681,8 @@ and the result agree. Each Jev judgment in a step names the answer behind it in 
 `choose_next` opens names the answer that scored it in `scored_by`): the request's `request_sha256`, the
 `question_id` it was asked under, and `from_store`. The journal's `request` row with that hash lists the
 question id, and that row's `response` holds the answer, also for an opening split into several requests;
-packs written before these fields resume as before. Without a stop rule nothing reads the history; with
+packs written before these fields resume as before. Each automatic entry selection decision in the
+manifest's `entry_selection` names its answer the same way. Without a stop rule nothing reads the history; with
 one, the stop check reads the sections it selects (by default only the fetched code). `HistoryStep` is generic: append your own steps (an agent's tool call and result) the same way.
 
 ## LlmStep: an LLM call you add yourself

@@ -125,6 +125,7 @@ class PickResult:
     probabilities: Mapping[str, float]
     confident: bool
     request_sha256: str
+    answered_by: AnswerSource | None = None
 
 
 @dataclass(frozen=True)
@@ -1342,6 +1343,7 @@ def _pick_result(response: JevResponse, question_id: str, thresholds: Thresholds
         answer.probabilities,
         thresholds.choice_is_confident(answer.confidence),
         response.request_sha256,
+        response.source(question_id),
     )
 
 
