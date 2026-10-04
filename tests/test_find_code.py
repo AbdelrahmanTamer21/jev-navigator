@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import re
 import signal
@@ -1144,35 +1145,39 @@ class ProviderError(RuntimeError):
 class FailsWhileCancelling:
     """Once the second place's request is in flight, the first raises the caller's Ctrl-C. The second
     waits for the cancel this triggers, then ends the way ``on_abort`` says: the abort's own error,
-    or a real provider error that happened to arrive while the interrupt was being handled."""
+    a real provider error that happened to arrive while the interrupt was being handled, or, with
+    ``None``, the answer of a request the cancel could not stop."""
 
     model = "fails-while-cancelling"
 
-    def __init__(self, on_abort: Exception) -> None:
+    def __init__(self, on_abort: Exception | None) -> None:
         self.on_abort = on_abort
         self.second_in_flight = threading.Event()
         self.cancelled = threading.Event()
 
     def ask(self, state, questions):
-        del questions
         if state["slice"]["code"] == "first":
             self.second_in_flight.wait(timeout=5)
             raise KeyboardInterrupt
         self.second_in_flight.set()
         self.cancelled.wait(timeout=5)
+        if self.on_abort is None:
+            return ScriptedJevClient(default_noul=0.05).ask(state, questions)
         raise self.on_abort
 
     def cancel(self) -> None:
         self.cancelled.set()
 
 
-def _search_two_places_while_one_is_interrupted(tmp_path: Path, client: FailsWhileCancelling):
+def _search_two_places_while_one_is_interrupted(
+    tmp_path: Path, client: FailsWhileCancelling, store: JsonlAnswerStore | None = None
+):
     (tmp_path / "places.txt").write_text("first\nsecond\n")
     index = CodeIndex(tmp_path, ["places.txt"])
     places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
     return places, lambda: find_code(
         index,
-        Judge(client),
+        Judge(client, store=store),
         TARGET,
         [],
         budget=SearchBudget(beam_width=2),
@@ -1197,6 +1202,31 @@ def test_a_provider_error_during_cancellation_comes_out_as_that_error(tmp_path: 
     assert client.cancelled.is_set()
     assert raised.value is error
     assert raised.value.__cause__ is cause
+
+
+def test_a_full_disk_while_storing_an_answer_during_cancellation_comes_out_as_that_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    disk_full = OSError(errno.ENOSPC, "No space left on device")
+
+    def full_disk(store: JsonlAnswerStore, line: dict) -> None:
+        del store, line
+        raise disk_full
+
+    monkeypatch.setattr(JsonlAnswerStore, "_append", full_disk)
+    client = FailsWhileCancelling(on_abort=None)
+    _, search = _search_two_places_while_one_is_interrupted(
+        tmp_path, client, JsonlAnswerStore(tmp_path / "answers.jsonl")
+    )
+
+    # Act
+    with pytest.raises(OSError) as raised:
+        search()
+
+    # Assert
+    assert client.cancelled.is_set()
+    assert raised.value is disk_full
 
 
 def test_a_send_the_interrupt_aborted_is_set_aside_as_cancelled(tmp_path: Path) -> None:
