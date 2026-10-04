@@ -12,7 +12,6 @@ import tempfile
 import threading
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import replace
 from functools import cache
 from pathlib import Path, PurePosixPath
 
@@ -23,6 +22,7 @@ from .bindings import (
     CallFacts,
     binding_from_facts,
     binding_through_import,
+    local_binding,
     unparsed_binding,
 )
 from .fact_cache import FactCache
@@ -377,16 +377,16 @@ class CodeIndex:
             injected = self.binding_resolver.resolve_call(file, line, name, receiver)
             if injected is not None:
                 return injected
-        if self._names_a_local(file, line, name, receiver, role):
-            facts = self._call_facts(file, name, receiver, role)
-            return binding_from_facts(replace(facts, module_scope=(), importable=(), imported_from=()))
-        through_import = (
-            self._binding_through_alias(file, name, role)
-            if receiver is None
-            else self._binding_through_module(file, name, receiver, role)
-        )
-        if through_import is not None:
-            return through_import
+        if not self._binds_locally(file, line, name, receiver, role):
+            through_import = (
+                self._binding_through_alias(file, name, role)
+                if receiver is None
+                else self._binding_through_module(file, name, receiver, role)
+            )
+            if through_import is not None:
+                return through_import
+        elif receiver is None:
+            return local_binding(name)
         return binding_from_facts(self._call_facts(file, name, receiver, role))
 
     def _call_facts(self, file: str, name: str, receiver: str | None, role: str | None) -> CallFacts:
@@ -402,11 +402,13 @@ class CodeIndex:
             self._files_hiding(name),
         )
 
-    def _names_a_local(self, file: str, line: int, name: str, receiver: str | None, role: str | None) -> bool:
-        """Whether a function holding ``line`` binds the name the use looks up first (``db`` in
-        ``db.query()``) for its own body. The use then names that local value, never a definition or
-        import of its module. A type is looked up among types, which no local value replaces, and an
-        export names module-level code."""
+    def _binds_locally(self, file: str, line: int, name: str, receiver: str | None, role: str | None) -> bool:
+        """Whether a function holding ``line`` binds the name the use looks up first for its own body:
+        ``stop`` in ``stop()``, ``db`` in ``db.query()``. That name then holds a local value, never a
+        definition, import or module alias of its module; a method on it is still looked up by its
+        own name. A type is looked up among types, which no local value replaces, and an export names
+        module-level code. A function counts from its first line, so a call on that line before the
+        function starts counts as inside it."""
         if role in ("type", "export"):
             return False
         looked_up = name if receiver is None else first_identifier(receiver)

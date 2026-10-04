@@ -88,6 +88,14 @@ def binding_through_import(alias: str, definition: Span, exporter: ImportFact) -
     )
 
 
+def local_binding(name: str) -> Binding:
+    """``candidate``: the calling function binds ``name`` for its own body, so the use names that
+    local value, whose target the index does not resolve."""
+    return Binding(
+        BindingStatus.CANDIDATE, f"{name} is bound inside the calling function; its value is not resolved"
+    )
+
+
 def unparsed_binding(name: str, files: Iterable[str]) -> Binding:
     """``unknown``: a definition of ``name`` may sit in ``files``, which the index could not parse."""
     listed = ", ".join(sorted(files)[:5])

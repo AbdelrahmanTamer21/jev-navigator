@@ -914,7 +914,8 @@ def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_i
 def test_an_import_alias_replaced_by_a_local_name_binds_nothing_through_the_import(tmp_path: Path) -> None:
     """A parameter or local variable with an alias's name replaces the import inside its function:
     `halt()` there is not the module's `stop`, in TypeScript or Python, nor `cls()` after
-    `cls = self.client_class` and a fallback import `as cls`."""
+    `cls = self.client_class` and a fallback import `as cls`. Such a local value is a candidate whose
+    target is not resolved, never an absent definition."""
     # Arrange
     index = committed(
         tmp_path,
@@ -948,7 +949,10 @@ def test_an_import_alias_replaced_by_a_local_name_binds_nothing_through_the_impo
     # Assert
     assert Span("src/x.ts", 1, 3, "stop") not in targets.values(), targets
     assert targets["app/routes.py"] != Span("app/jobs.py", 1, 2, "refund")
-    assert cls.status.value != "resolved", cls
+    assert (cls.status.value, cls.reason) == (
+        "candidate",
+        "cls is bound inside the calling function; its value is not resolved",
+    )
 
 
 def test_a_local_name_replaces_an_import_for_values_and_never_for_types(tmp_path: Path) -> None:
