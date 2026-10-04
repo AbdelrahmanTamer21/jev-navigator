@@ -99,6 +99,26 @@ def test_a_failing_route_falls_back_to_the_next_and_both_attempts_are_journaled(
     assert first_request == [("drex", 503)] * 3 + [("jev", 200)]
 
 
+def test_a_configured_local_decider_answers_and_the_hosted_jev_receives_nothing(tmp_path: Path) -> None:
+    # Arrange: the default client's address is a stand-in for the hosted Jev
+    with stand_in("decider-test") as decider, stand_in("jev-hosted") as hosted:
+        settings = {
+            "SYSTEM_ONE_ROUTES": "decider",
+            "SYSTEM_ONE_DECIDER_ENDPOINT": decider.url,
+            "SYSTEM_ONE_DECIDER_MODEL": "decider-test",
+            "SYSTEM_ONE_DECIDER_INPUT_TOKENS": "8192",
+            "TYPESAFE_BASE_URL": hosted.url,
+        }
+
+        # Act
+        result = run_find(tmp_path, settings)
+
+    # Assert
+    assert result.returncode == 0, result.stderr
+    assert decider.received
+    assert not hosted.received
+
+
 def test_without_routes_the_default_jev_client_answers(tmp_path: Path) -> None:
     # Arrange
     with stand_in("jev-test") as jev:
