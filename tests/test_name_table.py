@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 import sqlite3
+import threading
 from collections import Counter
 from pathlib import Path
 
@@ -158,6 +159,34 @@ def test_a_file_deleted_after_the_scope_was_covered_is_reported_not_read(tmp_pat
     # Assert
     assert (callers, count) == ((), 0)
     assert index.unavailable_files == {"web/handle.ts": "disappeared after inventory"}
+
+
+def test_a_warm_run_needs_no_write_lock_on_the_table(tmp_path: Path, private_cache_root: Path) -> None:
+    # Arrange: another process holds the table's write lock for the whole warm run
+    commit_files(tmp_path, REPOSITORY)
+    every_lookup(CodeIndex.from_git(tmp_path))
+    [path] = (private_cache_root / "names").glob("*.sqlite")
+    writer = sqlite3.connect(path, isolation_level=None)
+    writer.execute("begin immediate")
+    outcome: list[object] = []
+
+    def warm_run() -> None:
+        try:
+            index = CodeIndex.from_git(tmp_path)
+            outcome.append(every_lookup(index))
+            index.functions_in("web/store.ts")
+        except Exception as error:  # noqa: BLE001 - the assertion below reports it
+            outcome.append(error)
+
+    # Act
+    run = threading.Thread(target=warm_run, daemon=True)
+    run.start()
+    run.join(timeout=10)
+    writer.execute("rollback")
+
+    # Assert
+    assert not run.is_alive(), "the warm run waited for the table's write lock"
+    assert len(outcome) == 1 and isinstance(outcome[0], dict)
 
 
 def test_no_table_row_holds_a_string_literal(tmp_path: Path, private_cache_root: Path) -> None:

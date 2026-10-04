@@ -81,15 +81,21 @@ class NameTable:
 
     def add(self, facts_by_blob: Mapping[str, FileFacts]) -> None:
         """Writes the rows of each file content the table does not hold yet, one transaction per
-        content; a content another process wrote meanwhile is left as it is."""
+        content. Contents already held take no write lock, so warm runs never wait on each other;
+        a content another process wrote meanwhile is left as it is."""
+        held = self.entries(facts_by_blob.keys())
         with self._lock:
             for blob, facts in facts_by_blob.items():
-                with self._db:
-                    self._db.execute("begin immediate")
-                    if self._add_entry(blob, facts):
-                        self._db.executemany(
-                            "insert into names values (?, ?, ?, ?, ?, ?, ?, ?, ?)", _rows(blob, facts)
-                        )
+                if blob not in held:
+                    self._write(blob, facts)
+
+    def _write(self, blob: str, facts: FileFacts) -> None:
+        with self._db:
+            self._db.execute("begin immediate")
+            if self._add_entry(blob, facts):
+                self._db.executemany(
+                    "insert into names values (?, ?, ?, ?, ?, ?, ?, ?, ?)", _rows(blob, facts)
+                )
 
     def rows(self, name: str) -> tuple[NameRow, ...]:
         with self._lock:
