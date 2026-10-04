@@ -106,9 +106,9 @@ def test_a_function_shown_whole_leaves_room_for_each_neighbour_alone(tmp_path: P
         _, result = _opened(index, client, f"app/place_{size}.py")
 
         # Assert
+        assert (size, result.outcome, client.refusals) == (size, Outcome.BUDGET, 0)
         (opened,) = result.starts
         offered = [entry.place_key for entry in result.not_inspected]
         cut = "[cut after" in opened.code.text
-        assert (size, result.outcome, client.refusals) == (size, Outcome.BUDGET, 0)
         assert "app/audit.py:1-9" in offered
         assert (size, len(offered)) == (size, 2 if cut else 1)
