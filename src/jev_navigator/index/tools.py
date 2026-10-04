@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -33,9 +34,13 @@ def run_command(arguments: Sequence[str], cwd: Path, *, no_match_exit: int | Non
     """The command's output; ``no_match_exit`` is the exit code a search tool uses for "nothing found"."""
     completed = subprocess.run(list(arguments), cwd=cwd, capture_output=True, text=True)
     if completed.returncode not in (0, no_match_exit):
-        detail = completed.stderr.strip()[:300]
-        raise ToolFailedError(f"{arguments[0]} exited {completed.returncode}: {detail}")
+        raise _tool_failure(arguments[0], completed.returncode, completed.stderr)
     return completed.stdout
+
+
+def _tool_failure(tool: str, returncode: int, stderr: str) -> ToolFailedError:
+    """The failure with the tool's whole error output, whose cause is often its last line."""
+    return ToolFailedError(f"{tool} exited {returncode}: {stderr.strip()}")
 
 
 @cache
@@ -96,11 +101,7 @@ def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
     A Git worktree uses its tracked and untracked, non-ignored inventory, which naturally excludes
     nested repositories and managed worktrees. A non-Git directory uses ripgrep's ignore policy.
     """
-    try:
-        inside_git = git(["rev-parse", "--is-inside-work-tree"], cwd).strip() == "true"
-    except ToolFailedError:
-        inside_git = False
-    if inside_git:
+    if _inside_git_worktree(cwd):
         output = git(["ls-files", "-z", "-c", "-o", "--exclude-standard", "--", *prefixes], cwd)
     else:
         output = run_command(
@@ -124,6 +125,24 @@ def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
         if path and candidate.is_file() and not candidate.is_symlink():
             files.append(path)
     return tuple(sorted(dict.fromkeys(files)))
+
+
+def _inside_git_worktree(cwd: Path) -> bool:
+    """Whether ``cwd`` lies in a Git worktree. Only git's own "not a git repository" means no; any
+    other failure, such as a repository git refuses for dubious ownership, is raised, so it is never
+    listed as a plain directory. Git runs in the C locale so that message is never translated."""
+    completed = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    if completed.returncode == 0:
+        return completed.stdout.strip() == "true"
+    if "not a git repository" in completed.stderr:
+        return False
+    raise _tool_failure("git", completed.returncode, completed.stderr)
 
 
 def _text_hit(match: dict) -> TextHit:
@@ -160,9 +179,7 @@ def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) 
         capture_output=True,
     )
     if completed.returncode != 0:
-        raise ToolFailedError(
-            f"git cat-file exited {completed.returncode}: {completed.stderr.decode()[:300]}"
-        )
+        raise _tool_failure("git cat-file", completed.returncode, completed.stderr.decode())
     for path, content in zip(blobs, _batch_contents(completed.stdout), strict=True):
         _write_inside(destination, path, content)
 

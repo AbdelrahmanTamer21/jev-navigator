@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from git_repos import git
+from git_repos import commit_files, git
 
 from jev_navigator.index import tools
 
@@ -55,6 +55,45 @@ def test_export_fails_loudly_when_git_lacks_an_object(tmp_path: Path) -> None:
     # Act and assert
     with pytest.raises(tools.ToolFailedError, match=MISSING_OBJECT):
         tools.export_blobs(repository, {"gone.py": MISSING_OBJECT}, tmp_path / "export")
+
+
+def test_a_failing_tool_keeps_its_whole_error_output(tmp_path: Path) -> None:
+    # Arrange: a cause that a tool prints after a long preamble, as ast-grep does
+    cause = "the cause is on the last line"
+    script = f"import sys; sys.stderr.write('preamble ' * 60 + {cause!r}); sys.exit(3)"
+
+    # Act
+    with pytest.raises(tools.ToolFailedError) as raised:
+        tools.run_command([sys.executable, "-c", script], tmp_path)
+
+    # Assert
+    assert str(raised.value).endswith(cause)
+
+
+def test_a_repository_git_refuses_is_reported_instead_of_listed_as_a_plain_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Arrange: git refuses a repository it believes another user owns
+    repository = tmp_path / "repository"
+    commit_files(repository, {"a.py": "needle = 1\n"})
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+
+    # Act and assert
+    with pytest.raises(tools.ToolFailedError, match="dubious ownership"):
+        tools.listed_files(repository)
+
+
+def test_a_plain_directory_is_listed_whatever_language_git_speaks(tmp_path: Path, monkeypatch) -> None:
+    # Arrange: a translated "not a git repository" must still mean a plain directory
+    directory = tmp_path / "plain"
+    directory.mkdir()
+    (directory / "a.py").write_text("needle = 1\n")
+    monkeypatch.setenv("LANG", "de_DE.UTF-8")
+    monkeypatch.setenv("LANGUAGE", "de")
+    monkeypatch.delenv("LC_ALL", raising=False)
+
+    # Act and assert
+    assert tools.listed_files(directory) == ("a.py",)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX preprocessor script")
