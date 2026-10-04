@@ -406,8 +406,8 @@ def test_input_batches_keep_values_masked_across_request_boundaries(
     monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
     client = TypeSafeJevClient()
     try:
-        answers = Judge(client).check_every(
-            [DESCRIBES], items, {"doc": {"sentence": "posts an order"}}, batch_budget=1
+        answers = Judge(client, items_per_request=1).check_every(
+            [DESCRIBES], items, {"doc": {"sentence": "posts an order"}}
         )
     finally:
         client.close()
@@ -483,6 +483,7 @@ def test_cancel_aborts_an_active_official_sdk_request(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.parametrize("deliver", ["any_thread", "main_thread"])
+@pytest.mark.usefixtures("python_sigint_handler")
 def test_sigint_returns_the_active_http_place_as_resumable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deliver: str
 ) -> None:

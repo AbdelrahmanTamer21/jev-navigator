@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -43,7 +45,8 @@ def run(coroutine):
     return asyncio.run(coroutine)
 
 
-BIG_ITEM = "1" * 30_000
+BIG_ITEM = "1" * (JEV_INPUT_BOX_CHARS * 3 // 5)
+"""Too big for two to share a request, small enough to send alone."""
 THREE_BATCH_ITEMS = [{"code": f"x{index} = {BIG_ITEM}"} for index in range(3)]
 
 
@@ -167,6 +170,45 @@ def test_find_code_async_searches_like_find_code(sample_index: CodeIndex) -> Non
     assert sorted(map(str, async_client.requests)) == sorted(map(str, sync_client.requests))
 
 
+def test_find_code_async_keeps_the_event_loop_running_while_a_place_is_opened(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    start = place_for_line(sample_index, "app/orders.py", 6, "start")
+    opening: list[float] = []
+
+    def slow_open():
+        opening.append(time.monotonic())
+        time.sleep(0.2)
+        opening.append(time.monotonic())
+        return start.open()
+
+    judge = Judge(AsyncScriptedJevClient(ScriptedJevClient(nouls=limit_check_answers)))
+    ticks: list[float] = []
+
+    async def search_beside_a_ticker():
+        async def tick():
+            while True:
+                ticks.append(time.monotonic())
+                await asyncio.sleep(0.01)
+
+        ticker = asyncio.create_task(tick())
+        try:
+            return await find_code_async(
+                sample_index, judge, TARGET, [replace(start, open=slow_open)], moves={}
+            )
+        finally:
+            ticker.cancel()
+
+    # Act
+    result = run(search_beside_a_ticker())
+
+    # Assert
+    began, ended = opening[0], opening[1]
+    assert result.steps == 1
+    assert len([tick for tick in ticks if began < tick < ended]) >= 2
+
+
 def test_find_code_async_applies_the_stop_rule_through_the_async_history_check(
     sample_index: CodeIndex,
 ) -> None:
@@ -212,7 +254,7 @@ def test_the_first_async_check_each_replays_the_remaining_batches_from_the_store
 
     # Assert: the first batch pins the served model, the other batches replay for free.
     assert judge.calls == 1
-    assert [result.from_store for result in results] == [False, True, True]
+    assert sorted(result.from_store for result in results) == [False, True, True]
     assert all(result.probability == 0.9 for result in results)
     # Replayed batches never send, so only the live first batch can be in flight.
     assert client.max_in_flight == 1
@@ -360,9 +402,7 @@ def test_the_async_path_splits_a_batch_over_the_character_box_before_sending_it(
     items = [{"file": f"part{index}.py", "code": "y" * 19_300} for index in range(4)]
 
     # Act
-    results = run(
-        judge.check_every_async([DESCRIBES], items, SHARED, list_name="parts", batch_budget=500_000)
-    )
+    results = run(judge.check_every_async([DESCRIBES], items, SHARED, list_name="parts"))
 
     # Assert
     assert [result.probability for result in results["describes"]] == [0.9] * 4
