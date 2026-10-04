@@ -550,6 +550,15 @@ def test_the_defaults_are_a_gigabyte_per_process_eight_slots_and_two_minutes() -
     limit = MemoryLimit.from_env({})
 
     assert (limit.allowance_mb, limit.ceiling_mb, limit.slots, limit.wait_seconds) == (1024, 8192, 8, 120.0)
+    assert (limit.parse_threads, limit.single_parse_mb) == (3, 754)
+
+
+def test_the_largest_file_parsed_alone_follows_the_allowance() -> None:
+    larger = MemoryLimit.from_env(
+        {"JEV_NAVIGATOR_MEMORY_ALLOWANCE_MB": "2048", "JEV_NAVIGATOR_MEMORY_CEILING_MB": "8192"}
+    )
+
+    assert larger.single_parse_mb == 1778
 
 
 @pytest.mark.parametrize("entry", ["sync", "async"])

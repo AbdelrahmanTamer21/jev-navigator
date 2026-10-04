@@ -59,7 +59,7 @@ SLOT_POLL_SECONDS = 0.2
 
 PYTHON_SHARE_MB = 270
 """Python's measured share of the largest scope (261 MB for saleor/graphql). The rest of the allowance
-pays for ast-grep parsing files side by side, each up to the parse guard's bound."""
+pays for ast-grep: files side by side, each up to the parse guard's bound, or one file alone."""
 
 ENVIRONMENT_NAMES = {
     "allowance_mb": "JEV_NAVIGATOR_MEMORY_ALLOWANCE_MB",
@@ -113,6 +113,12 @@ class MemoryLimit:
         largest parse the guard admits; at least one. It assumes one parse per process, which
         ``parsing`` keeps."""
         return max(1, int((self.allowance_mb - PYTHON_SHARE_MB) // MAX_PARSE_PEAK_MB))
+
+    @property
+    def single_parse_mb(self) -> int:
+        """The largest estimated parse peak of a file ast-grep parses alone, on one thread with no other
+        file beside it: the allowance less Python's share. The parse guard refuses any file above it."""
+        return self.allowance_mb - PYTHON_SHARE_MB
 
 
 def slots_directory(environment: Mapping[str, str] | None = None) -> Path:
