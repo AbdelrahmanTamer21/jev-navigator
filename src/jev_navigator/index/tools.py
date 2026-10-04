@@ -171,7 +171,9 @@ def ripgrep_lines(texts: Sequence[str], files: Sequence[str], cwd: Path) -> list
 
 
 def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -> tuple[str, ...]:
-    """Every supplied file containing any of the exact ``texts``, without a result-count cutoff."""
+    """Every supplied file containing any of the exact ``texts``, without a result-count cutoff. Only
+    paths come back, and ripgrep stops reading a file at its first match, so a 20 MB one-line bundle
+    costs what a small file does; ``ripgrep_lines`` would print that line with every match."""
     patterns = [texts] if isinstance(texts, str) else list(texts)
     if not files or not patterns:
         return ()
