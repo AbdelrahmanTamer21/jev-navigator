@@ -15,6 +15,7 @@ from git_repos import git, write_files
 from isolated_jvn import NO_SETTINGS
 
 from jev_navigator.cache_root import cache_root
+from jev_navigator.data_root import data_root
 from jev_navigator.environment import SETTING_PREFIXES
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import JevResponse, NoulAnswer
@@ -182,6 +183,14 @@ def private_cache_root(
     ``JEV_NAVIGATOR_`` variable, so the answer store variable is unset and the store lives here."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("cache")))
     return cache_root()
+
+
+@pytest.fixture(autouse=True)
+def private_data_root(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Each test starts with an empty data folder of its own, holding the run folders the CLI writes
+    without ``--out``, so no test writes the user's run folders."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path_factory.mktemp("data")))
+    return data_root()
 
 
 @pytest.fixture
