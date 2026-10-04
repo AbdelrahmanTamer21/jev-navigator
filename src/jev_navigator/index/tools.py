@@ -13,6 +13,8 @@ from functools import cache
 from pathlib import Path
 from typing import IO
 
+import msgspec
+
 from .file_shape import MAX_PARSE_PEAK_MB, Placement, placement_of
 from .spans import TextHit
 
@@ -71,6 +73,7 @@ def ast_grep_rules(
     config: str | None = None,
     *,
     refused: dict[str, str],
+    decode: Callable[[str], dict] = json.loads,
 ) -> Iterator[dict]:
     """The matches of ``rules_yaml`` over ``files``, one at a time as ast-grep prints them, so no
     process's whole output is ever held. Every parse passes through here, placed by its estimated parse
@@ -82,7 +85,9 @@ def ast_grep_rules(
     symbols. ast-grep always runs with a JVN-owned sgconfig: ``config``,
     when given, is sgconfig YAML text (a ``languageGlobs`` remapping, say), otherwise
     ``NEUTRAL_AST_GREP_CONFIG``. It is written to a temporary file outside every repository and passed
-    with ``--config``, so the repository being analysed never configures the parser."""
+    with ``--config``, so the repository being analysed never configures the parser. ``decode`` turns
+    one printed match into the dict the caller reads, in every run, side by side or alone; a caller
+    that reads few fields passes a decoder that skips the rest."""
     placed = _placed(files, cwd, single_parse_limit_mb())
     refused.update(placed.refused)
     if not placed.side_by_side and not placed.alone:
@@ -93,19 +98,24 @@ def ast_grep_rules(
         path.write_text(NEUTRAL_AST_GREP_CONFIG if config is None else config)
         command = [AST_GREP, "scan", "--inline-rules", rules_yaml, "--config", str(path)]
         for chunk in file_chunks(placed.side_by_side):
-            yield from _scanned(command, chunk, cwd, refused)
+            yield from _scanned(command, chunk, cwd, refused, decode)
         for file in placed.alone:
-            yield from _scanned([*command, "--threads", "1"], [file], cwd, refused)
+            yield from _scanned([*command, "--threads", "1"], [file], cwd, refused, decode)
 
 
 def _scanned(
-    command: Sequence[str], files: Sequence[str], cwd: Path, refused: dict[str, str]
+    command: Sequence[str],
+    files: Sequence[str],
+    cwd: Path,
+    refused: dict[str, str],
+    decode: Callable[[str], dict],
 ) -> Iterator[dict]:
-    """The matches of one ast-grep run over ``files``; a file it skipped without parsing is added to
-    ``refused`` when the run ends."""
+    """The matches of one ast-grep run over ``files``, each decoded with ``decode``; a file it skipped
+    without parsing is added to ``refused`` when the run ends."""
     yield from _json_lines(
         [*command, "--json=stream", "--inspect=entity", "--", *files],
         cwd,
+        decode=decode,
         on_stderr=lambda inspection: refused.update(_skipped_files(files, inspection, cwd)),
     )
 
@@ -186,9 +196,13 @@ def _not_parsed_reason(path: Path) -> str | None:
 
 
 def _json_lines(
-    arguments: Sequence[str], cwd: Path, on_stderr: Callable[[str], None] | None = None
+    arguments: Sequence[str],
+    cwd: Path,
+    *,
+    decode: Callable[[str], dict],
+    on_stderr: Callable[[str], None] | None = None,
 ) -> Iterator[dict]:
-    """Each line the command prints, parsed as JSON while it runs. stderr goes to a file, so a full
+    """Each line the command prints, decoded with ``decode`` while it runs. stderr goes to a file, so a full
     stderr pipe cannot stall the command; the process is killed if the reader stops early. A line
     that is no JSON (the process died partway through it) fails with the process's exit code and
     stderr, which say why it stopped. ``on_stderr`` gets the whole stderr text once the command has
@@ -198,7 +212,7 @@ def _json_lines(
         try:
             for line in process.stdout:
                 if line.strip():
-                    yield _json_object(line, process, errors, arguments[0])
+                    yield _json_object(line, process, errors, arguments[0], decode)
         except BaseException:
             process.kill()
             raise
@@ -211,9 +225,15 @@ def _json_lines(
             on_stderr(_stderr_text(errors))
 
 
-def _json_object(line: str, process: subprocess.Popen, errors: IO[bytes], tool: str) -> dict:
+def _json_object(
+    line: str, process: subprocess.Popen, errors: IO[bytes], tool: str, decode: Callable[[str], dict]
+) -> dict:
+    """A whole line the decoder rejects for a missing or mistyped field raises as it is: the tool
+    printed it in full, so the decoder's expectation, not the tool, is what failed."""
     try:
-        return json.loads(line)
+        return decode(line)
+    except msgspec.ValidationError:
+        raise
     except ValueError as malformed:
         process.kill()
         raise _tool_failed(tool, process.wait(), errors) from malformed

@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "André Machon" }]
 license = "MIT"
-dependencies = []
+dependencies = [
+    "msgspec>=0.22",
+]
 
 [project.scripts]
 jvn = "jev_navigator.cli:main"

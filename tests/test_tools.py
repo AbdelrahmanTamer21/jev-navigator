@@ -3,11 +3,14 @@ from __future__ import annotations
 import stat
 import sys
 from pathlib import Path
+from typing import TypedDict
 
+import msgspec
 import pytest
 from git_repos import git
 
-from jev_navigator.index import tools
+from jev_navigator.index import file_shape, tools
+from jev_navigator.index.file_shape import Placement
 
 MISSING_OBJECT = "0" * 40
 
@@ -127,6 +130,34 @@ def test_a_process_killed_partway_through_a_line_reports_why_it_stopped(
         list(tools.ast_grep_rules(VALID_RULE, ["a.py", "b.py"], tmp_path, refused={}))
     assert str(failure.value) == f"{tools.AST_GREP} exited 137: ast-grep: out of memory"
     assert isinstance(failure.value.__cause__, ValueError)
+
+
+class _NeedsAFieldAstGrepNeverPrints(TypedDict):
+    neverPrinted: str
+
+
+def _parsed_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every file too big to be placed by its size alone is parsed alone: the side-by-side share is
+    lowered to the parser's base and the single-file limit lifted."""
+    monkeypatch.setattr(file_shape, "MAX_PARSE_PEAK_MB", file_shape.BASE_PEAK_MB)
+    monkeypatch.setattr(tools, "single_parse_limit_mb", lambda: float("inf"))
+
+
+@pytest.mark.parametrize("placement", [Placement.SIDE_BY_SIDE, Placement.ALONE])
+def test_a_whole_line_the_decoder_rejects_raises_the_decoders_error_not_the_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, placement: Placement
+) -> None:
+    # Arrange: ast-grep prints a whole match; the decoder expects a field ast-grep never prints
+    function = "def f():\n    return 1\n"
+    (tmp_path / "a.py").write_text(function * (file_shape.PARSEABLE_UP_TO_BYTES // len(function) + 1))
+    if placement is Placement.ALONE:
+        _parsed_alone(monkeypatch)
+    assert file_shape.placement_of(tmp_path, "a.py", tools.single_parse_limit_mb())[0] is placement
+    decode = msgspec.json.Decoder(_NeedsAFieldAstGrepNeverPrints).decode
+
+    # Act / Assert
+    with pytest.raises(msgspec.ValidationError):
+        list(tools.ast_grep_rules(VALID_RULE, ["a.py"], tmp_path, refused={}, decode=decode))
 
 
 def test_a_file_whose_name_starts_with_a_dash_is_scanned_as_a_file(tmp_path: Path) -> None:
