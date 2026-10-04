@@ -33,7 +33,7 @@ from .languages import (
 )
 from .packages import Packages
 from .scope_scan import FileFacts, FileStructure, ReferenceMatch, Unparsed, scan_facts
-from .source_files import DISAPPEARED, SourceFiles, SourceMemory
+from .source_files import DISAPPEARED, SourceFiles
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
 
@@ -95,6 +95,7 @@ class CodeIndex:
         self._scope = frozenset(self.files)
         self._code_files = tuple(path for path in self.files if language_of(path))
         self._unavailable: dict[str, str] = {}
+        self._refused: dict[str, str] = {}
         self._sources = SourceFiles(self.root, self._unavailable, LINE_CACHE_FILES)
         self._script_paths_in = cache(self._read_script_paths)
         self._packages = cache(self._read_packages)
@@ -246,14 +247,21 @@ class CodeIndex:
 
     @property
     def parser_scans_pending(self) -> tuple[str, ...]:
+        """The fact scan is pending until every available code file has facts or was refused by it."""
         available = set(self._available_files(self._code_files))
-        return () if available <= self._facts.keys() else ("facts",)
+        return () if available <= self._facts.keys() | self._refused.keys() else ("facts",)
 
     @property
     def unavailable_files(self) -> dict[str, str]:
-        """Files this index cannot read facts from, each with the reason: an inventory entry that disappeared,
-        or changed after the index first read it, or a file too large to parse safely."""
-        return dict(self._unavailable)
+        """Files this index has no facts for, each with the reason: an inventory entry that disappeared or
+        changed after the index first read it, or a file the parser refused (see ``refused_files``)."""
+        return {**self._unavailable, **self._refused}
+
+    @property
+    def refused_files(self) -> dict[str, str]:
+        """Readable files the fact scan never parsed, each with the reason, such as too large to parse.
+        Their text stays searchable; what they define is unknown, never absent."""
+        return dict(self._refused)
 
     @property
     def available_files(self) -> tuple[str, ...]:
@@ -407,16 +415,17 @@ class CodeIndex:
         return definitions, tuple(span for span in definitions if span in self._top_level_in(span.file))
 
     def _files_hiding(self, name: str) -> frozenset[str]:
-        """Where a definition of ``name`` could sit unseen: a file gone from the disk, or an unparsed
-        file whose lines under an ERROR node mention the name. A definition names what it defines, so
+        """Where a definition of ``name`` could sit unseen: a file gone from the disk, or an unparsed or
+        refused file whose unread lines mention the name. A definition names what it defines, so
         lines that never mention the name cannot hold one. Every file that mentions it has already
         been scanned to look for its definitions, so the answer does not depend on scan order."""
-        unparsed = (file for file in self.observed_unparsed_files if name in self._unread_names(file))
-        return frozenset(unparsed) | self.unavailable_files.keys()
+        unread = (*self.observed_unparsed_files, *self._refused)
+        mentioning = (file for file in unread if name in self._unread_names(file))
+        return frozenset(mentioning) | self._unavailable.keys()
 
     def _read_unread_names(self, file: str) -> frozenset[str]:
         """The words on the lines of ``file`` that its ERROR nodes span; the whole file's words while
-        its facts are still being recorded."""
+        its facts are still being recorded, or when the parser refused it."""
         lines = self._lines_of(file)
         facts = self._facts.get(file)
         stretches = facts.unparsed_lines if facts is not None else ((1, len(lines)),)
@@ -485,7 +494,9 @@ class CodeIndex:
             new = [name for name in dict.fromkeys(names) if name not in self._discovered]
             if not new:
                 return
-            unparsed = tuple(file for file in self._code_files if file not in self._facts)
+            unparsed = tuple(
+                file for file in self._code_files if file not in self._facts and file not in self._refused
+            )
         remaining = self._available_files(unparsed)
         mentioning = self._on_available(remaining, lambda files: tools.ripgrep_files(new, files, self.root))
         found = self._files_by_name(new, mentioning)
@@ -542,11 +553,11 @@ class CodeIndex:
             for file, facts in scanned.items():
                 if self._read_bytes(file) is None:
                     continue
+                if facts.refusal is not None:
+                    self._refused[file] = facts.refusal
+                    continue
                 self._remember_facts(file, facts)
-                if facts.refusal is None:
-                    self._fact_cache.save(file, contents[file], facts)
-                else:
-                    self._unavailable[file] = facts.refusal
+                self._fact_cache.save(file, contents[file], facts)
 
     def _load_cached_facts(self, files: Sequence[str]) -> dict[str, bytes]:
         """Remembers the persisted facts of ``files``; returns the bytes of those still to parse.
@@ -554,7 +565,7 @@ class CodeIndex:
         The caller holds the facts lock."""
         to_parse: dict[str, bytes] = {}
         for file in files:
-            if language_of(file) is None or file in self._facts:
+            if language_of(file) is None or file in self._facts or file in self._refused:
                 continue
             content = self._read_bytes(file)
             if content is None:
@@ -635,7 +646,8 @@ class CodeIndex:
                 if identity in seen:
                     continue
                 seen.add(identity)
-                if name in self._facts_in(inherited.path).export_names:
+                exported = self._facts_in(inherited.path).export_names
+                if inherited.path in self._refused or name in exported:
                     prior = found.get(inherited.path)
                     if prior is None or inherited.proven:
                         found[inherited.path] = inherited
@@ -765,11 +777,6 @@ class CodeIndex:
     def _read_bytes(self, file: str) -> bytes | None:
         """The file's bytes while they equal its first read, so facts are only built from them."""
         return self._sources.current(file)
-
-    @property
-    def source_memory(self) -> SourceMemory:
-        """What the index holds of the files it read: compressed first reads and cached lines."""
-        return self._sources.memory
 
     def _available_files(self, files: Sequence[str]) -> tuple[str, ...]:
         """The ``files`` still readable as the index first read them: neither reported unavailable
