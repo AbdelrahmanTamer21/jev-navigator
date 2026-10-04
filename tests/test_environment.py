@@ -12,6 +12,7 @@ from jev_navigator.environment import (
     TYPESAFE_SETTINGS,
     _env_file,
     _names_this_project,
+    checkout_root,
     load_typesafe_environment,
 )
 from jev_navigator.judgments.thresholds import Thresholds
@@ -98,6 +99,7 @@ def test_a_dotenv_outside_a_checkout_is_never_read(tmp_path, monkeypatch):
     installed = repository / ".venv/lib/site-packages/jev_navigator/environment.py"
     monkeypatch.chdir(repository)
     monkeypatch.setattr(environment, "__file__", str(installed))
+    monkeypatch.setattr(environment, "checkout_root", checkout_root)  # the real lookup, not conftest's
     monkeypatch.setattr(environment, "LEGACY_CONFIG", tmp_path / "absent-legacy-env")
 
     with pytest.raises(RuntimeError, match=r"TYPESAFE_API_KEY is unset"):

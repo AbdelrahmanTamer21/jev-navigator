@@ -5,13 +5,13 @@ import io
 import json
 import os
 import subprocess
-import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 
 import pytest
 from git_repos import commit_files
+from isolated_jvn import JVN
 
 from jev_navigator.cli import (
     SCHEMA_VERSION,
@@ -724,13 +724,7 @@ def test_json_pipeline_reaches_sdk_and_preserves_explicit_options(tmp_path):
     }
     try:
         result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "from jev_navigator.cli import main; raise SystemExit(main())",
-                "--json",
-                "-",
-            ],
+            [*JVN, "--json", "-"],
             input=json.dumps(payload),
             text=True,
             capture_output=True,
