@@ -7,23 +7,25 @@ from pathlib import Path
 import pytest
 from conftest import BudgetedClient
 
-from jev_navigator.judgments.answers import ChoiceAnswer
+from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer
 from jev_navigator.judgments.client import (
+    JEV_INPUT_BOX_CHARS,
+    JEV_REQUEST_TOKEN_LIMIT,
     JEV_STATE_TOKEN_LIMIT,
+    MAX_REQUEST_CHARS,
     InputBudgetExceededError,
     MissingAnswerError,
     ReplayOnlyClient,
-    estimate_tokens,
+    chars_for_tokens,
 )
 from jev_navigator.judgments.journal import JsonlJournal
 from jev_navigator.judgments.judge import (
-    MAX_REQUEST_BYTES,
     CallCapReachedError,
     CallOffer,
     Judge,
     request_exceeds_input_budget,
 )
-from jev_navigator.judgments.questions import Check, Criterion, Pick
+from jev_navigator.judgments.questions import Check, Criterion, Pick, serialized_chars
 from jev_navigator.judgments.secrets import SecretInRequestError, SecretMasker
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.judgments.thresholds import NoulVerdict, Thresholds
@@ -537,7 +539,69 @@ def test_a_scoped_judge_counts_its_own_calls_and_adds_them_to_its_parent() -> No
 
     # Assert
     assert (first.calls, second.calls, judge.calls) == (1, 2, 3)
-    assert judge.input_tokens == 300
+    assert judge.input_total.reported == 300
+    assert judge.input_total.not_reported == 0
+
+
+class _UsageClient:
+    """Answers each call with the next scripted input-token value; None is a response without usage."""
+
+    model = "jev-scripted"
+
+    def __init__(self, *tokens: int | None) -> None:
+        self.tokens = list(tokens)
+
+    def ask(self, state, questions):
+        answers = {question_id: NoulAnswer(0.9) for question_id in questions}
+        return JevResponse(answers, self.model, self.tokens.pop(0))
+
+
+def test_a_response_without_usage_is_reported_as_not_reported_and_never_added_as_zero() -> None:
+    # Arrange
+    judge = Judge(_UsageClient(10, None, 0))
+
+    # Act
+    answered = [
+        judge.ask({"s": index}, {"q": {"type": "noul"}}, thresholds=Thresholds()) for index in range(3)
+    ]
+
+    # Assert
+    assert [response.input_tokens for response in answered] == [10, None, 0]
+    assert judge.input_total.reported == 10
+    assert judge.input_total.not_reported == 1
+    assert judge.unanswered_requests == 0
+
+
+def test_a_total_with_every_response_reported_has_nothing_unreported() -> None:
+    judge = Judge(_UsageClient(10, 0))
+
+    for index in range(2):
+        judge.ask({"s": index}, {"q": {"type": "noul"}}, thresholds=Thresholds())
+
+    assert (judge.input_total.reported, judge.input_total.not_reported) == (10, 0)
+
+
+def test_a_scoped_judge_adds_unreported_responses_to_its_parent() -> None:
+    judge = Judge(_UsageClient(None))
+    scoped = judge.scope()
+
+    scoped.ask({"s": 1}, {"q": {"type": "noul"}}, thresholds=Thresholds())
+
+    assert (scoped.input_total.not_reported, judge.input_total.not_reported) == (1, 1)
+
+
+def test_a_store_replay_is_marked_replayed_and_reports_no_token_count(tmp_path: Path) -> None:
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+    state, questions = {"slice": {"code": "x = 1"}}, {"q": {"type": "noul", "instructions": "Is it?"}}
+    Judge(ScriptedJevClient(), store=store).ask(state, questions, thresholds=Thresholds())
+    replaying = Judge(ScriptedJevClient(), store=store, served_model="jev-scripted")
+
+    replayed = replaying.ask(state, questions, thresholds=Thresholds())
+
+    assert replayed.from_store is True
+    assert replayed.input_tokens is None
+    assert replaying.input_total.responses == 0
+    assert replaying.calls == 0
 
 
 def test_every_result_carries_the_hash_of_the_masked_request_that_answered_it(tmp_path: Path) -> None:
@@ -609,7 +673,7 @@ def _padding_item(label: str, chars: int) -> dict:
 
 
 def test_oversized_batch_is_split_before_sending_so_no_request_exceeds_the_input_budget() -> None:
-    client = BudgetedClient(MAX_REQUEST_BYTES)
+    client = BudgetedClient(MAX_REQUEST_CHARS)
     judge = Judge(client)
     items = [_padding_item(f"part{index}", 28_000) for index in range(4)]
 
@@ -619,60 +683,88 @@ def test_oversized_batch_is_split_before_sending_so_no_request_exceeds_the_input
 
     assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 4
     assert client.refusals == 0, "a request the measurement already rejects must not be paid for"
-    assert len(client.requests) == 4
+    assert len(client.requests) == 2
     judged_files: list[str] = []
     for state, questions in client.requests:
-        body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
-        assert body <= MAX_REQUEST_BYTES
+        body = serialized_chars({"state": state, "questions": questions})
+        assert body <= MAX_REQUEST_CHARS
         assert len(questions) == len(state["parts"]), "one atomic question per item and slot"
         judged_files.extend(item["file"] for item in state["parts"])
     assert sorted(judged_files) == [f"part{index}.py" for index in range(4)]
 
 
-def _request_tokens(state: dict, questions: dict) -> int:
-    longest_question = max(
-        estimate_tokens(json.dumps(question, ensure_ascii=False)) for question in questions.values()
+def _boxed_client() -> BudgetedClient:
+    return BudgetedClient(MAX_REQUEST_CHARS, input_box=JEV_INPUT_BOX_CHARS)
+
+
+def _judge_padded_parts(client: BudgetedClient, count: int, chars: int):
+    items = [_padding_item(f"part{index}", chars) for index in range(count)]
+    return Judge(client).check_every(
+        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=500_000
     )
-    return estimate_tokens(json.dumps(state, ensure_ascii=False)) + longest_question
 
 
-def test_state_over_the_token_limit_is_split_before_sending_although_the_body_fits() -> None:
-    client = BudgetedClient(MAX_REQUEST_BYTES)
-    judge = Judge(client)
-    items = [_padding_item(f"part{index}", 20_000) for index in range(4)]
+def test_a_state_just_under_the_character_box_is_sent_unsplit() -> None:
+    client = _boxed_client()
 
-    results = judge.check_every(
-        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=200_000
-    )
+    results = _judge_padded_parts(client, count=4, chars=18_800)
 
     assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 4
+    assert len(client.requests) == 1
     assert client.refusals == 0
+
+
+def test_a_state_just_over_the_character_box_is_split_before_sending_and_every_item_is_judged() -> None:
+    client = _boxed_client()
+
+    results = _judge_padded_parts(client, count=4, chars=19_300)
+
+    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 4
+    assert client.refusals == 0, "a request the measurement already rejects must not be paid for"
     assert len(client.requests) == 2
-    assert all(_request_tokens(*request) <= JEV_STATE_TOKEN_LIMIT for request in client.requests)
     judged_files = [item["file"] for state, _ in client.requests for item in state["parts"]]
     assert sorted(judged_files) == [f"part{index}.py" for index in range(4)]
 
 
-def test_a_body_over_the_byte_limit_is_over_budget_although_state_and_question_fit() -> None:
+def test_many_small_questions_over_a_moderate_state_fit_because_only_the_longest_question_counts() -> None:
+    state = {"parts": [{"code": "y" * 60_000}]}
+    questions = {f"q{index}": {"ask": "x" * 400} for index in range(200)}
+
+    assert not request_exceeds_input_budget(state, questions)
+
+
+def test_the_longest_question_counts_towards_the_character_box() -> None:
+    state = {"parts": [{"code": "y" * 60_000}]}
+    questions = {"short": {"ask": "x"}, "long": {"ask": "x" * 17_000}}
+
+    assert request_exceeds_input_budget(state, questions)
+    assert not request_exceeds_input_budget(state, {"short": questions["short"]})
+
+
+def test_a_body_over_the_request_box_is_over_budget_although_state_and_question_fit() -> None:
     state = {"doc": {"sentence": "s"}}
-    questions = {f"q{index}": {"ask": "x" * 40} for index in range(3_000)}
+    questions = {f"q{index}": {"ask": "x" * 40} for index in range(5_000)}
 
     assert request_exceeds_input_budget(state, questions)
     assert not request_exceeds_input_budget(state, dict(list(questions.items())[:100]))
 
 
-def test_state_just_under_the_token_limit_is_sent_unsplit() -> None:
-    client = BudgetedClient(MAX_REQUEST_BYTES)
-    judge = Judge(client)
-    items = [_padding_item(f"part{index}", 20_000) for index in range(2)]
+def test_non_ascii_state_is_measured_as_the_escaped_body_the_engine_measures() -> None:
+    chinese_comments = "\u4e2d" * 20_000
+    state = {"parts": [{"code": chinese_comments}]}
 
-    results = judge.check_every(
-        [DESCRIBES], items, {"doc": {"sentence": "s"}}, list_name="parts", batch_budget=200_000
-    )
+    assert len(json.dumps(state, ensure_ascii=False)) < JEV_INPUT_BOX_CHARS
+    assert request_exceeds_input_budget(state, {"q": {"ask": "x"}})
 
-    assert [result.verdict for result in results["describes"]] == [NoulVerdict.YES] * 2
-    assert len(client.requests) == 1
-    assert _request_tokens(*client.requests[0]) <= JEV_STATE_TOKEN_LIMIT
+
+def test_every_box_derives_from_the_one_characters_per_token_constant() -> None:
+    assert chars_for_tokens(JEV_STATE_TOKEN_LIMIT) == JEV_INPUT_BOX_CHARS == 76_800
+    assert chars_for_tokens(JEV_REQUEST_TOKEN_LIMIT) == MAX_REQUEST_CHARS == 153_600
+    assert chars_for_tokens(8_192) == 19_660
+
+
+def test_serialized_chars_counts_every_escaped_character() -> None:
+    assert serialized_chars({"a": "\u4e2d" * 10}) == len('{"a": "' + "\\u4e2d" * 10 + '"}')
 
 
 def test_provider_max_tokens_error_splits_the_batch_and_keeps_every_question_identity() -> None:
@@ -686,7 +778,7 @@ def test_provider_max_tokens_error_splits_the_batch_and_keeps_every_question_ide
     assert client.refusals == 1, "the first over-budget request is the provider's own evidence"
     assert len(client.requests) == 2
     for state, questions in client.requests:
-        body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
+        body = serialized_chars({"state": state, "questions": questions})
         assert body <= 34_000
     # Each item keeps its own store identity across the split: every item is judged exactly once.
     keys = [result.item["file"] for result in results["describes"]]
@@ -728,7 +820,7 @@ def test_split_answers_replay_from_the_store_without_new_calls(tmp_path: Path) -
 
 
 def test_a_normal_small_batch_is_unchanged_by_the_input_budget_boundary() -> None:
-    client = BudgetedClient(MAX_REQUEST_BYTES)
+    client = BudgetedClient(MAX_REQUEST_CHARS)
     judge = Judge(client)
     items = [{"code": "def a(): ..."}, {"code": "def b(): ..."}, {"code": "def c(): ..."}]
 
