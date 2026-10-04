@@ -170,20 +170,6 @@ def ripgrep_lines(texts: Sequence[str], files: Sequence[str], cwd: Path) -> list
     return hits
 
 
-def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -> tuple[str, ...]:
-    """Every supplied file containing any of the exact ``texts``, without a result-count cutoff."""
-    patterns = [texts] if isinstance(texts, str) else list(texts)
-    if not files or not patterns:
-        return ()
-    found: list[str] = []
-    with _pattern_file(patterns) as pattern_path:
-        command = [*_RIPGREP_SAFE, "--files-with-matches", "--null", "--fixed-strings", "-f", pattern_path]
-        for chunk in file_chunks(files, bytes_only=True):
-            output = run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
-            found += [path.removeprefix("./") for path in output.split("\0") if path]
-    return tuple(found)
-
-
 @contextmanager
 def _pattern_file(texts: Sequence[str]) -> Iterator[str]:
     """The path of a temporary ripgrep pattern file holding ``texts``, one per line, so their number

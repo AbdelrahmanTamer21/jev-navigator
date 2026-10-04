@@ -110,7 +110,7 @@ def importers_of(index: CodeIndex, path: str) -> tuple[str, ...]:
     """The scope files whose imports resolve to ``path``: one ripgrep for its import stem narrows the
     candidates, and the index's own text import reader decides, so nothing is parsed."""
     others = [file for file in index.files if file != path]
-    candidates = tools.ripgrep_files(_import_stem(path), others, index.root)
+    candidates = {hit.file for hit in tools.ripgrep_lines([_import_stem(path)], others, index.root)}
     return tuple(sorted(file for file in candidates if path in index.imports(file)))
 
 
