@@ -907,6 +907,15 @@ def test_a_scope_path_that_leaves_the_root_is_refused(tmp_path: Path, scope_path
         CodeIndex(root, [scope_path])
 
 
+def test_top_level_symbols_are_the_functions_and_classes_no_other_symbol_contains(
+    sample_index: CodeIndex,
+) -> None:
+    top_level = [span.name for span in sample_index.top_level_symbols("app/orders.py")]
+
+    assert top_level == ["OrderService", "cancel"]
+    assert "place" in [span.name for span in sample_index.symbols_in("app/orders.py")]
+
+
 def test_a_rendered_component_is_a_call_and_a_platform_element_is_not(tmp_path: Path) -> None:
     (tmp_path / "notices.tsx").write_text("export function LoadFailed() {\n  return <p>Not loaded</p>;\n}\n")
     (tmp_path / "basket.tsx").write_text(

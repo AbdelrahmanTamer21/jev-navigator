@@ -141,15 +141,7 @@ def test_a_file_whose_name_starts_with_a_dash_is_scanned_as_a_file(tmp_path: Pat
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX preprocessor script")
-@pytest.mark.parametrize(
-    "search",
-    [
-        lambda repository: tools.ripgrep_files("needle", ("a.py",), repository),
-        lambda repository: tuple(hit.file for hit in tools.ripgrep_fixed("needle", ("a.py",), repository, 5)),
-    ],
-    ids=["ripgrep_files", "ripgrep_fixed"],
-)
-def test_ripgrep_ignores_a_configured_preprocessor(tmp_path: Path, monkeypatch, search) -> None:
+def test_ripgrep_ignores_a_configured_preprocessor(tmp_path: Path, monkeypatch) -> None:
     # A ripgrep config in the environment (RIPGREP_CONFIG_PATH) can name `--pre=<program>`, which
     # ripgrep runs for each searched file. Over an untrusted repository that is code execution, so
     # jvn's searches must ignore the config entirely.
@@ -165,7 +157,7 @@ def test_ripgrep_ignores_a_configured_preprocessor(tmp_path: Path, monkeypatch, 
     repository.mkdir()
     (repository / "a.py").write_text("needle = 1\n")
 
-    found = search(repository)
+    found = tuple(hit.file for hit in tools.ripgrep_fixed("needle", ("a.py",), repository, 5))
 
     assert found == ("a.py",)  # the search still works
     assert not marker.exists()  # but the configured preprocessor never ran

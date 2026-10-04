@@ -47,7 +47,7 @@ QUESTION = "How does an order request become an HTTP result?"
 
 @pytest.mark.parametrize("json_mode", [False, True])
 def test_trace_command_writes_a_real_pack_with_default_output(
-    tmp_path: Path, monkeypatch, capsys, json_mode: bool
+    tmp_path: Path, monkeypatch, capsys, json_mode: bool, private_data_root: Path
 ) -> None:
     from jev_navigator import cli
 
@@ -71,7 +71,7 @@ def test_trace_command_writes_a_real_pack_with_default_output(
     )
     assert cli.main(argv) == 0
     output = capsys.readouterr()
-    packs = list((tmp_path / "jvn-results").glob("*/manifest.json"))
+    packs = list((private_data_root / "runs").glob("*/manifest.json"))
     assert len(packs) == 1
     manifest = json.loads(packs[0].read_text())
     assert manifest["trace"]["outcome"] == "completed"
