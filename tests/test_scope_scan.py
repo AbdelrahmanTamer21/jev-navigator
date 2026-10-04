@@ -769,6 +769,21 @@ def test_javascript_the_flow_reading_reads_worse_keeps_its_own_facts(tmp_path: P
     assert [span.name for span in index.functions_in("src/broken.js")] == ["count", "broken"]
 
 
+def test_javascript_both_readings_leave_equally_unread_stays_javascript(tmp_path: Path) -> None:
+    # Arrange: a syntax error each grammar leaves one line unread at
+    source = {"src/broken.js": "export function broken() {\n  return 1 +* 2;\n}\n"}
+    write_files(tmp_path, source)
+
+    # Act
+    facts = scan_facts(read_files(tmp_path, source), tmp_path, Unparsed())
+
+    # Assert
+    assert (facts["src/broken.js"].language, facts["src/broken.js"].unparsed_lines) == (
+        "javascript",
+        ((2, 2),),
+    )
+
+
 def test_comments_in_flow_typed_javascript_without_the_pragma_are_read_as_flow(
     tmp_path: Path, ast_grep_runs
 ) -> None:
