@@ -400,3 +400,18 @@ def test_second_pack_replays_the_persisted_answers_from_the_store(tmp_path: Path
         for obligation in manifest["trace"]["obligations"]
         for evidence in obligation["evidence"]
     )
+
+
+def test_trace_names_each_file_the_parser_refused_with_its_reason(tmp_path: Path) -> None:
+    # Arrange: a one-line bundle mentioning respond is too large to parse
+    repository = _workflow_repository(tmp_path)
+    statement = "export function respond(){return 1};"
+    commit_files(repository, {"dist/bundle.js": (statement * 6_000)[:200_000]})
+
+    # Act
+    manifest = _pack(repository, tmp_path / "pack", _evidence_client())
+
+    # Assert
+    reason = manifest["trace"]["unavailable_files"]["dist/bundle.js"]
+    assert reason.startswith("too large to parse")
+    assert f"`dist/bundle.js`: {reason}" in (tmp_path / "pack" / "report.md").read_text()

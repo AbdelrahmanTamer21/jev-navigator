@@ -19,7 +19,7 @@ from time import monotonic
 from .adapters.typesafe import TypeSafeJevClient
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
-from .cli_trace import create_trace_evidence_pack
+from .cli_trace import create_trace_evidence_pack, unavailable_file_lines
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
@@ -1018,8 +1018,10 @@ def _find_all_report(manifest: dict) -> str:
                 f"`{source['file']}:{source['lines'][0]}-{source['lines'][1]}` |"
             )
     lines += ["", "## Coverage gaps", ""]
-    for field in ("remaining_files", "unparsed_files", "unsupported_files", "unavailable_files"):
+    for field in ("remaining_files", "unparsed_files", "unsupported_files"):
         lines.append(f"- {field}: {', '.join(search[field]) or 'none'}")
+    lines.append("- unavailable_files:" if search["unavailable_files"] else "- unavailable_files: none")
+    lines += unavailable_file_lines(search["unavailable_files"])
     lines += ["", "## Matching bodies", ""]
     for value in search["found"]:
         source = value["source"]
@@ -1133,8 +1135,9 @@ def _report(manifest: dict) -> str:
         f"- Coverage caveat: {len(search['not_inspected'])} candidates were not independently opened; "
         f"{len(search['unparsed_files'])} files failed a completed parser scan. "
         f"Pending parser scans: {', '.join(search['parser_scans']['pending']) or 'none'}.",
-        "- Files unavailable (disappeared or changed on disk, or too large to parse): "
+        "- Files unavailable (disappeared or changed on disk, or refused by the parser): "
         f"{len(search['unavailable_files'])}.",
+        *unavailable_file_lines(search["unavailable_files"]),
         "",
         "## Opened code",
         "",
