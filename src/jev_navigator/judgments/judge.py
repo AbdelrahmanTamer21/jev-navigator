@@ -13,8 +13,9 @@ import copy
 import inspect
 import logging
 import threading
-from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Generator, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from .answers import JevResponse, NoulAnswer, TokenTotal, response_to_raw
@@ -61,7 +62,12 @@ BATCHING_RULE = "unit-place-order-count-and-box-v1"
 character box. Recorded on every stored answer; the batch membership hash in the item key already
 tells two batches apart."""
 DEFAULT_MAX_CONCURRENCY = 16
-"""How many batches of one judging call are in flight at once, on the sync and the async path."""
+"""How many requests one judge, together with all of its scopes, has in flight at once, on the
+sync and the async path."""
+SEND_SLOT_POLL_SECONDS = 0.01
+"""How often an async send waiting for a free slot looks again. The slots are a thread semaphore,
+shared with sync sends; waiting on one from the event loop by polling never blocks the loop and
+never takes an executor thread that a sync client's send needs to finish."""
 CODE_FIELD = "code"
 ROUTE_QUESTION = "route"
 _DEFAULT_MASKER = SecretMasker()
@@ -162,7 +168,10 @@ class Judge:
     single search, its own counter on the same client, store and journal; every scope adds its calls
     to its parent, and ``max_calls`` caps a judge together with all of its scopes.
     ``items_per_request`` caps the items of one batched request, and ``max_concurrency`` bounds how
-    many batches of one judging call are in flight, sync or async."""
+    many requests this judge and all of its scopes have in flight, sync or async, whichever callers
+    send them: a search's beam, its nested batches and history checks draw on the same slots. A slot
+    is held only around the client's send, never around an opening or a whole batched call, so a
+    caller holding none can always wait on its own nested requests."""
 
     def __init__(
         self,
@@ -193,6 +202,7 @@ class Judge:
         self.input_total = TokenTotal()
         self._parent: Judge | None = None
         self._bookkeeping = threading.Lock()
+        self._send_slots = threading.BoundedSemaphore(self.max_concurrency)
 
     def scope(self) -> Judge:
         child = copy.copy(self)
@@ -201,6 +211,7 @@ class Judge:
         child.replayed_answers = 0
         child.input_total = TokenTotal()
         child._parent = self
+        child._send_slots = self._send_slots
         return child
 
     def calls_left(self) -> int | None:
@@ -265,7 +276,8 @@ class Judge:
         each carrying every check for every item in it, instead of one round trip per check over the
         whole list. Batches hold at most ``items_per_request`` items and form in a stable item order,
         so the same items always form the same batches; an item's stored answer is reused only
-        with the same batch mates. Batches are sent concurrently, up to ``max_concurrency`` at once.
+        with the same batch mates. Batches are sent concurrently, within the judge-wide
+        ``max_concurrency``.
         A batch the provider would refuse for its input size is split by item and the halves
         measured again, so every request sent fits the measured input budget. Items already judged
         by the same question and model, in the same batch, come from the store.
@@ -350,7 +362,8 @@ class Judge:
         list_name: str = "items",
         thresholds: Thresholds | None = None,
     ) -> Mapping[str, list[CheckResult]]:
-        """``check_every`` with its batches sent concurrently, at most ``max_concurrency`` at once and,
+        """``check_every`` with its batches sent concurrently, at most ``max_concurrency`` at once (the
+        judge-wide send slots bound them together with every other caller), and,
         under a call cap, in waves no larger than the calls left, as the sync path does. When the
         served model is still unknown and an answer store is present, the first batch pins the model
         before the remaining batches look in the store. A batch refused for its size comes back as
@@ -606,10 +619,12 @@ class Judge:
         raw: RawResponse | None = None
         try:
             if hasattr(self.client, "send"):
-                raw = self._send_with_attempt_callback(prepared, request_id)
+                with self._send_slots:
+                    raw = self._send_with_attempt_callback(prepared, request_id)
                 self._journal_response(request_id, raw)
                 return self._accepted(prepared, _Dispatched.from_raw(self.client.parse(raw), raw, prepared))
-            response = self.client.ask(prepared.state, prepared.questions)
+            with self._send_slots:
+                response = self.client.ask(prepared.state, prepared.questions)
             raw = RawResponse.from_decoded(response_to_raw(response))
             self._journal_response(request_id, raw)
             return self._accepted(prepared, _Dispatched(response, prepared.body, sent_exact=False))
@@ -628,13 +643,15 @@ class Judge:
             if hasattr(self.client, "send"):
                 sender = getattr(self.client, "send_with_attempts", None)
                 callback = self._attempt_callback(request_id)
-                if callable(sender) and callback is not None:
-                    raw = await _awaited(sender, prepared.state, prepared.questions, on_attempt=callback)
-                else:
-                    raw = await _awaited(self.client.send, prepared.state, prepared.questions)
+                async with self._send_slot_async():
+                    if callable(sender) and callback is not None:
+                        raw = await _awaited(sender, prepared.state, prepared.questions, on_attempt=callback)
+                    else:
+                        raw = await _awaited(self.client.send, prepared.state, prepared.questions)
                 self._journal_response(request_id, raw)
                 return self._accepted(prepared, _Dispatched.from_raw(self.client.parse(raw), raw, prepared))
-            response = await _awaited(self.client.ask, prepared.state, prepared.questions)
+            async with self._send_slot_async():
+                response = await _awaited(self.client.ask, prepared.state, prepared.questions)
             raw = RawResponse.from_decoded(response_to_raw(response))
             self._journal_response(request_id, raw)
             return self._accepted(prepared, _Dispatched(response, prepared.body, sent_exact=False))
@@ -645,6 +662,16 @@ class Judge:
             self._record_refusal(prepared, error)
             raise
 
+    @asynccontextmanager
+    async def _send_slot_async(self) -> AsyncIterator[None]:
+        """One of the judge-wide send slots, awaited without blocking the event loop."""
+        while not self._send_slots.acquire(blocking=False):
+            await asyncio.sleep(SEND_SLOT_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            self._send_slots.release()
+
     def _must_learn_model_first(self) -> bool:
         """Without a served model the store cannot prove model-version identity, so every lookup
         misses; one batch sent alone pins ``served_model`` and the rest may then replay."""
@@ -654,7 +681,8 @@ class Judge:
         self, plan: _CheckPlan, cancelled: Callable[[], bool] | None = None
     ) -> Iterator[tuple[_Batch, JevResponse]]:
         """Every request of the plan's batches with its answer, a batch at a time as batches complete,
-        with at most ``max_concurrency`` batches in flight. Answers are applied by the caller, on its
+        with at most ``max_concurrency`` worker threads; their sends share the judge-wide send slots.
+        Answers are applied by the caller, on its
         own thread. Under a call cap, batches go in waves no larger than the calls left, in their
         stable order, so a capped call always answers the same batches. A batch refused for its size
         comes back as its halves, which are sent one per wave before any other batch (see
