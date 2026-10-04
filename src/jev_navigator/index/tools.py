@@ -6,7 +6,7 @@ import base64
 import json
 import subprocess
 import tempfile
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from functools import cache
@@ -23,11 +23,22 @@ RIPGREP = "rg"
 # program. It also keeps a personal rg config from changing what the index sees.
 _RIPGREP_SAFE = (RIPGREP, "--no-config")
 _NO_MATCHES_EXIT = 1
+_SCANNED_FILE_PREFIX = "sg: entity|file|"
 NEUTRAL_AST_GREP_CONFIG = "ruleDirs: []\n"
 """The smallest sgconfig ast-grep accepts. Passed with ``--config`` it replaces the discovery of the
 analysed repository's own sgconfig.yml, which is customer content: its ``languageGlobs`` would change
 what a file is parsed as, and its ``customLanguages`` makes ast-grep load a library the repository
 names. Confirmed with ast-grep 0.45.1 that ``--config`` replaces discovery and is not merged with it."""
+NOT_UTF8_REASON = "not parsed: not valid UTF-8"
+NOT_PARSED_REASON = "not parsed: ast-grep skipped the file and printed nothing for it"
+"""ast-grep 0.45.1 skips a file it was handed on its command line, exits 0 and prints nothing, when the
+file has more than 3,000,000 bytes and more than 200,000 lines (found by bisection on synthetic files:
+both limits must be exceeded; ``--stdin`` is not affected). Even a rule on ``kind: program`` matches
+nothing then, so a skipped file reads exactly like a file without functions. Only ``--inspect=entity``
+tells them apart: it prints one ``entity|file|PATH`` line for every file ast-grep actually scanned. A
+file that is not valid UTF-8 is skipped the same way (``NOT_UTF8_REASON``). A file of that
+size can be within the single-file limit (110,000 small functions, 3.4 MB, estimate about 300 MB) and so be
+parsed alone, which is why every run, side by side or alone, is checked."""
 MAX_FILES_PER_COMMAND = 300
 MAX_ARGUMENT_BYTES = 128 * 1024
 
@@ -66,7 +77,9 @@ def ast_grep_rules(
     peak (``file_shape``): files within ``MAX_PARSE_PEAK_MB`` are parsed side by side; a file over it
     but within ``single_parse_limit_mb()`` is parsed alone, one at a time; a file over that
     is never handed to ast-grep and is added to ``refused`` with its reason when the iteration starts,
-    so read ``refused`` after the matches. ast-grep always runs with a JVN-owned sgconfig: ``config``,
+    so read ``refused`` after the matches. A file that ast-grep itself skipped without parsing
+    (``NOT_PARSED_REASON``) is added when its process ends, so it is never taken for a file without
+    symbols. ast-grep always runs with a JVN-owned sgconfig: ``config``,
     when given, is sgconfig YAML text (a ``languageGlobs`` remapping, say), otherwise
     ``NEUTRAL_AST_GREP_CONFIG``. It is written to a temporary file outside every repository and passed
     with ``--config``, so the repository being analysed never configures the parser."""
@@ -80,9 +93,21 @@ def ast_grep_rules(
         path.write_text(NEUTRAL_AST_GREP_CONFIG if config is None else config)
         command = [AST_GREP, "scan", "--inline-rules", rules_yaml, "--config", str(path)]
         for chunk in file_chunks(placed.side_by_side):
-            yield from _json_lines([*command, "--json=stream", "--", *chunk], cwd)
+            yield from _scanned(command, chunk, cwd, refused)
         for file in placed.alone:
-            yield from _json_lines([*command, "--threads", "1", "--json=stream", "--", file], cwd)
+            yield from _scanned([*command, "--threads", "1"], [file], cwd, refused)
+
+
+def _scanned(
+    command: Sequence[str], files: Sequence[str], cwd: Path, refused: dict[str, str]
+) -> Iterator[dict]:
+    """The matches of one ast-grep run over ``files``; a file it skipped without parsing is added to
+    ``refused`` when the run ends."""
+    yield from _json_lines(
+        [*command, "--json=stream", "--inspect=entity", "--", *files],
+        cwd,
+        on_stderr=lambda inspection: refused.update(_skipped_files(files, inspection, cwd)),
+    )
 
 
 def single_parse_limit_mb() -> float:
@@ -132,11 +157,42 @@ def file_chunks(files: Sequence[str], *, bytes_only: bool = False) -> Iterator[S
         yield files[start:]
 
 
-def _json_lines(arguments: Sequence[str], cwd: Path) -> Iterator[dict]:
+def _skipped_files(chunk: Sequence[str], inspection: str, cwd: Path) -> dict[str, str]:
+    """The non-empty files of ``chunk`` that ast-grep's ``--inspect=entity`` output does not list as
+    scanned. ast-grep lists no empty file either, and an empty file has nothing to find."""
+    scanned = {
+        line.removeprefix(_SCANNED_FILE_PREFIX).rsplit(": language=", 1)[0]
+        for line in inspection.splitlines()
+        if line.startswith(_SCANNED_FILE_PREFIX)
+    }
+    reasons = {file: _not_parsed_reason(cwd / file) for file in chunk if file not in scanned}
+    return {file: reason for file, reason in reasons.items() if reason is not None}
+
+
+def _not_parsed_reason(path: Path) -> str | None:
+    """Why ast-grep skipped the file, or None when it had nothing to parse: the file is empty, or it
+    left the disk during the scan, which the index reports as disappeared."""
+    try:
+        content = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    if not content:
+        return None
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        return NOT_UTF8_REASON
+    return NOT_PARSED_REASON
+
+
+def _json_lines(
+    arguments: Sequence[str], cwd: Path, on_stderr: Callable[[str], None] | None = None
+) -> Iterator[dict]:
     """Each line the command prints, parsed as JSON while it runs. stderr goes to a file, so a full
     stderr pipe cannot stall the command; the process is killed if the reader stops early. A line
     that is no JSON (the process died partway through it) fails with the process's exit code and
-    stderr, which say why it stopped."""
+    stderr, which say why it stopped. ``on_stderr`` gets the whole stderr text once the command has
+    ended successfully."""
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen(list(arguments), cwd=cwd, stdout=subprocess.PIPE, stderr=errors, text=True)
         try:
@@ -151,6 +207,8 @@ def _json_lines(arguments: Sequence[str], cwd: Path) -> Iterator[dict]:
             returncode = process.wait()
         if returncode not in (0, _NO_MATCHES_EXIT):
             raise _tool_failed(arguments[0], returncode, errors)
+        if on_stderr is not None:
+            on_stderr(_stderr_text(errors))
 
 
 def _json_object(line: str, process: subprocess.Popen, errors: IO[bytes], tool: str) -> dict:
@@ -162,8 +220,16 @@ def _json_object(line: str, process: subprocess.Popen, errors: IO[bytes], tool: 
 
 
 def _tool_failed(tool: str, returncode: int, errors: IO[bytes]) -> ToolFailedError:
+    """The failure with the command's own error text, without ``--inspect=entity``'s list of scanned
+    files, which can run to one line per file of the scope."""
+    lines = _stderr_text(errors).splitlines()
+    message = "\n".join(line for line in lines if not line.startswith(_SCANNED_FILE_PREFIX))
+    return ToolFailedError(f"{tool} exited {returncode}: {message.strip()}")
+
+
+def _stderr_text(errors: IO[bytes]) -> str:
     errors.seek(0)
-    return ToolFailedError(f"{tool} exited {returncode}: {errors.read().decode(errors='replace').strip()}")
+    return errors.read().decode(errors="replace")
 
 
 def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:
