@@ -297,7 +297,10 @@ def test_a_stop_rule_reading_the_history_replays_without_a_live_request(
 ) -> None:
     # Arrange: the answer sources differ between a live run and its replay (from_store), so Jev
     # must never see them, or the replayed stop check becomes a new request
+    states: list[dict] = []
+
     def answer(question_id: str, question: dict, state: dict) -> float:
+        states.append(state)
         return 0.2 if section in state else 0.3
 
     rule = StopRule(FETCHED_HOLDS_LIMIT, sections=(section,))
@@ -328,3 +331,13 @@ def test_a_stop_rule_reading_the_history_replays_without_a_live_request(
     # Assert
     assert live.calls > 0
     assert replaying.calls == 0
+    assert any(section in state for state in states)
+    assert not keys_at_any_depth(states) & {"answered_by", "scored_by"}
+
+
+def keys_at_any_depth(value: object) -> set[str]:
+    if isinstance(value, dict):
+        return set(value) | {key for item in value.values() for key in keys_at_any_depth(item)}
+    if isinstance(value, list):
+        return {key for item in value for key in keys_at_any_depth(item)}
+    return set()
