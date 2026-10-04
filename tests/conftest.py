@@ -184,7 +184,7 @@ class BudgetedClient:
             raise InputBudgetExceededError(
                 "TypeSafeBadRequestError: 400 "
                 '{"detail":{"error_type":"max_tokens_exceeded"}} '
-                f"(input of {body} bytes, {box} characters of state and question)"
+                f"(input of {body} characters, {box} of them state and the longest question)"
             )
         self.requests.append((state, questions))
         answers = {question_id: NoulAnswer(self.default_noul) for question_id in questions}
