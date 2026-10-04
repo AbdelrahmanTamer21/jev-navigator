@@ -856,8 +856,11 @@ Neither a question hash nor a frozen manifest proves model quality or dataset co
 `uv run pytest --basetemp=<scratch dir>`. Tests run offline against small real git repositories and
 `ScriptedJevClient`. The suite retains the ten Express/Next.js and FastAPI/GraphQL graph
 capability regressions and verifies request/response capture through a real local HTTP socket.
-The TypeSafe adapter's tests run only with the extra installed:
-`uv run --extra typesafe pytest`. Run `uv run ruff check src tests` and
+Plain `uv run pytest` installs the TypeSafe extra with the dev group, so every test runs. A skipped
+test did not run, so a run with a skip fails and names it, unless the test declares a platform it
+cannot run on with a `skipif` condition. To show the core works without the extra, run
+`uv run --no-dev --with pytest pytest --without-typesafe`: only there may the TypeSafe tests skip,
+and it refuses to start when the extra is installed. Run `uv run ruff check src tests` and
 `uv run ruff format --check src tests` before pushing. Local checks are the normal validation
 path for this small library; pushes and pull requests do not launch hosted CI. The `tests`
 workflow is available through GitHub Actions **Run workflow** when an explicit cross-version
