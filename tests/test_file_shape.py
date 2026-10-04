@@ -75,6 +75,26 @@ def test_every_measured_file_of_short_lines_is_estimated_at_or_above_its_real_pe
         assert measure(dense_line * (code_bytes // len(dense_line))).parse_peak_mb >= real_peak
 
 
+@pytest.mark.parametrize(
+    ("operands", "real_peak"), [(330, 270.2), (1_400, 253.2)], ids=["2k-lines", "9k-lines"]
+)
+def test_four_megabytes_of_long_dense_lines_are_estimated_at_or_above_their_real_peak(
+    operands: int, real_peak: float
+) -> None:
+    # jvn-verifier's long dense TypeScript rows (04.10.2026): lines of about 2,000 and 9,300 bytes
+    line = b"v = " + b" + ".join(b"name%d" % operand for operand in range(operands)) + b";\n"
+
+    assert measure(line * (4_000_000 // len(line))).parse_peak_mb >= real_peak
+
+
+def test_a_long_line_of_short_strings_is_priced_as_code() -> None:
+    # Generated concatenations: 20,000-byte lines of short strings joined by `+`, no other punctuation
+    line = b"text = " + b" + ".join(b'"fragment"' for _ in range(1_500)) + b"\n"
+    concatenation = measure(line * (4_000_000 // len(line)))
+
+    assert concatenation.parse_peak_mb > 300
+
+
 def test_a_line_of_one_long_string_is_priced_by_its_punctuation_not_its_size() -> None:
     path = b'  d="' + b"M708 195.8c.4-1.5.8-3.5 2-4.7 " * 80_000 + b'"\n'
 
