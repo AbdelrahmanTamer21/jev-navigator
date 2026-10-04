@@ -13,9 +13,7 @@ from dataclasses import dataclass
 from functools import cache
 from typing import Protocol
 
-from .secret_shapes import MASK, hide_secrets
-
-BY_CONTENT_MIN_CHARS = 8
+from .secret_shapes import BY_CONTENT_MIN_CHARS, MASK, hide_secrets
 
 
 class Masker(Protocol):

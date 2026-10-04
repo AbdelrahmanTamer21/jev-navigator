@@ -1,10 +1,11 @@
 """What a secret value looks like in code and config, and what stays code.
 
 ``hide_secrets`` applies every rule in order and returns the masked text with the values it
-hid. A value under a secret-named key is hidden; a value that is a reference (an identifier,
-dotted path, call, env lookup or interpolation) is code and stays. The structural rules (shell
-words, quoted values with escapes or no closing quote, YAML block and continued values, and
-nested flow values) follow the analysis engine's audit masker, whose corpus both sides test.
+hid: token and hash shapes, credentials in URLs, and values under secret-named keys (shell and
+env-file words, quoted, plain, bare and fallback values, structured values in
+``secret_structures``), plus literal arguments to secret-named calls and high-entropy quoted
+values. Which keys are secret and which values are code is ``secret_values``. The structural
+rules follow the analysis engine's audit masker, whose corpus both sides test.
 """
 
 from __future__ import annotations
@@ -12,27 +13,27 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
+
+from .secret_structures import flow_spans, yaml_block_spans
+from .secret_values import (
+    CALL_OR_INDEX,
+    CODE_REFERENCE,
+    DOTTED_PATH,
+    KEY,
+    NAME_LITERAL,
+    SEPARATOR,
+    is_literal,
+    is_plain_words,
+    key_kind,
+    names_something,
+)
 
 MASK = "[MASKED]"
+BY_CONTENT_MIN_CHARS = 8
 HIGH_ENTROPY_BITS_PER_CHAR = 4.0
 
 Span = tuple[int, int]
-
-_SECRET_WORD = (
-    r"(?i:secret[_-]?access[_-]?key|secret[_-]?key|access[_-]?key|private[_-]?key|api[_-]?key"
-    r"|password|passwd|pwd|secret|token|credential)"
-)
-# The secret word is the key's last part: after a separator or a camelCase step, never inside a
-# word, so ``authToken`` and ``DB_PASSWORD`` are secret keys and ``tokenizer``, ``max_tokens``
-# and ``secretName`` are not.
-_SECRET_NAME = rf"(?<![\w$.-])(?:[\w$.-]*?(?:(?<=[_.$-])|(?<=[a-z0-9])(?=[A-Z])))?{_SECRET_WORD}(?![\w$])"
-_SEPARATOR = r"[\"']?[ \t]*[:=](?![:=>])[ \t]*"
-
-
-def _keyed(value: str, flags: int = 0) -> re.Pattern[str]:
-    return re.compile(rf"(?P<key>{_SECRET_NAME}){_SEPARATOR}{value}", flags)
-
 
 _PRIVATE_KEY_BLOCK = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----|\Z)", re.S
@@ -47,83 +48,44 @@ _TOKEN_SHAPES = (
     re.compile(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_\-]{20,}\b"),
     re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"),
+    re.compile(r"\$2[aby]?\$\d{2}\$[./A-Za-z0-9]{53}"),
+    re.compile(r"\$argon2(?:id|i|d)\$v=\d+\$m=\d+,t=\d+,p=\d+\$[A-Za-z0-9+/]+\$[A-Za-z0-9+/]+"),
 )
 _BEARER_VALUE = re.compile(r"(?i)\bbearer\s+(?P<value>[A-Za-z0-9._~+/=-]{16,})")
+_URL_PASSWORD = re.compile(
+    r"(?i)(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*+://[^/\s:@'\"`]++:(?P<value>[^/\s@'\"`]++)@"
+)
+_QUERY_VALUE = re.compile(r"[?&](?P<key>[A-Za-z_][\w.-]*+)=(?P<value>[^&\s#'\"`]++)")
 _SHELL_WORD = (
-    r"""(?:"(?:\\[\s\S]|\\\Z|[^"\\])*(?:"|\Z)|'(?:\\[\s\S]|\\\Z|[^'\\])*(?:'|\Z)|\\[\s\S]|[^\s"'\\])+"""
+    r"""(?:"(?:\\[\s\S]|\\\Z|[^"\\])*+(?:"|\Z)|'(?:\\[\s\S]|\\\Z|[^'\\])*+(?:'|\Z)|\\[\s\S]|[^\s"'\\])++"""
 )
 _SHELL_ASSIGNMENT = re.compile(
-    rf"^[ \t]*(?:export[ \t]+)?(?P<key>{_SECRET_NAME})=(?P<value>(?![{{\[]){_SHELL_WORD})"
+    rf"^[ \t]*(?:export[ \t]+)?{KEY}=(?P<value>(?![{{\[]){_SHELL_WORD})"
     r"(?=[ \t]*(?:$|#|;|&&|\|\||[A-Za-z_]\w*=))",
     re.M,
 )
-_QUOTED_VALUE = _keyed(
-    r"(?P<quote>[\"'`])(?P<value>(?:\\[\s\S]|\\\Z|(?!(?P=quote))[^\\])*)(?:(?P=quote)(?P<tail>[\w\"'][^\s,;})\]]*)?|\Z)"
+_QUOTED_VALUE = re.compile(
+    rf"{KEY}{SEPARATOR}(?:[bBrRuUfF]{{1,2}}(?=[\"']))?(?P<quote>\"\"\"|'''|[\"'`])(?P<value>(?:\\[\s\S]|\\\Z|(?!(?P=quote))[^\\])*+)"
+    r"(?:(?P=quote)(?P<tail>[\w\"'][^\s,;})\]]*+)?|\Z)"
 )
-_FLOW_VALUE = _keyed(r"(?P<value>(?=[\[{]))")
-_YAML_HEADER = re.compile(
-    rf"^(?P<leader>[ \t]*(?:-[ \t]+)?)[\"']?(?P<key>{_SECRET_NAME})[\"']?[ \t]*:(?![:=])[ \t]*"
-    r"(?P<value>[^\r\n]*)$",
-    re.M,
-)
-_YAML_PROPERTIES = re.compile(r"(?:(?:&[^\s|>]+|!(?:<[^>\r\n]+>|[^\s|>]*))[ \t]+)+")
-_YAML_BLOCK_SCALAR = re.compile(r"(?:(?:&[^\s|>]+|!(?:<[^>\r\n]+>|[^\s|>]*))[ \t]+)*[|>][-+0-9]*")
 _PLAIN_VALUE = re.compile(
-    rf"^[ \t]*(?:-[ \t]+)?[\"']?(?P<key>{_SECRET_NAME}){_SEPARATOR}"
-    r"(?P<value>[^\s\"'`{\[(#][^\n#]*?)(?=[ \t]*(?:#|//|$))",
+    rf"^[ \t]*(?:-[ \t]+)?[\"']?{KEY}{SEPARATOR}"
+    r"(?P<value>[^\s\"'`{\[(#](?:[^\n#/ \t]|[ \t]++(?=[^\s#])|/(?!/))*+)",
     re.M,
 )
-_PLAIN_WORD = re.compile(r"[^\s\"'`(){}\[\]=<>!&|?+*;,:]+")
-_CODE_WORDS = frozenset(
-    {
-        "and",
-        "as",
-        "async",
-        "await",
-        "else",
-        "for",
-        "function",
-        "if",
-        "in",
-        "instanceof",
-        "is",
-        "lambda",
-        "new",
-        "not",
-        "of",
-        "or",
-        "return",
-        "typeof",
-        "void",
-        "yield",
-    }
+_BARE_VALUE = re.compile(
+    rf"{KEY}{SEPARATOR}(?P<value>[\w.$@%+/~-][\w.$@%+/~=-]*+)(?=[ \t]*(?:$|[,;}})\]&]|#|//))", re.M
 )
-_BARE_VALUE = _keyed(r"(?P<value>[\w.$@%+/~-][\w.$@%+/~=-]*)(?=[ \t]*(?:$|[,;})\]]|#|//))", re.M)
-_LITERAL_FALLBACK = _keyed(
-    r"[^\n,;]*?(?:\|\||\?\?|\bor\b)\s*(?P<quote>[\"'`])(?P<value>[^\"'`\n]+)(?P=quote)"
+_LITERAL_FALLBACK = re.compile(
+    rf"{KEY}{SEPARATOR}[^\n,;:=]*?(?:\|\||\?\?|\bor\b)\s*(?P<quote>[\"'`])(?P<value>[^\"'`\n]+)(?P=quote)"
 )
-_SECRET_NAMED_CALL = re.compile(
-    r"(?:(?i:\b[\w.$]*(?:secret|token|password|passwd|credential|api_?key|hmac)\w*)|\bsign)"
-    r"\((?P<arguments>[^(){}\[\]\n]*)\)"
-)
+_CALL = re.compile(r"(?<![\w.$])(?P<name>[\w.$]++)\((?P<arguments>[^(){}\[\]\n]*+)\)")
+_SECRET_CALL_WORD = re.compile(r"(?i)secret|token|password|passwd|credential|api_?key|hmac")
 _QUOTED_LITERAL = re.compile(r"(?P<quote>[\"'`])(?P<value>[^\"'`\n]+)(?P=quote)")
-_QUOTED_ASSIGNMENT = re.compile(r"""[:=]\s*["'](?P<value>[A-Za-z0-9+/=_\-]{20,})["']""")
-_CODE_REFERENCE = re.compile(
-    r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*|-?(?:0[xob][\da-fA-F_]+|\d[\d_]*(?:\.\d+)*[A-Za-z%]{0,4})"
-)
-_NESTED_COMMENT = re.compile(r"(?://|(?:^|(?<=\s))#)[^\n]*")
-_NESTED_QUOTED = re.compile(r"(?P<quote>[\"'`])(?:\\.|(?!(?P=quote)).)*(?P=quote)", re.S)
-_NESTED_LEAF = re.compile(r"(?P<key>[\w$.-]+)[\"']?[ \t]*:(?![:=])[ \t]*(?P<value>[^,;}\]\n]*)")
-_KEY_BEFORE = re.compile(r"(?P<key>[\w$.-]+)[\"']?[ \t]*:[ \t]*$")
-# A nested key that names or describes something holds metadata, not a secret value.
-_NAMING_KEY = re.compile(
-    r"(?i)(?:^|[_.-]|(?<=[a-z0-9])(?=[A-Z]))(?:name|path|dir|directory|file|header|ref|url|uri|type|kind"
-    r"|field|label|annotation|mount|env|key|items|mode|description|in|enabled|required|optional)$"
-)
-_CALL_OR_INDEX = re.compile(r"[A-Za-z_$][\w$.]*\s*[(\[]")
-_DOTTED_PATH = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
-_NAME_LITERAL = re.compile(r"[A-Z][A-Z0-9_]*|[a-z]+(?:[-_./][a-z]+)*")
+_ALGORITHM_NAME = re.compile(r"(?i)(?:sha|md|blake2[bs]?|hs|rs|es|ps)-?\d+")
+_QUOTED_ASSIGNMENT = re.compile(r"""[:=]\s*["'](?P<value>[A-Za-z0-9+/=_\-]{20,}+)["']""")
 _IDENTIFIER_WORDS = re.compile(r"[A-Za-z]+(?:_[A-Za-z]+)*")
+_PLACEHOLDER = re.compile(r"(?i)pass(?:word|wd)?|pwd|secret|token|x+|\*+|<[^>]*>|\.\.\.|…")
 
 
 def hide_secrets(text: str) -> tuple[str, list[str]]:
@@ -158,157 +120,92 @@ def _quoted_spans(text: str) -> list[Span]:
     return [
         (match.start("value"), match.end("tail") if match["tail"] else match.end("value"))
         for match in _QUOTED_VALUE.finditer(text)
-        if match["value"] and _is_literal(match["value"])
+        if match["value"] and _keyed_value(match, is_literal(match["value"], match["quote"]))
     ]
 
 
-def _flow_spans(text: str) -> list[Span]:
-    spans: list[Span] = []
-    for match in _FLOW_VALUE.finditer(text):
-        end = _balanced_flow_value_end(text, match.start("value"))
-        if end is not None and _holds_literal_leaf(text[match.start("value") + 1 : end - 1]):
-            spans.append((match.start("value"), end))
-    return spans
+def _keyed(holds: Callable[[re.Match[str]], bool], naming: bool = True) -> Callable[[re.Match[str]], bool]:
+    """A rule's test for a value under a key: ``holds`` must call it a literal, and the key must be
+    secret, or, when ``naming`` allows it, a naming key whose value is not a name, path or URL."""
+
+    def hides(match: re.Match[str]) -> bool:
+        return _keyed_value(match, holds(match), naming)
+
+    return hides
 
 
-def _holds_literal_leaf(content: str) -> bool:
-    """Whether nested content under a secret key holds a literal: a quoted string or a scalar that is
-    not a reference, under a key that does not name something. ``{ type: String, required: true }``
-    and a Kubernetes ``secret:`` volume (``secretName``, ``items``, ``key``, ``path``) hold none."""
-    content = _NESTED_COMMENT.sub("", content)
-    quoted = any(
-        not _under_naming_key(content[: match.start()]) for match in _NESTED_QUOTED.finditer(content)
-    )
-    unquoted = _NESTED_QUOTED.sub("", content)
-    return quoted or any(_is_literal_leaf(leaf) for leaf in _NESTED_LEAF.finditer(unquoted))
-
-
-def _under_naming_key(before: str) -> bool:
-    key = _KEY_BEFORE.search(before)
-    return key is not None and bool(_NAMING_KEY.search(key["key"]))
-
-
-def _is_literal_leaf(leaf: re.Match[str]) -> bool:
-    value = leaf["value"].strip()
-    return (
-        bool(value)
-        and not _NAMING_KEY.search(leaf["key"])
-        and not _CODE_REFERENCE.fullmatch(value)
-        and not value.startswith(("(", "[", "{", "=", "&", "!", "|", "<"))
-        and "=>" not in value
-        and not _CALL_OR_INDEX.match(value)
-    )
-
-
-def _yaml_block_spans(text: str) -> list[Span]:
-    """A secret key's YAML block scalar, empty value with indented lines, or plain value continued
-    on deeper lines: the value and its continuation lines, never the sibling keys."""
-    spans: list[Span] = []
-    for header in _YAML_HEADER.finditer(text):
-        continuation_end = _continuation_end(text, header)
-        if continuation_end is not None and _yaml_value_continues(text, header, continuation_end):
-            start = _yaml_value_start(text, header)
-            end = continuation_end - 1 if text[continuation_end - 1] == "," else continuation_end
-            spans.append((start, end))
-    return spans
-
-
-def _continuation_end(text: str, header: re.Match[str]) -> int | None:
-    """The end of the last line indented deeper than the key, or None when no such line follows."""
-    key_column = len(header["leader"].expandtabs(8))
-    end = None
-    for line in _following_lines(text, header.end()):
-        content = text[line[0] : line[1]]
-        if not content.strip():
-            continue
-        if len(content[: len(content) - len(content.lstrip(" \t"))].expandtabs(8)) <= key_column:
-            break
-        end = line[1]
-    return end
-
-
-def _following_lines(text: str, position: int) -> Iterator[Span]:
-    """Each line after ``position`` (which ends a line), without its line ending."""
-    while position < len(text):
-        line_start = position + 1
-        line_end = text.find("\n", line_start)
-        line_end = len(text) if line_end == -1 else line_end
-        yield line_start, line_end - 1 if text[line_end - 1 : line_end] == "\r" else line_end
-        position = line_end
-
-
-def _yaml_value_continues(text: str, header: re.Match[str], continuation_end: int) -> bool:
-    """A block scalar, YAML properties or plain words continue as a value; an empty value continues
-    as nested content, which is a value only when it holds a literal."""
-    value = header["value"].strip()
-    if not value:
-        return _holds_literal_leaf(text[header.end() : continuation_end])
-    return bool(
-        _YAML_BLOCK_SCALAR.fullmatch(value) or _YAML_PROPERTIES.match(value + " ")
-    ) or _is_plain_words(value)
-
-
-def _yaml_value_start(text: str, header: re.Match[str]) -> int:
-    """Where the hidden value begins: at the inline value, or at the first indented line when it is empty."""
-    if not header["value"].strip():
-        return _first_content(text, header.end())
-    return header.start("value")
-
-
-def _first_content(text: str, position: int) -> int:
-    while position < len(text) and text[position].isspace():
-        position += 1
-    return position
-
-
-def _is_plain_words(value: str) -> bool:
-    """Two or more words of a plain YAML or ini scalar (``correct horse battery``), not an expression."""
-    words = value.split()
-    return (
-        len(words) >= 2
-        and all(_PLAIN_WORD.fullmatch(word) for word in words)
-        and not _CODE_WORDS.intersection(words)
-    )
+def _keyed_value(match: re.Match[str], literal: bool, naming: bool = True) -> bool:
+    kind = key_kind(match["key"])
+    if not literal or kind is None:
+        return False
+    return kind == "secret" or (naming and not names_something(match["value"]))
 
 
 def _call_literal_spans(text: str) -> list[Span]:
+    """Literal arguments to a secret-named call (``getSecret("...")``, ``sign(payload, "...")``) that look
+    like key material: not a name, not a hash algorithm, and holding a digit or at least eight characters."""
     return [
         (call.start("arguments") + literal.start("value"), call.start("arguments") + literal.end("value"))
-        for call in _SECRET_NAMED_CALL.finditer(text)
+        for call in _CALL.finditer(text)
+        if _is_secret_call(call["name"])
         for literal in _QUOTED_LITERAL.finditer(call.group("arguments"))
-        if _is_literal(literal["value"]) and not _NAME_LITERAL.fullmatch(literal["value"])
+        if _is_key_material(literal["value"], literal["quote"])
     ]
+
+
+def _is_secret_call(name: str) -> bool:
+    function = name.rsplit(".", 1)[-1]
+    return function == "sign" or bool(_SECRET_CALL_WORD.search(function))
+
+
+def _is_key_material(value: str, quote: str) -> bool:
+    return (
+        is_literal(value, quote)
+        and not NAME_LITERAL.fullmatch(value)
+        and not _ALGORITHM_NAME.fullmatch(value)
+        and (len(value) >= BY_CONTENT_MIN_CHARS or any(character.isdigit() for character in value))
+    )
 
 
 def _shell_literal(match: re.Match[str]) -> bool:
     """A shell word, unless it is code: a reference, call or index, an interpolation, or a keyword
     argument ending in a comma or bracket."""
     value = match["value"]
-    unquoted = value.strip("\"'")
+    quote = value[0] if value[:1] in ("'", '"') else '"'
     return (
         not value.endswith((",", ")", ";"))
-        and _is_literal(unquoted)
-        and not unquoted.startswith("$")
-        and not _DOTTED_PATH.fullmatch(value)
-        and not _CALL_OR_INDEX.match(value)
+        and is_literal(value.strip("\"'"), quote)
+        and not DOTTED_PATH.fullmatch(value)
+        and not CALL_OR_INDEX.match(value)
     )
 
 
 def _plain_literal(match: re.Match[str]) -> bool:
-    return _is_plain_words(match["value"])
+    return is_plain_words(match["value"])
 
 
 def _bare_literal(match: re.Match[str]) -> bool:
     value = match["value"]
-    return any(c.isalnum() for c in value) and not _CODE_REFERENCE.fullmatch(value)
+    return any(c.isalnum() for c in value) and not CODE_REFERENCE.fullmatch(value)
 
 
 def _quoted_literal(match: re.Match[str]) -> bool:
-    return _is_literal(match["value"])
+    return is_literal(match["value"], match["quote"])
 
 
-def _is_literal(value: str) -> bool:
-    return not value.startswith("$") and "${" not in value and "$(" not in value
+def _url_password(match: re.Match[str]) -> bool:
+    """A password in a URL, unless it is a placeholder (``user:pass@host``) or a reference."""
+    return is_literal(match["value"]) and not _PLACEHOLDER.fullmatch(match["value"])
+
+
+def _query_secret(match: re.Match[str]) -> bool:
+    value = match["value"]
+    return (
+        key_kind(match["key"]) == "secret"
+        and is_literal(value)
+        and any(c.isalnum() for c in value)
+        and not _PLACEHOLDER.fullmatch(value)
+    )
 
 
 def _bearer_value(match: re.Match[str]) -> bool:
@@ -327,106 +224,20 @@ def _is_high_entropy(value: str) -> bool:
     return bits >= HIGH_ENTROPY_BITS_PER_CHAR
 
 
-def _balanced_flow_value_end(text: str, start: int) -> int | None:
-    """Return the end of a quote-aware balanced object or array value (the engine's flow grammar)."""
-    expected_closers = {"{": "}", "[": "]"}
-    stack = [expected_closers[text[start]]]
-    scalar_started = [False]
-    last_scalar_was_quoted = [False]
-    quote: str | None = None
-    index = start + 1
-    while index < len(text):
-        character = text[index]
-        if quote is not None:
-            if character == "\\" and quote == '"':
-                index += 2
-                continue
-            if character == quote:
-                if quote == "'" and index + 1 < len(text) and text[index + 1] == "'":
-                    index += 2
-                    continue
-                quote = None
-                scalar_started[-1] = True
-                last_scalar_was_quoted[-1] = True
-            index += 1
-            continue
-
-        if not scalar_started[-1] and character in {"&", "!"}:
-            if character == "!" and index + 1 < len(text) and text[index + 1] == "<":
-                tag_end = text.find(">", index + 2)
-                if tag_end < 0:
-                    return None
-                index = tag_end + 1
-                continue
-            index += 1
-            while index < len(text) and (not text[index].isspace() and text[index] not in "[]{},"):
-                index += 1
-            continue
-
-        if (
-            not scalar_started[-1]
-            and character == "?"
-            and index + 1 < len(text)
-            and text[index + 1].isspace()
-        ):
-            index += 1
-            continue
-
-        if character == "#" and (not scalar_started[-1] or text[index - 1].isspace()):
-            line_end = text.find("\n", index + 1)
-            if line_end < 0:
-                return None
-            index = line_end + 1
-            continue
-
-        if character in {'"', "'"} and not scalar_started[-1]:
-            quote = character
-        elif character in expected_closers:
-            stack.append(expected_closers[character])
-            scalar_started.append(False)
-            last_scalar_was_quoted.append(False)
-        elif character in {"}", "]"}:
-            if character != stack[-1]:
-                return None
-            stack.pop()
-            scalar_started.pop()
-            last_scalar_was_quoted.pop()
-            if not stack:
-                return index + 1
-            scalar_started[-1] = True
-            last_scalar_was_quoted[-1] = False
-        elif character == ",":
-            scalar_started[-1] = False
-            last_scalar_was_quoted[-1] = False
-        elif character == ":":
-            next_character = text[index + 1] if index + 1 < len(text) else ""
-            is_separator = (
-                last_scalar_was_quoted[-1]
-                or not next_character
-                or next_character.isspace()
-                or next_character in "[]{},"
-            )
-            scalar_started[-1] = not is_separator
-            last_scalar_was_quoted[-1] = False
-        elif not character.isspace():
-            scalar_started[-1] = True
-            last_scalar_was_quoted[-1] = False
-        index += 1
-    return None
-
-
 _RULES: tuple[Callable[[str], list[Span]], ...] = (
     _matches(_PRIVATE_KEY_BLOCK),
     _matches(_KEY_MARKER_LINE),
     *(_matches(shape) for shape in _TOKEN_SHAPES),
     _matches(_BEARER_VALUE, _bearer_value),
-    _matches(_SHELL_ASSIGNMENT, _shell_literal),
+    _matches(_URL_PASSWORD, _url_password),
+    _matches(_QUERY_VALUE, _query_secret),
+    _matches(_SHELL_ASSIGNMENT, _keyed(_shell_literal)),
     _quoted_spans,
-    _flow_spans,
-    _yaml_block_spans,
-    _matches(_PLAIN_VALUE, _plain_literal),
-    _matches(_BARE_VALUE, _bare_literal),
-    _matches(_LITERAL_FALLBACK, _quoted_literal),
+    flow_spans,
+    yaml_block_spans,
+    _matches(_PLAIN_VALUE, _keyed(_plain_literal, naming=False)),
+    _matches(_BARE_VALUE, _keyed(_bare_literal)),
+    _matches(_LITERAL_FALLBACK, _keyed(_quoted_literal, naming=False)),
     _call_literal_spans,
     _matches(_QUOTED_ASSIGNMENT, _high_entropy_value),
 )
