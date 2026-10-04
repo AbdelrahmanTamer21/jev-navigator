@@ -29,8 +29,10 @@ The command chooses an entry point and creates `./jvn-results/<directory>-<times
 directory where you invoked it. You do not need to supply a scope, starting line or budget.
 
 Credentials come from `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` in the process environment, then
-from `~/.config/jvn/env`. The file uses dotenv syntax and is not executed. Help and schema discovery
-need no key and make no model calls.
+from `~/.config/jvn/env`. The file uses dotenv syntax and is not executed. A jev-navigator source
+checkout also reads its own `.env` before that file. A `.env` in the searched directory is never
+read, and either file sets only `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names. Help and
+schema discovery need no key and make no model calls.
 
 ## Discover commands and request fields
 
