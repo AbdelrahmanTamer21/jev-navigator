@@ -47,9 +47,12 @@ class ToolFailedError(RuntimeError):
     """A command-line tool failed for a reason other than finding nothing."""
 
 
-def run_command(arguments: Sequence[str], cwd: Path, *, no_match_exit: int | None = None) -> str:
-    """The command's output; ``no_match_exit`` is the exit code a search tool uses for "nothing found"."""
-    completed = subprocess.run(list(arguments), cwd=cwd, capture_output=True, text=True)
+def run_command(
+    arguments: Sequence[str], cwd: Path, *, no_match_exit: int | None = None, stdin: str | None = None
+) -> str:
+    """The command's output; ``no_match_exit`` is the exit code a search tool uses for "nothing found";
+    ``stdin``, when given, is written to the command's standard input."""
+    completed = subprocess.run(list(arguments), cwd=cwd, input=stdin, capture_output=True, text=True)
     if completed.returncode not in (0, no_match_exit):
         detail = completed.stderr.strip()[:300]
         raise ToolFailedError(f"{arguments[0]} exited {completed.returncode}: {detail}")
@@ -247,11 +250,7 @@ def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
     A Git worktree uses its tracked and untracked, non-ignored inventory, which naturally excludes
     nested repositories and managed worktrees. A non-Git directory uses ripgrep's ignore policy.
     """
-    try:
-        inside_git = git(["rev-parse", "--is-inside-work-tree"], cwd).strip() == "true"
-    except ToolFailedError:
-        inside_git = False
-    if inside_git:
+    if inside_git_worktree(cwd):
         output = git(["ls-files", "-z", "-c", "-o", "--exclude-standard", "--", *prefixes], cwd)
     else:
         output = run_command(
@@ -289,8 +288,15 @@ def _decoded(field: dict) -> str:
     return base64.b64decode(field["bytes"]).decode("utf-8", errors="replace")
 
 
-def git(arguments: Sequence[str], cwd: Path) -> str:
-    return run_command(["git", *arguments], cwd)
+def inside_git_worktree(cwd: Path) -> bool:
+    try:
+        return git(["rev-parse", "--is-inside-work-tree"], cwd).strip() == "true"
+    except ToolFailedError:
+        return False
+
+
+def git(arguments: Sequence[str], cwd: Path, *, stdin: str | None = None) -> str:
+    return run_command(["git", *arguments], cwd, stdin=stdin)
 
 
 def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) -> None:
