@@ -15,7 +15,7 @@ from pathlib import PurePosixPath
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.spans import Span
-from ..judgments.answers import AnswerSource
+from ..judgments.answers import AnswerSource, answered_by
 from ..judgments.client import JEV_INPUT_BOX_CHARS
 from ..judgments.judge import Judge, PickResult
 from ..judgments.questions import Pick, serialized_chars
@@ -76,7 +76,7 @@ class EntryDecision:
             "probabilities": self.probabilities,
             "request_sha256": self.request_sha256,
             "options": list(self.options),
-            **({"answered_by": self.answered_by.to_json()} if self.answered_by is not None else {}),
+            **answered_by(self.answered_by),
         }
 
 

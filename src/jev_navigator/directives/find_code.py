@@ -40,7 +40,7 @@ from ..history import (
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.spans import CodeSlice
-from ..judgments.answers import AnswerSource, JevResponse, NoulAnswer
+from ..judgments.answers import AnswerSource, JevResponse, NoulAnswer, answered_by
 from ..judgments.client import JEV_INPUT_BOX_CHARS, QUESTION_RESERVE_CHARS, InputBudgetExceededError
 from ..judgments.judge import (
     ABORTED_SEND_ERRORS,
@@ -1049,7 +1049,7 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
                 "probability": probability,
                 "verdict": verdict,
                 "relationship": place_relationship(place),
-                **_answered_by(source),
+                **answered_by(source),
             }
         )
     not_opened = [*opening.capped, *search.set_aside[set_aside_before:]]
@@ -1085,7 +1085,7 @@ def _open_step(
         "contains_target": {
             "probability": visit.probability,
             "verdict": visit.verdict,
-            **_answered_by(found),
+            **answered_by(found),
         },
         "could_contain": offered,
     }
@@ -1096,7 +1096,7 @@ def _open_step(
             "choice": _picked_place(answer.choice, opening.candidates),
             "confidence": answer.confidence,
             "used": _picked_slot(search, response) is not None,
-            **_answered_by(response.source(pick.question_id)),
+            **answered_by(response.source(pick.question_id)),
         }
     elif (unavailable := response.extra.get("open_first_unavailable")) is not None:
         judgments["open_first"] = {"used": False, "unavailable": unavailable}
@@ -1111,11 +1111,6 @@ def _open_step(
         if opening.item.tier == QueueTier.START
         else _DECISIONS[visit.verdict],
     )
-
-
-def _answered_by(source: AnswerSource | None) -> dict:
-    """The request and question behind a judgment, for joining a step to its journal answer."""
-    return {"answered_by": source.to_json()} if source is not None else {}
 
 
 def _picked_place(choice: str, candidates: list[Place]) -> str:
@@ -1273,7 +1268,7 @@ def _stop_step(
         judgments["last_stop_check"] = {
             "probability": search.stop_judgment.probability,
             "outcome": search.stop_judgment.outcome,
-            **_answered_by(search.stop_judgment.answered_by),
+            **answered_by(search.stop_judgment.answered_by),
         }
     arguments = {"outcome": outcome, "moves": list(search.moves)}
     return HistoryStep("stop", arguments, (), judgments, f"stopped: {outcome}")

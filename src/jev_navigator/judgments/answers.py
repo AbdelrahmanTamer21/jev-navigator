@@ -81,6 +81,12 @@ class AnswerSource:
         }
 
 
+def answered_by(source: AnswerSource | None) -> dict:
+    """A record's ``answered_by`` field, or nothing when no request is known: the one form every run
+    file uses to join a judgment to its journal answer."""
+    return {"answered_by": source.to_json()} if source is not None else {}
+
+
 @dataclass(frozen=True)
 class JevResponse:
     """``input_tokens`` is what the provider reported for the request, ``None`` when it reported
