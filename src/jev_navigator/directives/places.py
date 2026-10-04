@@ -14,6 +14,7 @@ from types import MappingProxyType
 from ..index.bindings import Binding
 from ..index.code_index import CodeIndex
 from ..index.spans import CallEdge, CodeSlice, Span, TextHit
+from ..judgments.relations import key_mention
 
 MAX_DEFINITION_LINES = 120
 REST_OF_FILE_LINES = 40
@@ -87,32 +88,18 @@ def window_place(
     return Place(f"{file}:{line}~{radius}", "window", signature, open_window, relation or None, binding)
 
 
-def range_place(
-    index: CodeIndex,
-    file: str,
-    start: int,
-    end: int,
-    relation: str,
-    *,
-    binding: Binding | None = None,
-) -> Place:
+def range_place(index: CodeIndex, file: str, start: int, end: int, relation: str) -> Place:
     """Lines chosen by their position (before or after a place, the start of a file); no single line
-    made them a neighbour, so the signature quotes their first line of code."""
+    made them a neighbour, so the signature quotes their first line of code and carries no binding."""
     span = Span(file, start, end)
     lines = index.read_slice(span).text.split("\n")
     code_line = first_code_line(lines, file)
     quoted = (
         next((line.strip() for line in lines if line.strip()), "") if code_line is None else lines[code_line]
     )
-    shown_relation = _with_binding(relation, binding)
-    signature = f"{span.key} `{quoted.strip()}` ({shown_relation})"
+    signature = f"{span.key} `{quoted.strip()}` ({relation})"
     return Place(
-        span.key,
-        "window",
-        signature,
-        lambda: index.read_slice(span, origin=shown_relation),
-        relation or None,
-        binding,
+        span.key, "window", signature, lambda: index.read_slice(span, origin=relation), relation or None
     )
 
 
@@ -272,9 +259,10 @@ def _callees(index: CodeIndex, opened: CodeSlice) -> list[Place]:
 
 
 def _callee_rank(index: CodeIndex, edge: CallEdge) -> tuple[bool, bool, int]:
+    """A callee with no definition yields no place, so its call sites are never counted."""
     targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
     only_tests = bool(targets) and all(_is_test_file(target.file) for target in targets)
-    return not edge.binding.proven, only_tests, index.call_site_count(edge.name)
+    return not edge.binding.proven, only_tests, index.call_site_count(edge.name) if targets else 0
 
 
 def _referenced_by(index: CodeIndex, opened: CodeSlice) -> list[Place]:
@@ -395,7 +383,7 @@ def _keys_mentioned(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     usable = [(key, hits) for key, hits in hits_by_key.items() if 0 < len(hits) <= MAX_KEY_HITS]
     rarest_first = sorted(usable, key=lambda item: len(item[1]))
     return [
-        place_for_line(index, hit.file, hit.line, f"mentions `{key}`")
+        place_for_line(index, hit.file, hit.line, key_mention(key))
         for key, hits in rarest_first
         for hit in hits
     ]

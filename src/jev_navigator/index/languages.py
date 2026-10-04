@@ -8,9 +8,8 @@ ERROR nodes, so incomplete coverage stays visible."""
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 
 LANGUAGE_BY_SUFFIX = {
     ".py": "python",
@@ -79,29 +78,24 @@ NAME_WRAPPERS = {
     "javascript": ("parenthesized_expression",),
 }
 
-_SCRIPT_DECLARATIONS = """  any:
+# ast-grep prints every node a rule's relations match, so asking whether a declaration sits in the
+# program printed the whole file once per declaration. Under a double negation the condition holds
+# the same and only the declaration is printed.
+_MODULE_VARIABLES = (
+    "{kind: lexical_declaration, not: {not: {inside: {any: [{kind: program}, {kind: export_statement}]}}}}"
+)
+_SCRIPT_DECLARATIONS = f"""  any:
     - kind: type_alias_declaration
     - kind: interface_declaration
     - kind: enum_declaration
-    - kind: lexical_declaration
-      inside:
-        any:
-          - kind: program
-          - kind: export_statement"""
+    - {_MODULE_VARIABLES}"""
 
 DECLARATION_RULES = {
     "python": """  kind: assignment
-  inside:
-    kind: expression_statement
-    inside:
-      kind: module""",
+  not: {not: {inside: {kind: expression_statement, inside: {kind: module}}}}""",
     "typescript": _SCRIPT_DECLARATIONS,
     "tsx": _SCRIPT_DECLARATIONS,
-    "javascript": """  kind: lexical_declaration
-  inside:
-    any:
-      - kind: program
-      - kind: export_statement""",
+    "javascript": f"  any: [{_MODULE_VARIABLES}]",
 }
 
 # The installed ast-grep supports tsx but not Flow. Route marked files through tsx;
@@ -130,22 +124,33 @@ _SCRIPT_TYPE_DECLARATION = re.compile(r"^\s*(?:export\s+)?(?:declare\s+)?(?:type
 
 
 def language_of(path: str) -> str | None:
-    return LANGUAGE_BY_SUFFIX.get(PurePosixPath(path).suffix)
+    """The language of ``path``'s suffix, read from the string because the index asks for every
+    file many times: a name's last dot after its first character starts the suffix."""
+    name = path.rpartition("/")[2]
+    dot = name.rfind(".")
+    return LANGUAGE_BY_SUFFIX.get(name[dot:]) if dot > 0 else None
 
 
-def language_for(path: str, lines: Sequence[str] | None = None) -> str | None:
-    """The language ``path`` parses as: like ``language_of``, but a JavaScript file whose leading
-    comments carry the ``@flow`` pragma parses as ``flow`` (with the tsx grammar)."""
+def parse_language(path: str, content: bytes) -> str | None:
+    """The language a file holding ``content`` parses as: like ``language_of``, but a JavaScript file
+    whose leading comments carry the ``@flow`` pragma parses as ``flow`` (with the tsx grammar)."""
     language = language_of(path)
-    if language == "javascript" and lines is not None and has_flow_pragma(lines):
+    if language == "javascript" and has_flow_pragma(split_lines(content.decode(errors="replace"))):
         return FLOW_LANGUAGE
     return language
+
+
+def split_lines(text: str) -> tuple[str, ...]:
+    """Lines split at newlines only, as the parser counts them; ``str.splitlines`` also splits at form
+    feeds and other separators, which would shift every line number after them."""
+    lines = text.replace("\r", "").split("\n")
+    return tuple(lines[:-1] if lines and lines[-1] == "" else lines)
 
 
 _FLOW_PRAGMA = re.compile(r"@flow\b")
 
 
-def has_flow_pragma(lines: Sequence[str]) -> bool:
+def has_flow_pragma(lines: Iterable[str]) -> bool:
     """True when a leading comment of the source carries the ``@flow`` pragma. Only comments before
     the first line of code count — never ``@flow`` in a string or the body — and the scan stops at
     that first code line, however far down it sits: leading comments may be arbitrarily long. A

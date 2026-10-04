@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import re
 import signal
+import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -10,7 +12,7 @@ from pathlib import Path
 import pytest
 from git_repos import commit_files
 
-from jev_navigator.directives.find_code import OPEN_FIRST, Outcome, SearchBudget, find_code
+from jev_navigator.directives.find_code import OPEN_FIRST, Outcome, SearchBudget, StopRule, find_code
 from jev_navigator.directives.places import (
     MOVES,
     Place,
@@ -22,6 +24,7 @@ from jev_navigator.directives.places import (
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
 
@@ -86,10 +89,30 @@ def test_a_low_neighbour_score_keeps_the_neighbour_as_not_inspected(sample_index
     result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
 
     # Assert
-    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert [visit.code.span.name for visit in result.starts] == ["place"]
     assert result.not_inspected and {entry.reason for entry in result.not_inspected} == {"deprioritized"}
     assert result.found == () and result.unsure == () and result.searched == ()
+
+
+def test_an_empty_search_counts_files_judged_apart_from_files_only_read_to_list_neighbours(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    client = ScriptedJevClient(
+        nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.1),
+        choices={"open_first": {"none": 1.0}},
+    )
+
+    # Act
+    result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
+
+    # Assert: files count as read only when a looked-up name occurs in them, never because the name
+    # table covered the scope
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
+    assert {visit.code.span.file for visit in result.starts} == {"app/orders.py"}
+    assert (result.files_judged, result.files_read_only, result.files_never_reached) == (1, 2, 4)
+    assert result.code_files == 7
 
 
 def test_a_system_discovered_initial_candidate_can_be_found(sample_index: CodeIndex) -> None:
@@ -233,9 +256,9 @@ def test_budget_receipt_does_not_start_unused_scope_scans(
     actual_scan = code_index.scan_facts
     scanned: list[tuple[str, ...]] = []
 
-    def observe_scan(files, root, lines_of, unparsed):
+    def observe_scan(files, root, unparsed):
         scanned.append(tuple(files))
-        return actual_scan(files, root, lines_of, unparsed)
+        return actual_scan(files, root, unparsed)
 
     monkeypatch.setattr(code_index, "scan_facts", observe_scan)
     index.functions_in("broken.js")
@@ -583,6 +606,116 @@ def test_a_global_call_cap_on_the_judge_ends_a_search_as_budget(sample_index: Co
     assert len(client.requests) == 2
 
 
+def places_chosen(result) -> list[str]:
+    return [
+        chosen["place"]
+        for step in result.history.steps
+        if step.operation == "choose_next"
+        for chosen in step.arguments["chosen"]
+    ]
+
+
+def test_a_capped_search_opens_no_place_after_a_round_the_cap_left_unanswered(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.9))
+    judge = Judge(client, max_calls=1)
+
+    # Act
+    result = find_code(
+        sample_index, judge, TARGET, start_at_place(sample_index), budget=SearchBudget(beam_width=1)
+    )
+
+    # Assert
+    offered = {entry["place"] for entry in result.history.steps[1].judgments["could_contain"]}
+    assert result.outcome == Outcome.BUDGET
+    assert len(client.requests) == 1
+    assert len(places_chosen(result)) == 2
+    assert {entry.place_key for entry in result.not_inspected} == offered
+    assert {entry.reason for entry in result.not_inspected} == {"budget"}
+
+
+def test_a_spent_call_budget_still_replays_every_stored_round_after_a_refused_request(
+    sample_index: CodeIndex, tmp_path: Path
+) -> None:
+    # Arrange
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+    answers = scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.9)
+    first_client = ScriptedJevClient(nouls=answers, choices={"open_first": {"none": 1.0}})
+    budget = SearchBudget(beam_width=1)
+    first = find_code(
+        sample_index,
+        Judge(first_client, store=store, max_calls=3),
+        TARGET,
+        start_at_place(sample_index),
+        budget=budget,
+    )
+    replay_client = ScriptedJevClient()
+    replay_judge = Judge(
+        replay_client, store=JsonlAnswerStore(store.path), served_model=first_client.model, max_calls=0
+    )
+
+    never_satisfied = StopRule(
+        Check("never_satisfied", "Is the search done?", Criterion("Yes."), Criterion("No."))
+    )
+
+    # Act
+    replayed = find_code(
+        sample_index,
+        replay_judge,
+        TARGET,
+        start_at_place(sample_index),
+        budget=budget,
+        stop_rule=never_satisfied,
+    )
+
+    # Assert
+    assert first.steps == 3
+    assert replay_client.requests == []
+    assert replayed.stop_judgment is None
+    assert replayed.outcome == Outcome.BUDGET
+    assert replayed.steps == 3
+    assert places_chosen(replayed)[:3] == places_chosen(first)[:3]
+    assert len(places_chosen(replayed)) == 4
+
+
+def test_a_capped_resume_with_the_earlier_answers_copied_in_stops_one_round_after_its_cap(
+    sample_index: CodeIndex, tmp_path: Path
+) -> None:
+    # Arrange
+    answers = scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.9)
+    budget = SearchBudget(beam_width=1)
+    first_store = JsonlAnswerStore(tmp_path / "first" / "answers.jsonl")
+    first = find_code(
+        sample_index,
+        Judge(ScriptedJevClient(nouls=answers), store=first_store, max_calls=1),
+        TARGET,
+        start_at_place(sample_index),
+        budget=budget,
+    )
+    copied = tmp_path / "second" / "answers.jsonl"
+    copied.parent.mkdir()
+    copied.write_bytes(first_store.path.read_bytes())
+    client = ScriptedJevClient(nouls=answers)
+
+    # Act
+    resumed = find_code(
+        sample_index,
+        Judge(client, store=JsonlAnswerStore(copied), max_calls=1),
+        TARGET,
+        [],
+        budget=budget,
+        resume=first,
+    )
+
+    # Assert
+    assert resumed.outcome == Outcome.BUDGET
+    assert len(client.requests) == 1
+    assert resumed.steps == 1
+    assert len(places_chosen(resumed)) == 2
+
+
 def test_cached_search_answer_is_free_at_zero_live_call_budget(
     sample_index: CodeIndex, tmp_path: Path
 ) -> None:
@@ -637,7 +770,7 @@ def test_find_code_with_no_moves_opens_only_its_start(sample_index: CodeIndex) -
     result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index), moves={})
 
     # Assert
-    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert result.steps == 1 and len(client.requests) == 1
 
 
@@ -665,7 +798,7 @@ def test_default_search_limits_are_unbounded_and_a_finite_frontier_terminates(
         None,
         None,
     )
-    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert result.not_inspected == ()
 
 
@@ -889,6 +1022,47 @@ def test_interrupt_while_popping_a_beam_restores_it_for_resume(
     assert resumed.found[0].place_key == target.key
 
 
+def test_interrupt_while_submitting_a_round_accounts_for_every_place_of_the_beam(
+    sample_index: CodeIndex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    from concurrent.futures import ThreadPoolExecutor
+
+    from jev_navigator.directives import find_code as find_code_module
+
+    class InterruptedOnSecondSubmit(ThreadPoolExecutor):
+        submitted = 0
+
+        def submit(self, *args, **kwargs):
+            type(self).submitted += 1
+            if type(self).submitted == 2:
+                raise KeyboardInterrupt
+            return super().submit(*args, **kwargs)
+
+    monkeypatch.setattr(find_code_module, "ThreadPoolExecutor", InterruptedOnSecondSubmit)
+    places = [
+        function_place(sample_index, sample_index.find_definition(name)[0])
+        for name in ("check_limits", "validate_order")
+    ]
+
+    # Act
+    cancelled = find_code(
+        sample_index,
+        Judge(ScriptedJevClient()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=2),
+        moves={},
+        initial_candidates=[(place, 1.0) for place in places],
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    accounted = {entry.place_key for entry in cancelled.not_inspected}
+    accounted |= {visit.place_key for visit in (*cancelled.found, *cancelled.searched, *cancelled.unsure)}
+    assert accounted == {place.key for place in places}
+
+
 def test_interrupt_while_recording_a_round_choice_restores_the_popped_place(
     sample_index: CodeIndex,
 ) -> None:
@@ -1085,7 +1259,7 @@ def test_a_none_pick_queues_nothing(sample_index: CodeIndex) -> None:
     result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
 
     # Assert
-    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert result.steps == 1
 
 
@@ -1109,7 +1283,7 @@ def test_a_waiting_pick_keeps_the_search_going_when_no_move_scores_above_the_no_
 
     # Assert
     assert result.steps == 2
-    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
 
 
 def test_a_start_judged_to_hold_the_target_is_recorded_but_never_ends_the_search(
@@ -1128,7 +1302,7 @@ def test_a_start_judged_to_hold_the_target_is_recorded_but_never_ends_the_search
     result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index))
 
     # Assert
-    assert result.outcome == Outcome.NOTHING_LEFT
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
     assert result.found == ()
     assert [(visit.code.span.name, visit.verdict) for visit in result.starts] == [("place", "yes")]
 
@@ -1222,3 +1396,118 @@ def test_a_long_signature_is_cut_the_same_way_in_the_candidate_and_the_pick_opti
     configure = next(signature for signature in signatures if "def configure(" in signature)
     assert len(configure) == 240 + len(" [line cut]") and configure.endswith(" [line cut]")
     assert [pick["criteria"][str(slot)] for slot in range(len(signatures))] == signatures
+
+
+def _interrupted_search_then_resume(index: CodeIndex, interrupt_round) -> tuple:
+    """A search whose round is interrupted by ``interrupt_round(real_ask_round)``, and the resume of it."""
+    from jev_navigator.directives import find_code as find_code_module
+
+    target = function_place(index, index.find_definition("check_limits")[0])
+    real_ask_round = find_code_module._ask_round
+    interrupted = []
+
+    def ask_round(judge, search, opened):
+        if interrupted:
+            return real_ask_round(judge, search, opened)
+        interrupted.append(True)
+        return interrupt_round(real_ask_round, judge, search, opened)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(find_code_module, "_ask_round", ask_round)
+        cancelled = find_code(
+            index,
+            Judge(ScriptedJevClient()),
+            TARGET,
+            [],
+            budget=SearchBudget(beam_width=1),
+            moves={},
+            initial_candidates=[(target, 1.0)],
+        )
+    resumed = find_code(
+        index,
+        Judge(ScriptedJevClient(nouls={"contains_target": 0.95})),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        resume=cancelled,
+    )
+    return target, cancelled, resumed
+
+
+def test_an_interrupt_after_a_beam_is_opened_and_before_it_is_asked_keeps_its_places_for_resume(
+    sample_index: CodeIndex,
+) -> None:
+    def interrupt_before_asking(real_ask_round, judge, search, opened):
+        raise KeyboardInterrupt
+
+    target, cancelled, resumed = _interrupted_search_then_resume(sample_index, interrupt_before_asking)
+
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert [entry.place_key for entry in cancelled.not_inspected] == [target.key]
+    assert resumed.outcome == Outcome.FOUND
+    assert resumed.found[0].place_key == target.key
+
+
+def test_an_interrupt_after_a_beam_is_asked_and_before_it_is_merged_keeps_its_places_for_resume(
+    sample_index: CodeIndex,
+) -> None:
+    def interrupt_after_asking(real_ask_round, judge, search, opened):
+        real_ask_round(judge, search, opened)
+        raise KeyboardInterrupt
+
+    target, cancelled, resumed = _interrupted_search_then_resume(sample_index, interrupt_after_asking)
+
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert [entry.place_key for entry in cancelled.not_inspected] == [target.key]
+    assert resumed.outcome == Outcome.FOUND
+    assert resumed.found[0].place_key == target.key
+
+
+def test_a_real_error_that_settled_before_the_interrupt_is_raised_not_labelled_cancelled(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange: the second place's request fails at once while the search waits for the first, which
+    # is still in flight when the interrupt arrives and ends with a connection error because the
+    # client was cancelled.
+    failed = threading.Event()
+    cancelled = threading.Event()
+
+    class OneFailsOneHangs(ScriptedJevClient):
+        def send(self, state, questions):
+            if "def check_limits" in state["slice"]["code"]:
+                failed.set()
+                raise OSError("disk full")
+            cancelled.wait(10)
+            raise ConnectionError("cancelled")
+
+        def cancel(self) -> None:
+            cancelled.set()
+
+    def interrupt_once_the_error_settled() -> None:
+        failed.wait(10)
+        time.sleep(0.3)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    places = [
+        function_place(sample_index, sample_index.find_definition(name)[0])
+        for name in ("validate_order", "check_limits")
+    ]
+    interrupter = threading.Thread(target=interrupt_once_the_error_settled)
+    interrupter.start()
+
+    # Act and Assert
+    try:
+        with pytest.raises(OSError, match="disk full"):
+            find_code(
+                sample_index,
+                Judge(OneFailsOneHangs()),
+                TARGET,
+                [],
+                budget=SearchBudget(beam_width=2),
+                moves={},
+                initial_candidates=[(place, 1.0) for place in places],
+            )
+    finally:
+        cancelled.set()
+        interrupter.join()
