@@ -33,6 +33,7 @@ from ..history import (
     HistoryJudgment,
     HistoryOutcome,
     HistoryStep,
+    HistoryTooLargeError,
     judge_history,
     judge_history_async,
 )
@@ -286,6 +287,9 @@ class _Search:
     replay_exhausted: bool = False
     failure: Exception | None = None
     counter: itertools.count = field(default_factory=itertools.count)
+    unmerged: list[_Opening] = field(default_factory=list)
+    """The places a round opened and has not merged yet; a caller interrupt returns them to the
+    frontier, wherever in the round it arrives."""
 
     def push(
         self,
@@ -355,22 +359,20 @@ def find_code(
     )
     search, judge = _begin(index, judge, target_description, start, options)
     stop = None
-    unmerged: list[_Opening] = []
     try:
         while (stop := _stop_reason(search, index)) is None:
-            unmerged = _open_round_or_fail(index, search, judge)
-            if not unmerged:
+            opened = _open_round_or_fail(index, search, judge)
+            if not opened:
                 continue
-            responses, cancelled = _ask_round(judge, search, unmerged)
+            responses, cancelled = _ask_round(judge, search, opened)
             with _defer_keyboard_interrupts():
-                _merge_round(search, unmerged, responses)
-                unmerged = []
+                _merge_round(search, opened, responses)
             if cancelled:
                 stop = Outcome.FAILED if search.failure is not None else Outcome.CANCELLED
                 break
             _apply_stop_rule(judge, search)
     except KeyboardInterrupt:
-        _set_aside_cancelled(search, unmerged)
+        _set_aside_cancelled(search)
         stop = Outcome.CANCELLED
     assert stop is not None
     return _result(search, stop, judge, index)
@@ -476,6 +478,8 @@ def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Openin
             if opening := _open(index, search, item):
                 opened.append(opening)
             processed += 1
+        with _defer_keyboard_interrupts():
+            search.unmerged = opened
         return opened
     except BaseException:
         for opening in opened:
@@ -484,6 +488,7 @@ def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Openin
         for item in beam[processed:]:
             search.visited.discard(item.place.key)
             heapq.heappush(search.queue, item)
+        search.unmerged = []
         raise
 
 
@@ -544,6 +549,7 @@ def _merge_round(search: _Search, opened: list[_Opening], responses: list) -> No
             _set_aside_unasked(search, opening, response.value)
         else:
             _merge(search, opening, response)
+    search.unmerged = []
 
 
 class _Unanswered(StrEnum):
@@ -629,9 +635,25 @@ class StopRule:
         return History(budget_chars=self.budget_chars, sections={SUBJECT: subject, **self.context})
 
 
+class StopRuleTooLargeError(RuntimeError):
+    """The stop rule's request cannot fit Jev's input box, so the search cannot judge whether to stop.
+    The caller sizes its rule (``budget_chars``, ``shared``, ``sections``); the search does not guess."""
+
+    def __init__(self, rule: StopRule, cause: Exception) -> None:
+        super().__init__(f"the stop rule {rule.check.name} cannot fit Jev's input: {cause}")
+        self.__cause__ = cause
+
+
+def _named_stop_failure(rule: StopRule, error: Exception) -> Exception:
+    """A stop request too large for Jev's input is named for its rule; any other error stays itself."""
+    if isinstance(error, HistoryTooLargeError | InputBudgetExceededError):
+        return StopRuleTooLargeError(rule, error)
+    return error
+
+
 def _apply_stop_rule(judge: Judge, search: _Search) -> None:
     """Skipped after a failed round, which already ends the search; a failed stop check ends it
-    ``failed`` too."""
+    ``failed`` too, a rule too large for Jev's input as ``StopRuleTooLargeError``."""
     rule = search.stop_rule
     if rule is None or search.failure is not None:
         return
@@ -642,7 +664,7 @@ def _apply_stop_rule(judge: Judge, search: _Search) -> None:
     except CallCapReachedError:
         search.cap_reached = True
     except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
-        search.failure = _failed(error).error
+        search.failure = _failed(_named_stop_failure(rule, error)).error
 
 
 async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:
@@ -656,7 +678,7 @@ async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:
     except CallCapReachedError:
         search.cap_reached = True
     except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
-        search.failure = _failed(error).error
+        search.failure = _failed(_named_stop_failure(rule, error)).error
 
 
 def _restore(search: _Search, previous: FindResult) -> None:
@@ -987,12 +1009,13 @@ def _set_aside_unasked(search: _Search, opening: _Opening, reason: str) -> None:
     _set_aside(search, opening.item, reason)
 
 
-def _set_aside_cancelled(search: _Search, unmerged: list[_Opening]) -> None:
+def _set_aside_cancelled(search: _Search) -> None:
     """A Ctrl-C after a round's places were opened and before its answers were merged, such as
-    while its pool starts or shuts down, leaves those places opened but unrecorded; they go back to
-    the frontier, and Resume asks them or replays their stored answers."""
-    for opening in unmerged:
+    while its pool starts or shuts down, leaves those places opened but unrecorded; they wait in
+    ``not_inspected`` as cancelled, and Resume asks them or replays their stored answers."""
+    for opening in search.unmerged:
         _set_aside_unasked(search, opening, "cancelled")
+    search.unmerged = []
 
 
 def _restore_opening(search: _Search, opening: _Opening) -> None:

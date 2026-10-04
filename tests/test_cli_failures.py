@@ -22,9 +22,11 @@ from jev_navigator.testing import ScriptedJevClient
 START = "app/entry.py:5"
 
 
-def second_request(position: int, state: Mapping) -> bool:
-    del state
-    return position == 2
+def target_request(position: int, state: Mapping) -> bool:
+    """The request about the target's own body. It shares its round with a sibling, so picking it by
+    content, not by arrival, keeps the round from finding the target in spite of the failure."""
+    del position
+    return "len(item) <= 3" in state.get("slice", {}).get("code", "")
 
 
 def import_line(position: int, state: Mapping) -> bool:
@@ -190,7 +192,7 @@ def test_a_failed_find_exits_1_with_the_error_and_its_resume_reaches_the_uninter
     repository = marked_repository(tmp_path / "repository")
     whole, expected = uninterrupted_requests(repository, tmp_path)
     store = tmp_path / "answers.sqlite"
-    failing = FailsOnRequest(limit_client(), second_request, provider_error())
+    failing = FailsOnRequest(limit_client(), target_request, provider_error())
     resuming = closable(limit_client())
     use_clients(monkeypatch, iter([failing, resuming]))
     first, second = tmp_path / "first", tmp_path / "second"
@@ -219,7 +221,9 @@ def test_a_failed_find_exits_1_with_the_error_and_its_resume_reaches_the_uninter
     assert resumed["search"]["outcome"] == whole["search"]["outcome"] == "found"
     assert resumed["search"]["found"] == whole["search"]["found"]
     sent = hashes(failing.received)
-    failed_request = sent.pop(1)
+    failed_request = sent.pop(
+        next(i for i, (state, _) in enumerate(failing.received) if target_request(0, state))
+    )
     assert sorted(sent + hashes(resuming.requests)) == sorted(expected)
     assert failed_request in hashes(resuming.requests)
 
@@ -230,7 +234,7 @@ def test_a_new_find_after_a_failed_one_runs_as_usual(tmp_path: Path, monkeypatch
     store = tmp_path / "answers.sqlite"
     use_clients(
         monkeypatch,
-        iter([FailsOnRequest(limit_client(), second_request, provider_error()), closable(limit_client())]),
+        iter([FailsOnRequest(limit_client(), target_request, provider_error()), closable(limit_client())]),
     )
     cli.main(find_command(repository, tmp_path / "failed", store))
 
@@ -313,7 +317,7 @@ def test_a_failure_raised_while_handling_another_error_lists_that_error_as_its_c
     repository = marked_repository(tmp_path / "repository")
     error = ProviderError("Jev answered 503")
     error.__context__ = TimeoutError("read timed out")
-    use_clients(monkeypatch, iter([FailsOnRequest(limit_client(), second_request, error)]))
+    use_clients(monkeypatch, iter([FailsOnRequest(limit_client(), target_request, error)]))
 
     # Act
     cli.main(find_command(repository, tmp_path / "failed", tmp_path / "answers.sqlite"))
@@ -333,7 +337,7 @@ def test_a_find_all_whose_seed_search_fails_never_starts_its_enumeration(
 ) -> None:
     # Arrange
     repository = marked_repository(tmp_path / "repository")
-    failing = FailsOnRequest(limit_client(), second_request, provider_error())
+    failing = FailsOnRequest(limit_client(), target_request, provider_error())
     use_clients(monkeypatch, iter([failing]))
     command = find_command(repository, tmp_path / "findall", tmp_path / "answers.sqlite")
     command[0] = "findall"

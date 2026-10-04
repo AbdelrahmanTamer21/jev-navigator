@@ -677,6 +677,22 @@ def test_jvn_find_stopped_by_the_allowance_while_opening_resumes_to_the_uninterr
     assert sorted(hashes(growing.received + resuming.requests)) == sorted(hashes(whole_client.requests))
 
 
+def test_a_test_takes_its_memory_slot_in_the_suites_folder_and_never_in_the_machines(
+    tmp_path: Path, private_memory_slots: Path
+) -> None:
+    # Act
+    tools.git(["--version"], tmp_path)
+
+    # Assert
+    def held_here(folder: Path) -> list[str]:
+        own = f"{os.getpid()}\n"
+        return [slot.name for slot in sorted(folder.glob("slot-*")) if slot.read_text() == own]
+
+    machine = memory_limit.slots_directory({})
+    assert held_here(private_memory_slots)
+    assert not machine.is_dir() or held_here(machine) == []
+
+
 def test_the_process_guard_follows_the_settings_it_is_read_with(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

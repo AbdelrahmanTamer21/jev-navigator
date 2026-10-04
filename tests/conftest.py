@@ -1,23 +1,44 @@
-"""A small real repository (Python and TypeScript, two commits) that the index tests run against."""
+"""A small real repository (Python and TypeScript, two commits) that the index tests run against,
+and every test's isolation from the developer's own decision-model settings."""
 
 from __future__ import annotations
 
-import json
+import os
 import signal
 import subprocess
 from collections import Counter
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 from git_repos import git, write_files
+from isolated_jvn import NO_SETTINGS
 
 from jev_navigator.cache_root import cache_root
+from jev_navigator.environment import SETTING_PREFIXES
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
-from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
+from jev_navigator.judgments.questions import serialized_chars
 from jev_navigator.memory_limit import SLOTS_DIR_VARIABLE
+
+
+@pytest.fixture(autouse=True)
+def no_developer_settings(monkeypatch):
+    """`jvn` reads the checkout `.env`, `~/.config/jvn/env` and the exported environment on
+    purpose, and any of them can name a live route with a real key, so a test would send its code
+    to a paid service. Every test starts without them, and what a test loads into the environment
+    is dropped when it ends. A test that runs `jvn` in a subprocess uses `isolated_jvn`."""
+    monkeypatch.setattr("jev_navigator.environment.checkout_root", lambda: NO_SETTINGS)
+    monkeypatch.setattr("jev_navigator.environment.LEGACY_CONFIG", NO_SETTINGS / "env")
+    for name in list(os.environ):
+        if name.startswith(SETTING_PREFIXES):
+            monkeypatch.delenv(name)
+    kept = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(kept)
+
 
 ORDER_SERVICE = '''\
 from app.validation import validate_order
@@ -143,24 +164,42 @@ def sample_repo(tmp_path: Path) -> Path:
     return root
 
 
+OUTER_CACHE_ROOT = cache_root()
+
+
+@pytest.fixture
+def outer_cache_root() -> Path:
+    """The cache folder the suite's own environment names, before any test's private one replaces it."""
+    return OUTER_CACHE_ROOT
+
+
 @pytest.fixture(autouse=True)
-def private_cache_root(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+def private_cache_root(
+    no_developer_settings, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
     """Each test starts with an empty cache folder of its own, holding its fact cache and its shared
     answer store, so no test reads what another run wrote, and no test, or jvn process a test
-    starts, writes the user's caches."""
+    starts, writes the user's caches. It runs after ``no_developer_settings`` has dropped every
+    ``JEV_NAVIGATOR_`` variable, so the answer store variable is unset and the store lives here."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("cache")))
-    monkeypatch.delenv(SHARED_STORE_VARIABLE, raising=False)
     return cache_root()
 
 
-@pytest.fixture(autouse=True, scope="session")
-def private_memory_slots(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+@pytest.fixture(scope="session")
+def memory_slots_folder(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return tmp_path_factory.mktemp("memory-slots")
+
+
+@pytest.fixture(autouse=True)
+def private_memory_slots(
+    no_developer_settings, memory_slots_folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
     """The suite's JVN processes take their memory slots in a folder of their own, never the
-    machine's, so no test waits for a live JVN run and no test makes one wait."""
-    folder = tmp_path_factory.mktemp("memory-slots")
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv(SLOTS_DIR_VARIABLE, str(folder))
-        yield folder
+    machine's, so no test waits for a live JVN run and no test makes one wait. It runs after
+    ``no_developer_settings`` has dropped every ``JEV_NAVIGATOR_`` variable. The folder lasts the whole
+    session, because a process keeps its slot in a folder for as long as it lives."""
+    monkeypatch.setenv(SLOTS_DIR_VARIABLE, str(memory_slots_folder))
+    return memory_slots_folder
 
 
 @pytest.fixture
@@ -192,9 +231,9 @@ class BudgetedClient:
     """A Jev client that refuses any request over a measured input budget, the way the real
     endpoint answered request 5 of the saved trace run: HTTP 400 ``max_tokens_exceeded``.
 
-    ``budget`` bounds the whole body in UTF-8 bytes. ``input_box`` bounds the state plus the longest
-    single question, the way the provider measures its documented input limit, and counts serialized
-    characters.
+    ``budget`` bounds the whole body and ``input_box`` the state plus the longest single question,
+    the way the provider measures its documented input limit. Both count characters of the
+    ASCII-escaped serialization (``serialized_chars``), the one measure of the library and the Engine.
 
     It records the requests it accepted, so a test can prove no request over the budget was ever
     sent, and how many times the provider had to refuse one.
@@ -210,7 +249,7 @@ class BudgetedClient:
         self.refusals = 0
 
     def ask(self, state: Mapping, questions: Mapping) -> JevResponse:
-        body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
+        body = serialized_chars({"state": state, "questions": questions})
         box = self._state_and_longest_question(state, questions)
         if body > self.budget or (self.input_box is not None and box > self.input_box):
             self.refusals += 1
@@ -225,7 +264,5 @@ class BudgetedClient:
 
     @staticmethod
     def _state_and_longest_question(state: Mapping, questions: Mapping) -> int:
-        longest = max(
-            (len(json.dumps(question, ensure_ascii=False)) for question in questions.values()), default=0
-        )
-        return len(json.dumps(state, ensure_ascii=False)) + longest
+        longest = max((serialized_chars(question) for question in questions.values()), default=0)
+        return serialized_chars(state) + longest

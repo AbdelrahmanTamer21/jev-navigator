@@ -30,8 +30,12 @@ The command chooses an entry point and creates `./jvn-results/<directory>-<times
 directory where you invoked it. You do not need to supply a scope, starting line or budget.
 
 Credentials come from `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` in the process environment, then
-from `~/.config/jvn/env`. The file uses dotenv syntax and is not executed. Help and schema discovery
-need no key and make no model calls.
+from `~/.config/jvn/env`. The file uses dotenv syntax and is not executed. When `jvn`'s code runs
+from a jev-navigator checkout (`uv run jvn` there, or an editable install), it also reads that
+checkout's `.env`, after the environment and before the file; any install into site-packages
+(`uv tool install`, `pipx`, a non-editable `pip install`) reads no `.env`. A `.env` in the searched directory is never read. Either file may set only `TYPESAFE_*`,
+`JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names, and `jvn` names on stderr any other name it ignores.
+Help and schema discovery need no key and make no model calls.
 
 ## Discover commands and request fields
 
@@ -56,7 +60,7 @@ unlimited unless you set a limit.
 | `--prefix PATH` | Whole source inventory. Limit scope to a file or directory, relative to the search root. Repeat for multiple scopes. | `jvn find "the order limit" --prefix app/ --prefix tests/` |
 | `--start PATH:LINE` | Automatic entry selection. Start from a known caller or entry point; repeat for multiple starts. Lines are 1-based, paths are relative to the search root. | `jvn find "the order limit" --start app/orders.py:42 --start app/routes.py:18` |
 | `--out PATH` | A unique directory under `./jvn-results/`. Choose another new or empty directory. | `jvn find "the order limit" --out ./order-evidence` |
-| `--answer-store PATH` | `$JEV_NAVIGATOR_ANSWER_STORE`, else `$XDG_CACHE_HOME/jev-navigator/answers.sqlite` (`~/.cache` when unset; provisional). The shared store every run reads and writes; a run prints `answer store: PATH` on stderr. Point an eval arm at a new file so it never replays another arm's answers. `find`, `findall` and `trace` accept it. | `jvn find "the order limit" --answer-store ./arm-a.sqlite` |
+| `--answer-store PATH` | `$JEV_NAVIGATOR_ANSWER_STORE`, else `$XDG_CACHE_HOME/jev-navigator/answers.sqlite` (`~/.cache` when unset or relative; provisional). The shared store every run reads and writes; a run prints `answer store: PATH` on stderr. Point an eval arm at a new file so it never replays another arm's answers. A missing file is created; an existing one must be a JVN answer store, on a disk with the locks SQLite's WAL mode needs (any local disk). A run refuses any other file, naming it. `find`, `findall` and `trace` accept it. | `jvn find "the order limit" --answer-store ./arm-a.sqlite` |
 | `--resume PATH` | Off. Continue a budget-stopped, cancelled or failed evidence pack into a new output directory. | `jvn find "the order limit" --resume ./order-evidence` |
 | `--max-depth N` | Unlimited. Maximum relationship hops from the starting places; `0` opens only those places. | `jvn find "the order limit" --max-depth 3` |
 | `--max-steps N` | Unlimited. Maximum distinct code openings during navigation; entry selection is separate. | `jvn find "the order limit" --max-steps 8` |
@@ -171,7 +175,7 @@ JSON mode writes one result object to stdout. It contains:
 | `manifest` | Absolute path to the complete `manifest.json`. |
 | `report` | Absolute path to the readable `report.md`. |
 | `search` | Outcome, matched spans, source code, decisions, request counts and coverage details. |
-| `provider` | Requested/served model and `input_tokens`, the sum of the counts the provider reported. `responses_without_usage` counts responses that reported none (null when resumed from an older pack), so 0 tokens with a non-zero count means unknown, not free. |
+| `provider` | Requested/served model and `input_tokens`, the sum of the counts the provider reported. `responses_without_usage` counts responses that reported none (null when resumed from an older pack), so 0 tokens with a non-zero count means unknown, not free. `unanswered_requests` counts requests that were sent but never answered (a cancelled or failed call), whose usage is unknown too. `input_tokens_complete` is true only when both counts are 0; otherwise `input_tokens` is a lower bound. |
 | `resume` | Evidence pack path to pass to `--resume` when the outcome is `budget` or `cancelled`; otherwise `null`. |
 
 Progress, expanded requests and errors go to stderr, so stdout remains parseable. For example:
@@ -192,7 +196,8 @@ Check the command's exit status before reading a result file:
 
 The evidence directory contains `report.md`, `manifest.json`, `journal.jsonl` and `answers.jsonl`.
 Every answer also goes to the shared answer store (see `--answer-store`), which holds no code; a later
-run at the same commit replays from it after one live request that learns the served model, and copies
+run at the same commit replays from it after the live requests that learn the served model (one for
+`findall` and `trace`, one per place the first round of `find` opens, up to `--beam-width`), and copies
 what it replays into its own `answers.jsonl`. Find All and Trace items carry the commit and file
 hashes, so a run on a new commit asks again.
 Budget-stopped, cancelled and failed packs also contain `resume.json`.
@@ -256,7 +261,7 @@ judgments and remaining coverage to a partial evidence pack.
 The result includes `seed_search`, and `search` records `found`, `unsure`, `searched`, source hashes,
 request identities, the static graph and coverage gaps. `functions_examined` means every enumerated
 function was judged; it does not prove the model found every behavior. `scope_incomplete` retains
-unsupported, unparsed or unavailable files; a file too large to parse safely is unavailable, with the reason. See the library composition in [extending.md](extending.md#compose-a-seed-first-find-all-search).
+unsupported, unparsed or unavailable files; a file too large to parse safely is unavailable, and report.md names each unavailable file with its reason. See the library composition in [extending.md](extending.md#compose-a-seed-first-find-all-search).
 
 `seed_search.calls` counts seed discovery; `search.enumeration_calls` counts the following enumeration.
 Their sum is `search.calls`, the whole workflow's actual model-request count.
@@ -302,7 +307,9 @@ unexamined evidence unresolved. Saved continuation is available for Find and Fin
 
 JSON stdout contains `output_directory`, `manifest`, `report`, `trace`, `provider` and `resume`
 (`null` for trace). Progress and requests stay on stderr. See `trace.outcome`, its obligations and
-`unresolved_links` before interpreting coverage. Ctrl-C stops the command with exit 130; an abrupt
+`unresolved_links` before interpreting coverage; `trace.unavailable_files` names, with the reason, each
+file the index has no facts for (gone or changed on disk, or refused by the parser), and report.md lists
+them. Ctrl-C stops the command with exit 130; an abrupt
 interruption can leave the journal and answer store without a final manifest. The library also
 offers cooperative cancellation between traversal steps and model batches that writes a partial
 pack.

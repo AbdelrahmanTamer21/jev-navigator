@@ -13,7 +13,7 @@ from .. import operations
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.spans import Span
-from ..judgments.judge import CallCapReachedError, CheckResult, Judge
+from ..judgments.judge import CallCapReachedError, CheckResult, Judge, unit_place
 from ..judgments.questions import Check
 from ..judgments.thresholds import NoulVerdict
 from .find_code import FOUND, search_failure
@@ -74,9 +74,11 @@ def find_all(
 ) -> FindAllResult:
     """Expand from concrete seeds, batch a property check, then examine remaining functions.
 
-    Seeds are candidate locations, not assumed matches. Candidate and unresolved graph bindings
-    remain unchanged. The fallback includes disconnected and differently named functions. An
-    empty seed list runs just that fallback; include_disconnected=False reports partial coverage.
+    The judged functions are listed in file and line order, however their answers arrive, so the
+    same run gives the same result. Seeds are candidate locations, not assumed matches. Candidate
+    and unresolved graph bindings remain unchanged. The fallback includes disconnected and
+    differently named functions. An empty seed list runs just that fallback;
+    include_disconnected=False reports partial coverage.
 
     ``completed`` retains answers from an interrupted enumeration of the same source, target,
     check and thresholds. The caller owns that identity check (the CLI validates its saved scope).
@@ -150,7 +152,7 @@ def find_all(
     return FindAllResult(
         target,
         graph,
-        tuple(judged),
+        tuple(sorted(judged, key=_place_order)),
         tuple(remaining_files),
         index.observed_unparsed_files,
         tuple(file for file in index.files if not language_of(file)),
@@ -159,3 +161,8 @@ def find_all(
         judge.calls,
         failure,
     )
+
+
+def _place_order(result: CheckResult) -> tuple:
+    """Judged functions in file and line order, whatever order their answers arrived in."""
+    return (*unit_place(result.item), result.item["span_key"])

@@ -32,9 +32,9 @@ Run in the source directory, or add `--repo /path/to/repo`. Dirty trees and non-
 Output defaults to a unique `./jvn-results/` directory. Trace starts must be repository-relative
 `PATH:LINE` values inside a function or method, not a class declaration. Unknown entry? Find first,
 inspect the returned function, then trace it. Quote the entire natural-language argument once.
-Do not edit files in scope while a search runs: a file that changes is reported unavailable, and a
+Do not edit files in scope while a search runs: a file that changes is reported unavailable when the index reads it again, and a
 search that finds nothing then ends `scope_incomplete` instead of `nothing_left`. A file too large to
-parse safely (a one-line bundle of about 70,000 characters or more) is never parsed: it is reported
+parse safely (a one-line bundle of about 70,000 bytes or more) is never parsed: it is reported
 unavailable with the reason "too large to parse", and it ends a not-found search the same way.
 
 For agents and pipelines, discover the current contract with `jvn schema find`, `jvn schema findall`
@@ -76,9 +76,10 @@ Trace may leave a journal without a manifest; keep its output.
 
 Find All and Trace judge at most 16 functions per request and send their requests in parallel; a Find
 opening still asks about all its neighbours in one request. Every answer goes to one shared answer
-store, `$XDG_CACHE_HOME/jev-navigator/answers.sqlite` (`~/.cache` when unset), which holds hashes,
-locations and answers, never code. A later run at the same commit replays from it after one live
-request. Give each experiment or eval arm its own store with `--answer-store PATH` (or
+store, `$XDG_CACHE_HOME/jev-navigator/answers.sqlite` (`~/.cache` when unset or relative), which holds
+hashes, locations and answers, never code. A later run at the same commit replays from it after the
+requests that learn the served model: one for Find All and Trace, one per place a Find's first round
+opens. Give each experiment or eval arm its own store with `--answer-store PATH` (or
 `JEV_NAVIGATOR_ANSWER_STORE`) so arms never reuse each other's answers; stderr names the store in
 use. `jvn trace` reports `replayed_answers` beside its live `calls`.
 
