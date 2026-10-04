@@ -99,12 +99,18 @@ def test_a_file_list_longer_than_the_argument_limit_is_split_across_processes(
     # Arrange
     commit_files(tmp_path, MIXED_SCOPE)
     files = sorted(MIXED_SCOPE)
-    together = (scanned(tmp_path), sorted(tools.ripgrep_fixed("return", files, tmp_path, max_hits=10)))
+    together = (
+        scanned(tmp_path),
+        sorted(tools.ripgrep_fixed("return", files, tmp_path, max_hits=10, context_bytes=200)),
+    )
     spawned.clear()
     monkeypatch.setattr(tools, "MAX_ARGUMENT_BYTES", 30)
 
     # Act
-    split = (scanned(tmp_path), sorted(tools.ripgrep_fixed("return", files, tmp_path, max_hits=10)))
+    split = (
+        scanned(tmp_path),
+        sorted(tools.ripgrep_fixed("return", files, tmp_path, max_hits=10, context_bytes=200)),
+    )
 
     # Assert
     assert spawned[tools.AST_GREP] > 2
@@ -424,3 +430,37 @@ def test_a_literal_search_over_more_files_than_a_parser_command_takes_starts_one
     assert len(sample_index.files) > 2
     assert {hit.file for hit in hits} >= {"app/orders.py", "app/validation.py"}
     assert spawned[tools.RIPGREP] == 1
+
+
+BUNDLE_PIECE = "var a=require('./util');a.util(1);"
+
+
+def bundle_beside_small_files(root: Path) -> list[str]:
+    """jvn-verifier's shape: a 20 MB one-line bundle naming ``util`` 1.2 million times, and 200 small
+    files that import it."""
+    (root / "src").mkdir(parents=True)
+    (root / "dist").mkdir()
+    (root / "dist/bundle.js").write_text(BUNDLE_PIECE * 600_000 + "\n")
+    for number in range(200):
+        (root / f"src/m{number}.js").write_text(
+            f"import {{ util }} from './util';\nexport const m{number} = util;\n"
+        )
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*.js"))
+
+
+def test_a_text_search_over_a_one_line_bundle_holds_only_a_window_around_each_hit(tmp_path: Path) -> None:
+    # Arrange
+    index = CodeIndex(tmp_path, bundle_beside_small_files(tmp_path))
+    tracemalloc.start()
+
+    # Act
+    hits = index.search_text("util", 2 * len(index.files))
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    # Assert: the bundle's 20 MB line never reaches Python, only a window around its first hit
+    [bundle_hit] = [hit for hit in hits if hit.file == "dist/bundle.js"]
+    assert len({hit.file for hit in hits}) == 201
+    assert peak < 10 * 2**20
+    assert bundle_hit.line == 1 and "util" in bundle_hit.text
+    assert len(bundle_hit.text) <= 2 * code_index.TEXT_HIT_CONTEXT_BYTES + len("util")

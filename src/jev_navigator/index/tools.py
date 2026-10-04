@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import subprocess
 import tempfile
@@ -41,9 +40,18 @@ def run_command(
 ) -> str:
     """The command's output; ``no_match_exit`` is the exit code a search tool uses for "nothing found";
     ``stdin``, when given, is written to the command's standard input."""
-    completed = subprocess.run(list(arguments), cwd=cwd, input=stdin, capture_output=True, text=True)
+    return command_output(arguments, cwd, no_match_exit=no_match_exit, stdin=stdin).decode()
+
+
+def command_output(
+    arguments: Sequence[str], cwd: Path, *, no_match_exit: int | None = None, stdin: str | None = None
+) -> bytes:
+    """``run_command``'s output as the bytes the command wrote, for output that quotes file content."""
+    completed = subprocess.run(
+        list(arguments), cwd=cwd, input=None if stdin is None else stdin.encode(), capture_output=True
+    )
     if completed.returncode not in (0, no_match_exit):
-        detail = completed.stderr.strip()[:300]
+        detail = completed.stderr.decode(errors="replace").strip()[:300]
         raise ToolFailedError(f"{arguments[0]} exited {completed.returncode}: {detail}")
     return completed.stdout
 
@@ -166,16 +174,50 @@ def _tool_failed(tool: str, returncode: int, errors: IO[bytes]) -> ToolFailedErr
     return ToolFailedError(f"{tool} exited {returncode}: {errors.read().decode(errors='replace').strip()}")
 
 
-def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:
-    """The lines holding ``text``. JSON events are split at newlines only, since a line of code may
-    hold a Unicode line separator that ``str.splitlines`` would split."""
-    command = [*_RIPGREP_SAFE, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
-    hits = []
+def ripgrep_fixed(
+    text: str, files: Sequence[str], cwd: Path, max_hits: int, context_bytes: int, *, whole_word: bool = False
+) -> list[TextHit]:
+    """The lines holding ``text``, at most ``max_hits`` per file, each as the bytes around one hit:
+    up to ``context_bytes`` before and after, so a one-line bundle costs no more than a short line.
+    ``whole_word`` keeps only hits no word character touches. The match runs on to the end of the
+    line, so each line matches once, and ``--replace`` prints only its window; ripgrep's JSON would
+    carry the whole line."""
+    pattern = _hit_window(text, context_bytes, whole_word)
+    command = [*_RIPGREP_SAFE, "--only-matching", "--line-number", "--with-filename", "--null"]
+    command += ["--max-count", str(max_hits), "--replace", "$window", "--regexp", pattern, "--"]
+    hits: dict[tuple[str, int], TextHit] = {}
     for chunk in file_chunks(files, bytes_only=True):
-        output = run_command([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
-        events = (json.loads(line) for line in output.split("\n") if line.strip())
-        hits += [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
-    return hits
+        for hit in _windows(command_output([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)):
+            hits.setdefault((hit.file, hit.line), hit)
+    return list(hits.values())
+
+
+def _hit_window(text: str, context_bytes: int, whole_word: bool) -> str:
+    """A regular expression capturing, as ``window``, ``text`` with up to ``context_bytes`` of any
+    bytes on either side, then matching the rest of the line. The text's characters other than
+    letters, digits and underscores are written as code points, so no character of it is read as
+    syntax."""
+    context = f"(?-u:.){{0,{context_bytes}}}"
+    literal = "".join(char if char.isalnum() or char == "_" else f"\\x{{{ord(char):x}}}" for char in text)
+    if whole_word:
+        literal = rf"(?:^|\W){literal}(?:\W|$)"
+    return f"(?P<window>{context}{literal}{context})(?-u:.)*"
+
+
+def _windows(output: bytes) -> Iterator[TextHit]:
+    """The hits of ripgrep's ``--null`` printer, ``path NUL line:window`` per line of output. A window
+    holds no newline, and a path ends at its NUL, so a newline in a path cannot split a record.
+    Bytes that are not UTF-8 are decoded the way the index reads files, with invalid bytes replaced."""
+    position = 0
+    while position < len(output):
+        path_end = output.index(b"\0", position)
+        number_end = output.index(b":", path_end)
+        window_end = output.find(b"\n", number_end)
+        window_end = len(output) if window_end < 0 else window_end
+        path = output[position:path_end].decode(errors="replace").removeprefix("./")
+        window = output[number_end + 1 : window_end].decode(errors="replace").rstrip("\r")
+        yield TextHit(path, int(output[path_end + 1 : number_end]), window)
+        position = window_end + 1
 
 
 def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
@@ -208,18 +250,6 @@ def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
         if path and candidate.is_file() and not candidate.is_symlink():
             files.append(path)
     return tuple(sorted(dict.fromkeys(files)))
-
-
-def _text_hit(match: dict) -> TextHit:
-    return TextHit(_decoded(match["path"]), match["line_number"], _decoded(match["lines"]).rstrip("\r\n"))
-
-
-def _decoded(field: dict) -> str:
-    """ripgrep reports a path or line that is not valid UTF-8 as base64 ``bytes`` instead of ``text``;
-    it is decoded the way the index reads files, with invalid bytes replaced."""
-    if "text" in field:
-        return field["text"]
-    return base64.b64decode(field["bytes"]).decode("utf-8", errors="replace")
 
 
 def inside_git_worktree(cwd: Path) -> bool:

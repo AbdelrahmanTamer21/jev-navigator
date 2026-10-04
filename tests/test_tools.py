@@ -157,7 +157,7 @@ def test_ripgrep_ignores_a_configured_preprocessor(tmp_path: Path, monkeypatch) 
     repository.mkdir()
     (repository / "a.py").write_text("needle = 1\n")
 
-    found = tuple(hit.file for hit in tools.ripgrep_fixed("needle", ("a.py",), repository, 5))
+    found = tuple(hit.file for hit in tools.ripgrep_fixed("needle", ("a.py",), repository, 5, 200))
 
     assert found == ("a.py",)  # the search still works
     assert not marker.exists()  # but the configured preprocessor never ran
