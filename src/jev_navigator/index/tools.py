@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
@@ -15,8 +14,6 @@ from typing import IO
 
 from .file_shape import refusal_of
 from .spans import TextHit
-
-logger = logging.getLogger(__name__)
 
 AST_GREP = "ast-grep"
 RIPGREP = "rg"
