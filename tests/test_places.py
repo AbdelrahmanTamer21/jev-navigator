@@ -22,6 +22,7 @@ from jev_navigator.directives.places import (
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
+from jev_navigator.judgments.relations import key_mention
 
 
 def committed_index(root: Path, files: Mapping[str, str]) -> CodeIndex:
@@ -148,7 +149,7 @@ def test_quoted_keys_are_searched_across_the_scope_including_docs_and_config(tmp
     mentions = {
         key.split(":")[0]
         for key, signature in offered.items()
-        if "mentions `max_items_per_order`" in signature
+        if key_mention("max_items_per_order") in signature
     }
     assert mentions == {"config.yaml", "README.md"}
 
@@ -169,7 +170,7 @@ def test_a_quoted_key_matches_whole_names_only(tmp_path: Path) -> None:
 
     # Assert
     mentions = {
-        key.split(":")[0] for key, signature in offered.items() if "mentions `invoice_day`" in signature
+        key.split(":")[0] for key, signature in offered.items() if key_mention("invoice_day") in signature
     }
     assert mentions == {"config.yaml"}
 
@@ -460,6 +461,34 @@ def test_callees_called_from_few_places_come_first(tmp_path: Path) -> None:
     callees = [signature.split("`")[1] for signature in offered.values() if "called by handle" in signature]
     assert callees[0] == "def save_event(event):"
     assert len(callees) == 10
+
+
+def test_a_callee_with_no_definition_is_never_counted_when_callees_are_ranked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: handle calls one defined helper and one name defined nowhere in scope
+    index = committed_index(
+        tmp_path,
+        {
+            "helpers.py": "def save_event(event):\n    return event\n",
+            "handler.py": "def handle(event):\n    undefined_logger(event)\n    return save_event(event)\n",
+        },
+    )
+    counted: list[str] = []
+    real_count = index.call_site_count
+
+    def recorded_count(name: str) -> int:
+        counted.append(name)
+        return real_count(name)
+
+    monkeypatch.setattr(index, "call_site_count", recorded_count)
+
+    # Act
+    offered = neighbour_signatures(index, "handle")
+
+    # Assert: it yields no place, so counting its call sites is wasted work
+    assert any("def save_event(event):" in signature for signature in offered.values())
+    assert "undefined_logger" not in counted
 
 
 def test_an_anonymous_handler_offers_proven_callees_before_test_only_candidates(

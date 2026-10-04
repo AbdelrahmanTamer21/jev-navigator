@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -405,8 +406,8 @@ def test_input_batches_keep_values_masked_across_request_boundaries(
     monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
     client = TypeSafeJevClient()
     try:
-        answers = Judge(client).check_every(
-            [DESCRIBES], items, {"doc": {"sentence": "posts an order"}}, batch_budget=1
+        answers = Judge(client, items_per_request=1).check_every(
+            [DESCRIBES], items, {"doc": {"sentence": "posts an order"}}
         )
     finally:
         client.close()
@@ -481,8 +482,10 @@ def test_cancel_aborts_an_active_official_sdk_request(monkeypatch: pytest.Monkey
         server_thread.join()
 
 
+@pytest.mark.parametrize("deliver", ["any_thread", "main_thread"])
+@pytest.mark.usefixtures("python_sigint_handler")
 def test_sigint_returns_the_active_http_place_as_resumable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deliver: str
 ) -> None:
     """The installed sync search and official SDK share one prompt cancellation boundary."""
     pytest.importorskip("typesafe_sdk")
@@ -521,13 +524,19 @@ def test_sigint_returns_the_active_http_place_as_resumable(
         range_place(index, "policy.py", 4, 5, "candidate"),
     ]
 
+    main_thread = threading.get_ident()
+
     def interrupt_when_sent() -> None:
         all_entered.wait()
-        os.kill(os.getpid(), signal.SIGINT)
+        if deliver == "main_thread":
+            signal.pthread_kill(main_thread, signal.SIGINT)
+        else:
+            os.kill(os.getpid(), signal.SIGINT)
 
     interrupter = threading.Thread(target=interrupt_when_sent)
     interrupter.start()
     try:
+        started = time.monotonic()
         result = find_code(
             index,
             Judge(client),
@@ -538,6 +547,7 @@ def test_sigint_returns_the_active_http_place_as_resumable(
             initial_candidates=[(place, 1.0) for place in places],
         )
 
+        assert time.monotonic() - started < 5, "the sent requests were left to the 30 s transport timeout"
         assert result.outcome == Outcome.CANCELLED
         assert {entry.place_key for entry in result.not_inspected} == {place.key for place in places}
         assert {entry.reason for entry in result.not_inspected} == {"cancelled"}
