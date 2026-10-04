@@ -326,3 +326,24 @@ def test_the_journal_keeps_the_request_as_handed_to_the_client_in_its_order(tmp_
     request = json.loads((tmp_path / "journal.jsonl").read_text().splitlines()[0])
     handed = json.loads(base64.b64decode(request["body_base64"]))
     assert list(handed["state"]) == ["target", "slice", "candidates"]
+
+
+def test_a_request_cancelled_after_it_was_sent_is_journaled_as_cancelled_after_it_was_sent(
+    tmp_path: Path,
+) -> None:
+    import concurrent.futures
+
+    class CancelledClient:
+        model = "cancelled"
+
+        def ask(self, state, questions):
+            raise concurrent.futures.CancelledError
+
+    journal = JsonlJournal(tmp_path / "journal.jsonl")
+
+    with pytest.raises(concurrent.futures.CancelledError):
+        Judge(CancelledClient(), journal=journal).ask(STATE, QUESTIONS, thresholds=Thresholds())
+
+    failure = json.loads((tmp_path / "journal.jsonl").read_text().splitlines()[1])
+    assert failure["kind"] == "failure"
+    assert failure["error"] == "CancelledError: the request was cancelled after it was sent"

@@ -14,6 +14,7 @@ import inspect
 import logging
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 
 from .answers import JevResponse, NoulAnswer, TokenTotal, response_to_raw
@@ -635,7 +636,7 @@ class Judge:
 
     def _journal_failure(self, request_id: str | None, error: Exception, raw: RawResponse | None) -> None:
         if self.journal is not None and request_id is not None:
-            self.journal.record_failure(request_id, f"{type(error).__name__}: {error}", raw)
+            self.journal.record_failure(request_id, _failure_text(error), raw)
 
     def _propagate_attempt_journal_error(
         self, request_id: str | None, error: AttemptJournalCallbackError, raw: RawResponse | None
@@ -1008,6 +1009,12 @@ def _pick_result(response: JevResponse, question_id: str, thresholds: Thresholds
 
 def _argument_id(operation: str, offer: CallOffer) -> str:
     return f"{operation}.{offer.argument.question_id}"
+
+
+def _failure_text(error: Exception) -> str:
+    if isinstance(error, CancelledError) and not str(error):
+        return f"{type(error).__name__}: the request was cancelled after it was sent"
+    return f"{type(error).__name__}: {error}"
 
 
 def _batches(plan: _CheckPlan) -> list[list[int]]:
