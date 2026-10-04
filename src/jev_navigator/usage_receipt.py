@@ -21,7 +21,7 @@ def usage_receipt(previous: dict | None, input_total: TokenTotal, unanswered_req
 def usage_report_lines(provider: dict) -> list[str]:
     return [
         f"- Responses without usage: {_count_text(provider['responses_without_usage'])}",
-        f"- Requests without a response: {_count_text(provider['unanswered_requests'])}",
+        f"- Requests whose usage is unknown: {_count_text(provider['unanswered_requests'])}",
         f"- Input tokens: {_input_tokens_text(provider)}",
     ]
 
