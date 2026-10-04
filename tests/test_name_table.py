@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import multiprocessing
 import os
 import sqlite3
@@ -241,6 +242,30 @@ def test_a_checkout_whose_filter_changes_lines_never_lends_its_rows_to_a_plain_c
 
     # Assert
     assert answered == expected
+
+
+@pytest.mark.parametrize("change", ["rewritten", "deleted"])
+def test_a_place_answered_from_the_table_reads_as_its_listed_blob_after_the_file_changes(
+    tmp_path: Path, change: str
+) -> None:
+    # Arrange: alpha's place comes from rows of a.py's listed blob, then a.py changes before any read
+    original = "def alpha():\n    return 1\n"
+    commit_files(tmp_path, {"a.py": original, "b.py": "def beta():\n    return alpha()\n"})
+    CodeIndex.from_git(tmp_path).find_definition("alpha")
+    index = CodeIndex.from_git(tmp_path)
+    (definition,) = index.find_definition("alpha")
+    if change == "rewritten":
+        (tmp_path / "a.py").write_text("# a new first line\n# and another\ndef omega():\n    return 2\n")
+    else:
+        (tmp_path / "a.py").unlink()
+
+    # Act
+    code = index.read_slice(definition)
+
+    # Assert
+    assert code.text == original.rstrip("\n")
+    assert code.file_sha256 == hashlib.sha256(original.encode()).hexdigest()
+    assert "a.py" in index.unavailable_files
 
 
 def test_a_files_definitions_come_from_the_table_with_their_lines(
