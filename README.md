@@ -337,8 +337,8 @@ script module exports the definitions an `export` statement or its own list name
 list gives them (`export { inner as outer }` exports `inner` as `outer`, never a private `outer`),
 its default export
 (`export default build`, `module.exports = build`), and its CommonJS exports (`exports.query = query`,
-`module.exports = { log }`, and under another name `exports.parse = urlParse`); a module that exports `new Logger()` exports no `log`, and an
-unexported helper stays its own module's. References carry a binding too. A
+`module.exports = { log }`, and under another name `exports.parse = urlParse`); a module that exports
+`new Logger()` exports no `log`, and an unexported helper stays its own module's. References carry a binding too. A
 binding counts only the definitions its site can name: a type, a class or a declaration a type can
 name, such as an interface; an export, any definition; and a call or any other reference (an
 argument, receiver, condition or decorator), a function, class or declaration a value can name, such
