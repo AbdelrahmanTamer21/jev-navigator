@@ -54,8 +54,8 @@ def test_trace_command_writes_a_real_pack_with_default_output(
     repository = _workflow_repository(tmp_path)
     client = _evidence_client()
     client.close = lambda: None
-    monkeypatch.setattr(cli, "TypeSafeJevClient", lambda: client)
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: client)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
     monkeypatch.chdir(tmp_path)
     request = {
         "command": "trace",

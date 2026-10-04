@@ -19,10 +19,9 @@ default replaces the oldest code bodies with a stub that keeps the source, and e
 recorded. Checks that select the same sections share one request; different selections run in
 parallel.
 
-The character budget is capped by Jev's input box for ``state`` plus the longest question: the
-documented 32,000 tokens at 2.4 characters per token (``REQUEST_CHARS_PER_TOKEN``, the Engine's
-value), 76,800 characters. The Engine measured 32,883 tokens accepted and about 33,200 refused on
-27.09.2026. A whole request may be larger, up to the documented 64k tokens.
+A judge holds the selected state, together with the shared state beside it, within what its
+client's box for ``state`` plus the longest question (``InputLimits.box_chars``) leaves after the
+longest question actually asked, and within the history's own ``budget_chars`` when it sets one.
 The docs also warn that accuracy falls as unrelated state grows,
 so select only the sections a check needs, and measure with ``ceiling_curve``.
 
@@ -40,7 +39,6 @@ from enum import StrEnum
 from typing import Protocol
 
 from .judgments.answers import AnswerSource, JevResponse, without_answer_sources
-from .judgments.client import JEV_INPUT_BOX_CHARS, QUESTION_RESERVE_CHARS
 from .judgments.judge import Judge
 from .judgments.questions import Check, content_hash, serialized_chars
 from .judgments.thresholds import NoulVerdict
@@ -164,9 +162,11 @@ def drop_oldest_code(
 @dataclass
 class History:
     """``sections`` declares the caller's own sections with their values; only declared names and the
-    built-in ones (``history``, ``fetched``, ``decisions``, ``previous_judgments``) can be selected."""
+    built-in ones (``history``, ``fetched``, ``decisions``, ``previous_judgments``) can be selected.
+    ``budget_chars`` is the caller's own bound on a selected state; a judge reading the history also
+    holds it within its client's input box, and ``None`` leaves that box alone."""
 
-    budget_chars: int = JEV_INPUT_BOX_CHARS - QUESTION_RESERVE_CHARS
+    budget_chars: int | None = None
     evict: EvictionPolicy = drop_oldest_code
     recorder: StepRecorder | None = None
     sections: dict[str, object] = field(default_factory=dict)
@@ -176,7 +176,6 @@ class History:
     evictions: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        self.budget_chars = min(self.budget_chars, JEV_INPUT_BOX_CHARS)
         reserved = set(self.sections) & set(BUILT_IN_SECTIONS)
         if reserved:
             raise ValueError(f"{sorted(reserved)} are built-in section names")
@@ -192,16 +191,25 @@ class History:
             raise UnknownSectionError(f"{name} is not a declared section")
         self.sections[name] = value
 
-    def state_for(self, names: Sequence[str], shared: Mapping | None = None, question_chars: int = 0) -> dict:
-        """Exactly the selected sections, each within its limit and all within the character budget;
-        ``self.evictions`` lists what this call trimmed. The budget is also measured with the
-        ``shared`` state that travels next to the sections, and never exceeds what Jev's input box
-        leaves after the question of ``question_chars`` that reads them."""
+    def state_for(
+        self,
+        names: Sequence[str],
+        shared: Mapping | None = None,
+        question_chars: int = 0,
+        *,
+        box_chars: int | None = None,
+    ) -> dict:
+        """Exactly the selected sections, each within its limit; ``self.evictions`` lists what this
+        call trimmed. Measured together with the ``shared`` state that travels next to them, they stay
+        within ``budget_chars`` and within what ``box_chars``, a client's box for the state plus the
+        longest question, leaves after the question of ``question_chars`` that reads them; unbounded
+        when neither is set."""
         self._require_known(names)
-        limit = min(self.budget_chars, JEV_INPUT_BOX_CHARS - question_chars)
+        room = None if box_chars is None else box_chars - question_chars
+        limit = min((bound for bound in (self.budget_chars, room) if bound is not None), default=None)
 
         def fits(steps: list[HistoryStep]) -> bool:
-            return self.size({**(shared or {}), **self._build(names, steps)}) <= limit
+            return limit is None or self.size({**(shared or {}), **self._build(names, steps)}) <= limit
 
         reads_code = bool(_SECTIONS_WITH_CODE & set(names))
         kept, self.evictions = self.evict(self.steps, fits) if reads_code else (self.steps, [])
@@ -331,7 +339,7 @@ def judge_sections(
 ) -> dict[str, HistoryJudgment]:
     """Several history checks: those selecting the same sections share one request, and different
     selections are asked in parallel. Each answer is kept in ``history.previous_judgments``."""
-    groups = _grouped(history, checks, shared or {})
+    groups = _grouped(judge, history, checks, shared or {})
     with ThreadPoolExecutor(max_workers=len(groups) or 1) as pool:
         responses = list(pool.map(lambda group: _ask_group(judge, group), groups))
     return _judged(judge, history, groups, responses, exhausted)
@@ -345,7 +353,7 @@ async def judge_sections_async(
     *,
     exhausted: bool = False,
 ) -> dict[str, HistoryJudgment]:
-    groups = _grouped(history, checks, shared or {})
+    groups = _grouped(judge, history, checks, shared or {})
     responses = await asyncio.gather(*(_ask_group_async(judge, group) for group in groups))
     return _judged(judge, history, groups, list(responses), exhausted)
 
@@ -361,12 +369,14 @@ class _Group:
         return {check.question_id: check.to_question() for check in self.checks.values()}
 
 
-def _grouped(history: History, checks: Mapping[str, HistoryCheck], shared: Mapping) -> list[_Group]:
+def _grouped(
+    judge: Judge, history: History, checks: Mapping[str, HistoryCheck], shared: Mapping
+) -> list[_Group]:
     by_sections: dict[tuple[str, ...], dict[str, Check]] = {}
     for name, entry in checks.items():
         by_sections.setdefault(entry.sections, {})[name] = entry.check
     return [
-        _Group(sections, _state(history, sections, shared, grouped), grouped)
+        _Group(sections, _state(history, sections, shared, grouped, judge.input_limits.box_chars), grouped)
         for sections, grouped in by_sections.items()
     ]
 
@@ -397,12 +407,14 @@ def _judged(
     return results
 
 
-def _state(history: History, sections: tuple[str, ...], shared: Mapping, checks: Mapping[str, Check]) -> dict:
+def _state(
+    history: History, sections: tuple[str, ...], shared: Mapping, checks: Mapping[str, Check], box_chars: int
+) -> dict:
     overlap = set(sections) & set(shared)
     if overlap:
         raise ValueError(f"shared state and history sections both use {sorted(overlap)}")
     longest_question = max(serialized_chars(check.to_question()) for check in checks.values())
-    return {**shared, **history.state_for(sections, shared, longest_question)}
+    return {**shared, **history.state_for(sections, shared, longest_question, box_chars=box_chars)}
 
 
 def _judgment(
@@ -436,7 +448,7 @@ def ceiling_curve(
     shared: Mapping | None = None,
     *,
     sections: tuple[str, ...] = DEFAULT_STOP_SECTIONS,
-    budget_chars: int = JEV_INPUT_BOX_CHARS - QUESTION_RESERVE_CHARS,
+    budget_chars: int | None = None,
 ) -> list[CeilingPoint]:
     """Replays a recorded search with a growing history and reports the check's probability at each
     size, to see where more characters stop helping. Use it with a replay or scripted client."""

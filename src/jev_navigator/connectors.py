@@ -47,7 +47,7 @@ class CommandConnector:
                 cwd=empty_directory,
             )
         if completed.returncode != 0:
-            raise ConnectorError(f"{self.name} exited {completed.returncode}: {completed.stderr[:300]}")
+            raise ConnectorError(f"{self.name} exited {completed.returncode}: {completed.stderr.strip()}")
         return completed.stdout
 
 

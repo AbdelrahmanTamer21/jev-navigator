@@ -7,6 +7,7 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 
 | Piece | What it gives you |
 | --- | --- |
+| `resolve_scope` | the files a search covers from folders, patterns, languages and a git ref, with tests, generated, vendored code and docs left out by default; a file only its shape marks as possibly generated is set aside under an output folder (`dist`, `build`, `generated`), and otherwise awaits Jev's generated judgment with its measured facts; a scope over its cap is refused with counts per folder and language (README, "Choosing the files a search covers") |
 | `CodeIndex` | mechanical lookups over a narrowed scope: definitions, callers, callees, references, text, imports, git history |
 | `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc |
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
@@ -136,7 +137,9 @@ only for the same source bytes, scope, target, Check and thresholds; the CLI ver
 in its saved pack. Completed positive, negative and uncertain judgments retain their original
 request hashes and are not sent again. Static graph reconstruction does not consume model calls.
 Cancellation keeps coverage partial and reporting does not trigger scans of untouched files.
-Provider errors propagate; retained journal receipts describe the work actually performed.
+Ctrl-C during judging ends it `cancelled`, and a failed request ends it `failed` with `failure` holding
+the same error; both keep every answer that arrived in `judged`, so `completed=` resumes it. Retained
+journal receipts describe the work actually performed.
 
 The CLI composes entry selection and `find_code` with this function. A seed-search miss still permits
 the disconnected fallback. Use `jvn findall "functions that enforce the order item limit"` or

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS, InputBudgetExceededError
+from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputBudgetExceededError
 from jev_navigator.judgments.journal import JsonlJournal, RawResponse
 from jev_navigator.judgments.judge import CallCapReachedError, Judge
 from jev_navigator.judgments.questions import Check, Criterion
@@ -28,7 +28,7 @@ DESCRIBES = Check(
     no=Criterion("The code does something else, or only calls it."),
 )
 SHARED = {"doc": {"sentence": "s"}}
-ONE_ITEM_PER_BATCH_CHARS = JEV_INPUT_BOX_CHARS * 3 // 5
+ONE_ITEM_PER_BATCH_CHARS = JEV_INPUT_LIMITS.box_chars * 3 // 5
 SMALL_ITEMS = [{"file": f"f{index}.py", "code": f"v = {index}"} for index in range(8)]
 
 

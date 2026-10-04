@@ -189,7 +189,8 @@ class _Store:
 
     def retired(self) -> list[_Item]:
         current = self.current()
-        return [_group_item(paths) for base, paths in self.groups().items() if base != current]
+        items = (_group_item(paths) for base, paths in self.groups().items() if base != current)
+        return [item for item in items if item is not None]
 
 
 def _is_table_file(name: str) -> bool:
@@ -458,31 +459,49 @@ def _items(paths: Iterable[Path]) -> list[_Item]:
 def _item(path: Path) -> _Item | None:
     """``path`` as one item, from a single ``lstat``: a link is a file, so removing it never touches
     what it points to. None when the path is gone."""
-    try:
-        status = path.lstat()
-    except FileNotFoundError:
+    status = _status(path)
+    if status is None:
         return None
     folder = stat.S_ISDIR(status.st_mode)
     size = _size(path) if folder else status.st_blocks * 512
     return _Item((path,), size, status.st_mtime, folder)
 
 
-def _group_item(paths: list[Path]) -> _Item:
-    statuses = [path.lstat() for path in paths]
+def _group_item(paths: list[Path]) -> _Item | None:
+    """A database and the side files still beside it: SQLite removes them when the last connection
+    closes, which another JVN process may do between the listing and this count. None when all went."""
+    present = {path: status for path in paths if (status := _status(path)) is not None}
+    if not present:
+        return None
+    statuses = present.values()
     return _Item(
-        tuple(paths), sum(status.st_blocks * 512 for status in statuses), max(s.st_mtime for s in statuses)
+        tuple(present), sum(status.st_blocks * 512 for status in statuses), max(s.st_mtime for s in statuses)
     )
 
 
 def _size(path: Path) -> int:
-    """Bytes on disk under ``path``, never following a link."""
+    """Bytes on disk under ``path``, never following a link; a file that went since it was listed
+    holds none."""
     if not path.is_dir() or path.is_symlink():
-        return path.lstat().st_blocks * 512
+        return _bytes_on_disk(path)
     return sum(
-        (Path(top) / name).lstat().st_blocks * 512
+        _bytes_on_disk(Path(top) / name)
         for top, folders, files in os.walk(path)
         for name in (*files, *folders)
     )
+
+
+def _bytes_on_disk(path: Path) -> int:
+    status = _status(path)
+    return 0 if status is None else status.st_blocks * 512
+
+
+def _status(path: Path) -> os.stat_result | None:
+    """``path``'s own ``lstat``, or None once it is gone."""
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
 
 
 def _total(items: Iterable[_Item]) -> int:
