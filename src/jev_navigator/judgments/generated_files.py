@@ -63,15 +63,17 @@ def judge_generated_files(
 
 
 def generated_file_entry(index: CodeIndex, path: str, shape: FileShape) -> dict:
-    """One file as Jev sees it: path, measured facts, importers and the two excerpts."""
+    """One file as Jev sees it: path, measured facts, importers and the two excerpts. Every field is a
+    measurement or the file's own text, never a verdict: no trigger names and no reasons. ``file_shape``
+    measures lines in bytes, so the line fields say so."""
     importers = importers_of(index, path)
     text = "\n".join(index.lines(path))
     return {
         "file": path,
         "size_bytes": shape.size_bytes,
         "line_count": shape.line_count,
-        "longest_line": shape.longest_line,
-        "chars_per_line": round(shape.chars_per_line, 1),
+        "longest_line_bytes": shape.longest_line,
+        "average_line_bytes": round(shape.chars_per_line, 1),
         "importers": list(importers[:MAX_IMPORTERS]),
         "importer_count": len(importers),
         **_excerpts(text),
