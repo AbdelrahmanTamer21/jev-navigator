@@ -326,8 +326,9 @@ require(...)`, `from m import stop as halt`) binds the same way to `stop`, unles
 name, as a default or through a module alias, is decided the same way from the module it names and
 the modules that one re-exports the name from: one definition proves the target, several leave a
 `candidate`, an exporting module that could not be parsed where it mentions the name, or that
-vanished, leaves it `unknown`, and a module that exports no such name leaves a `candidate` that says
-so. A function or class
+vanished, leaves it `unknown`, and a module with no definition exported under the name leaves a
+`candidate` that says so. A name a module imports and passes on without an `export ... from`, as a
+Python module's own `from pkg.core import compute`, is not followed. A function or class
 held by another function, a class or an object literal, or assigned to a property (`foo.bar =
 function () {}`), is no module-level definition. One assigned to `exports.x` or `module.exports.x`,
 or listed in `module.exports = {...}`, is a CommonJS export: an import names it, its own module does not.

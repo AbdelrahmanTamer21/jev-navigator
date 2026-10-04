@@ -1381,7 +1381,36 @@ def test_a_member_read_through_an_import_is_decided_like_a_named_import(tmp_path
     assert bindings[("use_lone.js", 2)].reason == "solo may be defined in files not parsed: lone.js"
     assert {
         bindings[site].reason for site in (("use_tools.js", 2), ("use_tools.ts", 3), ("use_tools.ts", 4))
-    } == {"the import names tools.js, where the index finds no exported walk"}
+    } == {
+        "the import names tools.js, where the index finds no definition exported as walk; a name that "
+        "module imports and passes on is not followed"
+    }
+
+
+def test_a_name_a_python_module_imports_and_passes_on_is_not_claimed_unexported(tmp_path: Path) -> None:
+    """A Python module exports the names it imports at module level too, so `from pkg.api import
+    compute` where api.py imports `compute` from pkg.core is no proof that api.py exports none: the
+    candidate says the index found no definition there and does not follow the import."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/core.py": "def compute():\n    return 1\n",
+            "pkg/api.py": "from pkg.core import compute\n\n\ndef compute_local():\n    return 2\n",
+            "use_api.py": "from pkg.api import compute\ncompute()\n",
+        },
+    )
+
+    # Act
+    binding = index.binding_of("use_api.py", 2, "compute", None)
+
+    # Assert
+    assert (binding.status.value, binding.reason) == (
+        "candidate",
+        "the import names pkg/api.py, where the index finds no definition exported as compute; a name "
+        "that module imports and passes on is not followed",
+    )
 
 
 def test_a_name_imported_under_an_alias_binds_to_the_exported_definition(
