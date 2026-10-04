@@ -226,8 +226,8 @@ values most, but only while they represent real files, so JVN cleans up after it
 
 Every `find`, `findall`, `trace` and `stats` run applies these rules as it ends, at most once a day,
 deleting at most 2,000 files per run; a failure to clean up is a notice on stderr and never fails the
-run, and Ctrl-C during the cleanup stops it with one notice and exit status 130, the result already
-saved. Nothing outside these two folders is ever deleted, and links are never followed.
+run, and Ctrl-C during the cleanup, which starts only once the run has ended, stops it with one
+notice and exit status 130. Nothing outside these two folders is ever deleted, and links are never followed.
 `jvn cache status` shows what each store holds and what each rule would remove; `jvn cache prune`
 applies every rule now.
 

@@ -109,13 +109,9 @@ def test_a_housekeeping_failure_never_fails_the_run(
     assert "jvn: housekeeping skipped:" in captured.err and ".trash" in captured.err
 
 
-@pytest.mark.usefixtures("python_sigint_handler")
-def test_ctrl_c_during_the_cleanup_ends_it_with_one_notice_after_the_result_is_saved(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # Arrange: the terminal sends Ctrl-C as the end-of-run sweep starts
-    commit_files(tmp_path / "repo", {"app.py": "def f():\n    return 1\n"})
-    monkeypatch.chdir(tmp_path / "repo")
+@pytest.fixture
+def ctrl_c_as_the_sweep_starts(monkeypatch: pytest.MonkeyPatch, python_sigint_handler: None) -> None:
+    """The terminal sends a real Ctrl-C as the end-of-run sweep starts."""
     real_sweep = housekeeping._sweep
 
     def sweep_interrupted(allowance):
@@ -123,6 +119,15 @@ def test_ctrl_c_during_the_cleanup_ends_it_with_one_notice_after_the_result_is_s
         return real_sweep(allowance)
 
     monkeypatch.setattr(housekeeping, "_sweep", sweep_interrupted)
+
+
+@pytest.mark.usefixtures("ctrl_c_as_the_sweep_starts")
+def test_ctrl_c_during_the_cleanup_ends_it_with_one_notice_after_the_result_is_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Arrange
+    commit_files(tmp_path / "repo", {"app.py": "def f():\n    return 1\n"})
+    monkeypatch.chdir(tmp_path / "repo")
 
     # Act
     exit_code = main(["stats"])
@@ -133,4 +138,24 @@ def test_ctrl_c_during_the_cleanup_ends_it_with_one_notice_after_the_result_is_s
     assert exit_code == 130
     assert "statistics pack:" in captured.out and (pack / "statistics.json").is_file()
     assert captured.err.count("jvn: housekeeping interrupted") == 1
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.usefixtures("ctrl_c_as_the_sweep_starts")
+def test_ctrl_c_during_the_cleanup_after_a_failed_run_also_ends_it_with_130_and_claims_no_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Arrange: a size range no symbol fits, so the run fails before it saves anything
+    commit_files(tmp_path / "repo", {"app.py": "def f():\n    return 1\n"})
+    monkeypatch.chdir(tmp_path / "repo")
+
+    # Act
+    exit_code = main(["stats", "--min-lines", "10", "--max-lines", "2"])
+
+    # Assert
+    captured = capsys.readouterr()
+    assert exit_code == 130
+    assert not runs_root().exists()
+    notice = "jvn: housekeeping interrupted after the run ended; a later run finishes it"
+    assert captured.err.count(notice) == 1
     assert "Traceback" not in captured.err

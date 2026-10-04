@@ -27,13 +27,13 @@ def run_cache_command(action: str) -> int:
 
 
 def tidy_after_run() -> bool:
-    """Housekeeping as a run ends, after its result is saved; whether Ctrl-C interrupted it. A failure
-    is a notice on stderr, never the run's failure. An interrupt ends the cleanup with one notice;
-    what the sweep had not finished goes on in a later run."""
+    """Housekeeping once a run has ended, saved or failed; whether Ctrl-C interrupted it. A failure is
+    a notice on stderr, never the run's failure. An interrupt ends the cleanup with one notice; what
+    the sweep had not finished goes on in a later run."""
     try:
         housekeeping.tidy()
     except KeyboardInterrupt:
-        print("jvn: housekeeping interrupted; the run's result is saved", file=sys.stderr)
+        print("jvn: housekeeping interrupted after the run ended; a later run finishes it", file=sys.stderr)
         return True
     except Exception as error:  # noqa: BLE001 - a failed prune must never fail the run it follows
         print(f"jvn: housekeeping skipped: {error}", file=sys.stderr)
