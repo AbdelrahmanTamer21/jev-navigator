@@ -40,7 +40,7 @@ from ..history import (
 from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.spans import CodeSlice
-from ..judgments.answers import AnswerSource, JevResponse, NoulAnswer, answered_by
+from ..judgments.answers import AnswerSource, JevResponse, NoulAnswer, answered_by, scored_by
 from ..judgments.client import JEV_INPUT_BOX_CHARS, QUESTION_RESERVE_CHARS, InputBudgetExceededError
 from ..judgments.judge import (
     ABORTED_SEND_ERRORS,
@@ -1126,7 +1126,7 @@ def _record_choice(search: _Search, beam: list[_Queued]) -> None:
             "priority": item.probability,
             "depth": item.depth,
             "reason": _choice_reason(item),
-            **({"scored_by": item.scored_by.to_json()} if item.scored_by is not None else {}),
+            **scored_by(item.scored_by),
         }
         for item in beam
     ]
