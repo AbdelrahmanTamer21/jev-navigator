@@ -6,9 +6,11 @@ lines of about 1,000 characters at 35 MB, and one 2.5 MB image string, which is 
 So the estimate sums, over lines, the square of each line's punctuation count. It fits every real file
 measured on 03.10.2026 and 04.10.2026 (the table is in the ``census/parse-peak`` folder of the
 evaluation, ``fit-table-punctuation-5.5.md``): the 13 files that really peak above 250 MB stay refused,
-and a long string of data is parsed. Ordinary code of short lines costs by how much of it there is:
-on 04.10.2026 files of 27,000 to 185,000 lines of Heedvane TypeScript and saleor Python peaked at 2.7
-to 3.8 MB per 1,000 lines over the base, so the estimate adds a term per line.
+and a long string of data is parsed. Code also costs by how much of it there is: on 04.10.2026,
+1.2 to 15 MB files of Heedvane TypeScript, saleor Python and dense generated lines peaked at 53 to 75
+MB per MB of code over the base, whatever the length of their lines. So the estimate adds a term per
+byte of code, where code is every line of at most ``CODE_LINE_BYTES``; a longer line is a minified
+bundle or one string of data, and its punctuation prices it.
 """
 
 from __future__ import annotations
@@ -21,28 +23,39 @@ BASE_PEAK_MB = 25.0
 PEAK_MB_PER_SQUARED_THOUSAND_PUNCTUATION = 5.5
 """The fitted constant is 5.0 (the real peaks of eight bundles give 3.5 to 5.0 after the base, and it
 under-counts by at most 1%); 5.5 is the margin."""
-PEAK_MB_PER_THOUSAND_LINES = 4.0
-"""The largest measured cost is 3.8 MB per 1,000 lines (27,504 lines of Heedvane API code); 4.0 is the
-margin."""
+PEAK_MB_PER_MB_OF_CODE = 80.0
+"""The largest measured cost is 75 MB per MB (55,000 dense TypeScript lines of 45 operands); 80 is the
+margin. The fit is in ``fit-table-punctuation-5.5.md``."""
+CODE_LINE_BYTES = 10_000
+"""A line up to this long counts as code for the size term."""
 PUNCTUATION = frozenset(b"{}();,[]")
 _NOT_PUNCTUATION = bytes(set(range(256)) - PUNCTUATION)
 MAX_PARSE_PEAK_MB = 250.0
-"""A file whose estimated parse peak exceeds this is never parsed. The largest parse measured under it
-peaked at 122 MB, and ast-grep scans files in parallel, so several can be in memory at once."""
+"""The most a file may take to be parsed side by side with others: ast-grep scans files in parallel, so
+several can be in memory at once. A file over it is parsed alone, when it fits the single-file limit,
+or refused."""
 
 
 def _safe_size_bytes() -> int:
-    """The largest size whose worst case stays under the bound: every byte a line (lines cannot exceed
-    bytes plus one) and every byte punctuation on one line (the sum of the squared line counts is at most
-    the square of the file's size). Solves base + lines x + punctuation x^2 = bound, x in thousands."""
-    lines, punctuation = PEAK_MB_PER_THOUSAND_LINES, PEAK_MB_PER_SQUARED_THOUSAND_PUNCTUATION
-    room = MAX_PARSE_PEAK_MB - BASE_PEAK_MB - lines / 1000
-    return int(1000 * (-lines + (lines * lines + 4 * punctuation * room) ** 0.5) / (2 * punctuation))
+    """The largest size whose worst case stays under the bound: every byte code and every byte
+    punctuation on one line (the sum of the squared line counts is at most the square of the file's
+    size). Solves base + code x + punctuation x^2 = bound, x in thousands of bytes."""
+    code, punctuation = PEAK_MB_PER_MB_OF_CODE / 1000, PEAK_MB_PER_SQUARED_THOUSAND_PUNCTUATION
+    room = MAX_PARSE_PEAK_MB - BASE_PEAK_MB
+    return int(1000 * (-code + (code * code + 4 * punctuation * room) ** 0.5) / (2 * punctuation))
 
 
 PARSEABLE_UP_TO_BYTES = _safe_size_bytes()
-"""A file this small can never be over the bound, whatever its lines. The size alone clears it, without
-a read."""
+"""A file this small can never be over the side-by-side bound, whatever its lines. The size alone
+clears it, without a read."""
+
+
+class Placement(StrEnum):
+    """How the door parses a file: beside others, alone, or not at all."""
+
+    SIDE_BY_SIDE = "side_by_side"
+    ALONE = "alone"
+    REFUSED = "refused"
 
 
 LONG_LINE_CHARS = 10_000
@@ -70,6 +83,7 @@ class FileShape:
     line_count: int
     longest_line: int
     squared_thousands_of_punctuation: float
+    code_bytes: int
 
     @property
     def chars_per_line(self) -> float:
@@ -79,7 +93,7 @@ class FileShape:
     def parse_peak_mb(self) -> float:
         return (
             BASE_PEAK_MB
-            + PEAK_MB_PER_THOUSAND_LINES * self.line_count / 1000
+            + PEAK_MB_PER_MB_OF_CODE * self.code_bytes / 1_000_000
             + PEAK_MB_PER_SQUARED_THOUSAND_PUNCTUATION * self.squared_thousands_of_punctuation
         )
 
@@ -96,15 +110,22 @@ class FileShape:
         return tuple(trigger for trigger, tripped in fired if tripped)
 
     @property
-    def too_large_to_parse(self) -> bool:
-        return self.parse_peak_mb > MAX_PARSE_PEAK_MB
+    def fits_side_by_side(self) -> bool:
+        return self.parse_peak_mb <= MAX_PARSE_PEAK_MB
 
-    @property
-    def refusal(self) -> str | None:
-        if not self.too_large_to_parse:
+    def placement(self, single_parse_limit_mb: float) -> Placement:
+        """Side by side within ``MAX_PARSE_PEAK_MB``, alone within ``single_parse_limit_mb``, else refused."""
+        if self.fits_side_by_side:
+            return Placement.SIDE_BY_SIDE
+        return Placement.ALONE if self.parse_peak_mb <= single_parse_limit_mb else Placement.REFUSED
+
+    def refusal(self, single_parse_limit_mb: float) -> str | None:
+        """Why the file is not parsed at all, or None when it is parsed side by side or alone."""
+        if self.placement(single_parse_limit_mb) is not Placement.REFUSED:
             return None
         return (
-            f"too large to parse: estimated parse peak {_peak_text(self.parse_peak_mb)}, "
+            f"too large to parse: estimated parse peak {_peak_text(self.parse_peak_mb)}, over the "
+            f"{_peak_text(max(single_parse_limit_mb, MAX_PARSE_PEAK_MB))} one file may take, "
             f"{_counted(self.line_count, 'line')}, longest line {self.longest_line:,} bytes"
         )
 
@@ -114,12 +135,14 @@ def shape_of(root: Path, path: str) -> FileShape:
     return measure((root / path).read_bytes())
 
 
-def refusal_of(root: Path, path: str) -> str | None:
-    """Why the file must not be parsed, or None. A file small enough to be safe by size is not read."""
+def placement_of(root: Path, path: str, single_parse_limit_mb: float) -> tuple[Placement, str | None]:
+    """How to parse the file, with the refusal when it is not parsed at all. A file small enough to be
+    safe by size is placed side by side without a read."""
     file = root / path
     if file.stat().st_size <= PARSEABLE_UP_TO_BYTES:
-        return None
-    return measure(file.read_bytes()).refusal
+        return Placement.SIDE_BY_SIDE, None
+    shape = measure(file.read_bytes())
+    return shape.placement(single_parse_limit_mb), shape.refusal(single_parse_limit_mb)
 
 
 def measure(content: bytes) -> FileShape:
@@ -130,6 +153,7 @@ def measure(content: bytes) -> FileShape:
         line_count=len(lines) - 1 if lines[-1] == b"" else len(lines),
         longest_line=max(len(line) for line in lines),
         squared_thousands_of_punctuation=sum(_punctuation_in(line) ** 2 for line in lines) / 1_000_000,
+        code_bytes=sum(len(line) for line in lines if len(line) <= CODE_LINE_BYTES),
     )
 
 
