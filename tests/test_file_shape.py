@@ -45,31 +45,40 @@ def test_the_estimate_follows_the_punctuation_of_a_line_not_its_length() -> None
     assert minified_code.parse_peak_mb > 1_000
 
 
-def test_short_lines_cost_by_how_many_there_are() -> None:
-    # Measured on 04.10.2026: ordinary code peaks at about 3 to 4 MB per 1,000 lines once it is parsed
+def test_code_of_short_lines_costs_by_its_size() -> None:
+    # Measured on 04.10.2026: ordinary and dense code peaks at 53 to 75 MB per MB once it is parsed
     statement = b"    total = compute(items, limit)\n"
 
-    under = measure(statement * 50_000)
-    over = measure(statement * 60_000)
+    side_by_side = measure(statement * 80_000)
+    over = measure(statement * 90_000)
 
-    assert not under.too_large_to_parse
+    assert not side_by_side.too_large_to_parse
     assert over.too_large_to_parse
-    assert over.refusal is not None and "60,000 lines" in over.refusal
+    assert over.refusal is not None and "90,000 lines" in over.refusal
 
 
-def test_every_measured_short_line_file_is_estimated_at_or_above_its_real_peak() -> None:
-    # (lines, real peak in MB) of the 04.10.2026 short-line census: Heedvane TypeScript and saleor Python
+def test_every_measured_file_of_short_lines_is_estimated_at_or_above_its_real_peak() -> None:
+    # (bytes of code, ast-grep's real peak in MB), 04.10.2026: Heedvane TypeScript repeated, saleor
+    # Python joined, and 55,000 dense lines of 45 operands in each language
     measured = [
-        (27_504, 130.2),
-        (53_922, 218.3),
-        (105_521, 362.8),
-        (184_661, 614.1),
-        (34_251, 131.7),
-        (171_255, 496.8),
+        (1_170_000, 90.5),
+        (2_300_000, 161.8),
+        (8_050_000, 480.8),
+        (1_210_000, 92.1),
+        (6_030_000, 387.0),
+        (14_620_000, 909.0),
+        (14_890_000, 1142.1),
     ]
 
-    for lines, real_peak in measured:
-        assert measure(b"x\n" * lines).parse_peak_mb >= real_peak
+    dense_line = b"v = " + b" + ".join(b"a%d" % operand for operand in range(45)) + b"\n"
+    for code_bytes, real_peak in measured:
+        assert measure(dense_line * (code_bytes // len(dense_line))).parse_peak_mb >= real_peak
+
+
+def test_a_line_of_one_long_string_is_priced_by_its_punctuation_not_its_size() -> None:
+    path = b'  d="' + b"M708 195.8c.4-1.5.8-3.5 2-4.7 " * 80_000 + b'"\n'
+
+    assert measure(b"<path\n" + path + b"/>\n").parse_peak_mb < 30
 
 
 def test_the_bound_for_a_one_line_bundle_sits_between_25000_and_32000_characters() -> None:

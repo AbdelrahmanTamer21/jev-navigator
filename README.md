@@ -326,8 +326,8 @@ unavailable. So is a file too large to parse safely:
 `tools.ast_grep_rules`, the one door every parse passes through, never hands ast-grep a file whose
 estimated parse peak (from the punctuation `{}();,[]` on each line, `index/file_shape.py`) is over
 250 MB, about 6,400 of those marks on one line, which a minified bundle reaches at a few tens of
-kilobytes. Ordinary code adds about 4 MB per 1,000 lines, so a file of more than about 56,000 short
-lines is refused as well. A large file that cannot be read to measure it is refused too, with the
+kilobytes. Code adds about 80 MB per MB, counting every line of up to 10,000 bytes, so a file of more than
+about 2.8 MB of code is refused as well. A large file that cannot be read to measure it is refused too, with the
 error. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
 peak and the longest line in bytes. A refused file is never recorded as parsed: it stays readable and
 searchable as text, it keeps its path in import relations (also as a re-export target), a name its
