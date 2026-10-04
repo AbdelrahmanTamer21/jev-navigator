@@ -115,6 +115,7 @@ typesafe = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "jev-navigator", extra = ["typesafe"] },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -125,6 +126,7 @@ provides-extras = ["typesafe"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "jev-navigator", extras = ["typesafe"] },
     { name = "pytest" },
     { name = "ruff" },
 ]
