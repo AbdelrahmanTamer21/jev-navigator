@@ -919,9 +919,9 @@ def _set_aside_unasked(search: _Search, opening: _Opening, reason: str) -> None:
 
 
 def _set_aside_cancelled(search: _Search, unmerged: list[_Opening]) -> None:
-    """A Ctrl-C between a round's answers arriving and their merge, such as while the round's pool
-    shuts down, leaves its places opened but unrecorded; they go back to the frontier, and Resume
-    replays their stored answers."""
+    """A Ctrl-C after a round's places were opened and before its answers were merged, such as
+    while its pool starts or shuts down, leaves those places opened but unrecorded; they go back to
+    the frontier, and Resume asks them or replays their stored answers."""
     for opening in unmerged:
         _set_aside_unasked(search, opening, "cancelled")
 

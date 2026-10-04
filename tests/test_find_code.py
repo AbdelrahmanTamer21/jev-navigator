@@ -1071,6 +1071,44 @@ def test_interrupt_while_submitting_a_round_keeps_every_place_resumable_or_recor
     assert accounted == {place.key for place in places}
 
 
+def test_interrupt_after_opening_a_round_before_asking_it_restores_every_opened_place(
+    sample_index: CodeIndex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    from concurrent.futures import ThreadPoolExecutor
+
+    from jev_navigator.directives import find_code as find_code_module
+
+    class InterruptedWhileCreatingThePool(ThreadPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(find_code_module, "ThreadPoolExecutor", InterruptedWhileCreatingThePool)
+    places = [
+        function_place(sample_index, sample_index.find_definition(name)[0])
+        for name in ("check_limits", "validate_order")
+    ]
+
+    # Act
+    cancelled = find_code(
+        sample_index,
+        Judge(ScriptedJevClient()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=2),
+        moves={},
+        initial_candidates=[(place, 1.0) for place in places],
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert {(entry.place_key, entry.reason) for entry in cancelled.not_inspected} == {
+        (place.key, "cancelled") for place in places
+    }
+    assert not cancelled.visited & {place.key for place in places}
+    assert cancelled.steps == 0
+
+
 def test_interrupt_while_recording_a_round_choice_restores_the_popped_place(
     sample_index: CodeIndex,
 ) -> None:
