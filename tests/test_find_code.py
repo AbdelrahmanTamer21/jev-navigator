@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import errno
 import os
 import re
@@ -14,7 +15,14 @@ from pathlib import Path
 import pytest
 from git_repos import commit_files
 
-from jev_navigator.directives.find_code import OPEN_FIRST, Outcome, SearchBudget, StopRule, find_code
+from jev_navigator.directives.find_code import (
+    OPEN_FIRST,
+    Outcome,
+    SearchBudget,
+    StopRule,
+    find_code,
+    find_code_async,
+)
 from jev_navigator.directives.places import (
     MOVES,
     Place,
@@ -46,6 +54,16 @@ def scripted(
         return could_contain(state["candidates"][int(slot.group(1))]["signature"])
 
     return answer
+
+
+def find_with(entry: str):
+    """``find_code`` itself, or ``find_code_async`` run to completion with the same arguments."""
+    if entry == "sync":
+        return find_code
+    return lambda *args, **kwargs: asyncio.run(find_code_async(*args, **kwargs))
+
+
+ENTRY_POINTS = pytest.mark.parametrize("entry", ["sync", "async"])
 
 
 def start_at_place(index: CodeIndex) -> list[Place]:
@@ -1073,6 +1091,44 @@ def test_interrupt_while_submitting_a_round_accounts_for_every_place_of_the_beam
     assert accounted == {place.key for place in places}
 
 
+def test_interrupt_after_opening_a_round_before_asking_it_restores_every_opened_place(
+    sample_index: CodeIndex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    from concurrent.futures import ThreadPoolExecutor
+
+    from jev_navigator.directives import find_code as find_code_module
+
+    class InterruptedWhileCreatingThePool(ThreadPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(find_code_module, "ThreadPoolExecutor", InterruptedWhileCreatingThePool)
+    places = [
+        function_place(sample_index, sample_index.find_definition(name)[0])
+        for name in ("check_limits", "validate_order")
+    ]
+
+    # Act
+    cancelled = find_code(
+        sample_index,
+        Judge(ScriptedJevClient()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=2),
+        moves={},
+        initial_candidates=[(place, 1.0) for place in places],
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert {(entry.place_key, entry.reason) for entry in cancelled.not_inspected} == {
+        (place.key, "cancelled") for place in places
+    }
+    assert not cancelled.visited & {place.key for place in places}
+    assert cancelled.steps == 0
+
+
 def test_interrupt_while_recording_a_round_choice_restores_the_popped_place(
     sample_index: CodeIndex,
 ) -> None:
@@ -1188,25 +1244,29 @@ def _search_two_places_while_one_is_interrupted(
     )
 
 
-def test_a_provider_error_during_cancellation_comes_out_as_that_error(tmp_path: Path) -> None:
+def test_a_provider_error_during_cancellation_ends_the_search_failed_with_that_error(tmp_path: Path) -> None:
     # Arrange
     cause = ConnectionResetError("connection reset by peer")
     error = ProviderError("Jev answered 503")
     error.__cause__ = cause
     client = FailsWhileCancelling(on_abort=error)
-    _, search = _search_two_places_while_one_is_interrupted(tmp_path, client)
+    places, search = _search_two_places_while_one_is_interrupted(tmp_path, client)
 
     # Act
-    with pytest.raises(ProviderError) as raised:
-        search()
+    failed = search()
 
     # Assert
     assert client.cancelled.is_set()
-    assert raised.value is error
-    assert raised.value.__cause__ is cause
+    assert failed.outcome == Outcome.FAILED
+    assert failed.failure is error
+    assert failed.failure.__cause__ is cause
+    assert {(entry.place_key, entry.reason) for entry in failed.not_inspected} == {
+        (places[0].key, "cancelled"),
+        (places[1].key, "failed"),
+    }
 
 
-def test_a_full_disk_while_storing_an_answer_during_cancellation_comes_out_as_that_error(
+def test_a_full_disk_while_storing_an_answer_during_cancellation_ends_the_search_failed_with_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Arrange
@@ -1223,12 +1283,77 @@ def test_a_full_disk_while_storing_an_answer_during_cancellation_comes_out_as_th
     )
 
     # Act
-    with pytest.raises(OSError) as raised:
-        search()
+    failed = search()
 
     # Assert
     assert client.cancelled.is_set()
-    assert raised.value is disk_full
+    assert failed.outcome == Outcome.FAILED
+    assert failed.failure is disk_full
+
+
+class FailsOnce:
+    """Answers like ``script``, except that the first request about ``failing`` code raises
+    ``error``; asked again, that request is answered. Records every request it receives."""
+
+    def __init__(self, script: ScriptedJevClient, failing: str, error: Exception) -> None:
+        self.script = script
+        self.failing = failing
+        self.error: Exception | None = error
+        self.requests: list[tuple[Mapping, Mapping]] = []
+        self.model = script.model
+
+    def ask(self, state, questions):
+        self.requests.append((state, questions))
+        if self.error is not None and state["slice"]["code"] == self.failing:
+            error, self.error = self.error, None
+            raise error
+        return self.script.ask(state, questions)
+
+
+@ENTRY_POINTS
+def test_a_provider_failure_ends_the_search_failed_and_its_resume_finishes_it(
+    tmp_path: Path, entry: str
+) -> None:
+    # Arrange
+    (tmp_path / "places.txt").write_text("first\nsecond\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
+    error = ProviderError("Jev answered 503")
+    error.__cause__ = ConnectionResetError("connection reset by peer")
+    script = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.95 if code == "second" else 0.05, could_contain=lambda signature: 0.05
+        )
+    )
+    client = FailsOnce(script, "second", error)
+    store = JsonlAnswerStore(tmp_path / "answers.jsonl")
+
+    def search(resume=None):
+        return find_with(entry)(
+            index,
+            Judge(client, store=store),
+            TARGET,
+            [],
+            budget=SearchBudget(beam_width=2),
+            moves={},
+            initial_candidates=[] if resume else [(place, 1.0) for place in places],
+            resume=resume,
+        )
+
+    # Act
+    failed = search()
+    resumed = search(resume=failed)
+
+    # Assert
+    assert failed.outcome == Outcome.FAILED
+    assert failed.failure is error
+    assert [visit.place_key for visit in failed.searched] == [places[0].key]
+    assert [(entry.place_key, entry.reason) for entry in failed.not_inspected] == [(places[1].key, "failed")]
+    assert resumed.outcome == Outcome.FOUND
+    assert resumed.failure is None
+    assert [visit.place_key for visit in resumed.found] == [places[1].key]
+    asked = [state["slice"]["code"] for state, _ in client.requests]
+    assert sorted(asked) == ["first", "second", "second"]
 
 
 def test_a_send_the_interrupt_aborted_is_set_aside_as_cancelled(tmp_path: Path) -> None:
@@ -1245,6 +1370,122 @@ def test_a_send_the_interrupt_aborted_is_set_aside_as_cancelled(tmp_path: Path) 
     assert {(entry.place_key, entry.reason) for entry in cancelled.not_inspected} == {
         (place.key, "cancelled") for place in places
     }
+
+
+def test_an_interrupt_after_a_round_is_merged_keeps_its_place_merged_once(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "places.txt").write_text("first\nsecond\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
+    stop_rule = IS_DONE
+
+    class InterruptedAtTheStopCheck:
+        model = "interrupted-at-the-stop-check"
+
+        def ask(self, state, questions):
+            if any(question_id.startswith("is_done") for question_id in questions):
+                raise KeyboardInterrupt
+            return ScriptedJevClient(default_noul=0.05).ask(state, questions)
+
+    # Act
+    cancelled = find_code(
+        index,
+        Judge(InterruptedAtTheStopCheck()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        initial_candidates=[(place, 1.0) for place in places],
+        stop_rule=stop_rule,
+    )
+
+    # Assert
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert [visit.place_key for visit in cancelled.searched] == [places[0].key]
+    assert [entry.place_key for entry in cancelled.not_inspected] == [places[1].key]
+    assert cancelled.steps == 1
+
+
+IS_DONE = StopRule(Check("is_done", "Is the search done?", Criterion("Yes."), Criterion("No.")))
+
+
+class FailsOnEveryRequest:
+    """A provider that is down: every request fails, the stop check's included."""
+
+    model = "down"
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.questions: list[Mapping] = []
+
+    def ask(self, state, questions):
+        del state
+        self.questions.append(questions)
+        raise self.error
+
+
+@ENTRY_POINTS
+def test_a_failed_round_ends_the_search_failed_without_asking_the_stop_rule(
+    tmp_path: Path, entry: str
+) -> None:
+    # Arrange
+    (tmp_path / "places.txt").write_text("first\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    place = range_place(index, "places.txt", 1, 1, "candidate")
+    error = ProviderError("Jev answered 503")
+    client = FailsOnEveryRequest(error)
+
+    # Act
+    failed = find_with(entry)(
+        index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        initial_candidates=[(place, 1.0)],
+        stop_rule=IS_DONE,
+    )
+
+    # Assert
+    assert failed.outcome == Outcome.FAILED
+    assert failed.failure is error
+    assert not any(question_id.startswith("is_done") for asked in client.questions for question_id in asked)
+
+
+@ENTRY_POINTS
+def test_a_failed_stop_check_ends_the_search_failed_with_its_error(tmp_path: Path, entry: str) -> None:
+    # Arrange
+    (tmp_path / "places.txt").write_text("first\nsecond\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
+    error = ProviderError("Jev answered 503")
+
+    class FailsAtTheStopCheck:
+        model = "fails-at-the-stop-check"
+
+        def ask(self, state, questions):
+            if any(question_id.startswith("is_done") for question_id in questions):
+                raise error
+            return ScriptedJevClient(default_noul=0.05).ask(state, questions)
+
+    # Act
+    failed = find_with(entry)(
+        index,
+        Judge(FailsAtTheStopCheck()),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=1),
+        moves={},
+        initial_candidates=[(place, 1.0) for place in places],
+        stop_rule=IS_DONE,
+    )
+
+    # Assert
+    assert failed.outcome == Outcome.FAILED
+    assert failed.failure is error
+    assert [visit.place_key for visit in failed.searched] == [places[0].key]
+    assert [entry.place_key for entry in failed.not_inspected] == [places[1].key]
 
 
 def test_the_result_and_the_stop_step_name_the_moves_the_search_used(sample_index: CodeIndex) -> None:
@@ -1581,7 +1822,7 @@ def test_an_interrupt_after_a_beam_is_asked_and_before_it_is_merged_keeps_its_pl
     assert resumed.found[0].place_key == target.key
 
 
-def test_a_real_error_that_settled_before_the_interrupt_is_raised_not_labelled_cancelled(
+def test_a_real_error_that_settled_before_the_interrupt_ends_the_search_failed_not_cancelled(
     sample_index: CodeIndex,
 ) -> None:
     # Arrange: the second place's request fails at once while the search waits for the first, which
@@ -1613,18 +1854,22 @@ def test_a_real_error_that_settled_before_the_interrupt_is_raised_not_labelled_c
     interrupter = threading.Thread(target=interrupt_once_the_error_settled)
     interrupter.start()
 
-    # Act and Assert
+    # Act
     try:
-        with pytest.raises(OSError, match="disk full"):
-            find_code(
-                sample_index,
-                Judge(OneFailsOneHangs()),
-                TARGET,
-                [],
-                budget=SearchBudget(beam_width=2),
-                moves={},
-                initial_candidates=[(place, 1.0) for place in places],
-            )
+        result = find_code(
+            sample_index,
+            Judge(OneFailsOneHangs()),
+            TARGET,
+            [],
+            budget=SearchBudget(beam_width=2),
+            moves={},
+            initial_candidates=[(place, 1.0) for place in places],
+        )
     finally:
         cancelled.set()
         interrupter.join()
+
+    # Assert
+    assert result.outcome == Outcome.FAILED
+    assert isinstance(result.failure, OSError)
+    assert str(result.failure) == "disk full"
