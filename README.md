@@ -386,6 +386,12 @@ else:
   under dist/" and its measured facts. Anywhere else it stays in `files`, counted toward the cap, and
   is listed in `resolved.awaiting_generated_judgment` with its measured facts, for Jev to judge. With
   `with_generated` nothing is measured and nothing awaits a judgment.
+- `judgments.generated_files.judge_generated_files(judge, index, resolved.awaiting_generated_judgment)`
+  asks Jev about those files, one question each: is the file generated, meaning no person edits it as
+  source? Each file is sent as its path, its measured facts, up to 10 files that import it with their
+  true count, and two 2,000-character excerpts (the opening and the middle). A file the secret scan
+  would refuse is never sent and comes back in `not_judged` with the reason. Nothing calls it yet: the
+  search that acts on the answers lands with Find v2's round controller.
 - `include` and `exclude` entries without `*`, `?` or `[` are folders or files. Other entries are
   globs over the whole path: `**` crosses folders, and a glob without `/` matches the file name at any
   depth unless a leading `/` anchors it at the root.
