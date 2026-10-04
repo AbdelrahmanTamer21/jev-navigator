@@ -211,6 +211,25 @@ def test_a_repositorys_custom_language_library_is_never_loaded(tmp_path: Path) -
     assert [match["file"] for match in matches] == ["a.ts"]
 
 
+def test_comment_scanning_never_reads_the_repositorys_own_sgconfig(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    commit_files(
+        repository,
+        {
+            "a.ts": "// explains why admit exists\nexport function admit() { return 1 }\n",
+            "sgconfig.yml": (
+                "customLanguages:\n  mylang:\n    libraryPath: ./missing.so\n    extensions: [my]\n"
+            ),
+        },
+    )
+    index = CodeIndex.from_git(repository, fact_cache_dir=tmp_path / "facts")
+
+    found = find_comments(index)
+
+    assert found.refused_files == {}
+    assert [block.span.file for block in found.kept] == ["a.ts"]
+
+
 def test_a_config_passed_by_the_caller_replaces_the_repositorys_config_and_is_not_merged_with_it(
     tmp_path: Path,
 ) -> None:

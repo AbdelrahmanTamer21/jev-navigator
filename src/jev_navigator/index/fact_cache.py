@@ -10,19 +10,20 @@ from functools import cache
 from pathlib import Path
 
 from ..cache_root import cache_root
-from . import imports, languages, scope_scan, spans
+from . import imports, languages, scope_scan, spans, tools
 from .languages import FLOW_LANGUAGE, FLOW_SGCONFIG, parse_language
 from .scope_scan import CallMatch, FileFacts, FileStructure, ReferenceMatch, fact_rules
 from .spans import Span
 from .tools import ast_grep_version
 
-_MODULES_THAT_READ_MATCHES = (scope_scan, languages, imports, spans)
+_MODULES_THAT_READ_MATCHES = (scope_scan, languages, imports, spans, tools)
 
 
 class FactCache:
     """Facts keyed by the file's bytes, its language, the ast-grep version, the rule text a scan of
-    that language sends, and the source of the code that turns matches into facts. Any change to
-    one of them is a cache miss, so no version string needs bumping by hand."""
+    that language sends, and the source of the code that runs ast-grep (``tools``: its config and
+    flags) and turns matches into facts. Any change to one of them is a cache miss, so no version
+    string needs bumping by hand, and facts a differently configured door produced are never served."""
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = root or user_fact_cache()
