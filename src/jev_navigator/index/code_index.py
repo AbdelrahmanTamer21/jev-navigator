@@ -830,8 +830,10 @@ class CodeIndex:
         keyed by their own hash instead, unless table rows of the listed blob were already answered
         for the file."""
         listed = self._listed_blobs.get(file)
+        if listed is None:
+            return True
         actual = git_blob_id(content)
-        if listed is None or actual == listed:
+        if actual == listed:
             return True
         if self._entries is not None and file in self._entries:
             return False
