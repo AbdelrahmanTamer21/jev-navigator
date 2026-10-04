@@ -590,12 +590,15 @@ class CodeIndex:
             self._unwritten = {}
 
     def _facts_in(self, file: str) -> FileFacts:
+        """The file counts as reached once its facts are known: a parse stopped partway, by JVN's memory
+        limit or an interrupt, reaches nothing."""
         self._require_in_scope(file)
+        facts = self._facts.get(file)
+        if facts is None:
+            self._ensure_facts((file,))
+            facts = self._facts.get(file, FileFacts(_NO_STRUCTURE, (), ()))
         self._reached.add(file)
-        if (known := self._facts.get(file)) is not None:
-            return known
-        self._ensure_facts((file,))
-        return self._facts.get(file, FileFacts(_NO_STRUCTURE, (), ()))
+        return facts
 
     def _ensure_facts(self, files: Sequence[str]) -> None:
         with self._facts_lock:
