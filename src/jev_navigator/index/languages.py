@@ -105,17 +105,26 @@ COMMONJS_EXPORTS_OBJECT = (
 )
 COMMONJS_EXPORT_PAIR = f"{{kind: pair, inside: {COMMONJS_EXPORTS_OBJECT}}}"
 
+# ast-grep prints every node a rule's relations match, so a relation to a large ancestor (the
+# program, a module statement, an object literal) printed that ancestor once per match, and the
+# parser's output grew with matches times file size. Every such relation sits under a double
+# negation, `not: {not: ...}`: it holds the same and prints only the match.
+#
 # Module-level declarations by what may name them, each a rule per grammar that has such
 # declarations: a type alias or interface only a type, a constant or variable only a value, and an
 # enum or a Python assignment (which may be a type alias) both.
-_MODULE_VARIABLES = "{kind: lexical_declaration, inside: {any: [{kind: program}, {kind: export_statement}]}}"
+_MODULE_VARIABLES = (
+    "{kind: lexical_declaration, not: {not: {inside: {any: [{kind: program}, {kind: export_statement}]}}}}"
+)
 _SCRIPT_TYPES = "  any: [{kind: type_alias_declaration}, {kind: interface_declaration}]"
 _SCRIPT_VALUES = f"  any: [{_MODULE_VARIABLES}]"
 _SCRIPT_ENUMS = "  kind: enum_declaration"
 TYPE_DECLARATIONS = {"typescript": _SCRIPT_TYPES, "tsx": _SCRIPT_TYPES}
 VALUE_DECLARATIONS = {"typescript": _SCRIPT_VALUES, "tsx": _SCRIPT_VALUES, "javascript": _SCRIPT_VALUES}
 TYPE_AND_VALUE_DECLARATIONS = {
-    "python": "  kind: assignment\n  inside: {kind: expression_statement, inside: {kind: module}}",
+    "python": (
+        "  kind: assignment\n  not: {not: {inside: {kind: expression_statement, inside: {kind: module}}}}"
+    ),
     "typescript": _SCRIPT_ENUMS,
     "tsx": _SCRIPT_ENUMS,
 }
@@ -140,30 +149,39 @@ _PATTERN_EXCLUSIONS = """  not:
             - has: {field: value, kind: call_expression, has: {field: function, regex: '^require$'}}"""
 _SCRIPT_NAME_KINDS = "{kind: identifier}, {kind: shorthand_property_identifier_pattern}"
 _SCRIPT_DECLARED_NAMES = f"""  any: [{_SCRIPT_NAME_KINDS}]
-  inside:
-    stopBy: end
-    field: name
-    kind: variable_declarator
-    inside: {_MODULE_VARIABLES}
+  all:
+    - not:
+        not:
+          inside:
+            stopBy: end
+            field: name
+            kind: variable_declarator
+            inside: {_MODULE_VARIABLES}
 {_PATTERN_EXCLUSIONS}"""
 _TYPED_SCRIPT_DECLARED_NAMES = f"""  any: [{_SCRIPT_NAME_KINDS}, {{kind: type_identifier}}]
-  inside:
-    stopBy: end
-    field: name
-    any:
-      - kind: variable_declarator
-        inside: {_MODULE_VARIABLES}
-      - kind: type_alias_declaration
-      - kind: interface_declaration
-      - kind: enum_declaration
+  all:
+    - not:
+        not:
+          inside:
+            stopBy: end
+            field: name
+            any:
+              - kind: variable_declarator
+                inside: {_MODULE_VARIABLES}
+              - kind: type_alias_declaration
+              - kind: interface_declaration
+              - kind: enum_declaration
 {_PATTERN_EXCLUSIONS}"""
 DECLARED_NAME_RULES = {
     "python": """  kind: identifier
-  inside:
-    stopBy: end
-    field: left
-    kind: assignment
-    inside: {stopBy: end, kind: expression_statement, inside: {kind: module}}
+  all:
+    - not:
+        not:
+          inside:
+            stopBy: end
+            field: left
+            kind: assignment
+            inside: {stopBy: end, kind: expression_statement, inside: {kind: module}}
   not:
     inside: {stopBy: end, any: [{kind: attribute}, {kind: subscript}]}""",
     "typescript": _TYPED_SCRIPT_DECLARED_NAMES,

@@ -247,18 +247,38 @@ def test_scan_facts_skips_unsupported_files_and_still_parses_supported_files(tmp
     assert mixed["notes.md"] == empty
 
 
+def _many(template: str, count: int = 300) -> str:
+    return "".join(template.format(n=n) for n in range(count))
+
+
 @pytest.mark.parametrize(
-    ("file", "declaration"),
-    [("module.ts", "const value{n} = {n};\n"), ("module.py", "value{n} = {n}\n")],
+    ("file", "source"),
+    [
+        (
+            "module.ts",
+            _many("const a{n} = {n}, b{n} = {n};\nexport type T{n} = string;\n")
+            + "const api = {\n"
+            + _many("  m{n}() {{ return {n}; }},\n")
+            + "};\n",
+        ),
+        (
+            "module.js",
+            _many("const {{ c{n} }} = settings;\nfoo.p{n} = function () {{ return {n}; }};\n")
+            + "module.exports = {\n"
+            + _many("  e{n}() {{ return {n}; }},\n")
+            + "};\n",
+        ),
+        ("module.py", _many("first{n}, second{n} = {n}, {n}\napp.debug{n} = True\n")),
+    ],
+    ids=["typescript", "javascript", "python"],
 )
-def test_a_module_declaration_is_printed_without_the_whole_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str, declaration: str
+def test_no_fact_rule_prints_more_than_the_node_it_matched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str, source: str
 ) -> None:
-    """ast-grep prints every node a rule's relations matched. A rule asking whether a declaration sits
-    in the program printed the whole file once per declaration, so the parser's output, and its
-    memory, grew with declarations times file size: 1.2 MB of ordinary code peaked over 2.5 GB."""
+    """ast-grep prints every node a rule's relations match. A relation to a large ancestor, such as
+    the program, a module statement or an object literal, printed that ancestor once per match, so
+    the parser's output and memory grew with matches times file size."""
     # Arrange
-    source = "".join(declaration.format(n=n) for n in range(400))
     (tmp_path / file).write_text(source)
     printed: list[dict] = []
     original_rules = tools.ast_grep_rules
@@ -271,12 +291,14 @@ def test_a_module_declaration_is_printed_without_the_whole_file(
     monkeypatch.setattr(tools, "ast_grep_rules", recorded_rules)
 
     # Act
-    facts = scan_facts([file], tmp_path, lambda path: source.splitlines(), Unparsed())
+    scan_facts([file], tmp_path, lambda path: source.splitlines(), Unparsed())
 
     # Assert
-    declarations = [match for match in printed if match["ruleId"] == "declaration"]
-    assert len(facts[file].structure.declarations) == len(declarations) == 400
-    assert all(len(json.dumps(match)) < len(source) for match in declarations)
+    oversized = {
+        match["ruleId"] for match in printed if len(json.dumps(match)) > 2_000 + 3 * len(match["text"])
+    }
+    assert printed
+    assert oversized == set()
 
 
 def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_path: Path) -> None:

@@ -425,7 +425,7 @@ def _property_rules(language: str) -> list[str]:
     export = (
         "  any:\n"
         f"    - {{any: {symbols}, {_held_past_wrappers(language, COMMONJS_EXPORT_TARGET)}}}\n"
-        f"    - {{kind: method_definition, inside: {COMMONJS_EXPORTS_OBJECT}}}\n"
+        f"    - {{kind: method_definition, not: {{not: {{inside: {COMMONJS_EXPORTS_OBJECT}}}}}}}\n"
         f"    - {{any: {expressions}, {_held_past_wrappers(language, COMMONJS_EXPORT_PAIR)}}}"
     )
     return [
@@ -439,8 +439,9 @@ def _property_rules(language: str) -> list[str]:
 
 
 def _held_past_wrappers(language: str, holder: str) -> str:
-    """An ``inside`` relation: the first ancestor no wrapper (see ``NAME_WRAPPERS``) is ``holder``."""
-    return f"inside: {{stopBy: {_past_wrappers(language)}, any: [{holder}]}}"
+    """A condition, printed by no match (see ``languages``): the first ancestor no wrapper (see
+    ``NAME_WRAPPERS``) is ``holder``."""
+    return f"not: {{not: {{inside: {{stopBy: {_past_wrappers(language)}, any: [{holder}]}}}}}}"
 
 
 def _past_wrappers(language: str) -> str:
@@ -453,7 +454,9 @@ def _object_member_rule(language: str) -> str:
     symbols = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language]))
     objects = _kinds(OBJECT_KINDS[language])
     return _rule_document(
-        _OBJECT_MEMBER_RULE, language, f"  any: {symbols}\n  inside:\n    stopBy: end\n    any: {objects}"
+        _OBJECT_MEMBER_RULE,
+        language,
+        f"  any: {symbols}\n  not: {{not: {{inside: {{stopBy: end, any: {objects}}}}}}}",
     )
 
 
