@@ -116,6 +116,7 @@ class CodeIndex:
         self._entries: dict[str, FileEntry] | None = None
         self._files_by_blob: dict[str, tuple[str, ...]] = {}
         self._file_order: dict[str, int] = {}
+        self._reached: set[str] = set()
         self._named = cache(self._places_named)
         self._text_hits = cache(self._search_text)
         self._co_changes = cache(self._read_co_changes)
@@ -239,28 +240,31 @@ class CodeIndex:
     @property
     def unparsed_files(self) -> frozenset[str]:
         """Files whose grammar reports ERROR nodes, after ensuring every available file has facts."""
-        self._ensure_facts(self._available_files(self._code_files))
+        available = self._available_files(self._code_files)
+        self._ensure_facts(available)
+        self._reached.update(available)
         return self._unparsed.files
 
     @property
     def observed_unparsed_files(self) -> frozenset[str]:
-        """Files found unparsed by scans that navigation actually needed, and, once a name lookup
-        covered the scope, every file the name table records as only partly parsed.
+        """Files found only partly parsed among those navigation actually reached.
 
         Unlike ``unparsed_files``, this receipt never starts another repository-wide scan. Pair it
         with ``parser_scans_pending`` before making any claim about the whole scope.
         """
-        return self._unparsed.files | self._incomplete_in_table()
+        return self._known_unparsed() & self._reached
 
-    def _incomplete_in_table(self) -> frozenset[str]:
+    def _known_unparsed(self) -> frozenset[str]:
+        """Every file known to be only partly parsed: scanned so far, or recorded so in the table."""
         entries = self._entries or {}
-        return frozenset(file for file, entry in entries.items() if entry.incomplete)
+        return self._unparsed.files | {file for file, entry in entries.items() if entry.incomplete}
 
     @property
     def parsed_files(self) -> frozenset[str]:
-        """Files navigation has parsed so far, never one it refused to parse; reading it never starts a
-        scan."""
-        return frozenset(self._facts.keys() - self._unavailable.keys())
+        """Files navigation has reached so far, through their facts or their name rows, never one it
+        refused to parse; reading it never starts a scan. Covering the scope for the name table
+        reaches no file."""
+        return frozenset(self._reached - self._unavailable.keys())
 
     @property
     def parser_scans_completed(self) -> tuple[str, ...]:
@@ -269,7 +273,7 @@ class CodeIndex:
     @property
     def parser_scans_pending(self) -> tuple[str, ...]:
         available = set(self._available_files(self._code_files))
-        return () if available <= self._facts.keys() | (self._entries or {}).keys() else ("facts",)
+        return () if available <= self._reached else ("facts",)
 
     @property
     def unavailable_files(self) -> dict[str, str]:
@@ -308,7 +312,17 @@ class CodeIndex:
             self._require_in_scope(file)
         available = self._available_files(files)
         self._ensure_facts(tuple(file for file in available if language_of(file)))
+        self._reached.update(available)
         return tuple(span for file in available for span in self.functions_in(file))
+
+    def facts_in_files(self, files: Sequence[str]) -> dict[str, FileFacts]:
+        """The facts of ``files`` (scope code files), read with one batched fact scan for those not
+        yet cached; a file the index cannot read is left out."""
+        for file in files:
+            self._require_in_scope(file)
+        self._ensure_facts(files)
+        self._reached.update(files)
+        return {file: self._facts[file] for file in files if file in self._facts}
 
     def symbols_in(self, file: str) -> tuple[Span, ...]:
         """Functions and classes."""
@@ -431,7 +445,7 @@ class CodeIndex:
         file whose lines under an ERROR node mention the name. A definition names what it defines, so
         lines that never mention the name cannot hold one. Every file that mentions it has already
         been scanned to look for its definitions, so the answer does not depend on scan order."""
-        unparsed = (file for file in self.observed_unparsed_files if name in self._unread_names(file))
+        unparsed = (file for file in self._known_unparsed() if name in self._unread_names(file))
         return frozenset(unparsed) | self.unavailable_files.keys()
 
     def _read_unread_names(self, file: str) -> frozenset[str]:
@@ -507,6 +521,7 @@ class CodeIndex:
             for row in self._name_table.rows(name)
             for file in self._files_by_blob.get(row.blob, ())
         ]
+        self._reached.update(file for file, _ in places)
         return tuple(sorted(places, key=self._place_order))
 
     def _place_order(self, place: tuple[str, NameRow]) -> tuple[int, int, int]:
@@ -564,6 +579,7 @@ class CodeIndex:
 
     def _facts_in(self, file: str) -> FileFacts:
         self._require_in_scope(file)
+        self._reached.add(file)
         if (known := self._facts.get(file)) is not None:
             return known
         self._ensure_facts((file,))
