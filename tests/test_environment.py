@@ -86,6 +86,30 @@ def test_a_missing_key_points_only_at_the_files_jvn_reads(tmp_path, monkeypatch,
     assert (".env.example" in message) is has_checkout
 
 
+@pytest.mark.parametrize(
+    ("has_checkout", "runs_in_checkout"),
+    [(False, False), (True, False), (True, True)],
+    ids=["installed", "run-elsewhere", "run-in-the-checkout"],
+)
+def test_a_missing_key_says_a_working_directory_env_is_not_read(
+    tmp_path, monkeypatch, has_checkout: bool, runs_in_checkout: bool
+):
+    # An installed jvn told to "set it in the checkout's .env" sends the user to create ./.env,
+    # which it never reads, so the error says so unless that file is the checkout's own.
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setattr(environment, "checkout_root", lambda: checkout if has_checkout else None)
+    working_directory = checkout if runs_in_checkout else elsewhere
+    monkeypatch.chdir(working_directory)
+
+    with pytest.raises(RuntimeError) as raised:
+        load_typesafe_environment({}, legacy=tmp_path / "absent-legacy-env")
+
+    assert (f"{working_directory / '.env'} is not read" in str(raised.value)) is not runs_in_checkout
+
+
 def test_a_checkout_env_file_is_read_through_checkout_root(tmp_path, monkeypatch):
     # The default path (no explicit root) reads the `.env` from the tool's own checkout.
     (tmp_path / ".env").write_text("TYPESAFE_API_KEY=checkout-key\n")

@@ -108,9 +108,16 @@ def _is_setting(name: str) -> bool:
 
 
 def _missing_key_message(root: Path | None, legacy: Path) -> str:
-    """Where to put the key: only the files this run reads, the checkout `.env` when there is one."""
+    """Where to put the key: only the files this run reads, the checkout `.env` when there is one,
+    and that a `.env` in the working directory is not read unless it is the checkout's own."""
     checkout = f"{root / '.env'} (see .env.example) or " if root is not None else ""
-    return f"TYPESAFE_API_KEY is unset: export it, or set it in {checkout}{legacy}"
+    message = f"TYPESAFE_API_KEY is unset: export it, or set it in {checkout}{legacy}"
+    working_directory = Path.cwd().resolve()
+    if root is None or working_directory != root.resolve():
+        message += (
+            f"; {working_directory / '.env'} is not read, as jvn reads a .env only from its own checkout"
+        )
+    return message
 
 
 def _env_file(path: Path) -> dict[str, str]:
