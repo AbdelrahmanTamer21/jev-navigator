@@ -4,7 +4,7 @@
 generated header, a vendored or output folder) and hands the rest on in
 ``ResolvedScope.awaiting_generated_judgment``. Each reaches Jev as one entry: its path, its measured
 facts, up to ``MAX_IMPORTERS`` files that import it with their true count, and two excerpts. The
-line the answer draws is André's (04.10.2026, about 13:00): generated means no person edits the file
+line the answer draws is André's (04.10.2026, 12:55): generated means no person edits the file
 as source. A file the secret scan refuses is never sent; it is named as not judged.
 """
 
