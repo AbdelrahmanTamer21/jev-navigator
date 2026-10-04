@@ -307,8 +307,13 @@ class CodeIndex:
         return result
 
     def enclosing_symbol(self, file: str, line: int) -> Span | None:
-        containing = [span for span in self.functions_in(file) if span.contains(line)]
-        return min(containing, key=Span.size, default=None)
+        return _innermost(self.functions_in(file), line)
+
+    def known_enclosing_symbol(self, file: str, line: int) -> Span | None:
+        """``enclosing_symbol`` from the facts already in memory, or None while there are none: it
+        never parses or loads a file, so a caller that only labels a place starts no work."""
+        facts = self._facts.get(file)
+        return None if facts is None else _innermost(facts.structure.functions, line)
 
     def functions_in(self, file: str) -> tuple[Span, ...]:
         return self._file_structure(file).functions
@@ -954,3 +959,7 @@ def _outermost(symbols: Sequence[Span]) -> list[Span]:
     return [
         span for span in symbols if not any(other != span and other.contains(span.start) for other in symbols)
     ]
+
+
+def _innermost(functions: Iterable[Span], line: int) -> Span | None:
+    return min((span for span in functions if span.contains(line)), key=Span.size, default=None)

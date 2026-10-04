@@ -17,6 +17,7 @@ from isolated_jvn import JVN
 from jev_navigator.cli_resume import load_resume, save_resume
 from jev_navigator.directives.find_code import SearchBudget, find_code
 from jev_navigator.directives.places import MOVES, function_place
+from jev_navigator.index import tools
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
@@ -61,6 +62,47 @@ def test_saved_find_frontier_restores_relationship_binding(tmp_path: Path) -> No
     assert frontier.place.move == "callees"
     assert frontier.place.binding.status == "resolved"
     assert frontier.place.binding.target.file == "app/target.py"
+
+
+def test_a_resumed_search_that_stops_again_saves_its_frontier_while_the_parser_is_killed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: a stopped search leaves the caller of `check` unopened. A resumed run, whose fact cache
+    # does not hold that file, stops again before opening it, and every ast-grep it starts is killed.
+    files = {
+        "app/target.py": "def check():\n    return True\n",
+        "app/entry.py": "from app.target import check\n\n\ndef handle():\n    return check()\n",
+    }
+    repository = tmp_path / "repository"
+    commit_files(repository, files)
+    first = CodeIndex(repository, list(files), fact_cache_dir=tmp_path / "first-facts")
+    start = function_place(first, first.find_definition("check")[0])
+    client = ScriptedJevClient(nouls=lambda _question_id, _question, _state: 0.1)
+    stopped = find_code(
+        first,
+        Judge(client),
+        "the check function",
+        [start],
+        moves={"callers": MOVES["callers"]},
+        budget=SearchBudget(max_steps=1, beam_width=1),
+    )
+    save_resume(tmp_path / "first.json", first, stopped, entry_pending=False)
+    resumed = CodeIndex(repository, list(files), fact_cache_dir=tmp_path / "resumed-facts")
+    restored = load_resume(tmp_path / "first.json", resumed).result
+    killed = tmp_path / "killed-bin"
+    killed.mkdir()
+    (killed / tools.AST_GREP).write_text("#!/bin/sh\nkill -9 $$\n")
+    (killed / tools.AST_GREP).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{killed}{os.pathsep}{os.environ['PATH']}")
+
+    # Act
+    save_resume(tmp_path / "second.json", resumed, restored, entry_pending=False)
+
+    # Assert: the frontier is saved again, labelled from what the resumed index read, which is no facts.
+    saved = json.loads((tmp_path / "second.json").read_text())["result"]["not_inspected"]
+    assert [(record["place_key"], record["signature"]) for record in saved] == [
+        ("app/entry.py:4-5", "app/entry.py:4")
+    ]
 
 
 @pytest.mark.parametrize("workflow", ["find", "findall"])
