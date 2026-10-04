@@ -788,25 +788,34 @@ class CodeIndex:
     ) -> Binding | None:
         """The binding of ``name`` imported from the module ``specifier`` names, read from that
         module's own facts and those of the modules it re-exports ``name`` from, never from a search
-        of the scope: one definition proves the target, several leave a candidate, an exporter whose
-        unparsed lines mention ``name`` or the name of a definition it exports as ``name`` (see
-        ``_own_names``), or that vanished, leaves it unknown, and no definition leaves a candidate
-        naming the modules. None when ``specifier`` names no module of the scope."""
+        of the scope: one definition proves the target, several leave a candidate, an exporter that
+        may hide it (see ``_hides``) leaves it unknown, and no definition leaves a candidate naming
+        the modules. None when ``specifier`` names no module of the scope."""
         exporters = self._exporters(file, specifier, name)
         if not exporters:
             return None
         definitions = tuple(
             span for exporter in exporters for span in self._importable_in(exporter.path, name, role)
         )
-        hiding = {
-            exporter.path
-            for exporter in exporters
-            for looked_up in {name, *self._own_names(exporter.path, name)}
-            if exporter.path in self._files_hiding(looked_up)
-        }
+        hiding = {exporter.path for exporter in exporters if self._hides(exporter.path, name)}
         return binding_from_facts(
             CallFacts(file, name, None, definitions, (), definitions, exporters, hiding)
         )
+
+    def _hides(self, exporter: str, name: str) -> bool:
+        """Whether ``exporter`` may export ``name`` where the index cannot see it: the parser refused
+        the file, so nothing it exports was read, or its unparsed lines mention ``name`` or the name
+        of a definition it exports as ``name`` (see ``_own_names``), or it vanished."""
+        if self._refused_parse(exporter):
+            return True
+        looked_up = {name, *self._own_names(exporter, name)}
+        return any(exporter in self._files_hiding(each) for each in looked_up)
+
+    def _refused_parse(self, file: str) -> bool:
+        """Whether the parser refused ``file`` (see ``refused_files``), asking for its facts first, so
+        the answer never depends on what was read before."""
+        self._facts_in(file)
+        return file in self._refused
 
     def _defines(self, file: str, name: str, role: str | None) -> bool:
         """Whether ``file``'s module scope defines ``name`` as a definition ``role`` can name."""
@@ -881,8 +890,7 @@ class CodeIndex:
                 if identity in seen:
                     continue
                 seen.add(identity)
-                exported = self._export_names_in(inherited.path)
-                if inherited.path in self._refused or name in exported:
+                if self._refused_parse(inherited.path) or name in self._export_names_in(inherited.path):
                     prior = found.get(inherited.path)
                     if prior is None or inherited.proven:
                         found[inherited.path] = inherited

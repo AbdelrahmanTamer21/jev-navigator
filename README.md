@@ -378,7 +378,8 @@ estimated parse peak (from the length of each line, `index/file_shape.py`) is ov
 error. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
 peak and the longest line in bytes. A refused file is never recorded as parsed: it stays readable and
 searchable as text, it keeps its path in import relations (also as a re-export target), a name its
-bytes mention binds `unknown`, `jvn stats` names it as never scanned, and `find_comments` lists it in
+bytes mention binds `unknown`, so does any name imported from it, whether or not its bytes say the
+name (a default export never needs the word `default`), `jvn stats` names it as never scanned, and `find_comments` lists it in
 `refused_files`. Any ast-grep or ripgrep failure other than that verified disappearance still fails the
 lookup that triggered it.
 
