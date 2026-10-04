@@ -34,7 +34,7 @@ Output defaults to a unique `./jvn-results/` directory. Trace starts must be rep
 inspect the returned function, then trace it. Quote the entire natural-language argument once.
 Do not edit files in scope while a search runs: a file that changes is reported unavailable when the index reads it again, and a
 search that finds nothing then ends `scope_incomplete` instead of `nothing_left`. A file too large to
-parse safely (a minified one-line bundle of a few tens of kilobytes or more) is never parsed: it is reported
+parse safely (a minified one-line bundle of a few tens of kilobytes, or more than about 56,000 lines of code) is never parsed: it is reported
 unavailable with the reason "too large to parse", and it ends a not-found search the same way.
 
 For agents and pipelines, discover the current contract with `jvn schema find`, `jvn schema findall`
