@@ -100,6 +100,17 @@ class NameTable:
             ).fetchall()
         return tuple(NameRow(*row) for row in found)
 
+    def definitions(self, blob: str) -> tuple[tuple[str, NameRow], ...]:
+        """Each named definition in one file content, with its name, in the facts' order: symbols,
+        then declarations."""
+        with self._lock:
+            found = self._db.execute(
+                "select name, blob, kind, position, start, end, role, receiver from names"
+                " where blob = ? and kind in (?, ?) order by kind = ?, position",
+                (blob, SYMBOL, DECLARATION, DECLARATION),
+            ).fetchall()
+        return tuple((name, NameRow(*row)) for name, *row in found)
+
     def _add_entry(self, blob: str, facts: FileFacts) -> bool:
         stretches = json.dumps([list(stretch) for stretch in facts.unparsed_lines])
         added = self._db.execute(
@@ -157,4 +168,5 @@ create table names (
     receiver text,
     primary key (name, blob, kind, position)
 ) without rowid;
+create index definitions_by_blob on names (blob) where kind in ('symbol', 'declaration');
 """

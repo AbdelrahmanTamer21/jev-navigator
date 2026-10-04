@@ -214,6 +214,33 @@ def test_a_checkout_that_converts_line_endings_answers_warm_lookups(
     assert spawned[tools.AST_GREP] == 0
 
 
+def test_a_files_definitions_come_from_the_table_with_their_lines(
+    tmp_path: Path, spawned: Counter[str]
+) -> None:
+    # Arrange
+    commit_files(tmp_path, REPOSITORY)
+    parsed = CodeIndex.from_git(tmp_path)
+    expected = {
+        file: tuple(
+            span
+            for span in dict.fromkeys((*parsed.symbols_in(file), *parsed.declarations_in(file)))
+            if span.name != "<anonymous>"
+        )
+        for file in REPOSITORY
+    }
+    every_lookup(parsed)
+    index = CodeIndex.from_git(tmp_path)
+    spawned.clear()
+
+    # Act
+    found = {file: index.definitions_in(file) for file in REPOSITORY}
+
+    # Assert
+    assert found == expected
+    assert [span.name for span in found["web/store.ts"]] == ["Store", "save", "check"]
+    assert spawned[tools.AST_GREP] == 0 and spawned[tools.RIPGREP] == 0
+
+
 def test_no_table_row_holds_a_string_literal(tmp_path: Path, private_cache_root: Path) -> None:
     # Arrange
     commit_files(tmp_path, REPOSITORY)

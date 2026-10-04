@@ -324,6 +324,15 @@ class CodeIndex:
         self._reached.update(files)
         return {file: self._facts[file] for file in files if file in self._facts}
 
+    def definitions_in(self, file: str) -> tuple[Span, ...]:
+        """The named functions, classes and declarations in ``file``, from the name table, so a
+        warm index answers without loading the file's facts."""
+        self._require_in_scope(file)
+        if file not in self._cover_scope() or file in self._unavailable:
+            return ()
+        rows = self._name_table.definitions(self._blob_of(file) or "")
+        return tuple(dict.fromkeys(Span(file, row.start, row.end, name) for name, row in rows))
+
     def symbols_in(self, file: str) -> tuple[Span, ...]:
         """Functions and classes."""
         return self._file_structure(file).symbols
