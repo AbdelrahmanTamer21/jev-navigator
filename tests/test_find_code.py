@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import re
 import signal
+import threading
 from collections.abc import Callable, Mapping
+from concurrent.futures import CancelledError
 from dataclasses import replace
 from pathlib import Path
 
@@ -1133,6 +1135,84 @@ def test_cancellation_keeps_a_successful_response_from_the_same_beam(tmp_path: P
     assert [(entry.place_key, entry.reason) for entry in cancelled.not_inspected] == [
         (places[1].key, "cancelled")
     ]
+
+
+class ProviderError(RuntimeError):
+    """A failure the provider reports, such as a 503, as opposed to a send the caller aborted."""
+
+
+class FailsWhileCancelling:
+    """Once the second place's request is in flight, the first raises the caller's Ctrl-C. The second
+    waits for the cancel this triggers, then ends the way ``on_abort`` says: the abort's own error,
+    or a real provider error that happened to arrive while the interrupt was being handled."""
+
+    model = "fails-while-cancelling"
+
+    def __init__(self, on_abort: Exception) -> None:
+        self.on_abort = on_abort
+        self.second_in_flight = threading.Event()
+        self.cancelled = threading.Event()
+
+    def ask(self, state, questions):
+        del questions
+        if state["slice"]["code"] == "first":
+            self.second_in_flight.wait(timeout=5)
+            raise KeyboardInterrupt
+        self.second_in_flight.set()
+        self.cancelled.wait(timeout=5)
+        raise self.on_abort
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+
+
+def _search_two_places_while_one_is_interrupted(tmp_path: Path, client: FailsWhileCancelling):
+    (tmp_path / "places.txt").write_text("first\nsecond\n")
+    index = CodeIndex(tmp_path, ["places.txt"])
+    places = [range_place(index, "places.txt", line, line, "candidate") for line in (1, 2)]
+    return places, lambda: find_code(
+        index,
+        Judge(client),
+        TARGET,
+        [],
+        budget=SearchBudget(beam_width=2),
+        moves={},
+        initial_candidates=[(place, 1.0) for place in places],
+    )
+
+
+def test_a_provider_error_during_cancellation_comes_out_as_that_error(tmp_path: Path) -> None:
+    # Arrange
+    cause = ConnectionResetError("connection reset by peer")
+    error = ProviderError("Jev answered 503")
+    error.__cause__ = cause
+    client = FailsWhileCancelling(on_abort=error)
+    _, search = _search_two_places_while_one_is_interrupted(tmp_path, client)
+
+    # Act
+    with pytest.raises(ProviderError) as raised:
+        search()
+
+    # Assert
+    assert client.cancelled.is_set()
+    assert raised.value is error
+    assert raised.value.__cause__ is cause
+
+
+def test_a_send_the_interrupt_aborted_is_set_aside_as_cancelled(tmp_path: Path) -> None:
+    # Arrange
+    client = FailsWhileCancelling(on_abort=CancelledError())
+    places, search = _search_two_places_while_one_is_interrupted(tmp_path, client)
+
+    # Act
+    cancelled = search()
+
+    # Assert
+    assert client.cancelled.is_set()
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert {(entry.place_key, entry.reason) for entry in cancelled.not_inspected} == {
+        (place.key, "cancelled") for place in places
+    }
 
 
 def test_the_result_and_the_stop_step_name_the_moves_the_search_used(sample_index: CodeIndex) -> None:
