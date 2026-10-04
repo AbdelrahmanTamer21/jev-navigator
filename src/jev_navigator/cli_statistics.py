@@ -30,6 +30,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
+from .cli_trace import not_indexed_lines
 from .directives import statistics
 from .index.code_index import CodeIndex
 
@@ -407,8 +408,13 @@ def _coverage_report(pack: dict) -> list[str]:
         ]
     not_indexed = pack["coverage"]["not_indexed"]
     if not_indexed:
-        named = ", ".join(f"`{path}` ({reason})" for path, reason in sorted(not_indexed.items()))
-        lines += ["", f"Not indexed, so outside every count above: {named}."]
+        listed_in = "`coverage.not_indexed` in `statistics.json`"
+        lines += [
+            "",
+            "Not indexed, so outside every count above:",
+            "",
+            *not_indexed_lines(not_indexed, listed_in),
+        ]
     lines += [""] + [f"{number}. {limit}" for number, limit in enumerate(pack["limits"], start=1)]
     return lines
 

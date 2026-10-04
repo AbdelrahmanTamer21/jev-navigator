@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -257,8 +258,28 @@ def _link_json(link) -> dict:
 
 
 def unavailable_file_lines(files: Mapping[str, str]) -> list[str]:
-    """One report line per file the index has no facts for, or never listed, with the reason."""
+    """One report line per file the index has no facts for, with the reason."""
     return [f"- `{file}`: {reason}" for file, reason in sorted(files.items())]
+
+
+def not_indexed_lines(entries: Mapping[str, str], listed_in: str) -> list[str]:
+    """The files and folders the listing left out, counted by reason and top folder, so a build output of
+    thousands of ignored files stays one row; ``listed_in`` names where every one is listed by name."""
+    if not entries:
+        return []
+    counts = Counter((reason, _top_folder(path)) for path, reason in entries.items())
+    return [
+        f"{len(entries):,} files and folders were not indexed; {listed_in} names each one.",
+        "",
+        "| Reason | Folder | Entries |",
+        "| --- | --- | ---: |",
+        *(f"| {reason} | {folder} | {count:,} |" for (reason, folder), count in sorted(counts.items())),
+    ]
+
+
+def _top_folder(path: str) -> str:
+    folder, separator, _ = path.partition("/")
+    return f"`{folder}/`" if separator else "top level"
 
 
 def _report(manifest: dict) -> str:
@@ -313,7 +334,8 @@ def _report(manifest: dict) -> str:
     if trace["unavailable_files"]:
         lines += ["", "## Files without facts", "", *unavailable_file_lines(trace["unavailable_files"])]
     if trace["not_indexed_files"]:
-        lines += ["", "## Files not indexed", "", *unavailable_file_lines(trace["not_indexed_files"])]
+        listed_in = "`trace.not_indexed_files` in `manifest.json`"
+        lines += ["", "## Files not indexed", "", *not_indexed_lines(trace["not_indexed_files"], listed_in)]
     lines += ["", "## Unresolved static links", ""]
     if not trace["unresolved_links"]:
         lines.append("Every static link in the walked component is resolved.")

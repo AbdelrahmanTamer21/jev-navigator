@@ -1331,7 +1331,8 @@ def test_find_and_findall_reports_name_each_ignored_file_as_not_indexed(tmp_path
     for report, not_indexed, indexed in reports.values():
         assert indexed == 4
         assert not_indexed == {"vendor/": "ignored"}
-        assert "`vendor/`: ignored" in report
+        assert "| ignored | `vendor/` | 1 |" in report
+        assert "`search.not_indexed_files` in `manifest.json`" in report
 
 
 def test_find_and_findall_reports_name_each_refused_file_with_its_reason(tmp_path: Path) -> None:

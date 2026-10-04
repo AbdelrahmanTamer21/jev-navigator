@@ -22,7 +22,7 @@ from .cache_root import cache_root
 from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
-from .cli_trace import create_trace_evidence_pack, unavailable_file_lines
+from .cli_trace import create_trace_evidence_pack, not_indexed_lines, unavailable_file_lines
 from .data_root import default_run_folder
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
@@ -1077,6 +1077,13 @@ def _find_all_summary(
     }
 
 
+def _not_indexed_section(search: dict) -> list[str]:
+    if not search["not_indexed_files"]:
+        return []
+    listed_in = "`search.not_indexed_files` in `manifest.json`"
+    return ["", "## Files not indexed", "", *not_indexed_lines(search["not_indexed_files"], listed_in)]
+
+
 def _find_all_report(manifest: dict) -> str:
     search = manifest["search"]
     lines = [
@@ -1104,9 +1111,9 @@ def _find_all_report(manifest: dict) -> str:
     lines += ["", "## Coverage gaps", ""]
     for field in ("remaining_files", "unparsed_files", "unsupported_files"):
         lines.append(f"- {field}: {', '.join(search[field]) or 'none'}")
-    for field in ("unavailable_files", "not_indexed_files"):
-        lines.append(f"- {field}:" if search[field] else f"- {field}: none")
-        lines += unavailable_file_lines(search[field])
+    lines.append("- unavailable_files:" if search["unavailable_files"] else "- unavailable_files: none")
+    lines += unavailable_file_lines(search["unavailable_files"])
+    lines += _not_indexed_section(search)
     lines += ["", "## Matching bodies", ""]
     for value in search["found"]:
         source = value["source"]
@@ -1253,7 +1260,7 @@ def _report(manifest: dict) -> str:
         *unavailable_file_lines(search["unavailable_files"]),
         f"- Files and folders not indexed (ignored, or otherwise left out of the listing): "
         f"{len(search['not_indexed_files'])}.",
-        *unavailable_file_lines(search["not_indexed_files"]),
+        *_not_indexed_section(search),
         "",
         "## Opened code",
         "",

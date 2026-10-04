@@ -427,7 +427,9 @@ def test_trace_names_each_ignored_file_as_not_indexed(tmp_path: Path) -> None:
 
     # Assert
     assert manifest["trace"]["not_indexed_files"] == {"build/": "ignored"}
-    assert "`build/`: ignored" in (tmp_path / "pack" / "report.md").read_text()
+    report = (tmp_path / "pack" / "report.md").read_text()
+    assert "| ignored | `build/` | 1 |" in report
+    assert "`trace.not_indexed_files` in `manifest.json`" in report
 
 
 def test_trace_names_each_file_the_parser_refused_with_its_reason(tmp_path: Path) -> None:
