@@ -784,8 +784,14 @@ costs no calls. A `choose_next` step lists the places opened next, each with its
 code, the `contains_target` probability and verdict, every neighbour offered with its `could_contain`
 probability, the `open_first` pick, and places set aside (`capped` or `depth`). A final `stop` step
 names the outcome, the not-inspected frontier with reasons, and the last stop check, so the history
-and the result agree. Without a stop rule nothing reads the history; with one, the stop check reads the
-sections it selects (by default only the fetched code). `HistoryStep` is generic: append your own steps (an agent's tool call and result) the same way.
+and the result agree. Each Jev judgment in a step names the answer behind it in `answered_by` (a place
+`choose_next` opens names the answer that scored it in `scored_by`): the request's `request_sha256`, the
+`question_id` it was asked under, and `from_store`. The journal's `request` row with that hash lists the
+question id, and that row's `response` holds the answer, also for an opening split into several requests;
+packs written before these fields resume as before. Each automatic entry selection decision in the
+manifest's `entry_selection`, and each Find All verdict in `found`, `unsure` and `searched`, names its
+answer the same way. Without a stop rule nothing reads the history; with
+one, the stop check reads the sections it selects (by default only the fetched code). `HistoryStep` is generic: append your own steps (an agent's tool call and result) the same way.
 
 ## LlmStep: an LLM call you add yourself
 
