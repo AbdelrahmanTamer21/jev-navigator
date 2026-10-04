@@ -29,7 +29,7 @@ from pathlib import Path
 
 # The tool's own settings namespace. Only names under these prefixes are honoured from a file, so a
 # file can never inject an operating-system or subprocess variable. `JEV_NAVIGATOR_*` holds the
-# search thresholds and budget; `SYSTEM_ONE_*` names the decision-model routes and their keys.
+# judgment thresholds only; `SYSTEM_ONE_*` names the decision-model routes and their keys.
 SETTING_PREFIXES = ("TYPESAFE_", "JEV_NAVIGATOR_", "SYSTEM_ONE_")
 LEGACY_CONFIG = Path.home() / ".config/jvn/env"
 

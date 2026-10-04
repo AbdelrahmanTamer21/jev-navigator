@@ -371,6 +371,7 @@ class CodeIndex:
             key = (call.file, call.line)
             if call.name == name and (key not in sites or call.receiver is None):
                 sites[key] = call.receiver
+        self._load_facts_for_bindings(name, (file for file, _ in sites))
         return tuple(
             CallSite(
                 file, line, self.enclosing_symbol(file, line), self.binding_of(file, line, name, receiver)
@@ -406,7 +407,9 @@ class CodeIndex:
         holder and binding. Code reached this way (a callback, a registry entry, a parameter typed
         with a class) has no call edge to follow. A member passed as an argument (``self.handler``)
         is bound like a method call on an unknown receiver, never proven by a same-named function."""
-        return self._references(self._references_named(name))
+        matches = self._references_named(name)
+        self._load_facts_for_bindings(name, (match.file for match in matches))
+        return self._references(matches)
 
     def references_in(self, function: Span) -> tuple[Reference, ...]:
         """Names ``function`` passes on without calling them, limited to names defined in scope."""
@@ -460,6 +463,16 @@ class CodeIndex:
             self._files_hiding(name),
         )
         return binding_from_facts(facts)
+
+    def _load_facts_for_bindings(self, name: str, use_files: Iterable[str]) -> None:
+        """Loads, in one scan, the facts that binding the uses of ``name`` reads: the files the uses
+        sit in and the files that define the name. With a warm table and an empty fact cache they
+        would otherwise load one file per scan. A name nothing uses loads nothing."""
+        uses = tuple(use_files)
+        if not uses:
+            return
+        definition_files = (span.file for span in self.find_definition(name))
+        self._ensure_facts(tuple(dict.fromkeys((*uses, *definition_files))))
 
     def _nameable_definitions(self, name: str, role: str | None) -> tuple[tuple[Span, ...], tuple[Span, ...]]:
         """The definitions of ``name`` a use in ``role`` can name, and those of them at top level.
@@ -927,13 +940,13 @@ def _changed_paths(status: str) -> list[str]:
 
 def _working_git_metadata(root: Path, prefixes: Sequence[str]) -> tuple[str, list[str], dict[str, str]]:
     """The HEAD commit, the changed and untracked paths, and the index blob id of each tracked file;
-    all empty outside Git."""
-    try:
-        commit = tools.git(["rev-parse", "HEAD"], root).strip()
-        status = tools.git(["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root)
-        listing = tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root)
-    except tools.ToolFailedError:
+    all empty outside Git, and no revision before the first commit. A repository git refuses raises
+    rather than reading as a plain folder."""
+    if not tools.inside_git_worktree(root):
         return "", [], {}
+    commit = tools.head_commit(root)
+    status = tools.git(["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root)
+    listing = tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root)
     return commit, _changed_paths(status), _regular_blobs(listing)
 
 

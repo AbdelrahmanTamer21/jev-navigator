@@ -1,13 +1,14 @@
 """Syntax facts extracted together in one ast-grep pass over each requested file set.
 
 Each requested file set is handed to ast-grep scans of a few hundred files each, which schedule
-parsing across ast-grep's own worker pool; every match becomes its fact as it is printed. The
-structure rules also match the grammar's ERROR nodes: a file the parser could only recover
-partially is reported as unparsed too. A JavaScript file the JavaScript grammar only partly reads is
-read once more as flow, which reads Flow types written without the ``@flow`` pragma. Its matched symbols and
-calls still count — recovery keeps what it could — but whatever the ERROR nodes swallowed is unknown,
-not absent. ``FileFacts.unparsed_lines`` keeps the lines those nodes span, so a lookup can tell which
-names they may hide.
+parsing across ast-grep's own worker pool; every match becomes its fact as it is printed, decoded
+into only the fields its fact is built from (``ParserMatch``). The structure rules also match the
+grammar's ERROR nodes: a file the parser could only recover partially is reported as unparsed too.
+A JavaScript file the JavaScript grammar only partly reads is read once more as flow, which reads
+Flow types written without the ``@flow`` pragma. Its matched symbols and calls still count —
+recovery keeps what it could — but whatever the ERROR nodes swallowed is unknown, not absent.
+``FileFacts.unparsed_lines`` keeps the lines those nodes span, so a lookup can tell which names they
+may hide.
 """
 
 from __future__ import annotations
@@ -15,6 +16,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import NotRequired, TypedDict
+
+import msgspec
 
 from . import tools
 from .imports import _local
@@ -100,6 +104,54 @@ class FileFacts:
     language: str | None = None
 
 
+class _Text(TypedDict):
+    text: str
+
+
+class _Captured(TypedDict, total=False):
+    CALLEE: _Text
+    NAME: _Text
+
+
+class _MetaVariables(TypedDict, total=False):
+    single: _Captured
+
+
+class _Start(TypedDict):
+    line: int
+
+
+class _End(TypedDict):
+    line: int
+
+
+class _ByteOffset(TypedDict):
+    start: int
+    end: int
+
+
+class _Range(TypedDict):
+    start: _Start
+    end: _End
+    byteOffset: _ByteOffset
+
+
+class ParserMatch(TypedDict):
+    """The fields of one printed ast-grep match that ``_FileFound`` reads. Every other field (the
+    labels of related nodes, the other metavariables) is skipped while decoding instead of becoming
+    Python objects, which makes decoding a large scan's output several times faster."""
+
+    ruleId: str
+    file: str
+    text: str
+    lines: str
+    range: _Range
+    metaVariables: NotRequired[_MetaVariables]
+
+
+decode_match = msgspec.json.Decoder(ParserMatch).decode
+
+
 def scan_facts(contents: Mapping[str, bytes], root: Path, unparsed: Unparsed) -> dict[str, FileFacts]:
     """Parse supported source files once; return empty facts for unsupported paths. ``contents`` holds
     each file's first-read bytes, which decide the language it is read as. Each match is turned
@@ -130,7 +182,10 @@ def _scanned(
     found = {file: _FileFound(FLOW_LANGUAGE if as_flow else language_of(file)) for file in files}
     languages = [FLOW_LANGUAGE] if as_flow else sorted({found[file].language for file in files})
     config = sgconfig_of(FLOW_LANGUAGE) if as_flow else None
-    for match in tools.ast_grep_rules(fact_rules(languages), files, root, config=config, refused=refused):
+    matches = tools.ast_grep_rules(
+        fact_rules(languages), files, root, config=config, refused=refused, decode=decode_match
+    )
+    for match in matches:
         found[match["file"]].add(match)
     return found
 
