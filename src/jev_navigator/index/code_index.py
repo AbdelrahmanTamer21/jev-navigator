@@ -117,6 +117,7 @@ class CodeIndex:
         self._files_by_blob: dict[str, tuple[str, ...]] = {}
         self._file_order: dict[str, int] = {}
         self._reached: set[str] = set()
+        self._incomplete_in_table: frozenset[str] = frozenset()
         self._named = cache(self._places_named)
         self._text_hits = cache(self._search_text)
         self._co_changes = cache(self._read_co_changes)
@@ -256,8 +257,7 @@ class CodeIndex:
 
     def _known_unparsed(self) -> frozenset[str]:
         """Every file known to be only partly parsed: scanned so far, or recorded so in the table."""
-        entries = self._entries or {}
-        return self._unparsed.files | {file for file, entry in entries.items() if entry.incomplete}
+        return self._unparsed.files | self._incomplete_in_table
 
     @property
     def parsed_files(self) -> frozenset[str]:
@@ -543,6 +543,9 @@ class CodeIndex:
                 by_blob.setdefault(blobs[file], []).append(file)
             self._files_by_blob = {blob: tuple(files) for blob, files in by_blob.items()}
             self._file_order = {file: position for position, file in enumerate(self._entries)}
+            self._incomplete_in_table = frozenset(
+                file for file, entry in self._entries.items() if entry.incomplete
+            )
             return self._entries
 
     def _blobs_of(self, files: Iterable[str]) -> dict[str, str]:
