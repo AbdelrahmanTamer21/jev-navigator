@@ -80,6 +80,10 @@ opens. Give each experiment or eval arm its own store with `--answer-store PATH`
 `JEV_NAVIGATOR_ANSWER_STORE`) so arms never reuse each other's answers; stderr names the store in
 use. `jvn trace` reports `replayed_answers` beside its live `calls`.
 
+The first search in a scope parses every file in it once and records each name and its lines in the
+name table under the same cache folder; later searches over unchanged files look names up there
+without searching or parsing. The table holds names and line numbers, never code or string literals.
+
 Live searches send source to the configured provider: reuse the user's source and spend authorization,
 and never print credentials (environment or `~/.config/jvn/env`). Progress is stderr, JSON stdout.
 Check the exit status first: 0 completed, 1 failed, 2 invalid input, 130 cancelled.

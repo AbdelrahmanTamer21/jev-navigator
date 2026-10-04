@@ -6,7 +6,7 @@ import base64
 import json
 import subprocess
 import tempfile
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from functools import cache
 from pathlib import Path
@@ -154,33 +154,6 @@ def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> 
     return hits
 
 
-def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -> tuple[str, ...]:
-    """Every supplied file containing any of the exact ``texts``, without a result-count cutoff. The
-    texts go to ripgrep in a pattern file, one per line, so their number never meets the argument
-    limit."""
-    patterns = [texts] if isinstance(texts, str) else list(texts)
-    if not files or not patterns:
-        return ()
-    if any("\n" in pattern for pattern in patterns):
-        raise ValueError("a text searched for by file cannot hold a line break")
-    with tempfile.NamedTemporaryFile("w", prefix="jev-navigator-patterns-", suffix=".txt") as pattern_file:
-        pattern_file.write("".join(f"{pattern}\n" for pattern in patterns))
-        pattern_file.flush()
-        command = [
-            *_RIPGREP_SAFE,
-            "--files-with-matches",
-            "--null",
-            "--fixed-strings",
-            "-f",
-            pattern_file.name,
-        ]
-        found: list[str] = []
-        for chunk in file_chunks(files):
-            output = run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
-            found += [path.removeprefix("./") for path in output.split("\0") if path]
-    return tuple(found)
-
-
 def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
     """Regular, non-symlink files owned by this working directory, including hidden paths.
 
@@ -239,7 +212,19 @@ def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) 
     that would leave ``destination`` and an object git does not have both raise ``ToolFailedError``."""
     if not blobs:
         return
-    requests = "".join(f"{object_id}\n" for object_id in blobs.values()).encode()
+    for path, content in zip(blobs, _cat_file_batch(repository, blobs.values()), strict=True):
+        _write_inside(destination, path, content)
+
+
+def git_blob(repository: Path, object_id: str) -> bytes:
+    """The bytes of one blob, asked for by object id; an object git does not have raises
+    ``ToolFailedError``."""
+    (content,) = _cat_file_batch(repository, [object_id])
+    return content
+
+
+def _cat_file_batch(repository: Path, object_ids: Iterable[str]) -> list[bytes]:
+    requests = "".join(f"{object_id}\n" for object_id in object_ids).encode()
     completed = subprocess.run(
         ["git", "cat-file", "--batch"],
         cwd=repository,
@@ -250,8 +235,7 @@ def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) 
         raise ToolFailedError(
             f"git cat-file exited {completed.returncode}: {completed.stderr.decode()[:300]}"
         )
-    for path, content in zip(blobs, _batch_contents(completed.stdout), strict=True):
-        _write_inside(destination, path, content)
+    return _batch_contents(completed.stdout)
 
 
 def _batch_contents(output: bytes) -> list[bytes]:

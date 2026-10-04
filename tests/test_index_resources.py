@@ -99,12 +99,12 @@ def test_a_file_list_longer_than_the_argument_limit_is_split_across_processes(
     # Arrange
     commit_files(tmp_path, MIXED_SCOPE)
     files = sorted(MIXED_SCOPE)
-    together = (scanned(tmp_path), set(tools.ripgrep_files("return", files, tmp_path)))
+    together = (scanned(tmp_path), sorted(tools.ripgrep_fixed("return", files, tmp_path, max_hits=10)))
     spawned.clear()
     monkeypatch.setattr(tools, "MAX_ARGUMENT_BYTES", 30)
 
     # Act
-    split = (scanned(tmp_path), set(tools.ripgrep_files("return", files, tmp_path)))
+    split = (scanned(tmp_path), sorted(tools.ripgrep_fixed("return", files, tmp_path, max_hits=10)))
 
     # Assert
     assert spawned[tools.AST_GREP] > 2
@@ -148,27 +148,6 @@ def test_co_changed_files_reads_history_once_per_file(sample_index: CodeIndex, s
     # Assert
     assert narrower == first[:1]
     assert spawned["git log"] == 1
-
-
-def test_prefetched_names_share_one_search_and_find_what_lone_lookups_find(
-    sample_repo: Path, spawned: Counter[str]
-) -> None:
-    # Arrange
-    names = ("validate_order", "check_limits", "handleOrder", "parseOrder", "absent_name")
-    alone = CodeIndex.from_git(sample_repo, fact_cache_dir=sample_repo.parent / "alone")
-    expected = {name: (alone.find_definition(name), alone.call_site_count(name)) for name in names}
-    index = CodeIndex.from_git(sample_repo, fact_cache_dir=sample_repo.parent / "prefetched")
-    spawned.clear()
-
-    # Act
-    index.prefetch_names(names)
-    searches_for_prefetch = spawned[tools.RIPGREP]
-    found = {name: (index.find_definition(name), index.call_site_count(name)) for name in names}
-
-    # Assert
-    assert searches_for_prefetch == 1
-    assert spawned[tools.RIPGREP] == 1
-    assert found == expected
 
 
 def test_a_file_removed_after_inventory_is_reported_when_a_search_meets_it(sample_repo: Path) -> None:
@@ -218,7 +197,9 @@ def test_symbols_on_the_same_lines_are_ordered_by_name_on_every_scan(tmp_path: P
     assert [span.name for span in runs[0].structure.functions] == ["a", "b"]
 
 
-def test_listing_callees_searches_once_for_every_name_called(tmp_path: Path, spawned: Counter[str]) -> None:
+def test_listing_callees_starts_no_text_search_for_the_names_called(
+    tmp_path: Path, spawned: Counter[str]
+) -> None:
     # Arrange
     commit_files(
         tmp_path,
@@ -239,7 +220,7 @@ def test_listing_callees_searches_once_for_every_name_called(tmp_path: Path, spa
     # Assert
     assert [edge.name for edge in edges] == ["first", "second", "third"]
     assert definitions == ["app/steps.py", "app/steps.py", "app/other.py"]
-    assert spawned[tools.RIPGREP] == 1
+    assert spawned[tools.RIPGREP] == 0
 
 
 def test_an_index_built_in_a_test_never_writes_the_user_fact_cache(tmp_path: Path) -> None:
@@ -291,23 +272,6 @@ def test_lines_split_where_the_parser_counts_them_even_after_a_lone_carriage_ret
     # Assert
     assert run.start == 2
     assert index.read_slice(run).text.splitlines()[0] == "def run():"
-
-
-def test_prefetching_more_names_than_a_command_line_holds_still_searches_once(
-    sample_repo: Path, spawned: Counter[str]
-) -> None:
-    # Arrange: about 1.3 MB of names, over the 1 MB macOS argument limit.
-    names = [f"name_that_appears_nowhere_{n:08d}" for n in range(36_000)] + ["check_limits"]
-    index = CodeIndex.from_git(sample_repo, fact_cache_dir=sample_repo.parent / "facts")
-    spawned.clear()
-
-    # Act
-    index.prefetch_names(names)
-    definitions = index.find_definition("check_limits")
-
-    # Assert
-    assert spawned[tools.RIPGREP] == 1
-    assert [span.file for span in definitions] == ["app/validation.py"]
 
 
 def test_a_jvn_process_started_by_a_test_uses_the_test_fact_cache_too() -> None:
