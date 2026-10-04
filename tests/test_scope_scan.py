@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -241,6 +242,38 @@ def test_scan_facts_skips_unsupported_files_and_still_parses_supported_files(tmp
     assert unsupported == {"notes.md": empty}
     assert mixed["module.py"].structure.functions == (Span("module.py", 1, 1, "greet"),)
     assert mixed["notes.md"] == empty
+
+
+@pytest.mark.parametrize(
+    ("file", "declaration"),
+    [("module.ts", "const value{n} = {n};\n"), ("module.py", "value{n} = {n}\n")],
+)
+def test_a_module_declaration_is_printed_without_the_whole_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str, declaration: str
+) -> None:
+    """ast-grep prints every node a rule's relations matched. A rule asking whether a declaration sits
+    in the program printed the whole file once per declaration, so the parser's output, and its
+    memory, grew with declarations times file size: 1.2 MB of ordinary code peaked over 2.5 GB."""
+    # Arrange
+    source = "".join(declaration.format(n=n) for n in range(400))
+    (tmp_path / file).write_text(source)
+    printed: list[dict] = []
+    original_rules = tools.ast_grep_rules
+
+    def recorded_rules(*arguments, **options):
+        for match in original_rules(*arguments, **options):
+            printed.append(match)
+            yield match
+
+    monkeypatch.setattr(tools, "ast_grep_rules", recorded_rules)
+
+    # Act
+    facts = scan_facts([file], tmp_path, Unparsed())
+
+    # Assert
+    declarations = [match for match in printed if match["ruleId"] == "declaration"]
+    assert len(facts[file].structure.declarations) == len(declarations) == 400
+    assert all(len(json.dumps(match)) < len(source) for match in declarations)
 
 
 def test_a_plain_call_wins_over_a_method_call_of_the_same_name_on_one_line(tmp_path: Path) -> None:

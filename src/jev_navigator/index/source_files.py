@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import zlib
 from collections.abc import Callable, MutableMapping
-from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -13,15 +12,6 @@ from .languages import split_lines
 
 DISAPPEARED = "disappeared after inventory"
 CHANGED = "changed on disk after the index first read it"
-
-
-@dataclass(frozen=True)
-class SourceMemory:
-    """What the reader holds: compressed first reads, and the files whose split lines are cached."""
-
-    first_read_files: int
-    first_read_bytes: int
-    line_cache_files: int
 
 
 class SourceFiles:
@@ -81,14 +71,6 @@ class SourceFiles:
         if file not in self._sha256:
             self.current(file)
         return self._sha256.get(file, "")
-
-    @property
-    def memory(self) -> SourceMemory:
-        return SourceMemory(
-            len(self._first_read),
-            sum(len(stored) for stored in self._first_read.values()),
-            self._lines.cache_info().currsize,
-        )
 
     def _read_lines(self, file: str) -> tuple[str, ...]:
         content = self.first_read(file)
