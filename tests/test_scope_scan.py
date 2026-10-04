@@ -260,8 +260,8 @@ def test_a_module_declaration_is_printed_without_the_whole_file(
     printed: list[dict] = []
     original_rules = tools.ast_grep_rules
 
-    def recorded_rules(rules: str, files, cwd, config=None):
-        for match in original_rules(rules, files, cwd, config=config):
+    def recorded_rules(*arguments, **options):
+        for match in original_rules(*arguments, **options):
             printed.append(match)
             yield match
 
