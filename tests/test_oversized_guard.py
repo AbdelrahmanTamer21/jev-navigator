@@ -273,7 +273,7 @@ def test_stats_name_a_refused_file_as_never_scanned_with_its_reason(tmp_path: Pa
     assert BUNDLE in pack["scope"]["unmeasured"]
     assert pack["coverage"]["complete"] is False
     assert BUNDLE not in pack["counts"]["per_file"]
-    assert f"`{BUNDLE}` (too large to parse: estimated parse peak 2 GB" in report
+    assert f"`{BUNDLE}` ({pack['coverage']['unavailable'][BUNDLE]})" in report
     assert "Fully covered" not in report
 
 

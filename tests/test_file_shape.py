@@ -179,8 +179,8 @@ def test_line_lengths_are_measured_in_bytes_so_multibyte_text_errs_on_the_safe_s
 
 
 def test_a_refusal_counts_the_longest_line_in_bytes_as_measured() -> None:
-    line = ("名" * 30_013).encode()
+    line = ("名();" * 12_000).encode()
 
     reason = measure(line).refusal
 
-    assert reason is not None and reason.endswith("longest line 90,039 bytes")
+    assert reason is not None and reason.endswith("longest line 72,000 bytes")
