@@ -198,7 +198,7 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
   `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
   `--answer-store PATH` points a run at another store file; each run prints the store it uses.
-- `resume.json` (budget-stopped or cancelled runs): the frontier as locations; Resume re-reads the
+- `resume.json` (budget-stopped, cancelled or failed runs): the frontier as locations; Resume re-reads the
   code from the unchanged repository.
 
 By default the manifest, report, journal and resume state hold no source code, only locations and
@@ -371,12 +371,18 @@ reason, unless a definition in another file, not imported from one of them, sett
 search reports `scope_incomplete` instead of `nothing_left`; a budget-limited result reports which
 fact scans completed and which remain pending. A file that disappears after the working-directory
 inventory was built, or changes after the index first read it, is reported separately as
-unavailable. So is a file too large to parse safely:
-`tools.ast_grep_rules`, the one door every parse passes through, never hands ast-grep a file whose
-estimated parse peak (from the length of each line, `index/file_shape.py`) is over 250 MB, about
-70,000 bytes on one line. A large file that cannot be read to measure it is refused too, with the
-error. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
-peak and the longest line in bytes. A refused file is never recorded as parsed: it stays readable and
+unavailable. So is a file too large to parse safely. `tools.ast_grep_rules`, the one door every
+parse passes through, estimates each file's parse peak (`index/file_shape.py`): 80 MB per MB of the
+file, every byte counted as code, plus the square of the punctuation `{}();,[]` on each line,
+which a minified bundle of a few tens of kilobytes on one line drives up. Files estimated at up to
+250 MB are parsed side by side. A file over that, but within the single-file limit
+(`tools.single_parse_limit_mb()`), is parsed alone, one at a time, with no other file beside it. A file
+over the single-file limit is never handed to ast-grep, and neither is a large file that cannot be read
+to measure it. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
+peak, the limit it is over, and the longest line in bytes. A file that ast-grep itself skips without
+parsing (it prints nothing for a file that is not valid UTF-8, or for one of more than 3,000,000
+bytes and 200,000 lines, which a file parsed alone can be) is refused too, as `not parsed`, and is
+never taken for a file without functions. A refused file is never recorded as parsed: it stays readable and
 searchable as text, it keeps its path in import relations (also as a re-export target), a name its
 bytes mention binds `unknown`, `jvn stats` names it as never scanned, and `find_comments` lists it in
 `refused_files`. Any ast-grep or ripgrep failure other than that verified disappearance still fails the
@@ -655,10 +661,14 @@ signature names its file and lines: a function quotes its first line; a window a
 or key outside any function gives its line range and quotes that line; a stretch chosen by position (the
 lines before or after, the start of a co-changed or imported file) gives its range and quotes its first
 line of code, past blank lines, comments, a license banner, a `'use strict'` directive or a module
-docstring. The outcome is `found`, `stop_rule`, `budget`, `nothing_left`, `unsure_only` or
-`scope_incomplete`, and the result keeps three sets: `found`; `searched` and `unsure` (bodies actually
-judged, start places apart in `starts`); and `not_inspected`, each entry with its reason (`budget`,
-`deprioritized`, `capped` or `depth`) and its `QueueTier`: `START`, `PICK` or `MOVE`. Resume
+docstring. The outcome is `found`, `stop_rule`, `budget`, `cancelled`, `failed`, `nothing_left`,
+`unsure_only` or `scope_incomplete`, and the result keeps three sets: `found`; `searched` and `unsure`
+(bodies actually judged, start places apart in `starts`); and `not_inspected`, each entry with its
+reason (`budget`, `cancelled`, `failed`, `deprioritized`, `capped` or `depth`) and its `QueueTier`:
+`START`, `PICK` or `MOVE`. A request that fails, such as a provider error or a full disk while
+storing its answer, ends `find_code` and `find_code_async` as `failed`: `failure` holds that same error object, the answers
+its round did get stay merged, and the failed place waits in `not_inspected` with reason `failed`.
+A request Ctrl-C stopped is `cancelled` instead. Resume
 preserves that role, so waiting starts still open before picks and are never reported as new finds.
 `searched` means "opened and judged at or below the no bar, probability kept", and `nothing_left`
 means "nothing left worth opening in a scope the search parsed whole"; neither proves that the code does not exist, because one "no" about
