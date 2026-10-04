@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import sqlite3
 import threading
 from pathlib import Path
 
 import pytest
 from conftest import BudgetedClient
+from store_openers import open_and_write_in_each_trial
 
 from jev_navigator.judgments import judge as judge_module
 from jev_navigator.judgments.client import ReplayOnlyClient
@@ -247,17 +249,23 @@ def test_a_size_refusal_under_another_input_box_is_not_honoured(tmp_path: Path, 
     assert [len(state["items"]) for state, _ in larger.requests] == [4]
 
 
-def test_a_store_from_an_older_layout_is_refused_with_what_to_delete(tmp_path: Path) -> None:
-    # Arrange
+def test_a_store_from_an_older_layout_is_refused_pointing_at_a_new_file_never_at_deleting_it(
+    tmp_path: Path,
+) -> None:
+    # Arrange: other runs may be writing this file, so the refusal must not advise deleting it
     shared = tmp_path / "answers.sqlite"
     old = sqlite3.connect(shared)
     old.execute("create table answers (request_sha256 text, model text, record text)")
     old.commit()
     old.close()
 
-    # Act / Assert
-    with pytest.raises(UnsupportedAnswerStoreError, match=f"delete {shared}"):
+    # Act
+    with pytest.raises(UnsupportedAnswerStoreError) as refused:
         SqliteAnswerStore(shared)
+
+    # Assert
+    assert "point --answer-store or JEV_NAVIGATOR_ANSWER_STORE at a new file" in str(refused.value)
+    assert "delete" not in str(refused.value)
 
 
 def test_a_store_with_an_unknown_version_is_refused(tmp_path: Path) -> None:
@@ -285,3 +293,27 @@ def test_a_new_store_is_created_with_the_current_version_and_reopens(tmp_path: P
     # Assert
     assert reopened.records() == ()
     assert sqlite3.connect(shared).execute("pragma user_version").fetchone()[0] == SHARED_STORE_VERSION
+
+
+def test_parallel_first_opens_of_a_new_shared_store_never_fail(tmp_path: Path) -> None:
+    # Arrange: eight processes open each fresh store at the same moment, thirty times over
+    context = multiprocessing.get_context("spawn")
+    trials = [str(tmp_path / f"trial-{number}" / "answers.sqlite") for number in range(30)]
+    with context.Manager() as manager:
+        failures = manager.list()
+        barrier = context.Barrier(8)
+        workers = [
+            context.Process(target=open_and_write_in_each_trial, args=(trials, barrier, failures))
+            for _ in range(8)
+        ]
+
+        # Act
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=300)
+        reported = list(failures)
+
+    # Assert
+    assert [worker.exitcode for worker in workers] == [0] * 8
+    assert reported == []

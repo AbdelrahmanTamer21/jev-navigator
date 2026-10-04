@@ -29,6 +29,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Protocol
 
 from .answers import Answer, JevResponse, answer_from_json
@@ -179,18 +180,17 @@ class UnsupportedAnswerStoreError(RuntimeError):
     """The shared store file was written in a layout this JVN does not read."""
 
 
-_SCHEMA = """
-create table if not exists answers (request_sha256 text not null, model text not null, record text not null);
-create index if not exists answers_by_request on answers (request_sha256, model);
-create table if not exists item_answers (
-    item_key text not null, model text not null, request_sha256 text not null, answer text not null
-);
-create index if not exists item_answers_by_key on item_answers (item_key, model);
-create table if not exists refusals (
-    request_sha256 text not null, route text not null, input_box integer not null
-);
-create index if not exists refusals_by_request on refusals (request_sha256, route, input_box);
-"""
+_SCHEMA = (
+    "create table answers (request_sha256 text not null, model text not null, record text not null)",
+    "create index answers_by_request on answers (request_sha256, model)",
+    "create table item_answers ("
+    "item_key text not null, model text not null, request_sha256 text not null, answer text not null)",
+    "create index item_answers_by_key on item_answers (item_key, model)",
+    "create table refusals (request_sha256 text not null, route text not null, input_box integer not null)",
+    "create index refusals_by_request on refusals (request_sha256, route, input_box)",
+)
+_BUSY_SECONDS = 30
+"""How long an opener waits for another run holding the store's lock."""
 
 
 class SqliteAnswerStore:
@@ -207,24 +207,8 @@ class SqliteAnswerStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._db = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
-        self._db.execute("pragma journal_mode=wal")
-        self._open_current_layout()
-
-    def _open_current_layout(self) -> None:
-        """Create the layout in a new file; refuse a file written in any other layout."""
-        version = self._db.execute("pragma user_version").fetchone()[0]
-        if version == 0 and not self._db.execute("select name from sqlite_master").fetchall():
-            self._db.executescript(_SCHEMA)
-            self._db.execute(f"pragma user_version = {SHARED_STORE_VERSION}")
-            return
-        if version != SHARED_STORE_VERSION:
-            self._db.close()
-            raise UnsupportedAnswerStoreError(
-                f"{self.path} holds answer store version {version}, this JVN reads version "
-                f"{SHARED_STORE_VERSION}; delete {self.path} and its -wal and -shm files, or point "
-                "--answer-store at a new file"
-            )
+        _open_current_layout(self.path)
+        self._db = sqlite3.connect(self.path, timeout=_BUSY_SECONDS, check_same_thread=False)
 
     def by_request(self, request_sha256: str) -> AnswerRecord | None:
         row = self._one(
@@ -282,6 +266,54 @@ class SqliteAnswerStore:
     def _one(self, query: str, parameters: tuple) -> tuple | None:
         with self._lock:
             return self._db.execute(query, parameters).fetchone()
+
+
+def _open_current_layout(path: Path) -> None:
+    """Create the layout in a new file, or refuse a file in any other layout. Many runs may open a new
+    file at once, so the check, the layout and its version are one exclusive transaction, and only
+    the run that created the layout switches the file to WAL."""
+    setup = sqlite3.connect(path, timeout=_BUSY_SECONDS, isolation_level=None)
+    try:
+        created = _create_or_check_layout(setup, path)
+        if created:
+            _switch_to_wal(setup)
+    finally:
+        setup.close()
+
+
+def _create_or_check_layout(setup: sqlite3.Connection, path: Path) -> bool:
+    setup.execute("begin exclusive")
+    try:
+        version = setup.execute("pragma user_version").fetchone()[0]
+        empty = not setup.execute("select name from sqlite_master").fetchall()
+        if version == 0 and empty:
+            for statement in _SCHEMA:
+                setup.execute(statement)
+            setup.execute(f"pragma user_version = {SHARED_STORE_VERSION}")
+        elif version != SHARED_STORE_VERSION:
+            raise UnsupportedAnswerStoreError(
+                f"{path} holds answer store version {version}, and this JVN reads version "
+                f"{SHARED_STORE_VERSION}; point --answer-store or {SHARED_STORE_VARIABLE} at a new file"
+            )
+        setup.execute("commit")
+        return version == 0 and empty
+    except BaseException:
+        setup.execute("rollback")
+        raise
+
+
+def _switch_to_wal(setup: sqlite3.Connection) -> None:
+    """WAL lets several runs read and write at once. Another run holding the file briefly makes the
+    switch report a locked database, so it is retried until the busy time runs out."""
+    deadline = monotonic() + _BUSY_SECONDS
+    while True:
+        try:
+            setup.execute("pragma journal_mode=wal")
+            return
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error) or monotonic() > deadline:
+                raise
+            sleep(0.01)
 
 
 class LayeredAnswerStore:
