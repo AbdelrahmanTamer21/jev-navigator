@@ -68,7 +68,8 @@ NOT_REPORTED_TEXT = "not reported"
 class JevResponse:
     """``input_tokens`` is what the provider reported for the request, ``None`` when it reported
     nothing; a missing count is never 0. ``from_store`` marks a replay: it sent nothing and carries
-    no count."""
+    no count. A response composed from several requests carries none either; totals count only
+    requests sent."""
 
     answers: Mapping[str, Answer]
     model: str
