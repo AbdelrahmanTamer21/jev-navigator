@@ -641,7 +641,7 @@ def test_cancelled_run_marks_its_token_total_incomplete_because_a_sent_request_n
     assert provider["unanswered_requests"] == 1
     assert provider["input_tokens_complete"] is False
     report = (output / "report.md").read_text()
-    assert "Requests without a response: 1" in report
+    assert "Requests whose usage is unknown: 1" in report
     assert "Input tokens: at least 100 (not complete)" in report
 
 

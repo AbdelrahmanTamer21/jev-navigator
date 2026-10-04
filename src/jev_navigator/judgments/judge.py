@@ -218,7 +218,8 @@ class Judge:
 
     @property
     def unanswered_requests(self) -> int:
-        """The requests sent whose response never arrived, so whose token usage is unknown."""
+        """The requests sent without a response that reported usage: cancelled, failed with an error,
+        or never answered. Their token usage is unknown."""
         return self.calls - self.input_total.responses
 
     def calls_left(self) -> int | None:
