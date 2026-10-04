@@ -286,6 +286,18 @@ def test_a_settings_file_that_is_not_utf_8_is_named_in_the_error(tmp_path):
     assert isinstance(raised.value.__cause__, UnicodeDecodeError)
 
 
+def test_a_byte_order_mark_does_not_cost_the_first_setting(tmp_path, capsys):
+    # Editors on Windows save UTF-8 with a byte-order mark, which would otherwise glue itself to the
+    # first name and make it an unknown name.
+    (tmp_path / ".env").write_bytes("\ufeffTYPESAFE_API_KEY=k\n".encode())
+    environment_values: dict[str, str] = {}
+
+    load_typesafe_environment(environment_values, root=tmp_path, legacy=tmp_path / "absent")
+
+    assert environment_values == {"TYPESAFE_API_KEY": "k"}
+    assert capsys.readouterr().err == ""
+
+
 def test_env_file_parsing_is_tolerant(tmp_path):
     path = _written(
         tmp_path, {"A": "plain", "B": "quoted"}, extra=["", "# comment", "no equals sign", "=novalue"]

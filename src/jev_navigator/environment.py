@@ -137,7 +137,8 @@ def _env_file(path: Path) -> dict[str, str]:
 
 
 def _settings_text(path: Path) -> str:
+    """The file as UTF-8 text, without a leading byte-order mark."""
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError as error:
         raise RuntimeError(f"cannot read settings file {path}: {error}") from error
