@@ -347,10 +347,10 @@ def test_a_declaration_on_a_first_line_after_a_byte_order_mark_keeps_its_name(tm
     assert [span.name for span in facts["flags.ts"].structure.declarations] == ["enabled"]
 
 
-def test_binding_many_calls_to_one_name_checks_each_definition_once(
+def test_binding_many_calls_to_one_imported_name_checks_the_imported_definition_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Arrange: three definitions of save, and forty files that import and call it
+    # Arrange: three definitions of save, and forty files that import one of them and call it
     callers = {
         f"app/caller_{n}.py": f"from app.store import save\n\n\ndef run_{n}(row):\n    return save(row)\n"
         for n in range(40)
