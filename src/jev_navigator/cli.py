@@ -23,7 +23,7 @@ from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_stat
 from .cli_trace import create_trace_evidence_pack
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
-from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
+from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code, search_failure
 from .directives.places import Place, place_for_line
 from .index.code_index import CodeIndex
 from .index.languages import language_of
@@ -312,7 +312,8 @@ def create_evidence_pack(
         )
         selection: EntrySelection | None = None
         started = monotonic()
-        entry_pending = False
+        entry_stop: Outcome | None = None
+        entry_failure: Exception | None = None
         if resume is not None:
             start_places = []
             initial_candidates = ()
@@ -322,10 +323,7 @@ def create_evidence_pack(
         else:
             progress.phase("choosing an entry point")
             start_places = []
-            try:
-                selection = choose_initial_candidates(index, judge, target)
-            except CallCapReachedError:
-                entry_pending = True
+            selection, entry_stop, entry_failure = _choose_entry(index, judge, target)
             initial_candidates = (
                 tuple(
                     (
@@ -342,8 +340,8 @@ def create_evidence_pack(
         if resuming_enumeration:
             assert resume is not None
             result = resume
-        elif entry_pending:
-            result = FindResult(Outcome.BUDGET, (), (), (), (), 0, 0)
+        elif entry_stop is not None:
+            result = FindResult(entry_stop, (), (), (), (), 0, 0, failure=entry_failure)
         else:
             progress.phase("navigating code")
             result = find_code(
@@ -373,7 +371,7 @@ def create_evidence_pack(
         progress.phase("writing evidence pack")
         scope_unavailable: dict[str, str] = {}
         needs_resume = (
-            enumeration.stopped_by in ("budget", "cancelled")
+            enumeration.stopped_by in RESUMABLE_OUTCOMES
             if enumeration is not None
             else result.outcome in RESUMABLE_OUTCOMES
         )
@@ -382,7 +380,7 @@ def create_evidence_pack(
                 output / "resume.json",
                 index,
                 result,
-                entry_pending=entry_pending,
+                entry_pending=entry_stop is not None,
                 completed=enumeration.judged if enumeration is not None else None,
                 check_id=CONTAINS_IMPLEMENTATION.question_id if enumeration is not None else None,
             )
@@ -403,7 +401,7 @@ def create_evidence_pack(
             entry_selection=selection,
             previous=previous,
             resume_from=resume_from,
-            entry_pending=entry_pending,
+            entry_pending=entry_stop is not None,
             scope_unavailable=scope_unavailable,
         )
         manifest["workflow"] = workflow
@@ -422,8 +420,9 @@ def create_evidence_pack(
         if enumeration is not None:
             manifest["seed_search"] = previous["seed_search"] if resuming_enumeration else manifest["search"]
             manifest["search"] = _find_all_summary(enumeration, judge.calls, duration_seconds, previous)
-        if result.failure is not None:
-            manifest["search"]["failure"] = _failure_record(result.failure, judge, journal)
+        failure = enumeration.failure if enumeration is not None and enumeration.failure else result.failure
+        if failure is not None:
+            manifest["search"]["failure"] = _failure_record(failure, judge, journal)
         if not keep_requests:
             _drop_code(manifest, index)
         _write_json(output / "manifest.json", manifest)
@@ -431,9 +430,9 @@ def create_evidence_pack(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
         )
         outcome = str(manifest["search"]["outcome"])
-        if result.outcome == Outcome.FAILED:
+        if outcome == Outcome.FAILED and failure is not None:
             print(f"resume: use --resume {output} with the same target and repository", file=sys.stderr)
-            raise result.failure
+            raise failure
         return manifest
     except KeyboardInterrupt:
         outcome = "cancelled"
@@ -441,6 +440,22 @@ def create_evidence_pack(
     finally:
         journal.record_terminal(outcome)
         progress.close(outcome)
+
+
+def _choose_entry(
+    index: CodeIndex, judge: Judge, target: str
+) -> tuple[EntrySelection | None, Outcome | None, Exception | None]:
+    """The chosen entry point, or why choosing it stopped: the call cap, Ctrl-C, or a failed
+    request with its error. A stopped choice saves the entry stage, and Resume chooses again,
+    replaying the answers already stored."""
+    try:
+        return choose_initial_candidates(index, judge, target), None, None
+    except CallCapReachedError:
+        return None, Outcome.BUDGET, None
+    except KeyboardInterrupt:
+        return None, Outcome.CANCELLED, None
+    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
+        return None, Outcome.FAILED, search_failure(error)
 
 
 def _failure_record(error: BaseException, judge: Judge, journal: ProgressJournal) -> dict:
@@ -452,6 +467,14 @@ def _failure_record(error: BaseException, judge: Judge, journal: ProgressJournal
         "request_id": request_id,
         "route": journal.routes.get(request_id) if request_id is not None else None,
     }
+
+
+def _entry_pending_lines(search: dict) -> list[str]:
+    if not search["entry_selection_pending"]:
+        return []
+    if search["outcome"] == Outcome.BUDGET:
+        return ["- Entry selection awaits another call allowance."]
+    return [f"- Entry selection stopped ({search['outcome']}); Resume chooses it again."]
 
 
 def _failure_lines(search: dict, bullet: str) -> list[str]:
@@ -1246,7 +1269,7 @@ def _report(manifest: dict) -> str:
         f"- Target: {manifest['target']}",
         f"- Outcome: **{_outcome_summary(search)}**",
         *_failure_lines(search, "- "),
-        *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
+        *_entry_pending_lines(search),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{manifest['provider']['requested_model']}`, served "
         f"`{manifest['provider']['served_model']}`",

@@ -145,6 +145,14 @@ def uninterrupted(workflow: str, repository: Path, tmp_path: Path) -> tuple[dict
     return manifest, client
 
 
+def verdicts(manifest: dict) -> list[tuple[str, str, str]]:
+    """Every function Find All judged, with its verdict; whether an answer came from the store is
+    left out, because a resumed run replays what the stopped run already paid for."""
+    search = manifest["search"]
+    judged = [*search["found"], *search["unsure"], *search["searched"]]
+    return sorted((entry["source"]["file"], entry["name"], entry["verdict"]) for entry in judged)
+
+
 def items_asked(requests: list[tuple[Mapping, Mapping]]) -> list[str]:
     """Each enumerated item once per request that asked it, by span key: batches regroup on Resume,
     so request hashes differ while the items asked must not."""
@@ -362,6 +370,9 @@ def test_an_entry_selection_stopped_by_a_failure_or_ctrl_c_resumes_to_the_uninte
     # Assert
     assert stopped_status == status
     assert manifest_of(first)["search"]["entry_selection_pending"] is True
+    stop = "failed" if status == 1 else "cancelled"
+    report = (first / "report.md").read_text()
+    assert f"- Entry selection stopped ({stop}); Resume chooses it again." in report
     assert (first / "resume.json").is_file()
     assert resumed_status == 0
     assert manifest_of(second)["search"]["found"] == whole["search"]["found"]
@@ -397,7 +408,7 @@ def test_a_find_all_enumeration_stopped_by_a_failure_or_ctrl_c_resumes_to_the_un
     assert (first / "resume.json").is_file()
     assert resumed_status == 0
     assert resumed["search"]["outcome"] == whole["search"]["outcome"] == "scope_examined"
-    assert resumed["search"]["matched"] == whole["search"]["matched"]
+    assert verdicts(resumed) == verdicts(whole)
     stopped_batch = next(request for request in stopping.received if enumerating("helper_20")(0, request[0]))
     answered = [request for request in stopping.received if request is not stopped_batch]
     assert items_asked(answered + resuming.requests) == items_asked(whole_client.requests)

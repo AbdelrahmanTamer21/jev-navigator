@@ -109,8 +109,8 @@ The follow-up invocation gets a fresh allowance by default (24 live calls for Fi
 `--max-calls none` changes that allowance. Stored answers and the journal carry forward, so replayed
 answers cost no live calls. The new manifest combines earlier and new visits, history and call counts;
 `search.calls_this_invocation` records only the new requests, while `search.calls` is cumulative;
-the previous pack remains intact. A cap reached during automatic entry selection saves that stage,
-and the next invocation replays its stored decisions before continuing. Resume requires unchanged
+the previous pack remains intact. A cap, Ctrl-C or failed request during automatic entry selection
+saves that stage, and the next invocation replays its stored decisions before continuing. Resume requires unchanged
 source and scope, the same thresholds and requested model. If the source changed, start a new search.
 
 ## JSON requests
