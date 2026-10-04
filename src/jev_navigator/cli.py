@@ -35,7 +35,13 @@ from .index.code_index import CodeIndex
 from .index.languages import language_of
 from .judgments.answers import TokenTotal, answered_by
 from .judgments.client import JevClient
-from .judgments.journal import ERROR_TEXT_VARIABLE, error_message, error_text_kept, message_fields
+from .judgments.journal import (
+    ERROR_TEXT_VARIABLE,
+    error_message,
+    error_text_kept,
+    keeps_request_text,
+    message_fields,
+)
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import (
     SHARED_STORE_VARIABLE,
@@ -303,6 +309,8 @@ def create_evidence_pack(
     _validate_budget(budget)
     thresholds = thresholds or Thresholds()
     previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client, workflow)
+    if resume_from is not None:
+        _require_its_request_text_kept(resume_from.resolve(), keep_requests)
     _prepare_output(output)
     if resume_from is not None:
         for name in ("answers.jsonl", "journal.jsonl"):
@@ -985,6 +993,17 @@ def _previous_pack(
             "resume must use the same workflow, repository, scope, target, starts, thresholds and model"
         )
     return previous
+
+
+def _require_its_request_text_kept(pack: Path, keep_requests: bool) -> None:
+    """A pack whose journal holds its requests' text resumes only with ``keep_requests``: the resumed
+    run continues that journal and its answers, and a folder written without the flag holds no code."""
+    journal = pack / "journal.jsonl"
+    if not keep_requests and journal.is_file() and keeps_request_text(journal):
+        raise ValueError(
+            f"{pack} keeps the text of its requests, so its resume must keep it too: "
+            'add --keep-requests (JSON "keep_requests": true)'
+        )
 
 
 def _default_output(repository: Path) -> Path:

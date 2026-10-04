@@ -172,6 +172,35 @@ def test_a_resumed_default_run_replays_its_stored_answers_and_finds_the_code(tmp
     assert files_holding_code(first) == files_holding_code(second) == []
 
 
+def test_a_pack_that_kept_its_request_text_is_not_resumed_without_keep_requests(tmp_path: Path) -> None:
+    # Arrange: a budget-stopped pack whose journal holds the text of its requests
+    repository = marked_repository(tmp_path / "repository")
+    first, second = tmp_path / "first", tmp_path / "second"
+    find_pack(repository, first, "find", 1, keep_requests=True)
+
+    # Act
+    with pytest.raises(ValueError) as refusal:
+        find_pack(repository, second, "find", 1, resume_from=first)
+
+    # Assert: the run writes nothing, and says which flag the pack needs
+    assert str(first) in str(refusal.value)
+    assert "--keep-requests" in str(refusal.value)
+    assert not second.exists()
+
+
+def test_a_pack_that_kept_its_request_text_resumes_with_keep_requests(tmp_path: Path) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    first, second = tmp_path / "first", tmp_path / "second"
+    find_pack(repository, first, "find", 1, keep_requests=True)
+
+    # Act
+    resumed = find_pack(repository, second, "find", 1, keep_requests=True, resume_from=first)
+
+    # Assert
+    assert resumed["search"]["calls"] == 2
+
+
 @pytest.mark.parametrize("keep_requests", [False, True])
 def test_the_json_request_field_keep_requests_reaches_the_run_folder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_requests: bool
