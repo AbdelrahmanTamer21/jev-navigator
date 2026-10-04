@@ -22,7 +22,7 @@ from jev_navigator.judgments.judge import (
     Judge,
     request_exceeds_input_budget,
 )
-from jev_navigator.judgments.questions import Check, Criterion, Pick
+from jev_navigator.judgments.questions import Check, Criterion, Pick, serialized_chars
 from jev_navigator.judgments.secrets import SecretInRequestError, SecretMasker
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.judgments.thresholds import NoulVerdict, Thresholds
@@ -669,7 +669,7 @@ def test_oversized_batch_is_split_before_sending_so_no_request_exceeds_the_input
     assert len(client.requests) == 2
     judged_files: list[str] = []
     for state, questions in client.requests:
-        body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
+        body = serialized_chars({"state": state, "questions": questions})
         assert body <= MAX_REQUEST_CHARS
         assert len(questions) == len(state["parts"]), "one atomic question per item and slot"
         judged_files.extend(item["file"] for item in state["parts"])
@@ -732,6 +732,18 @@ def test_a_body_over_the_request_box_is_over_budget_although_state_and_question_
     assert not request_exceeds_input_budget(state, dict(list(questions.items())[:100]))
 
 
+def test_non_ascii_state_is_measured_as_the_escaped_body_the_engine_measures() -> None:
+    chinese_comments = "\u4e2d" * 20_000
+    state = {"parts": [{"code": chinese_comments}]}
+
+    assert len(json.dumps(state, ensure_ascii=False)) < JEV_INPUT_BOX_CHARS
+    assert request_exceeds_input_budget(state, {"q": {"ask": "x"}})
+
+
+def test_serialized_chars_counts_every_escaped_character() -> None:
+    assert serialized_chars({"a": "\u4e2d" * 10}) == len('{"a": "' + "\\u4e2d" * 10 + '"}')
+
+
 def test_provider_max_tokens_error_splits_the_batch_and_keeps_every_question_identity() -> None:
     client = BudgetedClient(34_000)  # stricter than the measured packing budget
     judge = Judge(client)
@@ -743,7 +755,7 @@ def test_provider_max_tokens_error_splits_the_batch_and_keeps_every_question_ide
     assert client.refusals == 1, "the first over-budget request is the provider's own evidence"
     assert len(client.requests) == 2
     for state, questions in client.requests:
-        body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
+        body = serialized_chars({"state": state, "questions": questions})
         assert body <= 34_000
     # Each item keeps its own store identity across the split: every item is judged exactly once.
     keys = [result.item["file"] for result in results["describes"]]

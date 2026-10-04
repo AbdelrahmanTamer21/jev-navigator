@@ -11,7 +11,6 @@ import asyncio
 import base64
 import copy
 import inspect
-import json
 import logging
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -53,6 +52,9 @@ from .thresholds import NoulVerdict, Thresholds
 logger = logging.getLogger(__name__)
 
 MAX_STATE_CHARS = 60_000
+"""The state a packed batch carries, in ``serialized_chars``. It sits below ``JEV_INPUT_BOX_CHARS``
+(76,800), so normal packing leaves room for the question and never reaches the preflight; that fires
+only for a batch that a single item overflows."""
 CODE_FIELD = "code"
 ROUTE_QUESTION = "route"
 _DEFAULT_MASKER = SecretMasker()
@@ -1013,7 +1015,7 @@ def _batches(plan: _CheckPlan) -> list[list[int]]:
     An item is measured together with the question wording asked about it, because that is what one
     request has to fit, and a single question is measured exactly as the batch around it is.
     """
-    budget = plan.budget - len(json.dumps(plan.shared))
+    budget = plan.budget - serialized_chars(plan.shared)
     batches: list[list[int]] = []
     current: list[int] = []
     used = 0
@@ -1030,4 +1032,4 @@ def _batches(plan: _CheckPlan) -> list[list[int]]:
 def _open_size(plan: _CheckPlan, position: int) -> int:
     """What one item and the wording of the questions still open about it would cost on their own."""
     wording = [check.to_question(item_path(plan.list_name, 0)) for check in plan.open_at(position).values()]
-    return len(json.dumps(plan.items[position])) + sum(len(json.dumps(question)) for question in wording)
+    return serialized_chars(plan.items[position]) + sum(serialized_chars(question) for question in wording)
