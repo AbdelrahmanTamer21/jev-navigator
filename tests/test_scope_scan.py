@@ -259,7 +259,7 @@ def _wide_script_function() -> str:
 
 
 @pytest.mark.parametrize(
-    ("file", "source"),
+    ("file", "source", "counts"),
     [
         (
             "module.ts",
@@ -269,6 +269,7 @@ def _wide_script_function() -> str:
             + _many("  m{n}() {{ return {n}; }},\n")
             + "};\n"
             + _wide_script_function(),
+            (1201, 301, 600, 902),
         ),
         (
             "module.js",
@@ -277,6 +278,7 @@ def _wide_script_function() -> str:
             + _many("  e{n}() {{ return {n}; }},\n  s{n},\n  p{n}: p{n},\n")
             + "};\n"
             + _wide_script_function(),
+            (300, 601, 0, 902),
         ),
         (
             "module.py",
@@ -285,17 +287,19 @@ def _wide_script_function() -> str:
             + _many("    p{n},\n")
             + "):\n    for item in items:\n"
             + _many("        l{n} = p{n}\n"),
+            (600, 1, 0, 601),
         ),
     ],
     ids=["typescript", "javascript", "python"],
 )
 def test_no_fact_rule_prints_more_than_the_node_it_matched(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str, source: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str, source: str, counts: tuple[int, ...]
 ) -> None:
     """ast-grep prints every node a rule's relations match. A relation to a large ancestor, such as
     the program, a module statement or an object literal, printed that ancestor once per match, so
     the parser's output and memory grew with matches times file size. A match prints its own node
-    three times (its text, its lines and its primary label), each as JSON."""
+    three times (its text, its lines and its primary label), each as JSON. The facts are still all
+    found: the declarations, functions, module aliases and local names the source holds."""
     # Arrange
     (tmp_path / file).write_text(source)
     printed: list[dict] = []
@@ -309,9 +313,17 @@ def test_no_fact_rule_prints_more_than_the_node_it_matched(
     monkeypatch.setattr(tools, "ast_grep_rules", recorded_rules)
 
     # Act
-    scan_facts([file], tmp_path, Unparsed())
+    facts = scan_facts([file], tmp_path, Unparsed())[file]
 
     # Assert
+    structure = facts.structure
+    found = (
+        len(structure.declarations),
+        len(structure.functions),
+        len(facts.module_aliases),
+        len(structure.local_names),
+    )
+    assert found == counts
     oversized = {
         match["ruleId"]
         for match in printed

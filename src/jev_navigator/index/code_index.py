@@ -367,8 +367,11 @@ class CodeIndex:
         return self._file_structure(file).symbols
 
     def top_level_symbols(self, file: str) -> tuple[Span, ...]:
-        """The functions and classes no other function or class of the file contains, in file order."""
-        return tuple(sorted(_outermost(self.symbols_in(file)), key=lambda span: (span.start, -span.end)))
+        """The functions and classes the module names (see ``FileStructure.module_symbols``) or
+        assigns to its CommonJS exports, in file order."""
+        structure = self._file_structure(file)
+        exported = (span for span in structure.commonjs_exports if span not in structure.module_symbols)
+        return tuple(sorted((*structure.module_symbols, *exported), key=lambda span: (span.start, -span.end)))
 
     def declarations_in(self, file: str) -> tuple[Span, ...]:
         """Constants, assignments, types, interfaces and enums at module level or directly in a
@@ -1176,12 +1179,6 @@ def _regular_blobs(listing: str) -> dict[str, str]:
 def _commits(log: str) -> list[set[str]]:
     blocks = log.split(_COMMIT_MARK)
     return [{line.strip() for line in block.split("\n") if line.strip()} for block in blocks if block.strip()]
-
-
-def _outermost(symbols: Sequence[Span]) -> list[Span]:
-    return [
-        span for span in symbols if not any(other != span and other.contains(span.start) for other in symbols)
-    ]
 
 
 def _innermost_lines(lines: Iterable[tuple[int, int]]) -> tuple[int, int]:
