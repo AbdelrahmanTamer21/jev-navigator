@@ -316,10 +316,13 @@ inventory was built, or changes after the index first read it, is reported separ
 unavailable. So is a file too large to parse safely:
 `tools.ast_grep_rules`, the one door every parse passes through, never hands ast-grep a file whose
 estimated parse peak (from the length of each line, `index/file_shape.py`) is over 250 MB, about
-70,000 characters on one line, and `unavailable_files` gives the estimated peak and the longest line.
-The file keeps its path in import relations, a name that may be defined in it binds `unknown`, and
-`find_comments` lists it in `refused_files`. Any ast-grep or ripgrep failure other
-than that verified disappearance still fails the lookup that triggered it.
+70,000 bytes on one line. A large file that cannot be read to measure it is refused too, with the
+error. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
+peak and the longest line in bytes. A refused file is never recorded as parsed: it stays readable and
+searchable as text, it keeps its path in import relations (also as a re-export target), a name its
+bytes mention binds `unknown`, `jvn stats` names it as never scanned, and `find_comments` lists it in
+`refused_files`. Any ast-grep or ripgrep failure other than that verified disappearance still fails the
+lookup that triggered it.
 
 Calls are found by name in the syntax tree, which is not a resolved binding. Every call carries a
 `Binding(status, reason, target)`: `resolved` when a module-level definition in the same file, or one
