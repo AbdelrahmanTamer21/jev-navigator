@@ -370,3 +370,10 @@ def test_a_batch_split_in_a_capped_wave_never_takes_a_call_from_its_wave() -> No
 
     # Assert: the halves of the refused pair wait for the next wave, which has no call left
     assert _answered_files(client) == ["f2.py", "f3.py", "f4.py", "f5.py"]
+
+
+@pytest.mark.parametrize("setting", ["max_concurrency", "items_per_request"])
+def test_a_judge_refuses_a_batch_setting_below_one(setting: str) -> None:
+    # Act and Assert: zero would hang the async path and make no batch at all
+    with pytest.raises(ValueError, match=f"{setting} must be at least 1"):
+        Judge(ScriptedJevClient(), **{setting: 0})

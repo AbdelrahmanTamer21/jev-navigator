@@ -185,8 +185,8 @@ class Judge:
         self.served_model = served_model
         self.journal = journal
         self.max_calls = max_calls
-        self.items_per_request = items_per_request
-        self.max_concurrency = max_concurrency
+        self.items_per_request = _at_least_one("items_per_request", items_per_request)
+        self.max_concurrency = _at_least_one("max_concurrency", max_concurrency)
         self.calls = 0
         self.replayed_answers = 0
         self.input_total = TokenTotal()
@@ -1129,6 +1129,12 @@ class _CallRequest:
         chosen = self.usable[route_result.choice]
         argument_result = _pick_result(response, _argument_id(chosen.name, chosen), self.thresholds)
         return CallDecision(chosen.name, argument_result.choice, route_result, argument_result)
+
+
+def _at_least_one(setting: str, value: int) -> int:
+    if value < 1:
+        raise ValueError(f"{setting} must be at least 1, got {value}")
+    return value
 
 
 def _completed_wave(futures: list[Future]) -> Generator[tuple[_Batch, JevResponse], None, list[_Batch]]:
