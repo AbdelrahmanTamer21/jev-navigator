@@ -52,13 +52,23 @@ def answered_probability(records: list[dict], source: dict) -> float:
         if record["kind"] == "request" and record["request_sha256"] == source["request_sha256"]
     ]
     assert [source["question_id"] in request["question_ids"] for request in requests] == [True]
+    return journal_response(records, source)["answers"][source["question_id"]]["noul"]
+
+
+def journal_response(records: list[dict], source: dict) -> dict:
+    """The decoded response body of the one request row with ``source``'s hash."""
+    (request,) = [
+        record
+        for record in records
+        if record["kind"] == "request" and record["request_sha256"] == source["request_sha256"]
+    ]
+    assert source["question_id"] in request["question_ids"]
     response = next(
         record
         for record in records
-        if record["kind"] == "response" and record["request_id"] == requests[0]["request_id"]
+        if record["kind"] == "response" and record["request_id"] == request["request_id"]
     )
-    answer = json.loads(base64.b64decode(response["body_base64"]))["answers"][source["question_id"]]
-    return answer["noul"]
+    return json.loads(base64.b64decode(response["body_base64"]))
 
 
 def test_each_judgment_of_an_open_step_joins_to_the_answer_that_decided_it(tmp_path: Path) -> None:
@@ -237,3 +247,37 @@ def test_a_find_all_pack_saved_before_question_ids_were_recorded_still_resumes(t
     assert stopped["search"]["outcome"] == "budget"
     assert resumed["search"]["outcome"] == "scope_examined"
     assert {entry["name"] for entry in resumed["search"]["found"]} == {"admit", "fits"}
+
+
+def test_each_entry_selection_decision_joins_to_the_answer_that_chose_it(tmp_path: Path) -> None:
+    # Arrange: no start, so the search chooses its own entry point
+    output = tmp_path / "pack"
+    manifest = create_evidence_pack(
+        marked_repository(tmp_path / "repository"),
+        ("app/",),
+        TARGET,
+        (),
+        output,
+        SearchBudget(max_calls=6, beam_width=1),
+        limit_client(),
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    # Act
+    records = journal(output)
+
+    # Assert
+    asked = [
+        decision
+        for decision in manifest["entry_selection"]["decisions"]
+        if decision["confidence"] is not None
+    ]
+    assert asked
+    for decision in asked:
+        assert answered_choice(records, decision["answered_by"]) == decision["probabilities"]
+
+
+def answered_choice(records: list[dict], source: dict) -> dict:
+    """The option probabilities the journal's response holds for ``source``'s Choice question."""
+    response = journal_response(records, source)
+    return response["answers"][source["question_id"]]["probabilities"]
