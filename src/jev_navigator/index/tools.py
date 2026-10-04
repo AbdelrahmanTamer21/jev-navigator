@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
@@ -15,10 +14,12 @@ from typing import IO
 
 from .spans import TextHit
 
-logger = logging.getLogger(__name__)
-
 AST_GREP = "ast-grep"
 RIPGREP = "rg"
+# `--no-config` keeps ripgrep from reading `RIPGREP_CONFIG_PATH`: over an untrusted repository, a
+# config file could otherwise inject flags such as `--pre=<program>`, which runs an arbitrary
+# program. It also keeps a personal rg config from changing what the index sees.
+_RIPGREP_SAFE = (RIPGREP, "--no-config")
 _NO_MATCHES_EXIT = 1
 MAX_FILES_PER_COMMAND = 300
 MAX_ARGUMENT_BYTES = 128 * 1024
@@ -114,7 +115,7 @@ def _tool_failed(tool: str, returncode: int, errors: IO[bytes]) -> ToolFailedErr
 def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:
     """The lines holding ``text``. JSON events are split at newlines only, since a line of code may
     hold a Unicode line separator that ``str.splitlines`` would split."""
-    command = [RIPGREP, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
+    command = [*_RIPGREP_SAFE, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
     hits = []
     for chunk in file_chunks(files):
         output = run_command([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
@@ -135,7 +136,14 @@ def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -
     with tempfile.NamedTemporaryFile("w", prefix="jev-navigator-patterns-", suffix=".txt") as pattern_file:
         pattern_file.write("".join(f"{pattern}\n" for pattern in patterns))
         pattern_file.flush()
-        command = [RIPGREP, "--files-with-matches", "--null", "--fixed-strings", "-f", pattern_file.name]
+        command = [
+            *_RIPGREP_SAFE,
+            "--files-with-matches",
+            "--null",
+            "--fixed-strings",
+            "-f",
+            pattern_file.name,
+        ]
         found: list[str] = []
         for chunk in file_chunks(files):
             output = run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
@@ -158,7 +166,7 @@ def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
     else:
         output = run_command(
             [
-                RIPGREP,
+                *_RIPGREP_SAFE,
                 "--files",
                 "--hidden",
                 "--null",
