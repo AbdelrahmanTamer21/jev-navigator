@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from git_repos import commit_files
 
-from jev_navigator.directives.entry import FILE_READ_CAP, choose_initial_candidates
+from jev_navigator.directives.entry import FILE_READ_CAP, MAX_OPTIONS, choose_initial_candidates
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS
 from jev_navigator.judgments.judge import Judge, request_exceeds_input_budget
@@ -329,3 +329,70 @@ def test_a_long_target_leaves_the_request_inside_the_character_box(tmp_path: Pat
     assert client.requests
     for state, questions in client.requests:
         assert not request_exceeds_input_budget(state, questions)
+
+
+def test_a_level_wider_than_one_request_reads_only_the_files_of_the_options_shown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: 450 folders at the root, more than two requests of options
+    folders = {f"area{number:03d}/mod.py": f"def thing_{number:03d}():\n    pass\n" for number in range(450)}
+    index = _index(tmp_path, folders)
+    parsed: list[int] = []
+    real = CodeIndex.functions_in_files
+
+    def counted(self: CodeIndex, files):
+        parsed.append(len(files))
+        return real(self, files)
+
+    monkeypatch.setattr(CodeIndex, "functions_in_files", counted)
+
+    # Act
+    choose_initial_candidates(index, Judge(ScriptedJevClient()), TARGET)
+
+    # Assert: the group request reads nothing; the request that shows options reads at most theirs
+    assert max(parsed) <= MAX_OPTIONS
+    assert sum(parsed) <= MAX_OPTIONS + FILE_READ_CAP
+
+
+def test_every_option_gets_its_first_main_file_read_before_any_option_gets_a_second(tmp_path: Path) -> None:
+    # Arrange: 20 options, each with three subfolders, so each has three main files; the budget is 30
+    files = {
+        f"area{number:02d}/{folder}/mod.py": f"def {folder}_{number:02d}():\n    pass\n"
+        for number in range(20)
+        for folder in ("alpha", "beta", "gamma")
+    }
+
+    # Act
+    options = _root_options(_index(tmp_path, files))
+
+    # Assert
+    assert len(options) == 20
+    assert all("alpha_" in text for text in options.values())
+    assert sum("beta_" in text for text in options.values()) == FILE_READ_CAP - 20
+
+
+def test_a_package_marker_with_code_is_never_a_main_file(tmp_path: Path) -> None:
+    index = _index(tmp_path, {**LIBRARY, "src/pkg/__init__.py": "def package_marker():\n    pass\n"})
+
+    src = _option_for(_root_options(index), "directory src/ ")
+
+    assert "package_marker" not in src
+    assert "__init__" not in src.split("Main files:")[1]
+
+
+def test_a_secret_shaped_file_name_is_masked_in_the_request_and_in_the_descriptions_recorded(
+    tmp_path: Path,
+) -> None:
+    # The receipt still names the selected file by its path: it is local evidence, never sent.
+    name = "AKIAIOSFODNN7EXAMPLE"
+    index = _index(tmp_path, {f"keys/{name}.py": "def load():\n    return 1\n", "app.py": "x = 1\n"})
+
+    client, receipt = _sent_and_recorded(index)
+
+    descriptions = [
+        option["description"] for decision in receipt["decisions"] for option in decision["options"]
+    ]
+    assert client.requests
+    assert name not in json.dumps(client.requests)
+    assert any("[MASKED]" in text for text in descriptions)
+    assert not any(name in text for text in descriptions)

@@ -108,7 +108,6 @@ class _PathEntry:
     kind: str
     path: str
     files: tuple[str, ...]
-    description: str
 
 
 @dataclass(frozen=True)
@@ -126,8 +125,10 @@ def choose_initial_candidates(index: CodeIndex, judge: Judge, target: str) -> En
     parent = ""
     mask = _mask_of(judge)
     while True:
-        entries = _path_entries(index, files, parent, mask)
-        chosen, decision = _choose_path(judge, target, parent, entries)
+        entries = _path_entries(files, parent)
+        chosen, decision = _choose_path(
+            judge, target, parent, entries, lambda shown: _path_descriptions(index, shown, mask)
+        )
         decisions += decision
         if chosen.kind == "file":
             selected_file = chosen.path
@@ -162,9 +163,7 @@ def _mask_of(judge: Judge) -> Mask:
     return judge.masker.mask if judge.masker is not None else str
 
 
-def _path_entries(
-    index: CodeIndex, files: tuple[str, ...], parent: str, mask: Mask
-) -> tuple[_PathEntry, ...]:
+def _path_entries(files: tuple[str, ...], parent: str) -> tuple[_PathEntry, ...]:
     prefix = PurePosixPath(parent).parts
     grouped: dict[tuple[str, str], list[str]] = {}
     for file in files:
@@ -177,12 +176,19 @@ def _path_entries(
         elif remainder:
             path = "/".join((*prefix, remainder[0]))
             grouped.setdefault(("directory", path), []).append(file)
-    ordered = sorted(grouped.items())
-    symbols = _symbols_of_main_files(index, [(kind, path, paths) for (kind, path), paths in ordered])
-    return tuple(
-        _PathEntry(kind, path, tuple(paths), _path_description(index, kind, path, paths, symbols, mask))
-        for (kind, path), paths in ordered
+    return tuple(_PathEntry(kind, path, tuple(paths)) for (kind, path), paths in sorted(grouped.items()))
+
+
+def _path_descriptions(index: CodeIndex, entries: Sequence[_PathEntry], mask: Mask) -> list[str]:
+    """The descriptions of the options one request shows. Only their main files are read, so a level
+    with more entries than one request reads nothing for the groups it is not asked about."""
+    symbols = _symbols_of_main_files(
+        index, [(entry.kind, entry.path, list(entry.files)) for entry in entries]
     )
+    return [
+        _path_description(index, entry.kind, entry.path, list(entry.files), symbols, mask)
+        for entry in entries
+    ]
 
 
 def _description_limit(question: Pick, state: dict, option_count: int) -> int:
@@ -396,6 +402,7 @@ def _choose_path(
     target: str,
     parent: str,
     entries: tuple[_PathEntry, ...],
+    describe: Callable[[Sequence[_PathEntry]], list[str]],
 ) -> tuple[_PathEntry, list[EntryDecision]]:
     selected, decisions, _ = _choose(
         judge,
@@ -404,7 +411,7 @@ def _choose_path(
         "path",
         parent or "/",
         entries,
-        lambda entry: entry.description,
+        describe,
         lambda entry: entry.path,
     )
     return selected, decisions
@@ -423,12 +430,14 @@ def _choose_span(
         "span",
         file,
         entries,
-        lambda entry: entry.description,
+        lambda shown: [entry.description for entry in shown],
         lambda entry: entry.span.key,
     )
 
 
 def _choose(judge, question, target, level, parent, entries, describe, identify):
+    """Narrow ``entries`` to one: groups of ``MAX_OPTIONS`` are chosen by their range first, and
+    ``describe`` is asked only for the options of the request that shows them."""
     remaining = list(entries)
     decisions: list[EntryDecision] = []
     while len(remaining) > MAX_OPTIONS:
@@ -454,7 +463,7 @@ def _choose(judge, question, target, level, parent, entries, describe, identify)
         remaining = chosen_group
     if len(remaining) == 1:
         only = remaining[0]
-        (shown,) = _offered(judge, question, _state(target, parent), [describe(only)])
+        (shown,) = _offered(judge, question, _state(target, parent), describe([only]))
         decision = EntryDecision(
             level,
             parent,
@@ -472,7 +481,7 @@ def _choose(judge, question, target, level, parent, entries, describe, identify)
         level,
         parent,
         remaining,
-        [describe(entry) for entry in remaining],
+        describe(remaining),
         identify,
     )
     by_entry = {
