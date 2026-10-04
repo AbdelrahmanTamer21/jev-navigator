@@ -46,6 +46,9 @@ POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
+RESUMABLE_OUTCOMES = (Outcome.BUDGET, Outcome.CANCELLED, Outcome.FAILED)
+"""A search that stopped before it finished: it saves its frontier, a Find All does not enumerate
+after it, and ``--resume`` continues it."""
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -131,7 +134,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     calls = manifest["provider"]["calls"] if args.command == "trace" else result["calls"]
     resume_directory = (
         str(output.resolve())
-        if args.command in ("find", "findall") and search_outcome in ("budget", "cancelled")
+        if args.command in ("find", "findall") and search_outcome in RESUMABLE_OUTCOMES
         else None
     )
     if args.json:
@@ -356,7 +359,7 @@ def create_evidence_pack(
         seed_calls = judge.calls
         seed_duration_seconds = monotonic() - started
         enumeration = None
-        if workflow == "findall" and result.outcome not in (Outcome.BUDGET, Outcome.CANCELLED):
+        if workflow == "findall" and result.outcome not in RESUMABLE_OUTCOMES:
             progress.phase("expanding seed and checking remaining functions")
             enumeration = find_all(
                 index,
@@ -372,7 +375,7 @@ def create_evidence_pack(
         needs_resume = (
             enumeration.stopped_by in ("budget", "cancelled")
             if enumeration is not None
-            else result.outcome in (Outcome.BUDGET, Outcome.CANCELLED)
+            else result.outcome in RESUMABLE_OUTCOMES
         )
         if needs_resume:
             scope_unavailable = save_resume(
@@ -419,6 +422,8 @@ def create_evidence_pack(
         if enumeration is not None:
             manifest["seed_search"] = previous["seed_search"] if resuming_enumeration else manifest["search"]
             manifest["search"] = _find_all_summary(enumeration, judge.calls, duration_seconds, previous)
+        if result.failure is not None:
+            manifest["search"]["failure"] = _failure_record(result.failure, judge, journal)
         if not keep_requests:
             _drop_code(manifest, index)
         _write_json(output / "manifest.json", manifest)
@@ -426,6 +431,9 @@ def create_evidence_pack(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
         )
         outcome = str(manifest["search"]["outcome"])
+        if result.outcome == Outcome.FAILED:
+            print(f"resume: use --resume {output} with the same target and repository", file=sys.stderr)
+            raise result.failure
         return manifest
     except KeyboardInterrupt:
         outcome = "cancelled"
@@ -433,6 +441,30 @@ def create_evidence_pack(
     finally:
         journal.record_terminal(outcome)
         progress.close(outcome)
+
+
+def _failure_record(error: BaseException, judge: Judge, journal: ProgressJournal) -> dict:
+    """The error that ended the search, with its cause chain and the journal request it failed in."""
+    request_id = judge.failed_request(error)
+    return {
+        **_error_fields(error),
+        "causes": [_error_fields(cause) for cause in _causes(error)],
+        "request_id": request_id,
+        "route": journal.routes.get(request_id) if request_id is not None else None,
+    }
+
+
+def _error_fields(error: BaseException) -> dict:
+    return {"type": type(error).__name__, "message": str(error)}
+
+
+def _causes(error: BaseException) -> list[BaseException]:
+    causes = []
+    cause = error.__cause__
+    while cause is not None:
+        causes.append(cause)
+        cause = cause.__cause__
+    return causes
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -834,8 +866,8 @@ def _previous_pack(
     previous = json.loads((source / "manifest.json").read_text())
     if not (source / "resume.json").is_file():
         raise ValueError(f"no saved search frontier in {source}")
-    if previous["search"]["outcome"] not in ("budget", "cancelled"):
-        raise ValueError("only a budget-stopped or cancelled search can resume")
+    if previous["search"]["outcome"] not in RESUMABLE_OUTCOMES:
+        raise ValueError("only a budget-stopped, cancelled or failed search can resume")
     if (
         previous.get("workflow", "find") != workflow
         or previous["source"]["repository"] != str(repository)
@@ -1175,6 +1207,7 @@ _FRONTIER_REASONS = {
     "budget": "Configured search limit reached",
     "depth": "Configured depth limit reached",
     "cancelled": "Search cancelled",
+    "failed": "A request failed; Resume asks it again",
     "stop_rule": "Caller stop condition met",
     "scope_incomplete": "Source scope incomplete",
     "neighbours_per_kind": "Configured neighbour limit reached",

@@ -11,7 +11,7 @@ from pathlib import Path
 from time import monotonic
 
 from .judgments.answers import TokenTotal, reported_input_tokens, reported_output_tokens
-from .judgments.journal import JournalRequest, JsonlJournal, RawResponse
+from .judgments.journal import JournalRequest, JsonlJournal, RawAttempt, RawResponse
 from .run_files import place_location, step_shown
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -138,6 +138,7 @@ class ProgressJournal(JsonlJournal):
         super().__init__(path, keep_request_text=keep_request_text)
         self.progress = progress
         self.place_label: Callable[[str], str] = place_location
+        self.routes: dict[str, str] = {}
 
     def record_step(self, step: Mapping) -> None:
         super().record_step(step if self.keep_request_text else self._shown(step))
@@ -160,6 +161,12 @@ class ProgressJournal(JsonlJournal):
     def record_response(self, request_id: str, response: RawResponse) -> None:
         super().record_response(request_id, response)
         self.progress.response(request_id, response)
+
+    def record_attempt(self, request_id: str, attempt: RawAttempt) -> None:
+        """Also remembers the route a routed client sent the request on."""
+        super().record_attempt(request_id, attempt)
+        if attempt.route is not None:
+            self.routes[request_id] = attempt.route
 
     def record_failure(self, request_id: str, error: str, response: RawResponse | None = None) -> None:
         super().record_failure(request_id, error, response)

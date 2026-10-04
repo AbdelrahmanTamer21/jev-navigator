@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from jev_navigator import cli
 from jev_navigator.cli import create_evidence_pack
 from jev_navigator.directives.find_all import CONTAINS_IMPLEMENTATION
 from jev_navigator.directives.find_code import SearchBudget
+from jev_navigator.judgments.journal import RawAttempt, RawResponse
 from jev_navigator.judgments.questions import request_sha256
 from jev_navigator.testing import ScriptedJevClient
 
@@ -24,8 +26,9 @@ class ProviderError(RuntimeError):
 
 
 class FailsOnRequest:
-    """Answers like ``script``, except that request number ``failing`` raises ``error`` once. It
-    records every request it receives, answered or not."""
+    """Answers like ``script``, except that request number ``failing`` raises ``error`` once; a
+    sibling sent in the same round is still answered. It records every request it receives,
+    answered or not."""
 
     def __init__(self, script: ScriptedJevClient, failing: int, error: Exception) -> None:
         self.script = script
@@ -33,10 +36,13 @@ class FailsOnRequest:
         self.error = error
         self.received: list[tuple[Mapping, Mapping]] = []
         self.model = script.model
+        self._counting = threading.Lock()
 
     def ask(self, state: Mapping, questions: Mapping):
-        self.received.append((state, questions))
-        if len(self.received) == self.failing:
+        with self._counting:
+            self.received.append((state, questions))
+            position = len(self.received)
+        if position == self.failing:
             raise self.error
         return self.script.ask(state, questions)
 
@@ -129,8 +135,9 @@ def test_a_failed_find_exits_1_with_the_error_and_its_resume_reaches_the_uninter
     assert resumed["search"]["outcome"] == whole["search"]["outcome"] == "found"
     assert resumed["search"]["found"] == whole["search"]["found"]
     sent = hashes(failing.received)
-    assert sent[:1] + hashes(resuming.requests) == expected
-    assert sent[1] == expected[1]
+    failed_request = sent.pop(failing.failing - 1)
+    assert sorted(sent + hashes(resuming.requests)) == sorted(expected)
+    assert failed_request in hashes(resuming.requests)
 
 
 def test_a_new_find_after_a_failed_one_runs_as_usual(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -149,6 +156,50 @@ def test_a_new_find_after_a_failed_one_runs_as_usual(tmp_path: Path, monkeypatch
     # Assert
     assert status == 0
     assert manifest_of(tmp_path / "fresh")["search"]["outcome"] == "found"
+
+
+class FailsOnARoute:
+    """A routed provider: the second request's attempt on route ``backup`` fails; the others are
+    answered like ``script``."""
+
+    def __init__(self, script: ScriptedJevClient) -> None:
+        self.script = script
+        self.model = script.model
+        self.sent = 0
+
+    def send_with_attempts(self, state: Mapping, questions: Mapping, on_attempt=None) -> RawResponse:
+        self.sent += 1
+        if self.sent != 2:
+            return self.script.send(state, questions)
+        if on_attempt is not None:
+            on_attempt(RawAttempt(1, 1.0, b"", error_type="ProviderError", error="503", route="backup"))
+        raise provider_error()
+
+    def send(self, state: Mapping, questions: Mapping) -> RawResponse:
+        return self.send_with_attempts(state, questions)
+
+    def parse(self, raw: RawResponse):
+        return self.script.parse(raw)
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_failed_request_on_a_route_names_that_route_in_the_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    use_clients(monkeypatch, iter([FailsOnARoute(limit_client())]))
+
+    # Act
+    status = cli.main(
+        find_command(repository, tmp_path / "routed", tmp_path / "answers.sqlite", "--beam-width", "1")
+    )
+
+    # Assert
+    assert status == 1
+    assert manifest_of(tmp_path / "routed")["search"]["failure"]["route"] == "backup"
 
 
 def asks(question_id: str) -> Callable[[tuple[Mapping, Mapping]], bool]:

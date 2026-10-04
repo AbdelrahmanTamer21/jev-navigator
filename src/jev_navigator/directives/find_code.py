@@ -126,6 +126,7 @@ class Outcome(StrEnum):
     NOTHING_LEFT = "nothing_left"
     SCOPE_INCOMPLETE = "scope_incomplete"
     BUDGET = "budget"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -236,6 +237,7 @@ class FindResult:
     files_judged: int = 0
     files_read: int = 0
     code_files: int = 0
+    failure: Exception | None = None
 
     @property
     def files_read_only(self) -> int:
@@ -280,6 +282,7 @@ class _Search:
     steps: int = 0
     cap_reached: bool = False
     replay_exhausted: bool = False
+    failure: Exception | None = None
     counter: itertools.count = field(default_factory=itertools.count)
 
     def push(
@@ -361,7 +364,7 @@ def find_code(
                 _merge_round(search, unmerged, responses)
                 unmerged = []
             if cancelled:
-                stop = Outcome.CANCELLED
+                stop = Outcome.FAILED if search.failure is not None else Outcome.CANCELLED
                 break
             _apply_stop_rule(judge, search)
     except KeyboardInterrupt:
@@ -488,8 +491,8 @@ def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[l
 
 def _cancel_round(judge: Judge, futures: list[Future], asked: int) -> list:
     """Abort the round's sends and wait until every one has settled. A send the abort stopped is
-    cancelled; any other error is the provider's real failure and is raised as it is, with its own
-    cause."""
+    cancelled; a failed request comes back as ``_Failed`` like in any round, and anything else a
+    send raises propagates as it is."""
     with _defer_keyboard_interrupts(re_raise=False):
         judge.abort_sends(futures)
         responses = [_settled_response(future) for future in futures]
@@ -508,13 +511,14 @@ def _merge_round(search: _Search, opened: list[_Opening], responses: list) -> No
     that got none means the store holds nothing for the frontier, so opening more places is waste.
     Counting unreplayed store records instead would never stop a Resume: its store carries the
     earlier run's answers for places that run already judged, which this run never asks again."""
-    answered = [response for response in responses if not isinstance(response, _Unanswered)]
+    answered = [response for response in responses if not isinstance(response, _Unanswered | _Failed)]
     search.replay_exhausted = search.cap_reached and not answered
     for opening, response in zip(opened, responses, strict=True):
-        if response is _Unanswered.CANCELLED:
-            _set_aside_unasked(search, opening, "cancelled")
-        elif response is _Unanswered.BUDGET:
-            _set_aside_unasked(search, opening, "budget")
+        if isinstance(response, _Failed):
+            _set_aside_unasked(search, opening, "failed")
+            search.failure = search.failure or response.error
+        elif isinstance(response, _Unanswered):
+            _set_aside_unasked(search, opening, response.value)
         else:
             _merge(search, opening, response)
 
@@ -522,6 +526,14 @@ def _merge_round(search: _Search, opened: list[_Opening], responses: list) -> No
 class _Unanswered(StrEnum):
     BUDGET = "budget"
     CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True)
+class _Failed:
+    """A request that failed: the place returns to the frontier and the search ends ``failed``
+    holding ``error``, so Resume can ask it again."""
+
+    error: Exception
 
 
 @contextmanager
@@ -610,6 +622,8 @@ def _restore(search: _Search, previous: FindResult) -> None:
 def _stop_reason(search: _Search, index: CodeIndex) -> Outcome | None:
     if search.found:
         return Outcome.FOUND
+    if search.failure is not None:
+        return Outcome.FAILED
     if search.stop_judgment is not None and search.stop_judgment.outcome == HistoryOutcome.FOUND:
         return Outcome.STOP_RULE
     steps_used = search.budget.max_steps is not None and search.steps >= search.budget.max_steps
@@ -738,7 +752,8 @@ def _opening_request(search: _Search, opening: _Opening) -> _OpeningRequest:
 
 
 def _ask_within_cap(judge: Judge, search: _Search, opening: _Opening):
-    """None when a judge's global cap, shared with other callers, ran out before this request."""
+    """The response; ``_Unanswered.BUDGET`` when a judge's global cap, shared with other callers, ran
+    out before this request; ``_Failed`` when the request failed."""
     request = _opening_request(search, opening)
     try:
         if not request_exceeds_input_budget(request.state, request.questions):
@@ -753,6 +768,10 @@ def _ask_within_cap(judge: Judge, search: _Search, opening: _Opening):
     except CallCapReachedError:
         search.cap_reached = True
         return _Unanswered.BUDGET
+    except ABORTED_SEND_ERRORS:
+        raise
+    except Exception as error:  # noqa: BLE001 - every failure gets resume state: the search ends failed holding this same error, and the CLI re-raises it after saving, so its edge still decides between one line and a traceback
+        return _Failed(error)
 
 
 async def _ask_within_cap_async(judge: Judge, search: _Search, opening: _Opening):
@@ -1154,6 +1173,7 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
         len(judged_files),
         len(read_files),
         len(code_files),
+        search.failure,
     )
 
 
@@ -1172,6 +1192,8 @@ def _stop_step(
     unavailable: Mapping[str, str],
 ) -> HistoryStep:
     judgments: dict[str, object] = {"not_inspected": [_frontier_entry(entry) for entry in not_inspected]}
+    if search.failure is not None:
+        judgments["failure"] = f"{type(search.failure).__name__}: {search.failure}"
     if unparsed:
         judgments["unparsed_files"] = sorted(unparsed)
     judgments["parser_scans"] = {

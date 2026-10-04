@@ -296,7 +296,7 @@ def test_split_seed_resumes_completed_neighbours_without_another_paid_request(
 
 
 @pytest.mark.parametrize("status", [400, 401])
-def test_optional_priority_keeps_size_failure_but_propagates_auth_failure(
+def test_optional_priority_keeps_size_failure_but_an_auth_failure_ends_the_search_failed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     status: int,
@@ -328,8 +328,10 @@ def test_optional_priority_keeps_size_failure_but_propagates_auth_failure(
             )
 
         if status == 401:
-            with pytest.raises(TypeSafeAuthenticationError, match="invalid_api_key"):
-                search()
+            result = search()
+            assert result.outcome == Outcome.FAILED
+            assert isinstance(result.failure, TypeSafeAuthenticationError)
+            assert "invalid_api_key" in str(result.failure)
         else:
             result = search()
             opened = next(step for step in result.history.steps if step.operation == "open")
