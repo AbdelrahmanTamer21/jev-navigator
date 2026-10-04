@@ -1,3 +1,4 @@
+import time
 from collections import Counter
 
 import pytest
@@ -99,6 +100,31 @@ SECRET_VALUES = {
         "secret: getSecret('sk-live-signing-0042')",
         "sk-live-signing-0042",
     ),
+    "bcrypt password hash": (
+        'password_hash = "$2b$12$KIXQJpZ8sWm3eVt7Lq9u0OaBcDeFgHiJkLmNoPqRsTuVwXyZ01234"',
+        "KIXQJpZ8sWm3eVt7Lq9u0OaBcDeFgHiJkLmNoPqRsTuVwXyZ01234",
+    ),
+    "single-quoted value starting with a dollar sign": ("api_key = '$ecretValue123'", "ecretValue123"),
+    "value with an interpolation inside": ('jwt_secret = "abcd${x}1234efgh5678"', "1234efgh5678"),
+    "value under a key that names an environment": ('SECRET_ENV = "prod-hunter2-xyz"', "prod-hunter2-xyz"),
+    "value under a key that names a label": ('password_label = "Sup3rS3cret!"', "Sup3rS3cret!"),
+    "value under a key that names a file": (
+        'client_secret_file = "s3cr3t-value-not-a-file"',
+        "s3cr3t-value-not-a-file",
+    ),
+    "value under a key that names a header": (
+        'auth_token_header = "abcd1234efgh5678ijkl"',
+        "abcd1234efgh5678ijkl",
+    ),
+    "token in a URL query": (
+        'token_url = "https://example.test/cb?token=abcd1234efgh5678"',
+        "abcd1234efgh5678",
+    ),
+    "password in a URL": ('DATABASE_URL = "postgres://app:Pr0dPassw0rd@db:5432/app"', "Pr0dPassw0rd"),
+    "value under a password-hash key": (
+        'password_hash = "pbkdf2-sha256-600000-abcdef"',
+        "pbkdf2-sha256-600000-abcdef",
+    ),
     "high-entropy value under an ordinary name": (
         'const signingKey = "Zq8vT2mN4xR7pL1wK9sD3fH6";',
         "Zq8vT2mN4xR7pL1wK9sD3fH6",
@@ -132,6 +158,18 @@ CODE_REFERENCES = [
     "_render_reports_block(reports, token_budget=...)",
     'secretAnnotation(kind, "name")',
     'requireSecretEnvironment(config, "RUNNER_AUTH_TOKEN", "engine-secrets", "runner-auth-token")',
+    'my_token = "${TOKEN}"',
+    'DATABASE_URL = "postgres://app:${DB_PASSWORD}@db:5432/app"',
+    'token_url = "https://example.test/oauth/token"',
+    'client_secret_file = "/run/secrets/client_secret.json"',
+    'SECRET_ENV = "production"',
+    'password_label = "Password"',
+    "packages/trpc/server/api-token-router/create-api-token.ts:9-43",
+    "scripts/check-github-oauth-credentials.mjs:25-35",
+    "getUserFromSessionToken(context, queryInfo, 'user.', false)",
+    'return createHmac("sha256", key)',
+    "crypto.createHmac('sha1', key)",
+    "MAX_TOKENS_MARKER = 'max_tokens_exceeded'",
 ]
 
 
@@ -203,3 +241,23 @@ def test_a_long_bare_value_is_masked_everywhere_in_the_request() -> None:
 
     # Assert
     assert masked == {"config": "api_key: [MASKED]", "log": "sent [MASKED] upstream"}
+
+
+LONG_LINES = {
+    "dash chain": "a-" * 35_000,
+    "SVG path data": 'd="M' + "".join(f"{i % 97}.{i % 13}-" for i in range(12_000)) + '"',
+    "upper-case run": "A_" * 35_000 + "=x",
+    "dotted secret-word run": "token." * 12_000 + "x",
+    "secret-named call run": "getToken" * 9_000 + "(x)",
+}
+
+
+@pytest.mark.parametrize("text", LONG_LINES.values(), ids=LONG_LINES.keys())
+def test_masking_a_long_line_takes_time_linear_in_its_length(text: str) -> None:
+    # Act
+    started = time.perf_counter()
+    SecretMasker().mask(text)
+    SecretScanner().findings(text)
+
+    # Assert
+    assert time.perf_counter() - started < 1.0

@@ -20,8 +20,8 @@ MASK = "[MASKED]"
 BY_CONTENT_MIN_CHARS = 8
 HIGH_ENTROPY_BITS_PER_CHAR = 4.0
 
-_SECRET_WORD = r"(?:secret|token|password|passwd|pwd|api[_-]?key|access[_-]?key|private[_-]?key|credential)"
-_SECRET_KEY = rf"(?P<key>(?i:\b[\w.-]*{_SECRET_WORD}[\w.-]*))[\"']?\s*[:=]\s*"
+_KEY = r"(?<![\w$.-])(?P<key>[A-Za-z_$][\w$.-]*+)"
+_SEPARATOR = r"[\"']?\s*[:=]\s*"
 _PRIVATE_KEY_BLOCK = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----|\Z)", re.S
 )
@@ -35,35 +35,78 @@ _TOKEN_SHAPES = (
     re.compile(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_\-]{20,}\b"),
     re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"),
+    re.compile(r"\$2[aby]?\$\d{2}\$[./A-Za-z0-9]{53}"),
+    re.compile(r"\$argon2(?:id|i|d)\$v=\d+\$m=\d+,t=\d+,p=\d+\$[A-Za-z0-9+/]+\$[A-Za-z0-9+/]+"),
 )
 _BEARER_VALUE = re.compile(r"(?i)\bbearer\s+(?P<value>[A-Za-z0-9._~+/=-]{16,})")
+_URL_PASSWORD = re.compile(
+    r"(?i)(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*+://[^/\s:@'\"`]++:(?P<value>[^/\s@'\"`]++)@"
+)
+_QUERY_VALUE = re.compile(r"[?&](?P<key>[A-Za-z_][\w.-]*+)=(?P<value>[^&\s#'\"`]++)")
 _ENV_FILE_VALUE = re.compile(
-    r"^[ \t]*(?:export[ \t]+)?(?P<key>[A-Z0-9_]*"
-    r"(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL)[A-Z0-9_]*)="
-    r"(?P<value>[^\s\"'`#$()\[\]{}][^\s\"'`#()\[\]{}]*)[ \t]*(?=#|$)",
+    r"^[ \t]*(?:export[ \t]+)?(?P<key>[A-Z_][A-Z0-9_]*+)="
+    r"(?P<value>[^\s\"'`#$()\[\]{}][^\s\"'`#()\[\]{}]*+)[ \t]*(?=#|$)",
     re.M,
 )
-_QUOTED_SECRET_VALUE = re.compile(rf"{_SECRET_KEY}(?P<quote>[\"'`])(?P<value>[^\"'`\s]+)(?P=quote)")
+_QUOTED_SECRET_VALUE = re.compile(rf"{_KEY}{_SEPARATOR}(?P<quote>[\"'`])(?P<value>[^\"'`\s]++)(?P=quote)")
 _LITERAL_FALLBACK = re.compile(
-    rf"{_SECRET_KEY}[^\n,;]*?(?:\|\||\?\?|\bor\b)\s*(?P<quote>[\"'`])(?P<value>[^\"'`\n]+)(?P=quote)"
+    rf"{_KEY}{_SEPARATOR}[^\n,;]*?(?:\|\||\?\?|\bor\b)\s*(?P<quote>[\"'`])(?P<value>[^\"'`\n]+)(?P=quote)"
 )
 _BARE_SECRET_VALUE = re.compile(
-    rf"{_SECRET_KEY}(?P<value>[\w.$@%+/~-][\w.$@%+/~=-]*)(?=[ \t]*(?:$|[,;}})\]]|#|//))", re.M
+    rf"{_KEY}{_SEPARATOR}(?P<value>[\w.$@%+/~-][\w.$@%+/~=-]*+)(?=[ \t]*(?:$|[,;}})\]&]|#|//))", re.M
 )
-_QUOTED_ASSIGNMENT = re.compile(r"""[:=]\s*["'](?P<value>[A-Za-z0-9+/=_\-]{20,})["']""")
-_SECRET_NAMED_CALL = re.compile(
-    r"(?:(?i:\b[\w.$]*(?:secret|token|password|passwd|credential|api_?key|hmac)\w*)|\bsign)"
-    r"\((?P<arguments>[^(){}\[\]\n]*)\)"
-)
+_QUOTED_ASSIGNMENT = re.compile(r"""[:=]\s*["'](?P<value>[A-Za-z0-9+/=_\-]{20,}+)["']""")
+_CALL = re.compile(r"(?<![\w.$])(?P<name>[\w.$]++)\((?P<arguments>[^(){}\[\]\n]*+)\)")
+_SECRET_CALL_WORD = re.compile(r"(?i)secret|token|password|passwd|credential|api_?key|hmac")
 _QUOTED_LITERAL = re.compile(r"(?P<quote>[\"'`])(?P<value>[^\"'`\n]+)(?P=quote)")
-_NAMING_KEY = re.compile(
-    r"(?i)(?:name|path|dir|directory|file|header|ref|url|uri|type|kind|field|label|annotation|mount|env)$"
+_KEY_PART = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+_SECRET_WORDS = (
+    ("secret", "access", "key"),
+    ("secret", "key"),
+    ("access", "key"),
+    ("private", "key"),
+    ("api", "key"),
+    ("apikey",),
+    ("secretkey",),
+    ("password",),
+    ("passwd",),
+    ("pwd",),
+    ("secret",),
+    ("token",),
+    ("credential",),
+)
+_CREDENTIAL_SUFFIXES = frozenset({"hash", "digest", "salt"})
+_NAMING_SUFFIXES = frozenset(
+    {
+        "name",
+        "path",
+        "dir",
+        "directory",
+        "file",
+        "header",
+        "ref",
+        "url",
+        "uri",
+        "type",
+        "kind",
+        "field",
+        "label",
+        "annotation",
+        "mount",
+        "env",
+    }
 )
 _CODE_REFERENCE = re.compile(
-    r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*|-?(?:0x[\da-fA-F]+|\d[\d_]*(?:\.\d+)*[A-Za-z%]{0,4})"
+    r"\$?[A-Za-z_]\w*(?:\.\$?[A-Za-z_]\w*)*|-?(?:0x[\da-fA-F]+|\d[\d_]*(?:\.\d+)*[A-Za-z%]{0,4})"
 )
+_INTERPOLATION = re.compile(r"\$\{[^{}]*\}|\$\([^()]*\)")
+_VARIABLE = re.compile(r"\$[A-Za-z_]\w*")
 _DOTTED_PATH = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
+_NAME_SHAPED = re.compile(r"[A-Za-z_][A-Za-z_.\-]*")
+_PATH_SHAPED = re.compile(r"(?:~|\.{1,2})?/?[\w.@-]+(?:/[\w.@\[\]-]+)+/?|/[\w.@-]*")
+_URL_SHAPED = re.compile(r"[a-z][a-z0-9+.-]*://\S+")
 _NAME_LITERAL = re.compile(r"[A-Z][A-Z0-9_]*|[a-z]+(?:[-_./][a-z]+)*")
+_ALGORITHM_NAME = re.compile(r"(?i)(?:sha|md|blake2[bs]?|hs|rs|es|ps)-?\d+")
 
 
 class Masker(Protocol):
@@ -208,34 +251,95 @@ def _matches(pattern: re.Pattern[str], hides: Callable[[re.Match[str]], bool] = 
 
 
 def _call_literal_spans(text: str) -> list[tuple[int, int]]:
+    """Literal arguments to a secret-named call (``getSecret("...")``, ``sign(payload, "...")``) that look
+    like key material: not a name, not a hash algorithm, and holding a digit or at least eight characters."""
     return [
         (call.start("arguments") + literal.start("value"), call.start("arguments") + literal.end("value"))
-        for call in _SECRET_NAMED_CALL.finditer(text)
+        for call in _CALL.finditer(text)
+        if _is_secret_call(call["name"])
         for literal in _QUOTED_LITERAL.finditer(call.group("arguments"))
-        if _is_literal(literal["value"]) and not _NAME_LITERAL.fullmatch(literal["value"])
+        if _is_key_material(literal["value"], literal["quote"])
     ]
 
 
-def _holds_quoted_literal(match: re.Match[str]) -> bool:
-    return _holds_value(match) and _is_literal(match["value"])
+def _is_secret_call(name: str) -> bool:
+    function = name.rsplit(".", 1)[-1]
+    return function == "sign" or bool(_SECRET_CALL_WORD.search(function))
 
 
-def _holds_bare_literal(match: re.Match[str]) -> bool:
+def _is_key_material(value: str, quote: str) -> bool:
+    return (
+        _is_literal(value, quote)
+        and not _NAME_LITERAL.fullmatch(value)
+        and not _ALGORITHM_NAME.fullmatch(value)
+        and (len(value) >= BY_CONTENT_MIN_CHARS or any(character.isdigit() for character in value))
+    )
+
+
+def _key_kind(key: str) -> str | None:
+    """The key's kind: "secret" when its last part is a secret word (``DB_PASSWORD``, ``authToken``,
+    ``password_hash``), "naming" when a naming word follows it (``SECRET_ENV``, ``token_url``,
+    ``secretName``), else None (``max_tokens``, ``tokenizer``)."""
+    parts = [part.lower() for piece in re.split(r"[._\-$]+", key) for part in _KEY_PART.findall(piece)]
+    if _ends_with_secret_word(parts):
+        return "secret"
+    if parts and parts[-1] in _CREDENTIAL_SUFFIXES and _ends_with_secret_word(parts[:-1]):
+        return "secret"
+    if parts and parts[-1] in _NAMING_SUFFIXES and _ends_with_secret_word(parts[:-1]):
+        return "naming"
+    return None
+
+
+def _ends_with_secret_word(parts: list[str]) -> bool:
+    return any(tuple(parts[-len(word) :]) == word for word in _SECRET_WORDS if len(parts) >= len(word))
+
+
+def _keyed_value_hides(kind_holds: Callable[[str], bool]) -> Callable[[re.Match[str]], bool]:
+    """A value under a secret key is hidden when ``kind_holds`` calls it a literal; under a naming key only
+    when it is also not a name, a path or a URL."""
+
+    def hides(match: re.Match[str]) -> bool:
+        kind = _key_kind(match["key"])
+        if kind is None or not kind_holds(match):
+            return False
+        return kind == "secret" or not _names_something(match["value"])
+
+    return hides
+
+
+def _names_something(value: str) -> bool:
+    return bool(
+        _NAME_SHAPED.fullmatch(value) or _PATH_SHAPED.fullmatch(value) or _URL_SHAPED.fullmatch(value)
+    )
+
+
+def _quoted_literal(match: re.Match[str]) -> bool:
+    quote = match["quote"] if "quote" in match.re.groupindex else '"'
+    return _is_literal(match["value"], quote)
+
+
+def _bare_literal(match: re.Match[str]) -> bool:
     value = match["value"]
-    return _holds_value(match) and any(c.isalnum() for c in value) and not _CODE_REFERENCE.fullmatch(value)
+    return any(c.isalnum() for c in value) and not _CODE_REFERENCE.fullmatch(value)
 
 
-def _holds_env_file_literal(match: re.Match[str]) -> bool:
-    return _holds_value(match) and not _DOTTED_PATH.fullmatch(match["value"])
+def _env_file_literal(match: re.Match[str]) -> bool:
+    return not _DOTTED_PATH.fullmatch(match["value"])
 
 
-def _holds_value(match: re.Match[str]) -> bool:
-    """A secret-named key that names something (``secretName``, ``TOKEN_PATH``) holds a name, not a value."""
-    return not _NAMING_KEY.search(match["key"])
+def _url_password(match: re.Match[str]) -> bool:
+    return _is_literal(match["value"], '"')
 
 
-def _is_literal(value: str) -> bool:
-    return not value.startswith("$") and "${" not in value
+def _query_secret(match: re.Match[str]) -> bool:
+    return _key_kind(match["key"]) == "secret" and _is_literal(match["value"], '"')
+
+
+def _is_literal(value: str, quote: str) -> bool:
+    """A whole ``${...}`` or ``$(...)``, or ``$NAME`` outside single quotes, refers to a variable: code."""
+    if _INTERPOLATION.fullmatch(value):
+        return False
+    return quote == "'" or not _VARIABLE.fullmatch(value)
 
 
 def _bearer_value(match: re.Match[str]) -> bool:
@@ -257,10 +361,12 @@ _RULES = (
     _matches(_KEY_MARKER_LINE),
     *(_matches(shape) for shape in _TOKEN_SHAPES),
     _matches(_BEARER_VALUE, _bearer_value),
-    _matches(_ENV_FILE_VALUE, _holds_env_file_literal),
-    _matches(_QUOTED_SECRET_VALUE, _holds_quoted_literal),
-    _matches(_LITERAL_FALLBACK, _holds_quoted_literal),
+    _matches(_URL_PASSWORD, _url_password),
+    _matches(_QUERY_VALUE, _query_secret),
+    _matches(_ENV_FILE_VALUE, _keyed_value_hides(_env_file_literal)),
+    _matches(_QUOTED_SECRET_VALUE, _keyed_value_hides(_quoted_literal)),
+    _matches(_LITERAL_FALLBACK, _keyed_value_hides(_quoted_literal)),
     _call_literal_spans,
-    _matches(_BARE_SECRET_VALUE, _holds_bare_literal),
+    _matches(_BARE_SECRET_VALUE, _keyed_value_hides(_bare_literal)),
     _matches(_QUOTED_ASSIGNMENT, _high_entropy_value),
 )
