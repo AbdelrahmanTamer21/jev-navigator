@@ -626,7 +626,8 @@ explicitly. An unknown name raises `UnknownSectionError`. Each section has its o
 Text limits also apply inside nested lists and mappings. Rendering a limited view preserves the
 complete code and judgments in the append-only record.
 The budget is a character box: the client's input limit for state plus the longest question, less
-room for the question, and within `budget_chars` when the history sets one. Each client declares its
+the longest question asked, measured together with the shared state, and within `budget_chars` when
+the history sets one. Each client declares its
 limits as `input_limits` (`InputLimits`, in characters at the rate `REQUEST_CHARS_PER_TOKEN`); a
 client that declares none is taken to be Jev, 32,000 tokens for state plus the longest question and
 64k tokens for a whole request (the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026). The
