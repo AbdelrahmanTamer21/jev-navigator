@@ -277,13 +277,14 @@ before any tool reads it.
 The index extracts symbols, declarations, calls and non-call references together in one ast-grep
 pass over the files a lookup actually needs. The pass runs a few hundred files per ast-grep process
 and turns each match into its fact as ast-grep prints it, so memory holds the facts, never the
-parser's output, and no command line outgrows the system's argument limit. Facts that start on the
-same line are ordered by their position in the line, so every run returns them in the same order;
-symbols spanning the same lines are ordered by name.
+parser's output, and no command line outgrows the system's argument limit. Calls are ordered by
+where they start in the file, and of two calls starting at one place (`new Foo(a).bar()` and
+`new Foo(a)`) the outer comes first, so every run returns them in the same order; symbols spanning
+the same lines are ordered by name.
 Exact-name lookups first use ripgrep to narrow the candidate files, and `prefetch_names` narrows
 several names with one ripgrep; opening a known span parses its file directly. The resulting
 per-file facts are cached by source bytes, language, ast-grep version, the rule text and the source
-of the code that reads the matches, in `$XDG_CACHE_HOME/jev-navigator/facts` (`~/.cache` when the
+of the code that runs ast-grep and reads its matches, in `$XDG_CACHE_HOME/jev-navigator/facts` (`~/.cache` when the
 variable is unset or relative), so a new index can reuse facts without treating changed source or changed
 parser rules as current. A file that changes on disk after the index first read it is
 reported as unavailable when the index reads it again, and its code still reads as the text the
