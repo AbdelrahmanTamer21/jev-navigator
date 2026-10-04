@@ -461,9 +461,12 @@ class CodeIndex:
     def _load_facts_for_bindings(self, name: str, use_files: Iterable[str]) -> None:
         """Loads, in one scan, the facts that binding the uses of ``name`` reads: the files the uses
         sit in and the files that define the name. With a warm table and an empty fact cache they
-        would otherwise load one file per scan."""
+        would otherwise load one file per scan. A name nothing uses loads nothing."""
+        uses = tuple(use_files)
+        if not uses:
+            return
         definition_files = (span.file for span in self.find_definition(name))
-        self._ensure_facts(tuple(dict.fromkeys((*use_files, *definition_files))))
+        self._ensure_facts(tuple(dict.fromkeys((*uses, *definition_files))))
 
     def _nameable_definitions(self, name: str, role: str | None) -> tuple[tuple[Span, ...], tuple[Span, ...]]:
         """The definitions of ``name`` a use in ``role`` can name, and those of them at top level.

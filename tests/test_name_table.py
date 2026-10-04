@@ -295,6 +295,22 @@ def test_a_warm_table_with_an_empty_fact_cache_loads_a_names_facts_in_one_scan(
     assert spawned[tools.AST_GREP] == 1
 
 
+def test_a_name_nothing_uses_loads_no_facts_on_a_warm_table(tmp_path: Path, spawned: Counter[str]) -> None:
+    # Arrange: place is defined but never called or passed on; the table is warm, the facts are not
+    repository = tmp_path / "repository"
+    commit_files(repository, REPOSITORY)
+    every_lookup(CodeIndex.from_git(repository, fact_cache_dir=tmp_path / "warm-facts"))
+    index = CodeIndex.from_git(repository, fact_cache_dir=tmp_path / "empty-facts")
+    spawned.clear()
+
+    # Act
+    found = (index.find_callers("place"), index.find_references("place"))
+
+    # Assert
+    assert found == ((), ())
+    assert spawned[tools.AST_GREP] == 0
+
+
 def test_a_files_definitions_come_from_the_table_with_their_lines(
     tmp_path: Path, spawned: Counter[str]
 ) -> None:
