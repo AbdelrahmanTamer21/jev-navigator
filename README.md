@@ -96,9 +96,17 @@ jvn find "where do we reject evidence quotes that are absent from the source?" -
 ```
 
 Explicit `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` process values win independently. Otherwise
-`jvn` reads those settings from `~/.config/jvn/env` with a dotenv parser; it does not execute that
-file or print the values. `TYPESAFE_BASE_URL` is the API root before `/v1/systemone`, such as
-`http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
+`jvn` reads those settings from `~/.config/jvn/env`, a file in dotenv syntax that it parses itself;
+it does not execute that file or print the values. `TYPESAFE_BASE_URL` is the API root before
+`/v1/systemone`, such as `http://127.0.0.1:4777/jvn` for a gateway serving `/jvn/v1/systemone`.
+
+When its code runs from a jev-navigator source checkout (`uv run jvn` there, or an editable
+install), `jvn` first fills what is missing from that checkout's `.env` (see `.env.example`). Any
+install into site-packages (`uv tool install`, `pipx`, a non-editable `pip install`) reads no
+`.env`, and when the directory it runs in holds one, it says on stderr that it did not read it. It
+never reads a `.env` from the directory or repository it searches. A settings file can set only
+`jvn`'s own `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names; `jvn` names on stderr any
+other name it ignores, never its value.
 
 ### JSON input for agents and pipelines
 
@@ -268,7 +276,9 @@ before any tool reads it.
 
 The index extracts symbols, declarations, calls and non-call references together in one ast-grep
 pass over the files a lookup actually needs. Exact-name lookups first use ripgrep to narrow the
-candidate files; opening a known span parses its file directly. The resulting per-file facts are
+candidate files; opening a known span parses its file directly. ripgrep always runs with
+`--no-config`, so a `RIPGREP_CONFIG_PATH` file can neither change what the index sees nor run a
+preprocessor over the searched repository. The resulting per-file facts are
 cached by source bytes, language, ast-grep version and rule version, so a new index can reuse facts
 without treating changed source or changed parser rules as current. Each call site's binding is
 computed once. There is no default file-count refusal or parser timeout, and no requested file is

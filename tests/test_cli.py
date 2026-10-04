@@ -5,13 +5,13 @@ import io
 import json
 import os
 import subprocess
-import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 
 import pytest
 from git_repos import commit_files
+from isolated_jvn import JVN
 
 from jev_navigator.cli import (
     SCHEMA_VERSION,
@@ -609,7 +609,6 @@ def repository_commit(repository: Path) -> str:
 
 
 def test_each_existing_typesafe_environment_value_wins_independently(tmp_path: Path) -> None:
-    pytest.importorskip("dotenv")
     path = tmp_path / "env"
     path.write_text("TYPESAFE_API_KEY=file-key\nTYPESAFE_BASE_URL=http://file.example/gateway\n")
     environment = {"TYPESAFE_API_KEY": "process-key"}
@@ -622,13 +621,12 @@ def test_each_existing_typesafe_environment_value_wins_independently(tmp_path: P
     }
 
 
-def test_user_dotenv_key_is_loaded_without_shell_evaluation(tmp_path: Path) -> None:
-    pytest.importorskip("dotenv")
+def test_user_dotenv_loads_only_settings_and_never_shell_evaluates(tmp_path: Path) -> None:
+    marker = tmp_path / "shell-ran"
+    command = f"$(touch {marker})"
     path = tmp_path / "env"
     path.write_text(
-        "TYPESAFE_API_KEY='file-value'\n"
-        "TYPESAFE_BASE_URL='http://127.0.0.1:4777/jvn'\n"
-        "UNRELATED=$(touch should-not-run)\n"
+        f"TYPESAFE_API_KEY='file-value'\nTYPESAFE_DEFAULT_MODEL={command}\nUNRELATED=outside-the-settings\n"
     )
     environment: dict[str, str] = {}
 
@@ -636,17 +634,15 @@ def test_user_dotenv_key_is_loaded_without_shell_evaluation(tmp_path: Path) -> N
 
     assert environment == {
         "TYPESAFE_API_KEY": "file-value",
-        "TYPESAFE_BASE_URL": "http://127.0.0.1:4777/jvn",
-        "UNRELATED": "$(touch should-not-run)",  # loaded literally, never shell-evaluated
-    }
-    assert not (tmp_path / "should-not-run").exists()
+        "TYPESAFE_DEFAULT_MODEL": command,
+    }  # the value arrives as written, and UNRELATED, outside the tool's settings, never loads
+    assert not marker.exists()
 
 
 def test_dotenv_base_url_reaches_the_real_sdk_system_one_endpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pytest.importorskip("typesafe_sdk")
-    pytest.importorskip("dotenv")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     received: list[tuple[str, bytes]] = []
@@ -878,13 +874,7 @@ def test_json_pipeline_reaches_sdk_and_preserves_explicit_options(tmp_path):
     }
     try:
         result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "from jev_navigator.cli import main; raise SystemExit(main())",
-                "--json",
-                "-",
-            ],
+            [*JVN, "--json", "-"],
             input=json.dumps(payload),
             text=True,
             capture_output=True,
