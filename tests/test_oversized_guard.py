@@ -64,7 +64,7 @@ def test_a_file_over_the_memory_bound_is_never_parsed_and_is_reported(
     assert not ast_grep.received(BUNDLE)
     reason = index.unavailable_files[BUNDLE]
     assert reason.startswith("too large to parse: estimated parse peak ")
-    assert reason.endswith(" GB, longest line 668,777 bytes")
+    assert reason.endswith(" GB, 1 line, longest line 668,777 bytes")
     assert index.parser_scans_pending == ()
 
 
@@ -467,3 +467,24 @@ def test_a_refused_file_is_measured_once_for_the_life_of_the_index(tmp_path: Pat
 
     # Assert
     assert [event for event in scans if event[1] == "started"] == [("facts", "started", 1)]
+
+
+def test_a_five_megabyte_file_of_ordinary_short_lines_is_never_handed_to_ast_grep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: ordinary code peaks at about 74 MB per MB of source once parsed (04.10.2026 census)
+    ast_grep = _AstGrepRecorder(monkeypatch)
+    generated = "".join(f"export function step{n}(a, b) {{ return a + b; }}\n" for n in range(120_000))
+    commit_files(
+        tmp_path / "repo",
+        {"src/generated/steps.ts": generated, "src/small.py": "def small():\n    return 1\n"},
+    )
+    index = CodeIndex.from_git(tmp_path / "repo", fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    index.functions_in_files(index.files)
+
+    # Assert
+    assert len(generated) > 5_000_000
+    assert not ast_grep.received("src/generated/steps.ts")
+    assert "120,000 lines" in index.refused_files["src/generated/steps.ts"]

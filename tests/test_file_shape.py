@@ -45,12 +45,31 @@ def test_the_estimate_follows_the_punctuation_of_a_line_not_its_length() -> None
     assert minified_code.parse_peak_mb > 1_000
 
 
-def test_many_short_lines_stay_cheap_however_large_the_file_is() -> None:
-    shape = measure(b"x = 1\n" * 120_000)
+def test_short_lines_cost_by_how_many_there_are() -> None:
+    # Measured on 04.10.2026: ordinary code peaks at about 3 to 4 MB per 1,000 lines once it is parsed
+    statement = b"    total = compute(items, limit)\n"
 
-    assert shape.size_bytes == 720_000
-    assert shape.parse_peak_mb < 30
-    assert not shape.too_large_to_parse
+    under = measure(statement * 50_000)
+    over = measure(statement * 60_000)
+
+    assert not under.too_large_to_parse
+    assert over.too_large_to_parse
+    assert over.refusal is not None and "60,000 lines" in over.refusal
+
+
+def test_every_measured_short_line_file_is_estimated_at_or_above_its_real_peak() -> None:
+    # (lines, real peak in MB) of the 04.10.2026 short-line census: Heedvane TypeScript and saleor Python
+    measured = [
+        (27_504, 130.2),
+        (53_922, 218.3),
+        (105_521, 362.8),
+        (184_661, 614.1),
+        (34_251, 131.7),
+        (171_255, 496.8),
+    ]
+
+    for lines, real_peak in measured:
+        assert measure(b"x\n" * lines).parse_peak_mb >= real_peak
 
 
 def test_the_bound_for_a_one_line_bundle_sits_between_25000_and_32000_characters() -> None:
@@ -64,7 +83,7 @@ def test_the_refusal_names_the_estimated_peak_and_the_longest_line() -> None:
 
     assert reason is not None
     assert reason.startswith("too large to parse: estimated parse peak ")
-    assert reason.endswith(" GB, longest line 668,777 bytes")
+    assert reason.endswith(" GB, 1 line, longest line 668,777 bytes")
     assert measure(_one_line(20_000)).refusal is None
 
 
@@ -146,10 +165,10 @@ def test_shape_of_reads_one_file_given_the_repository_folder_and_the_path(tmp_pa
     assert shape.triggers == (Trigger.LONG_LINE, Trigger.DENSE_LINES)
 
 
-def test_the_stat_shortcut_is_exact_a_file_up_to_the_safe_size_can_never_be_over_the_bound() -> None:
-    all_punctuation = b";"
-    assert not measure(all_punctuation * PARSEABLE_UP_TO_BYTES).too_large_to_parse
-    assert measure(all_punctuation * (PARSEABLE_UP_TO_BYTES + 1)).too_large_to_parse
+def test_the_stat_shortcut_is_safe_a_file_up_to_the_safe_size_can_never_be_over_the_bound() -> None:
+    assert not measure(b";" * PARSEABLE_UP_TO_BYTES).too_large_to_parse
+    assert not measure(b"\n" * PARSEABLE_UP_TO_BYTES).too_large_to_parse
+    assert measure(b";" * (PARSEABLE_UP_TO_BYTES + 700)).too_large_to_parse
 
 
 def test_a_small_file_is_cleared_from_its_size_without_reading_it(
@@ -210,4 +229,4 @@ def test_a_235_kb_hand_written_module_is_cleared() -> None:
 
     assert shape.size_bytes > 235_000
     assert not shape.too_large_to_parse
-    assert shape.parse_peak_mb < 30
+    assert shape.parse_peak_mb < 50

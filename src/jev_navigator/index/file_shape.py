@@ -6,7 +6,9 @@ lines of about 1,000 characters at 35 MB, and one 2.5 MB image string, which is 
 So the estimate sums, over lines, the square of each line's punctuation count. It fits every real file
 measured on 03.10.2026 and 04.10.2026 (the table is in the ``census/parse-peak`` folder of the
 evaluation, ``fit-table-punctuation-5.5.md``): the 13 files that really peak above 250 MB stay refused,
-and a long string of data is parsed.
+and a long string of data is parsed. Ordinary code of short lines costs by how much of it there is:
+on 04.10.2026 files of 27,000 to 185,000 lines of Heedvane TypeScript and saleor Python peaked at 2.7
+to 3.8 MB per 1,000 lines over the base, so the estimate adds a term per line.
 """
 
 from __future__ import annotations
@@ -19,18 +21,28 @@ BASE_PEAK_MB = 25.0
 PEAK_MB_PER_SQUARED_THOUSAND_PUNCTUATION = 5.5
 """The fitted constant is 5.0 (the real peaks of eight bundles give 3.5 to 5.0 after the base, and it
 under-counts by at most 1%); 5.5 is the margin."""
+PEAK_MB_PER_THOUSAND_LINES = 4.0
+"""The largest measured cost is 3.8 MB per 1,000 lines (27,504 lines of Heedvane API code); 4.0 is the
+margin."""
 PUNCTUATION = frozenset(b"{}();,[]")
 _NOT_PUNCTUATION = bytes(set(range(256)) - PUNCTUATION)
 MAX_PARSE_PEAK_MB = 250.0
 """A file whose estimated parse peak exceeds this is never parsed. The largest parse measured under it
 peaked at 122 MB, and ast-grep scans files in parallel, so several can be in memory at once."""
 
-PARSEABLE_UP_TO_BYTES = int(
-    1000 * ((MAX_PARSE_PEAK_MB - BASE_PEAK_MB) / PEAK_MB_PER_SQUARED_THOUSAND_PUNCTUATION) ** 0.5
-)
-"""A file this small can never be over the bound, whatever its lines: punctuation cannot exceed bytes,
-and the sum of the squared line counts is at most the square of the file's size. The size alone clears
-it, without a read."""
+
+def _safe_size_bytes() -> int:
+    """The largest size whose worst case stays under the bound: every byte a line (lines cannot exceed
+    bytes plus one) and every byte punctuation on one line (the sum of the squared line counts is at most
+    the square of the file's size). Solves base + lines x + punctuation x^2 = bound, x in thousands."""
+    lines, punctuation = PEAK_MB_PER_THOUSAND_LINES, PEAK_MB_PER_SQUARED_THOUSAND_PUNCTUATION
+    room = MAX_PARSE_PEAK_MB - BASE_PEAK_MB - lines / 1000
+    return int(1000 * (-lines + (lines * lines + 4 * punctuation * room) ** 0.5) / (2 * punctuation))
+
+
+PARSEABLE_UP_TO_BYTES = _safe_size_bytes()
+"""A file this small can never be over the bound, whatever its lines. The size alone clears it, without
+a read."""
 
 
 LONG_LINE_CHARS = 10_000
@@ -65,7 +77,11 @@ class FileShape:
 
     @property
     def parse_peak_mb(self) -> float:
-        return BASE_PEAK_MB + PEAK_MB_PER_SQUARED_THOUSAND_PUNCTUATION * self.squared_thousands_of_punctuation
+        return (
+            BASE_PEAK_MB
+            + PEAK_MB_PER_THOUSAND_LINES * self.line_count / 1000
+            + PEAK_MB_PER_SQUARED_THOUSAND_PUNCTUATION * self.squared_thousands_of_punctuation
+        )
 
     @property
     def triggers(self) -> tuple[Trigger, ...]:
@@ -89,7 +105,7 @@ class FileShape:
             return None
         return (
             f"too large to parse: estimated parse peak {_peak_text(self.parse_peak_mb)}, "
-            f"longest line {self.longest_line:,} bytes"
+            f"{_counted(self.line_count, 'line')}, longest line {self.longest_line:,} bytes"
         )
 
 
@@ -119,6 +135,10 @@ def measure(content: bytes) -> FileShape:
 
 def _punctuation_in(line: bytes) -> int:
     return len(line.translate(None, _NOT_PUNCTUATION))
+
+
+def _counted(count: int, noun: str) -> str:
+    return f"{count:,} {noun}" if count == 1 else f"{count:,} {noun}s"
 
 
 def _peak_text(megabytes: float) -> str:
