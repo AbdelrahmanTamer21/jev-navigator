@@ -717,3 +717,25 @@ def test_a_value_that_a_copy_turns_into_a_secret_is_masked_again_so_the_request_
 
     # Assert
     assert masked_state["fixture"]["code"] == '  sessionToken: "[MASKED]",\n'
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '    api_token: str = field(default="admin")\n',
+        '    secret: process.env.AUTH_SECRET, role: "admin",\n',
+    ],
+)
+def test_a_code_line_a_copy_changed_is_masked_again_as_code(line: str) -> None:
+    # Arrange
+    state = {
+        "code": {"file": "app/settings.py", "code": line},
+        "keyed": {"file": "app/fixtures.py", "code": 'password = "admin"\n'},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state["code"]["code"] == line.replace('"admin"', '"[MASKED]"')
