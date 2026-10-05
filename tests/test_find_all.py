@@ -21,7 +21,7 @@ from jev_navigator.directives.find_all import (
     match_check,
 )
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.index.units import UNSUPPORTED_LANGUAGE, RangeAnchor, UnitKind
+from jev_navigator.index.units import OUTSIDE_SCOPE, UNSUPPORTED_LANGUAGE, RangeAnchor, UnitKind
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputBudgetExceededError, InputLimits
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
@@ -245,6 +245,19 @@ def test_a_place_is_left_out_only_when_every_line_of_it_is_already_delivered(
     [top_level] = [unit for unit in result.units if unit.kind == UnitKind.TOP_LEVEL]
     assert any("STRICT = True" in code for code in sent_code(provider)) is judged
     assert result.not_judged.get(top_level.id) == (None if judged else DELIVERED)
+
+
+def test_a_scope_file_the_index_lacks_is_named_unlisted_and_the_rest_is_still_judged(tmp_path: Path) -> None:
+    # Arrange: the caller's scope names a file its index never held, as a masked copy without it would
+    index = repository(tmp_path)
+    provider = labelled({("limit", "len(order.items)"): 0.9})
+
+    # Act
+    result = find_all(index, Judge(provider), LIMIT, files=["rules.py", "removed.py"])
+
+    # Assert
+    assert (result.failure, result.unlisted) == (None, {"removed.py": OUTSIDE_SCOPE})
+    assert [score.unit.id for score in result.scores("limit") if score.probability >= 0.9] == ["rules.py:4-5"]
 
 
 @dataclass

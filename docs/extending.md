@@ -365,7 +365,8 @@ Top-level code is a file's lines outside every function and method, class bodies
 runs of lines in order (`ranges`) without the blank lines at their edges. A file whose top-level code
 is only imports, comments, directives such as `"use client"`, lines of closing brackets and blank
 lines lists no top-level unit. A file in a language JVN does not parse gives no units and is named
-in `unlisted` with `language not supported`, as is a file that disappeared after the inventory.
+in `unlisted` with `language not supported`, as is a file that disappeared after the inventory, and a
+file outside the index's scope with the index's own reason (`no file at this path`) or `not in the index scope`.
 
 A unit whose text fits `box_chars` is one item, whatever its length. Only a larger unit is cut into
 `pieces` of at most 60 lines, in order, with no overlap and never across two runs of top-level code;
