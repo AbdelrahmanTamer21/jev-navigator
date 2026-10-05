@@ -580,6 +580,11 @@ call cap stays exact under concurrency, and after a failure or cancellation no b
 request, while answers already received still yield. A sync method given an async client raises
 `TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
 
+Places: `check_each`, `check_every` and their `iter_` and async forms take `places`, one
+`index.units.Item` per item, when items are code units. A place orders the batches (file, then
+lines) and goes into the stored record, never into the state, so each item carries only the fields a
+question reads; each `CheckResult` names its `place`.
+
 Budgets: `judge.calls` counts requests sent (store hits are free; `judge.replayed_answers` counts
 the answers the store gave instead). `Judge(max_calls=N)` caps a judge
 together with every `judge.scope()` made from it, and a scope counts its own calls; `find_code` runs
@@ -645,9 +650,9 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `record.sent_request()`, with a judge that has no store. `JsonlJournal(keep_request_text=True)`
   likewise keeps the body as handed to the client (`body_base64`) and the wire bytes when captured
   (`sent_body_base64`), and `export_for_review` keeps the order the request is sent in. By default the store keeps
-  hashes, question wording, and each item's ids, file, lines, commit and names, so
-  `rebuild_request(record, CodeIndex.at_commit(...), shared)` rebuilds a request from the code at
-  that commit and proves it matches, or names the part that differs. A request whose items carried a
+  hashes, question wording, and each item's ids, file, lines, commit and names, or its place's file
+  and runs, so `rebuild_request(record, CodeIndex.at_commit(...), shared)` rebuilds a request from
+  the code at that commit and proves it matches, or names the part that differs. A request whose items carried a
   field that can quote code, such as a Trace link line or a Find signature, keeps that field withheld,
   so it does not rebuild exactly; the mismatch then names the withheld fields first.
 

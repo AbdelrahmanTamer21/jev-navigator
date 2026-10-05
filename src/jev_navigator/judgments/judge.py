@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator, Callable, Generator, Iterator, Mappin
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed, wait
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from .answers import AnswerSource, JevResponse, NoulAnswer, TokenTotal, response_to_raw
 from .client import (
@@ -49,6 +50,9 @@ from .secrets import (
 )
 from .store import AnswerRecord, AnswerStore, StoredItemAnswer
 from .thresholds import NoulVerdict, Thresholds
+
+if TYPE_CHECKING:
+    from ..index.units import Item
 
 DEFAULT_ITEMS_PER_REQUEST = 16
 """How many items one batched request carries at most (André, 03.10.2026: measured on the code-index
@@ -84,7 +88,8 @@ class CheckResult:
     """``probability`` is Jev's raw P(yes); ``verdict`` applies the current yes/no band. Callers may
     apply any band of their own to ``probability``. ``request_sha256`` identifies the masked request
     that answered it, also when the answer came from the store, and ``question_id`` the question it
-    was asked under there (None in a result saved before it was recorded)."""
+    was asked under there (None in a result saved before it was recorded). ``place`` is the unit or
+    piece the item was judged at, when the caller gave places."""
 
     item: Mapping
     probability: float
@@ -92,6 +97,7 @@ class CheckResult:
     from_store: bool
     request_sha256: str
     question_id: str | None = None
+    place: Item | None = None
 
     def source(self) -> AnswerSource | None:
         if self.question_id is None:
@@ -264,12 +270,13 @@ class Judge:
         *,
         list_name: str = "items",
         thresholds: Thresholds | None = None,
+        places: Sequence[Item] | None = None,
     ) -> list[CheckResult]:
         """One yes/no answer per item, batched into as few requests as the state size allows.
         Items already judged by the same question and model come from the store."""
-        return self.check_every([check], items, shared, list_name=list_name, thresholds=thresholds)[
-            check.name
-        ]
+        return self.check_every(
+            [check], items, shared, list_name=list_name, thresholds=thresholds, places=places
+        )[check.name]
 
     def check_every(
         self,
@@ -279,6 +286,7 @@ class Judge:
         *,
         list_name: str = "items",
         thresholds: Thresholds | None = None,
+        places: Sequence[Item] | None = None,
     ) -> Mapping[str, list[CheckResult]]:
         """Every check asked about every item, in as few requests as the size budget allows.
 
@@ -292,7 +300,7 @@ class Judge:
         measured again, so every request sent fits the measured input budget. Items already judged
         by the same question and model, in the same batch, come from the store.
         """
-        plan = self._check_plan(checks, items, shared, list_name, thresholds)
+        plan = self._check_plan(checks, items, shared, list_name, thresholds, places)
         for sub_batch, response in self._answered_batches(plan):
             plan.answer(sub_batch, response)
         return plan.answers()
@@ -305,6 +313,7 @@ class Judge:
         *,
         list_name: str = "items",
         thresholds: Thresholds | None = None,
+        places: Sequence[Item] | None = None,
     ) -> Iterator[CheckResult]:
         """Yield cached answers, then completed batches, preserving work before a later stop.
 
@@ -312,7 +321,7 @@ class Judge:
         not input order. A call-cap or provider failure still raises after earlier results yield.
         """
         for _name, result in self.iter_check_every(
-            [check], items, shared, list_name=list_name, thresholds=thresholds
+            [check], items, shared, list_name=list_name, thresholds=thresholds, places=places
         ):
             yield result
 
@@ -325,6 +334,7 @@ class Judge:
         list_name: str = "items",
         thresholds: Thresholds | None = None,
         cancelled: Callable[[], bool] | None = None,
+        places: Sequence[Item] | None = None,
     ) -> Iterator[tuple[str, CheckResult]]:
         """Every check asked about every item, yielded per answered question as batches complete.
 
@@ -336,7 +346,7 @@ class Judge:
         Cancellation is checked before each live request, including between split halves; cached and
         already answered results still yield in full. It does not cancel a request already in flight.
         """
-        plan = self._check_plan(checks, items, shared, list_name, thresholds)
+        plan = self._check_plan(checks, items, shared, list_name, thresholds, places)
         names = {check.question_id: check.name for check in checks}
         for (position, question_id), answer in sorted(plan.answered.items()):
             yield names[question_id], plan.result(position, answer)
@@ -356,10 +366,11 @@ class Judge:
         *,
         list_name: str = "items",
         thresholds: Thresholds | None = None,
+        places: Sequence[Item] | None = None,
     ) -> list[CheckResult]:
         """``check_each`` with its batches sent concurrently."""
         answers = await self.check_every_async(
-            [check], items, shared, list_name=list_name, thresholds=thresholds
+            [check], items, shared, list_name=list_name, thresholds=thresholds, places=places
         )
         return answers[check.name]
 
@@ -371,6 +382,7 @@ class Judge:
         *,
         list_name: str = "items",
         thresholds: Thresholds | None = None,
+        places: Sequence[Item] | None = None,
     ) -> Mapping[str, list[CheckResult]]:
         """``check_every`` with its batches sent concurrently, at most ``max_concurrency`` at once (the
         judge-wide send slots bound them together with every other caller), and,
@@ -381,7 +393,7 @@ class Judge:
         batch stops the batches still waiting for a slot of this call; one already waiting for a
         judge-wide send slot still sends. The wave settles whole before its failure is raised, so no
         request of the call is still running when the error comes out."""
-        plan = self._check_plan(checks, items, shared, list_name, thresholds)
+        plan = self._check_plan(checks, items, shared, list_name, thresholds, places)
         queue = _WaveQueue(list(plan.batches))
         slots = asyncio.Semaphore(self.max_concurrency)
         halted = asyncio.Event()
@@ -819,6 +831,7 @@ class Judge:
         shared: Mapping | None,
         list_name: str,
         thresholds: Thresholds | None,
+        places: Sequence[Item] | None = None,
     ) -> _CheckPlan:
         """Mask the whole candidate set once, before packing, so copied secret values stay hidden
         across batches. A value found in any check's wording is hidden in the items and shared state
@@ -826,9 +839,15 @@ class Judge:
         each send still runs. Batches form over every item,
         answered or not, so they do not depend on the store. Each per-item store key includes its
         masked item, the shared state, the question and the batch it was asked in.
+
+        ``places``, one per item, are where each item's code comes from: they order the batches and
+        go into the record (its sources and skeleton), never into the state, so the state carries
+        only the items' own fields.
         """
         if len({check.name for check in checks}) != len(checks):
             raise ValueError("independent checks require unique names for their result lists")
+        if places is not None and len(places) != len(items):
+            raise ValueError(f"{len(places)} places for {len(items)} items: give one place per item")
         hidden = self._hidden_values(checks, items, shared or {})
         *items, shared = self._masked_together([*items, shared or {}], hidden)
         plan = _CheckPlan(
@@ -841,6 +860,7 @@ class Judge:
             self.items_per_request,
             self.input_limits,
             masker=self.masker,
+            places=places,
         )
         groups = _batches(plan)
         for members in groups:
@@ -893,14 +913,17 @@ class Judge:
                 questions[asked] = plan.question(check, slot)
                 slots[asked] = position
                 item_keys[self._item_key(check, item, plan.shared, mates)] = asked
-                if _source_of(item):
-                    sources[asked] = _source_of(item)
+                source = plan.source_of(position)
+                if source:
+                    sources[asked] = source
         if not questions:
             return None
         extras = {
             "item_keys": item_keys,
             "sources": sources,
-            "skeleton": _skeleton(plan.list_name, questions, batch_items, plan.shared),
+            "skeleton": _skeleton(
+                plan.list_name, questions, batch_items, plan.shared, plan.places_of(members)
+            ),
             "batch": {
                 "batching_rule": BATCHING_RULE,
                 "items_per_request": plan.items_per_request,
@@ -1134,6 +1157,7 @@ class _CheckPlan:
     batches: list[_Batch] = field(default_factory=list)
     item_ids: list[str] = field(init=False)
     masker: Masker | None = None
+    places: Sequence[Item] | None = None
     _questions: dict[tuple[str, int], dict] = field(default_factory=dict, init=False)
 
     def open_at(self, position: int) -> Mapping[str, Check]:
@@ -1149,8 +1173,27 @@ class _CheckPlan:
         caller gave them in, and a new commit does not reorder them."""
         return sorted(
             range(len(self.items)),
-            key=lambda position: (*unit_place(self.items[position]), self.item_ids[position], position),
+            key=lambda position: (*self._place(position), self.item_ids[position], position),
         )
+
+    def _place(self, position: int) -> tuple[str, int, int]:
+        if self.places is None:
+            return unit_place(self.items[position])
+        place = self.places[position]
+        return place.file, place.ranges[0][0], place.ranges[-1][1]
+
+    def source_of(self, position: int) -> dict:
+        """Where the item at ``position`` comes from, as the record names it."""
+        if self.places is None:
+            return _source_of(self.items[position])
+        place = self.places[position]
+        return {"file": place.file, "runs": [list(run) for run in place.ranges]}
+
+    def places_of(self, members: Sequence[int]) -> list[dict] | None:
+        """The places of a batch's members, in request order, for the record's skeleton."""
+        if self.places is None:
+            return None
+        return [self.source_of(position) for position in members]
 
     def question(self, check: Check, slot: int) -> dict:
         """The check's question about the item at ``slot``, masked with the plan's hidden values;
@@ -1198,6 +1241,7 @@ class _CheckPlan:
             answer.from_store,
             answer.request_sha256,
             answer.question_id,
+            None if self.places is None else self.places[position],
         )
 
 
@@ -1302,16 +1346,22 @@ def _score_result(response: JevResponse, question_id: str) -> ScoreResult:
     return ScoreResult(answer.score, answer.probabilities, answer.confidence, response.request_sha256)
 
 
-def _skeleton(list_name: str, questions: Mapping, items: list[Mapping], shared: Mapping) -> dict:
+def _skeleton(
+    list_name: str, questions: Mapping, items: list[Mapping], shared: Mapping, places: list[dict] | None
+) -> dict:
     """Everything needed to rebuild a batched request except the code itself and the shared state:
-    the code is re-read from each item's file and lines, and only hashes of it are kept."""
-    return {
+    the code is re-read from each item's place (its file and runs) when the caller gave places, else
+    from its own file and lines, and only hashes of it are kept."""
+    skeleton = {
         "list_name": list_name,
         "questions": dict(questions),
         "items": [{key: value for key, value in item.items() if key != CODE_FIELD} for item in items],
         "item_code_sha256": [content_hash(item.get(CODE_FIELD, "")) for item in items],
         "shared_sha256": content_hash(shared),
     }
+    if places is not None:
+        skeleton["places"] = places
+    return skeleton
 
 
 def unit_place(item: Mapping) -> tuple[str, int, int]:

@@ -9,7 +9,10 @@ from pathlib import Path
 
 import pytest
 from conftest import BudgetedClient
+from git_repos import commit_files
 
+from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.index.units import items_to_judge, list_units, read_ranges
 from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer
 from jev_navigator.judgments.client import (
     JEV_INPUT_LIMITS,
@@ -27,7 +30,7 @@ from jev_navigator.judgments.judge import (
     CallOffer,
     Judge,
 )
-from jev_navigator.judgments.questions import Check, Criterion, Pick, serialized_chars
+from jev_navigator.judgments.questions import Check, Criterion, Pick, content_hash, serialized_chars
 from jev_navigator.judgments.secrets import SecretInRequestError, SecretMasker
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.judgments.thresholds import NoulVerdict, Thresholds
@@ -152,6 +155,62 @@ def test_a_check_with_only_one_criterion_is_refused(given: str) -> None:
     # Act and assert
     with pytest.raises(ValueError, match="both"):
         Check(name="half", instructions="Does `{item}.code` validate orders?", **one_side)
+
+
+ADMITS = Check("admits", "Does `{item}.code` decide whether an order is admitted?")
+ORDERS = (
+    "LIMIT = 3\n\n\ndef admit(items):\n    return len(items) <= LIMIT\n\n\n"
+    "def refuse(items):\n    return not admit(items)\n\n\nSTRICT = True\n"
+)
+
+
+def _judged_places(tmp_path: Path) -> tuple[CodeIndex, list, list[dict]]:
+    """Every unit of a committed file as Find judges it: its place, and an entry of file and code."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    commit_files(repo, {"orders.py": ORDERS})
+    index = CodeIndex.from_git(repo)
+    units = list_units(index, ["orders.py"], box_chars=JEV_INPUT_LIMITS.box_chars).units
+    places = [item for unit in units for item in items_to_judge(unit)]
+    entries = [{"file": place.file, "code": read_ranges(index, place.file, place.ranges)} for place in places]
+    return index, places, entries
+
+
+def test_an_item_judged_at_a_place_sends_only_its_own_fields_and_its_answer_names_the_place(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    index, places, entries = _judged_places(tmp_path)
+    client = ScriptedJevClient(default_noul=0.9)
+
+    # Act
+    results = Judge(client).check_each(ADMITS, entries, places=places)
+
+    # Assert
+    state, _ = client.requests[0]
+    assert [sorted(item) for item in state["items"]] == [["code", "file"]] * len(places)
+    assert sorted(result.place.id for result in results) == sorted(place.id for place in places)
+    assert all(
+        result.item["code"] == read_ranges(index, result.place.file, result.place.ranges)
+        for result in results
+    )
+
+
+def test_items_judged_at_places_are_sent_in_line_order_whatever_order_they_came_in(tmp_path: Path) -> None:
+    # Arrange
+    _, places, entries = _judged_places(tmp_path)
+    by_content = sorted(entries, key=content_hash)
+    in_line_order = sorted(zip(places, entries, strict=True), key=lambda pair: pair[0].ranges[0][0])
+    by_line = [entry for _, entry in in_line_order]
+    assert by_content != by_line, "the content order must differ from the line order for this test to tell"
+    client = ScriptedJevClient(default_noul=0.9)
+
+    # Act
+    Judge(client).check_each(ADMITS, list(reversed(entries)), places=list(reversed(places)))
+
+    # Assert
+    state, _ = client.requests[0]
+    assert state["items"] == by_line
 
 
 def test_items_judged_before_with_the_same_batch_mates_are_answered_from_the_store(tmp_path: Path) -> None:
