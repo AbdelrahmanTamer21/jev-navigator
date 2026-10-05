@@ -702,7 +702,7 @@ SETTINGS = {
     "settings.yaml": "database:\n  host: db.internal\n  database_password: hunter2abcdef\nretry_limit: 4\n",
     "app.conf": "DATABASE_HOST=db.internal\nDATABASE_PASSWORD=hunter2abcdef\nRETRY_LIMIT=4\n",
     ".env": "DATABASE_PASSWORD=hunter2abcdef\nRETRY_LIMIT=4\n",
-    ".env.example": "DATABASE_PASSWORD=hunter2abcdef\nRETRY_LIMIT=4\n",
+    ".env.example": "DATABASE_PASSWORD=hunter2abcdef\nAPI_TOKEN = tok3nvalue9\nRETRY_LIMIT=4\n",
 }
 
 
@@ -756,7 +756,8 @@ def test_an_env_file_is_never_listed_named_or_reached_while_an_env_template_is_r
     assert result.names == {"RETRY_LIMIT": NameHits(3, 3, 1)}
     sent = {item["file"]: item["code"] for state, _ in provider.requests for item in state[ITEMS]}
     assert ".env" not in sent
-    assert MASK in sent[".env.example"] and "hunter2abcdef" not in sent[".env.example"]
+    assert sent[".env.example"].count(MASK) == 2
+    assert "hunter2abcdef" not in sent[".env.example"] and "tok3nvalue9" not in sent[".env.example"]
 
 
 LOCKED = {
