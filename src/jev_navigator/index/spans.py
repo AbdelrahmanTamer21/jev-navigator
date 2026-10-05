@@ -2,11 +2,26 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .bindings import Binding
+
+
+_LOCATED = re.compile(r"(?P<file>[^\s:`]+):\d+(?:-\d+)?(?= |$)")
+
+
+def located_line(file: str, lines: str, text: str) -> str:
+    """A line that names where it comes from first, ``file:lines text`` (a place's signature)."""
+    return f"{file}:{lines} {text}"
+
+
+def located_file(line: str) -> str | None:
+    """The file a ``located_line`` names, or None when the line does not start with a location."""
+    match = _LOCATED.match(line)
+    return match["file"] if match else None
 
 
 @dataclass(frozen=True, order=True)

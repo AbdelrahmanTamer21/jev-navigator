@@ -1,3 +1,4 @@
+import json
 import re
 import time
 from collections import Counter
@@ -5,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from jev_navigator.index.spans import located_file, located_line
 from jev_navigator.judgments.secrets import (
     HIGH_ENTROPY_MIN_CHARS,
     MASK,
@@ -737,3 +739,60 @@ def test_an_unterminated_value_inside_another_string_ends_where_that_string_clos
 
     # Assert
     assert masked == """('DB_PASSWORD="[MASKED]', "DB_PASSWORD=[REDACTED]"),"""
+
+
+def _candidate_request(signature: str, preview: str) -> dict:
+    return {"candidates": [{"signature": signature, "preview": preview, "relationship": "calls"}]}
+
+
+def test_a_candidate_from_a_code_file_keeps_its_code() -> None:
+    # Arrange
+    line = "createApiKey: (input) => serverClient.apiKeys.create.mutate(input),"
+    state = _candidate_request(f"apps/web/src/app/api/settings/api-keys/route.ts:28 `{line}`", f"  {line}\n")
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert masked_state == state
+
+
+def test_a_candidate_from_a_config_file_is_read_as_config() -> None:
+    # Arrange
+    state = _candidate_request(
+        "deploy/docker-compose.yml:3-12 line 5 `POSTGRES_PASSWORD: example` (mentions)",
+        "environment:\n  POSTGRES_PASSWORD: example\n",
+    )
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert "example" not in json.dumps(masked_state)
+
+
+def test_a_candidate_whose_location_does_not_parse_is_read_as_config() -> None:
+    # Arrange
+    state = _candidate_request("my dir/form.ts:3 `token: abc123`", "token: abc123\n")
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert "abc123" not in json.dumps(masked_state)
+
+
+def test_a_signature_names_its_file_for_every_place_shape() -> None:
+    # Arrange
+    lines = [
+        located_line("app/a.py", "7", "`def f():`"),
+        located_line("app/a.py", "1-40", "line 7 `x = 1` (calls)"),
+        located_line("deploy/b.yml", "3-12", "`key: value` (start of file)"),
+    ]
+
+    # Act
+    files = [located_file(line) for line in lines]
+
+    # Assert
+    assert files == ["app/a.py", "app/a.py", "deploy/b.yml"]
+    assert located_file("a sentence: with a colon") is None

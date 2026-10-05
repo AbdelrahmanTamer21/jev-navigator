@@ -14,7 +14,7 @@ from types import MappingProxyType
 from ..index.bindings import Binding
 from ..index.code_index import CodeIndex
 from ..index.scope import is_test_file
-from ..index.spans import CallEdge, CodeSlice, Span, TextHit
+from ..index.spans import CallEdge, CodeSlice, Span, TextHit, located_line
 from ..judgments.relations import key_mention
 
 MAX_DEFINITION_LINES = 120
@@ -50,7 +50,7 @@ def function_place(
     first_line = index.read_slice(Span(span.file, span.start, span.start)).text.strip()
     shown_relation = _with_binding(relation, binding)
     note = f" ({shown_relation})" if shown_relation else ""
-    signature = f"{span.file}:{span.start} `{first_line}`{note}"
+    signature = located_line(span.file, str(span.start), f"`{first_line}`{note}")
     return Place(
         span.key,
         "function",
@@ -83,7 +83,9 @@ def window_place(
 
     span = open_window().span
     text_line = index.read_slice(Span(file, line, line)).text.strip()
-    signature = f"{file}:{span.start}-{span.end} line {line} `{text_line}` ({shown_relation})"
+    signature = located_line(
+        file, f"{span.start}-{span.end}", f"line {line} `{text_line}` ({shown_relation})"
+    )
     return Place(f"{file}:{line}~{radius}", "window", signature, open_window, relation or None, binding)
 
 
@@ -96,7 +98,7 @@ def range_place(index: CodeIndex, file: str, start: int, end: int, relation: str
     quoted = (
         next((line.strip() for line in lines if line.strip()), "") if code_line is None else lines[code_line]
     )
-    signature = f"{span.key} `{quoted.strip()}` ({relation})"
+    signature = located_line(span.file, f"{span.start}-{span.end}", f"`{quoted.strip()}` ({relation})")
     return Place(
         span.key, "window", signature, lambda: index.read_slice(span, origin=relation), relation or None
     )

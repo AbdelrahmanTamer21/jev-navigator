@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from functools import cache
 from typing import Protocol
 
+from ..index.spans import located_file
 from .secret_shapes import (
     BY_CONTENT_MIN_CHARS,
     HIGH_ENTROPY_MIN_CHARS,
@@ -180,6 +181,11 @@ def _strings(value: object, path: str | None = None) -> list[tuple[str, str | No
 
 
 def _file_of(mapping: Mapping, outer: str | None) -> str | None:
-    """A mapping's ``file`` names the file its strings come from (a slice's code, a candidate's lines)."""
+    """The file a mapping's strings come from: its ``file`` (a slice's code), or the file its
+    ``signature`` names (a candidate's preview), else the enclosing mapping's."""
     file = mapping.get("file")
-    return file if isinstance(file, str) else outer
+    if isinstance(file, str):
+        return file
+    signature = mapping.get("signature")
+    named = located_file(signature) if isinstance(signature, str) else None
+    return named or outer
