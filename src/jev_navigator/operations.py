@@ -14,13 +14,9 @@ from .index.bindings import Binding, BindingStatus, names_exactly
 from .index.code_index import CodeIndex
 from .index.languages import language_of, language_read
 from .index.spans import CallSite, CodeSlice, Span
-from .mentions import paths_in
+from .mentions import code_names_in, paths_in
 
 MAX_FUNCTION_LINES = 120
-_DOC_IDENTIFIER = re.compile(
-    r"`([A-Za-z_][\w.]*)(?:\(\))?`"
-    r"|\b([a-z]+(?:_[a-z0-9]+)+|[a-z]+(?:[A-Z][a-z0-9]*)+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b"
-)
 _COMMENT_PREFIXES = ("#", "//", "/*", "*", "*/")
 _TOKEN_SPLIT = re.compile(r"_|(?<=[a-z0-9])(?=[A-Z])")
 
@@ -173,8 +169,7 @@ def similar_functions(index: CodeIndex, symbol: str, limit: int = 10) -> tuple[S
 
 def code_named_in_doc(index: CodeIndex, doc_text: str) -> tuple[Span, ...]:
     """Function definitions in scope whose names the text mentions, in order of first mention."""
-    mentioned = dict.fromkeys(_doc_identifiers(doc_text))
-    return tuple(span for name in mentioned for span in index.find_definition(name))
+    return tuple(span for name in code_names_in(doc_text) for span in index.find_definition(name))
 
 
 def files_named_by(index: CodeIndex, texts: Sequence[str], anchor_files: Sequence[str]) -> NamedFiles:
@@ -467,8 +462,3 @@ def _name_words(span: Span) -> set[str]:
 def _by_score(item: tuple[float, Span]) -> tuple[float, str]:
     score, span = item
     return -score, span.key
-
-
-def _doc_identifiers(doc_text: str) -> Iterable[str]:
-    for backticked, bare in _DOC_IDENTIFIER.findall(doc_text):
-        yield (backticked or bare).split(".")[-1]

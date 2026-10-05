@@ -327,7 +327,7 @@ operations.callers_of_file(index, path)
 operations.trace_callers(index, symbol)  # and trace_callees; optional depth, otherwise fixed point
 operations.trace_graph(index, index.find_definition(symbol))  # calls and non-call references
 operations.similar_functions(index, symbol)
-operations.code_named_in_doc(index, text)
+operations.code_named_in_doc(index, text)  # definitions of the names mentions.code_names_in finds
 # the scope files texts or anchor files name by path: NamedFiles(code, text, named_by)
 operations.files_named_by(index, texts, anchor_files)
 

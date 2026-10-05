@@ -13,7 +13,7 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `index.units` | the units a search judges (functions, methods, Prisma schema blocks, each file's top-level code), cut into 60-line pieces only when larger than their room in a request, and the one resolver of lines and line ranges to units |
 | `index.prisma_schema` | a Prisma schema's model, view, enum and composite type blocks with their lines, and the client accessor a model or view is queried through (`model WebsiteEvent` is `prisma.websiteEvent`) |
 | `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc, files a text names by path (`files_named_by`) |
-| `mentions` | the one owner of whether a token in a text is a path (`paths_in`) |
+| `mentions` | what a text mentions, one owner each: the path tokens it spells out (`paths_in`), whether a span names a file rather than code (`is_file_path`), the code names it spells out (`code_names_in`, which `code_named_in_doc` reads), and the members a symbol list names (`member_names`) |
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
 | `find_code` | a best-first search that opens places until the code a description names is found |

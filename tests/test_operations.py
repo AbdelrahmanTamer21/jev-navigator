@@ -182,6 +182,20 @@ def test_an_anchor_outside_the_scope_is_never_read(tmp_path: Path) -> None:
     assert (named.code, named.text) == ((), ())
 
 
+def test_a_file_named_in_backticks_gives_no_code_name(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "config.py").write_text(
+        "def toml():\n    return 1\n\n\ndef read_settings():\n    return toml()\n"
+    )
+    index = CodeIndex(tmp_path, ["config.py"])
+
+    # Act
+    spans = operations.code_named_in_doc(index, "`pyproject.toml` is loaded by read_settings")
+
+    # Assert
+    assert [span.name for span in spans] == ["read_settings"]
+
+
 def test_comment_above_a_function_describes_the_whole_function(sample_index: CodeIndex) -> None:
     # Act
     code = operations.code_described_by_comment(sample_index, "app/comments.py", 24)
