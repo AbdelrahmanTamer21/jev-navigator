@@ -640,9 +640,49 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `JEV_NAVIGATOR_CHOICE_MIN_CONFIDENCE`, `JEV_NAVIGATOR_NOUL_YES_AT` and `JEV_NAVIGATOR_NOUL_NO_AT` (via
   `Thresholds.from_env()` at the edge), then a directive's defaults, then per-call overrides
   (`judge.effective(directive, call)`).
-- **Secrets.** `SecretMasker` masks private keys, token shapes, secret-named assignments and
-  high-entropy assignments in every request, by content: a value hidden in one place is hidden
-  everywhere in the request, for example where a relation text or another candidate quotes it.
+- **Secrets.** `SecretMasker` masks secret values and keeps code (rules in `judgments/secret_shapes.py`,
+  `secret_structures.py` and `secret_values.py`). It hides private keys, token shapes, password hashes
+  (bcrypt, argon2), Bearer values, passwords and secret query values in URLs, and values under
+  secret-named keys: shell and env-file words, quoted values (with escapes, prefixes such as `b"..."`,
+  triple quotes, across lines, or never closed), YAML block and continued values, nested values that
+  hold a literal, plain words, fallbacks after a reference, and literal arguments to secret-named
+  calls that look like key material; plus high-entropy quoted values that are not identifier words.
+  A key holds a secret when a secret word (including `pass`, `pwd` and `credentials`) is one of its
+  parts; `max_tokens`, `tokenizer` and `bypass` hold none. Under a key the secret word ends
+  (`DB_PASSWORD`, `authToken`, `db_pass`) every literal is hidden, in tables and blocks too. Under a key
+  a naming word ends (`SECRET_ENV`, `token_url`, `CREDENTIAL_PATTERNS`) only a credential-looking word
+  is hidden: one word of eight or more characters that is not a name, a path or a URL. Under any other
+  suffix (`SECRET_KEY_BASE`, `GH_TOKEN_RO`) every string literal is hidden, sentences and passphrases
+  too, except an environment variable's name, a path or a URL; that includes a block scalar and the
+  literals concatenated onto one, while a nested table's inner keys are judged on their own. Under a
+  key a message word ends (`PASSWORD_ERROR`, `TOKEN_HELP_TEXT`) a sentence is kept. A value that
+  repeats its key (`PASS: "PASS"`) is kept, unless it is a common default password such as
+  `password`. A long unquoted run of letters and digits is a value, not a reference.
+  The masker reads a slice as its file type: in a config file (`.yml`, `.yaml`, `.env`, `.ini`, `.cfg`,
+  `.conf`, `.properties`, `.toml`, a Dockerfile) or in text from no file, an unquoted value under a
+  secret key is masked too (`POSTGRES_PASSWORD: example`), unless it is empty, a boolean or a whole
+  `${VAR}`, `$VAR` or `${{ ... }}` reference; in code it stays (`token: str`). A request mapping's
+  `file` names the file of the strings inside it, and a candidate's signature names its file the same
+  way (the signature builders in `directives/places.py` write it, and `located_file` beside them parses
+  exactly that grammar); a signature that names no file, or whose file is ambiguous, reads as config. An upper-case environment assignment is a value
+  wherever it stands on a shell, Makefile or CI line (`run: API_TOKEN=... npm test`), unless it is a
+  usage placeholder (`KEY=...`, `KEY=<credential>`). A secret flag on a command line
+  (`psql --password=...`, `deploy --api-token ...`) and a Stripe secret key anywhere are values too.
+  `is_high_entropy`, `HIGH_ENTROPY_MIN_CHARS` and `TOKEN_CHARACTER_CLASS` are public, for callers that
+  judge a lone token. A reference stays code: an identifier, dotted path, call, a whole `${...}`, a
+  command substitution `$(...)`, or `$NAME` outside single quotes, so `secret: process.env.AUTH_SECRET`
+  reaches Jev unchanged, and so does nested metadata such as a Kubernetes `secret:` volume. Every rule
+  scans in time linear in the text length. The analysis engine's audit-masker corpus is shared in
+  `tests/test_secret_shape_corpus.py`. Masking works by content: a value hidden in one place is hidden
+  everywhere in the request, for example where a relation text or another candidate quotes it; a value
+  of 8 or more characters wherever it appears, a shorter one as a whole word, and a number of at most four characters or a value without letters
+  or digits only where it stands. JVN's own question wording (instructions, and the criteria of a
+  question that is not a choice) keeps its words, and a key of the request equal to a short masked
+  value does not refuse it.
+  A quoted value may run across lines (triple quotes, template literals, text blocks) or sit in
+  parentheses with its joined parts; a quote that closes a string the key sat in opens no value; a string
+  that is not hidden is read again for the secret assignments inside it; and a value inside another
+  quote's string ends where that string closes.
   The complete candidate set is masked once, before packing, so copied values stay hidden across
   batches; the final scan still runs on every request before it is sent.
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value
