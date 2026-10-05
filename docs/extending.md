@@ -364,7 +364,10 @@ a function, its decorators included, or the file's top-level code when the line 
 function, stubs included, even top-level code the listing leaves out. A line inside a nested
 function names that function, which the listing leaves out; its `nested_in` names the function that
 holds its text. A range names each unit its non-blank lines touch, without the units nested in
-another one it names. Each unit comes back once, in the order first named. A file outside the scope,
+another one it names. Each unit comes back once, in the order first named. With `listed_only=True`
+every unit named is one `list_units` lists, for a caller that judges only listed units: a nested
+function gives way to the outermost function holding it, and lines of only top-level code the
+listing leaves out (imports, comments, directives, brackets) are reported. A file outside the scope,
 a file in a language JVN does not parse, a line outside its file, a reversed range, and a blank line
 in a file with no top-level code are reported in `unresolved` with their problem, and a file is
 parsed only after its anchor is known to point inside it.
