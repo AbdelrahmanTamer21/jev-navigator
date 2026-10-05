@@ -136,7 +136,10 @@ question reads "Look only at `items[n]`. Does that code match the description in
 (`match_check`). A unit larger than its room in a request (`result.room`) is judged by its pieces and
 scored by its best one; a piece still too large is named in `not_judged`, and so is a unit or piece
 whose request asking every target does not fit the client's limits once masked, since masking can
-lengthen code past the room (`Judge.fits_alone`). One unit never fails the search. Every unit is one
+lengthen code past the room (`Judge.fits_alone`). A unit or piece whose request is refused anyway, by
+the provider for its size with no smaller split or by the final secret scan, is named `REFUSED` in
+`not_judged`, its error is kept in `refusals`, and the search goes on. One unit never fails the
+search. Every unit is one
 a listing lists, so a hit inside a nested function names the function holding it. No code step is capped: the
 Judge's call cap is the only budget. The population goes to the Judge in waves of `batches_per_wave`
 requests' worth (16 by default). Its order holds between waves, and exactly only at one batch per
@@ -488,7 +491,9 @@ for obligation in result.obligations:
 
 An evidence-backed obligation has at least one positive judgment; it does not prove the whole path
 or every relevant branch is present. Negative judgments mean no evidence in the supplied component.
-Uncertain and unexamined items remain unresolved. `result.graph` retains every walked function and
+Uncertain and unexamined items remain unresolved. A span whose request is refused stays unjudged
+(`result.refusals` keeps it with its error), so every obligation stays unexamined, and the trace goes
+on. `result.graph` retains every walked function and
 link, including uncertain bindings; `included` is only a presentation backbone, not a deletion of
 the remaining component.
 

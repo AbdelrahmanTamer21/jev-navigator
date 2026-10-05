@@ -1185,6 +1185,11 @@ def _find_all_summary(
             for group, verdict in _VERDICT_GROUPS
         },
         "not_judged": dict(result.not_judged),
+        "refused": {
+            refusal.place.id: f"{type(refusal.error).__name__}: {refusal.error}"
+            for refusal in result.refusals
+            if refusal.place is not None
+        },
         "unlisted_files": dict(result.unlisted),
         "unresolved_seeds": [
             {**asdict(problem.anchor), "problem": problem.problem} for problem in result.unresolved

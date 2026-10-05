@@ -24,8 +24,10 @@ from jev_navigator.cli import (
     create_evidence_pack,
     main,
 )
+from jev_navigator.directives.find_all import REFUSED
 from jev_navigator.directives.find_code import SearchBudget
 from jev_navigator.environment import load_typesafe_environment
+from jev_navigator.judgments.client import InputBudgetExceededError
 from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
 from jev_navigator.testing import ScriptedJevClient
 
@@ -1276,6 +1278,51 @@ def test_findall_budget_stop_writes_partial_pack_with_completed_results(tmp_path
     else:
         assert saved["search"]["found"]
     assert (out / "report.md").is_file()
+
+
+class _RefusingProvider:
+    """Answers like ``ScriptedJevClient``, but refuses for its input size every Find All request
+    whose items hold ``marker``; the seed search's requests carry no items and are answered."""
+
+    def __init__(self, marker: str) -> None:
+        self.scripted = ScriptedJevClient(default_noul=0.2)
+        self.marker = marker
+        self.model = self.scripted.model
+
+    def ask(self, state, questions):
+        if self.marker in json.dumps(state.get("items", [])):
+            raise InputBudgetExceededError("max_tokens_exceeded")
+        return self.scripted.ask(state, questions)
+
+
+def test_findall_names_a_refused_unit_and_its_error_and_judges_the_rest(tmp_path: Path) -> None:
+    # Arrange
+    repo = tmp_path / "repo"
+    commit_files(
+        repo,
+        {
+            "policy.py": "def admit(item):\n    return len(item) <= 3\n",
+            "other.py": "def refused_here(item):\n    return 'REFUSE-ME'\n",
+        },
+    )
+
+    # Act
+    result = create_evidence_pack(
+        repo,
+        (),
+        "item limit",
+        (),
+        tmp_path / "pack",
+        SearchBudget(max_calls=20),
+        _RefusingProvider("REFUSE-ME"),
+        workflow="findall",
+    )
+
+    # Assert
+    search = result["search"]
+    assert search["outcome"] == "scope_examined"
+    assert search["not_judged"] == {"other.py:1-2": REFUSED}
+    assert search["refused"] == {"other.py:1-2": "InputBudgetExceededError: max_tokens_exceeded"}
 
 
 def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(

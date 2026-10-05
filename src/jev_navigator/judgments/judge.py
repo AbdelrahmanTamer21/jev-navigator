@@ -42,6 +42,7 @@ from .secrets import (
     DEFAULT_MASKER,
     Masker,
     Scanner,
+    SecretInRequestError,
     SecretScanner,
     mask_everywhere,
     mask_request,
@@ -81,6 +82,17 @@ ABORTED_SEND_ERRORS: tuple[type[BaseException], ...] = (CancelledError, Keyboard
 
 class CallCapReachedError(RuntimeError):
     """A call would exceed the ``max_calls`` cap of this judge or of a judge it was scoped from."""
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """An item whose request was refused, so its answers are unknown: the provider refused it for its
+    input size and no smaller split of it exists, or the final secret scan refused it. ``item`` is the
+    item as masked for the request, ``place`` where its code comes from when the caller gave places."""
+
+    item: Mapping
+    place: Item | None
+    error: Exception
 
 
 @dataclass(frozen=True)
@@ -371,18 +383,20 @@ class Judge:
         thresholds: Thresholds | None = None,
         cancelled: Callable[[], bool] | None = None,
         places: Sequence[Item] | None = None,
+        refusals: list[Refusal] | None = None,
     ) -> Iterator[tuple[str, CheckResult]]:
         """Every check asked about every item, yielded per answered question as batches complete.
 
         The streaming form of ``check_every``: it uses the same packing, splitting, concurrency and
         cache, yields each result under the name of the check that asked for it as its batch
         completes, and yields cached answers before the first batch so store hits consume no live
-        call. A call-cap failure, or a provider input-budget refusal that no split can answer, still
-        raises after every answered batch has yielded, so a caller keeps them all.
+        call. A call-cap failure raises after every answered batch has yielded, so a caller keeps
+        them all. A refused batch (see ``Refusal``) goes into ``refusals``, one entry per item, and
+        every other batch is still sent; without ``refusals`` it raises like a call-cap failure.
         Cancellation is checked before each live request, including between split halves; cached and
         already answered results still yield in full. It does not cancel a request already in flight.
         """
-        plan = self._check_plan(checks, items, shared, list_name, thresholds, places)
+        plan = self._check_plan(checks, items, shared, list_name, thresholds, places, refusals)
         names = {check.question_id: check.name for check in checks}
         for (position, question_id), answer in sorted(plan.answered.items()):
             yield names[question_id], plan.result(position, answer)
@@ -443,12 +457,13 @@ class Judge:
         list_name: str = "items",
         thresholds: Thresholds | None = None,
         places: Sequence[Item] | None = None,
+        refusals: list[Refusal] | None = None,
     ) -> AsyncIterator[tuple[str, CheckResult]]:
         """``iter_check_every`` sent as ``check_every_async`` sends: cached answers first, then each
         wave's answers as the wave settles, each under the name of the check that asked for it. A
         failure, a call cap included, raises after every batch its wave answered has yielded, so a
-        caller keeps them all."""
-        plan = self._check_plan(checks, items, shared, list_name, thresholds, places)
+        caller keeps them all; a refused batch goes into ``refusals`` as on the sync path."""
+        plan = self._check_plan(checks, items, shared, list_name, thresholds, places, refusals)
         names = {check.question_id: check.name for check in checks}
         for (position, question_id), answer in sorted(plan.answered.items()):
             yield names[question_id], plan.result(position, answer)
@@ -497,12 +512,13 @@ class Judge:
                     masked=plan.hidden,
                     **batch.extras,
                 )
-            except InputBudgetExceededError:
+            except InputBudgetExceededError as error:
                 halves = self._halves(plan, batch)
                 if halves is None:
-                    halted.set()
-                    raise
+                    return _refused_async(plan, batch, error, halted)
                 return None, halves
+            except SecretInRequestError as error:
+                return _refused_async(plan, batch, error, halted)
             except Exception:
                 halted.set()
                 raise
@@ -832,9 +848,10 @@ class Judge:
         except InputBudgetExceededError as error:
             halves = self._halves(plan, batch)
             if halves is None:
-                stop.halted.set()
-                return _SentBatch([], error, [])
+                return _refused(plan, batch, error, stop)
             return _SentBatch([], None, halves)
+        except SecretInRequestError as error:
+            return _refused(plan, batch, error, stop)
         except Exception as error:
             stop.halted.set()
             return _SentBatch([], error, [])
@@ -904,6 +921,7 @@ class Judge:
         list_name: str,
         thresholds: Thresholds | None,
         places: Sequence[Item] | None = None,
+        refusals: list[Refusal] | None = None,
     ) -> _CheckPlan:
         """Mask the whole candidate set once, before packing, so copied secret values stay hidden
         across batches. A value found in any check's wording is hidden in the items and shared state
@@ -933,6 +951,7 @@ class Judge:
             self.input_limits,
             masker=self.masker,
             places=places,
+            refusals=refusals,
         )
         groups = _batches(plan)
         for members in groups:
@@ -1230,6 +1249,7 @@ class _CheckPlan:
     item_ids: list[str] = field(init=False)
     masker: Masker | None = None
     places: Sequence[Item] | None = None
+    refusals: list[Refusal] | None = None
     _questions: dict[tuple[str, int], dict] = field(default_factory=dict, init=False)
 
     def open_at(self, position: int) -> Mapping[str, Check]:
@@ -1292,6 +1312,17 @@ class _CheckPlan:
             self.answered[(position, question_id)] = _ItemAnswer(
                 answer.probability, response.from_store, response.request_sha256, question_id
             )
+
+    def refuse(self, batch: _Batch, error: Exception) -> bool:
+        """Records each item of a refused batch, when the caller keeps refusals; False when it does
+        not, so the refusal is raised instead."""
+        if self.refusals is None:
+            return False
+        self.refusals.extend(
+            Refusal(self.items[position], None if self.places is None else self.places[position], error)
+            for position in batch.members
+        )
+        return True
 
     def answers(self) -> dict[str, list[CheckResult]]:
         """The answers of this call, kept under the obligation that asked for them."""
@@ -1364,6 +1395,25 @@ def _completed_wave(futures: list[Future]) -> Generator[tuple[_Batch, JevRespons
     if failure is not None:
         raise failure
     return [half for batch in sent for half in batch.halves]
+
+
+def _refused(plan: _CheckPlan, batch: _Batch, error: Exception, stop: _BatchStop) -> _SentBatch:
+    """A refused batch on the sync path: kept as refused while the other batches go on, or, when the
+    caller keeps no refusals, the failure that stops them."""
+    if plan.refuse(batch, error):
+        return _SentBatch([], None, [])
+    stop.halted.set()
+    return _SentBatch([], error, [])
+
+
+def _refused_async(
+    plan: _CheckPlan, batch: _Batch, error: Exception, halted: asyncio.Event
+) -> tuple[_Batch | None, list[_Batch]]:
+    """A refused batch on the async path, kept or raised as on the sync path."""
+    if plan.refuse(batch, error):
+        return None, []
+    halted.set()
+    raise error
 
 
 def _wave_failure(failures: Sequence[BaseException]) -> BaseException | None:

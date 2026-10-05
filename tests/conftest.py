@@ -4,6 +4,7 @@ guard that fails a run with an undeclared skip."""
 
 from __future__ import annotations
 
+import asyncio
 import os
 import signal
 import subprocess
@@ -308,3 +309,18 @@ class BudgetedClient:
     def _state_and_longest_question(state: Mapping, questions: Mapping) -> int:
         longest = max((serialized_chars(question) for question in questions.values()), default=0)
         return serialized_chars(state) + longest
+
+
+class AsyncBudgetedClient:
+    """The async form of ``BudgetedClient``: it refuses a request over the character boxes."""
+
+    def __init__(self, budgeted: BudgetedClient) -> None:
+        self.budgeted = budgeted
+
+    @property
+    def model(self) -> str:
+        return self.budgeted.model
+
+    async def ask(self, state: Mapping, questions: Mapping) -> JevResponse:
+        await asyncio.sleep(0)
+        return self.budgeted.ask(state, questions)

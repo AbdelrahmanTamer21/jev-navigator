@@ -41,7 +41,7 @@ from ..index.units import (
     read_ranges,
     resolve_anchors,
 )
-from ..judgments.judge import CallCapReachedError, CheckResult, Judge
+from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
 from ..judgments.questions import Check, item_path, serialized_chars
 from ..judgments.thresholds import NoulVerdict
 from .find_code import search_failure
@@ -51,6 +51,7 @@ TARGETS = "targets"
 DELIVERED = "already delivered by the caller"
 TOO_LARGE = "too large to judge"
 NOT_REACHED = "not reached: the search stopped first"
+REFUSED = "refused: the provider or the final secret scan refused its request, so its answer is unknown"
 FOUND = "found"
 FIND_TEXT_TARGET = "target"
 BATCHES_PER_WAVE = 16
@@ -102,7 +103,8 @@ class FindAllResult:
     each naming its place; ``not_judged`` each unit or piece id left unjudged with the reason.
     ``room`` is what one unit's code had in a request and ``batches_per_wave`` the wave size, both
     None when the search never started. ``unlisted`` files gave no units and ``unresolved`` caller
-    anchors named none."""
+    anchors named none. ``refusals`` keeps each refused place's error; the place is ``not_judged``
+    as ``REFUSED`` and the search goes on past it."""
 
     targets: Mapping[str, str]
     room: int | None
@@ -117,6 +119,7 @@ class FindAllResult:
     stopped_by: str
     calls: int
     failure: Exception | None = None
+    refusals: tuple[Refusal, ...] = ()
 
     @classmethod
     def not_started(cls, targets: Mapping[str, str], stopped_by: str) -> FindAllResult:
@@ -149,7 +152,7 @@ class FindAllResult:
         reasons = set(self.not_judged.values())
         if self.stopped_by != "scope_examined" or NOT_REACHED in reasons:
             return "partial"
-        if self.unlisted or self.unresolved or self.unparsed_files or TOO_LARGE in reasons:
+        if self.unlisted or self.unresolved or self.unparsed_files or reasons & {TOO_LARGE, REFUSED}:
             return "scope_incomplete"
         return "units_examined"
 
@@ -351,6 +354,7 @@ class _Search:
         self.not_judged: dict[str, str] = {}
         self.unlisted: dict[str, str] = {}
         self.unresolved: list[UnresolvedAnchor] = []
+        self.refusals: list[Refusal] = []
         self.found: dict[str, int] = {}
         self.reached: Counter[str] = Counter()
         self.without_unit: Counter[str] = Counter()
@@ -376,7 +380,7 @@ class _Search:
             if self.stopped():
                 return
             async for name, answer in self.judge.iter_check_every_async(
-                self.checks, entries, self.shared, list_name=ITEMS, places=places
+                self.checks, entries, self.shared, list_name=ITEMS, places=places, refusals=self.refusals
             ):
                 self._record(self.target_of[name], answer)
             if self.found_one:
@@ -504,6 +508,7 @@ class _Search:
             list_name=ITEMS,
             cancelled=self.cancelled,
             places=places,
+            refusals=self.refusals,
         ):
             self._record(self.target_of[name], answer)
 
@@ -522,13 +527,18 @@ class _Search:
         return all((target, place.id) in self.answered for target in self.targets)
 
     def result(self, stop: str, failure: Exception | None) -> FindAllResult:
+        refused = {
+            refusal.place.id
+            for refusal in self.refusals
+            if refusal.place is not None and refusal.place.id in self.not_judged
+        }
         return FindAllResult(
             self.targets,
             self.room,
             self.batches_per_wave,
             tuple(sorted(self.units.values(), key=_unit_order)),
             {target: tuple(sorted(answers, key=_answer_order)) for target, answers in self.judged.items()},
-            dict(self.not_judged),
+            self.not_judged | dict.fromkeys(refused, REFUSED),
             dict(self.unlisted),
             tuple(self.unresolved),
             {
@@ -539,6 +549,7 @@ class _Search:
             stop,
             self.judge.calls,
             failure,
+            tuple(self.refusals),
         )
 
 

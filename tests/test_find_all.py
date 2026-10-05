@@ -7,13 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from conftest import WEBSITE_QUERIES, BudgetedClient
+from conftest import WEBSITE_QUERIES, AsyncBudgetedClient, BudgetedClient
 from short_secrets import ShortSecretMasker, numbered_secret
 
 from jev_navigator.directives.find_all import (
     DELIVERED,
     ITEMS,
     NOT_REACHED,
+    REFUSED,
     TARGETS,
     TOO_LARGE,
     NameHits,
@@ -345,6 +346,30 @@ def test_a_unit_of_exactly_its_room_is_judged_whole_and_one_character_more_is_to
     entry = {"file": "big.py", "code": sized_function(room + 1).removesuffix("\n")}
     with pytest.raises(InputBudgetExceededError):
         Judge(over).check_each(match_check("limit"), [entry], {TARGETS: LIMIT})
+
+
+@pytest.mark.parametrize("sending", ["sync", "async"])
+def test_a_refused_request_marks_its_unit_refused_and_the_search_goes_on(
+    tmp_path: Path, sending: str
+) -> None:
+    # Arrange: the provider's budget is below the box the Judge measures, so it refuses the big unit
+    index = repository(tmp_path, {"big.py": sized_function(3_000), "rules.py": ORDERS["rules.py"]})
+    provider = BudgetedClient(2_500)
+
+    # Act
+    if sending == "sync":
+        result = find_all(index, Judge(provider), LIMIT, files=index.files)
+    else:
+        result = asyncio.run(
+            find_all_async(index, Judge(AsyncBudgetedClient(provider)), LIMIT, files=index.files)
+        )
+
+    # Assert
+    [big] = [unit for unit in result.units if unit.path == "big.py"]
+    assert result.not_judged == {big.id: REFUSED}
+    assert (result.stopped_by, result.coverage) == ("scope_examined", "scope_incomplete")
+    assert {answer.place.file for answer in result.judged["limit"]} == {"rules.py"}
+    assert [type(refusal.error) for refusal in result.refusals] == [InputBudgetExceededError]
 
 
 def secrets_function(lines: int) -> str:

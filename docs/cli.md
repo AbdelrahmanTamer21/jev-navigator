@@ -287,11 +287,13 @@ library's `find_all_text` searches those files when a caller asks for them
 
 The result includes `seed_search`, and `search` records the `found`, `unsure` and `searched` units
 (each with its kind, name, file and runs of lines, the piece judged when it was cut, its answer and
-request identity), `room_chars`, `not_judged` (each unit or piece left unjudged, with the reason)
-and coverage gaps: `unlisted_files`, `unresolved_seeds`, `unparsed_files` and `not_indexed_files`.
+request identity), `room_chars`, `not_judged` (each unit or piece left unjudged, with the reason),
+`refused` (each unit or piece whose request was refused, with the error: the provider refused it for its
+size and no smaller split exists, or the final secret scan refused it; the search goes on past it) and
+coverage gaps: `unlisted_files`, `unresolved_seeds`, `unparsed_files` and `not_indexed_files`.
 `units_examined` means every unit was judged; it does not prove the model found every behavior.
-`scope_incomplete` retains files JVN does not parse or could not read, unparsed files and pieces too
-large to judge; a file too large to parse safely is unlisted, and report.md names each unlisted file
+`scope_incomplete` retains files JVN does not parse or could not read, unparsed files, pieces too
+large to judge and refused requests; a file too large to parse safely is unlisted, and report.md names each unlisted file
 with its reason. See the library composition in [extending.md](extending.md#judge-every-unit-with-find-all).
 
 `seed_search.calls` counts seed discovery; `search.enumeration_calls` counts the following enumeration.

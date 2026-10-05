@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from conftest import BudgetedClient
+from conftest import AsyncBudgetedClient, BudgetedClient
 from git_repos import commit_files
 
 from jev_navigator.directives.find_all import match_check
@@ -31,6 +31,7 @@ from jev_navigator.judgments.judge import (
     CallCapReachedError,
     CallOffer,
     Judge,
+    Refusal,
 )
 from jev_navigator.judgments.questions import Check, Criterion, Pick, content_hash, serialized_chars
 from jev_navigator.judgments.secrets import SecretInRequestError, SecretMasker
@@ -480,6 +481,75 @@ def test_the_final_scan_refuses_a_secret_that_masking_cannot_reach_on_the_batch_
     with pytest.raises(SecretInRequestError):
         Judge(client).check_each(DESCRIBES, items, {"doc": {"sentence": "s"}})
     assert client.requests == []
+
+
+@pytest.mark.parametrize("sending", ["sync", "async"])
+def test_a_batch_the_final_scan_refuses_is_recorded_and_every_other_batch_is_answered(sending: str) -> None:
+    # Arrange
+    client = ScriptedJevClient()
+    leaked = {"code": "y = 2", f"ghp_{'c3' * 18}": "key text is never masked"}
+    items = [{"code": "x = 1"}, leaked, {"code": "z = 3"}]
+    refusals: list[Refusal] = []
+    judge = Judge(client if sending == "sync" else AsyncScriptedJevClient(client), items_per_request=1)
+    shared = {"doc": {"sentence": "s"}}
+
+    # Act
+    if sending == "sync":
+        answers = list(judge.iter_check_every([DESCRIBES], items, shared, refusals=refusals))
+    else:
+        answers = asyncio.run(
+            _collected(judge.iter_check_every_async([DESCRIBES], items, shared, refusals=refusals))
+        )
+
+    # Assert
+    assert sorted(result.item["code"] for _, result in answers) == ["x = 1", "z = 3"]
+    assert [(refusal.item["code"], type(refusal.error)) for refusal in refusals] == [
+        ("y = 2", SecretInRequestError)
+    ]
+    assert len(client.requests) == 2
+
+
+def test_every_item_of_a_batch_the_final_scan_refuses_is_recorded() -> None:
+    # Arrange
+    client = ScriptedJevClient()
+    items = [{"code": "x = 1"}, {"code": "y = 2", f"ghp_{'c3' * 18}": "key text is never masked"}]
+    refusals: list[Refusal] = []
+
+    # Act
+    answers = list(Judge(client).iter_check_every([DESCRIBES], items, {}, refusals=refusals))
+
+    # Assert
+    assert (answers, client.requests) == ([], [])
+    assert sorted(refusal.item["code"] for refusal in refusals) == ["x = 1", "y = 2"]
+
+
+@pytest.mark.parametrize("sending", ["sync", "async"])
+def test_an_item_the_provider_refuses_alone_is_recorded_and_every_other_item_is_answered(
+    sending: str,
+) -> None:
+    # Arrange: the provider's budget is smaller than the box the Judge measures, so it refuses one item
+    provider = BudgetedClient(2_000)
+    items = [{"code": "a = 1"}, {"code": "b = '" + "x" * 3_000 + "'"}, {"code": "c = 3"}]
+    refusals: list[Refusal] = []
+    judge = Judge(provider if sending == "sync" else AsyncBudgetedClient(provider))
+
+    # Act
+    if sending == "sync":
+        answers = list(judge.iter_check_every([DESCRIBES], items, {}, refusals=refusals))
+    else:
+        answers = asyncio.run(
+            _collected(judge.iter_check_every_async([DESCRIBES], items, {}, refusals=refusals))
+        )
+
+    # Assert
+    assert sorted(result.item["code"] for _, result in answers) == ["a = 1", "c = 3"]
+    assert [(refusal.item["code"][:5], type(refusal.error)) for refusal in refusals] == [
+        ("b = '", InputBudgetExceededError)
+    ]
+
+
+async def _collected(answers):
+    return [answer async for answer in answers]
 
 
 def test_the_final_scan_refuses_a_masked_value_that_is_also_a_state_key() -> None:

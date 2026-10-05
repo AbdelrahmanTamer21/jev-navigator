@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from conftest import BudgetedClient
+from conftest import AsyncBudgetedClient, BudgetedClient
 
 from jev_navigator.directives.find_code import Outcome, SearchBudget, StopRule, find_code, find_code_async
 from jev_navigator.directives.places import place_for_line
@@ -444,25 +444,10 @@ def test_the_first_async_batch_of_check_every_asks_each_item_once_per_check(
         assert [result.probability for result in results[name]] == [0.9, 0.9]
 
 
-class _AsyncBudgetedClient:
-    """The async form of ``BudgetedClient``: it refuses a request over the character boxes."""
-
-    def __init__(self, budgeted: BudgetedClient) -> None:
-        self.budgeted = budgeted
-
-    @property
-    def model(self) -> str:
-        return self.budgeted.model
-
-    async def ask(self, state: dict, questions: dict):
-        await asyncio.sleep(0)
-        return self.budgeted.ask(state, questions)
-
-
 def test_the_async_path_splits_a_batch_over_the_character_box_before_sending_it() -> None:
     # Arrange
     budgeted = BudgetedClient(JEV_INPUT_LIMITS.request_chars, input_box=JEV_INPUT_LIMITS.box_chars)
-    judge = Judge(_AsyncBudgetedClient(budgeted))
+    judge = Judge(AsyncBudgetedClient(budgeted))
     items = [{"file": f"part{index}.py", "code": "y" * 19_300} for index in range(4)]
 
     # Act
