@@ -549,7 +549,12 @@ on its own scope, so searches sharing one judge never use up each other's budget
   eight or more characters that is not a name, a path or a URL. Under any other suffix
   (`SECRET_KEY_BASE`, `GH_TOKEN_RO`) every literal is hidden except an environment variable's name, a
   path or a URL. A value that repeats its key (`PASS: "PASS"`) is kept, unless it is a common default
-  password such as `password`. A long unquoted run of letters and digits is a value, not a reference. A reference stays code: an identifier, dotted
+  password such as `password`. A long unquoted run of letters and digits is a value, not a reference.
+  The masker reads a slice as its file type: in a config file (`.yml`, `.yaml`, `.env`, `.ini`, `.cfg`,
+  `.conf`, `.properties`, `.toml`, a Dockerfile) or in text from no file, an unquoted value under a
+  secret key is masked too (`POSTGRES_PASSWORD: example`), unless it is empty, a boolean or a whole
+  `${VAR}`, `$VAR` or `${{ ... }}` reference; in code it stays (`token: str`). A request mapping's
+  `file` names the file of the strings inside it. A reference stays code: an identifier, dotted
   path, call, a whole `${...}` or `$(...)`, or `$NAME` outside single quotes, so
   `secret: process.env.AUTH_SECRET` reaches Jev unchanged. Every rule scans in time linear in the line
   length. Masking works by content: a value of at least 8 characters hidden in one place is hidden

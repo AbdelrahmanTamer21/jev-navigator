@@ -5,6 +5,7 @@ import pytest
 
 from jev_navigator.judgments.secrets import (
     MASK,
+    SecretInRequestError,
     SecretMasker,
     SecretScanner,
     mask_by_content,
@@ -20,13 +21,13 @@ def test_repeated_request_text_is_scanned_once_without_retaining_other_requests(
     masked = Counter()
     discovered = Counter()
 
-    def observe_mask(self, text):
+    def observe_mask(self, text, path=None):
         masked[text] += 1
-        return mask(text)
+        return mask(text, path)
 
-    def observe_discovery(self, text):
+    def observe_discovery(self, text, path=None):
         discovered[text] += 1
-        return discover(text)
+        return discover(text, path)
 
     monkeypatch.setattr(SecretMasker, "mask", observe_mask)
     monkeypatch.setattr(SecretMasker, "masked_values", observe_discovery)
@@ -195,14 +196,17 @@ def test_the_scanner_reports_every_secret_value_the_masker_hides(code: str, valu
     assert SecretScanner().findings(SecretMasker().mask(code)) == []
 
 
+CODE_PATH = "src/app/module.ts"
+
+
 @pytest.mark.parametrize("code", CODE_REFERENCES)
 def test_code_references_reach_jev_byte_identical(code: str) -> None:
     # Act
-    masked = SecretMasker().mask(code)
+    masked = SecretMasker().mask(code, CODE_PATH)
 
     # Assert
     assert masked == code
-    assert SecretScanner().findings(code) == []
+    assert SecretScanner().findings(code, CODE_PATH) == []
 
 
 def test_only_the_value_is_masked_when_the_key_has_the_same_text() -> None:
@@ -386,3 +390,76 @@ def test_a_credential_under_a_naming_key_is_masked() -> None:
 
     # Assert
     assert "a8f9e0d1c2b3a4f5" not in masked
+
+
+COMPOSE = "services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: example\n      POSTGRES_USER: app\n"
+
+
+@pytest.mark.parametrize(
+    ("file", "code", "secret"),
+    [
+        ("docker-compose.yml", COMPOSE, "example"),
+        ("deploy/app.env", "DB_PASSWORD=example\n", "example"),
+        (".env.local", "API_TOKEN: hunter2\n", "hunter2"),
+        ("config/app.ini", "[db]\npassword = example\n", "example"),
+        ("Dockerfile", "ENV DB_PASSWORD=example\n", "example"),
+        ("pyproject.toml", "api_token = hunter2\n", "hunter2"),
+    ],
+)
+def test_an_unquoted_value_under_a_secret_key_in_a_config_file_is_masked(
+    file: str, code: str, secret: str
+) -> None:
+    # Arrange
+    state = {"slice": {"file": file, "lines": "1-5", "code": code}}
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert secret not in masked_state["slice"]["code"]
+
+
+@pytest.mark.parametrize(
+    ("file", "code"),
+    [
+        ("app/auth.py", "def login(token: str) -> None:\n    password: str = token\n"),
+        ("web/form.ts", "const form = { password: hunter2 };\n"),
+        (
+            "docker-compose.yml",
+            "environment:\n  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}\n  DB_TOKEN: $DB_TOKEN\n",
+        ),
+        ("values.yaml", "auth:\n  password:\n  token: null\n"),
+        ("pod.yaml", "spec:\n  automountServiceAccountToken: false\n"),
+        (".github/workflows/ci.yml", "env:\n  API_TOKEN: ${{ secrets.API_TOKEN }}\n"),
+    ],
+)
+def test_code_and_config_references_keep_their_unquoted_values(file: str, code: str) -> None:
+    # Arrange
+    state = {"slice": {"file": file, "lines": "1-3", "code": code}}
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert masked_state == state
+
+
+def test_text_without_a_file_is_read_as_config() -> None:
+    # Act
+    masked = SecretMasker().mask("POSTGRES_PASSWORD: example")
+
+    # Assert
+    assert masked == "POSTGRES_PASSWORD: [MASKED]"
+
+
+def test_the_final_scan_reads_a_slice_as_its_file_type() -> None:
+    # Arrange
+    code_slice = {"slice": {"file": "app/form.ts", "code": "const form = {\n  token: abc123,\n};\n"}}
+    config_slice = {"slice": {"file": "app.yaml", "code": "token: abc123\n"}}
+
+    # Act
+    refuse_if_secret(code_slice, {}, SecretScanner())
+
+    # Assert
+    with pytest.raises(SecretInRequestError):
+        refuse_if_secret(config_slice, {}, SecretScanner())
