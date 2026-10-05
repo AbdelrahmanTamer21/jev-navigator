@@ -572,8 +572,10 @@ on its own scope, so searches sharing one judge never use up each other's budget
   scans in time linear in the text length. The analysis engine's audit-masker corpus is shared in
   `tests/test_secret_shape_corpus.py`. Masking works by content: a value hidden in one place is hidden
   everywhere in the request, for example where a relation text or another candidate quotes it; a value
-  of 8 or more characters wherever it appears, a shorter one as a whole word, and a short number only
-  where it stands.
+  of 8 or more characters wherever it appears, a shorter one as a whole word, and a number of at most four characters or a value without letters
+  or digits only where it stands. JVN's own question wording (instructions, and the criteria of a
+  question that is not a choice) keeps its words, and a key of the request equal to a short masked
+  value does not refuse it.
   A quoted value may run across lines (triple quotes, template literals, text blocks) or sit in
   parentheses with its joined parts; a quote that closes a string the key sat in opens no value; a string
   that is not hidden is read again for the secret assignments inside it; and a value inside another

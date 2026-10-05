@@ -75,7 +75,7 @@ _INLINE_ENV_ASSIGNMENT = re.compile(
     re.M,
 )
 _CLI_SECRET_FLAG = re.compile(
-    r"(?:^|(?<=\s))--?(?P<key>[A-Za-z][\w-]*+)(?:=|[ \t]++)(?P<value>[^\s\"'`=-][^\s\"'`]*+)"
+    r"(?:^|(?<=\s))--?(?P<key>[A-Za-z][\w-]*+)(?:=|[ \t]++)(?P<value>[^\s\"'`=<>|&;$(-][^\s\"'`]*+)"
 )
 _USAGE_PLACEHOLDER = re.compile(r"\.\.\.|…|<[^<>]*>|\*+|x+", re.I)
 _QUOTED_VALUE = re.compile(
