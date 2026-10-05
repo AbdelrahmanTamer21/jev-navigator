@@ -161,7 +161,7 @@ class SecretMasker:
 
     ``masked_values`` lists every masked value but a short number (``"1.5"``, ``"0"``), so request masking
     hides each copy elsewhere too: anywhere for a value of ``BY_CONTENT_MIN_CHARS`` or more characters,
-    as a whole word for a shorter one (see ``_copy_pattern``).
+    as a whole word for a shorter one (see ``copy_pattern``).
 
     ``path`` is the file the text comes from. In a config file, or in text from no file, an unquoted value
     under a secret key is a value (``POSTGRES_PASSWORD: example``); in code it stays (``token: str``)."""
@@ -209,7 +209,7 @@ def masked_values(value: object, masker: Masker) -> frozenset[str]:
 def mask_everywhere(value: object, masker: Masker, values: frozenset[str], questions: bool = False) -> object:
     """Masks every string by the masker's rules, then hides each of ``values`` wherever it still
     appears. Keys are left as they are. In ``questions``, JVN's own wording hides no copies."""
-    copies = [_copy_pattern(secret) for secret in sorted(values - {MASK}, key=len, reverse=True)]
+    copies = [copy_pattern(secret) for secret in sorted(values - {MASK}, key=len, reverse=True)]
 
     @cache
     def hide(text: str, path: str | None, role: str) -> str:
@@ -237,7 +237,7 @@ def refuse_if_secret(
     A key counts only for a value of ``BY_CONTENT_MIN_CHARS`` or more characters (a short value such as
     ``"false"`` equals JVN's own keys), and question wording, which keeps its words, never counts."""
     texts = _strings(state) + _strings(questions, questions=True)
-    copies = [(value, _copy_pattern(value)) for value in masked - {MASK}]
+    copies = [(value, copy_pattern(value)) for value in masked - {MASK}]
     if any(_holds_copy(text, value, copy) for text in texts for value, copy in copies):
         raise SecretInRequestError("a masked value is still in the request, in a key; nothing was sent")
     if scanner is None:
@@ -247,7 +247,7 @@ def refuse_if_secret(
             raise SecretInRequestError("the final scan found a secret in the request; nothing was sent")
 
 
-def _copy_pattern(value: str) -> re.Pattern[str]:
+def copy_pattern(value: str) -> re.Pattern[str]:
     """Where a masked value's copies stand: anywhere for a value of ``BY_CONTENT_MIN_CHARS`` or more
     characters, and as a whole word for a shorter one, so ``hunter2`` is hidden but ``hunter2x`` stays."""
     if len(value) >= BY_CONTENT_MIN_CHARS:
