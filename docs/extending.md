@@ -30,7 +30,8 @@ Code holds the goal, the loop and the stopping. Jev gets concrete state and one 
 
 1. Say what code will do with each answer, and what the costly error is.
 2. Do everything mechanical in code: which functions exist, who calls whom, which files changed.
-3. Ask one `Check` per item about a concrete property of supplied code, with yes and no criteria.
+3. Ask one `Check` per item about a concrete property of supplied code. Add yes and no criteria
+   when the instructions alone leave the boundary open; a `Check` takes both or neither.
 4. Never ask whether something is false, wrong or contradicts something; ask for the concrete
    property instead, and let code combine the answers.
 5. Handle every outcome: yes, no, unsure, and low confidence.
