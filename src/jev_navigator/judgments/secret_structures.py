@@ -86,11 +86,13 @@ def _is_literal_leaf(leaf: re.Match[str]) -> bool:
 
 def yaml_block_spans(text: str) -> list[Span]:
     """A secret key's YAML block scalar, empty value with indented lines, or plain value continued
-    on deeper lines: the value and its continuation lines, never the sibling keys."""
+    on deeper lines: the value and its continuation lines, never the sibling keys. Under a suffixed key
+    (``DB_PASSWORD_PROD``) only a value the key itself holds counts; a nested table's inner keys are
+    judged on their own."""
     spans: list[Span] = []
     scanned_to = 0
     for header in _YAML_HEADER.finditer(text):
-        if header.start() < scanned_to or key_kind(header["key"]) != "secret":
+        if header.start() < scanned_to or not _holds_yaml_value(header):
             continue
         continuation_end = _continuation_end(text, header)
         if continuation_end is None:
@@ -100,6 +102,11 @@ def yaml_block_spans(text: str) -> list[Span]:
             end = continuation_end - 1 if text[continuation_end - 1] == "," else continuation_end
             spans.append((_yaml_value_start(text, header), end))
     return spans
+
+
+def _holds_yaml_value(header: re.Match[str]) -> bool:
+    kind = key_kind(header["key"])
+    return kind == "secret" or (kind == "suffixed" and bool(header["value"].strip()))
 
 
 def _continuation_end(text: str, header: re.Match[str]) -> int | None:

@@ -115,15 +115,32 @@ def _matches(pattern: re.Pattern[str], hides: Callable[[re.Match[str]], bool] = 
     return spans
 
 
+_CONCATENATED = re.compile(
+    r"[ \t]*+(?:\+|\.\.?|\\\r?\n)?[ \t]*+(?P<quote>[\"'])(?P<value>(?:\\.|(?!(?P=quote))[^\\\n])*+)(?P=quote)"
+)
+
+
 def _quoted_spans(text: str) -> list[Span]:
     """A quoted value runs to its closing quote across escapes and lines, or to the end of the text
     when it never closes; letters glued to the closing quote belong to it. A "value" that starts with
     whitespace is the rest of a string the key sat in (``'GitLab token: ' GITLAB_TOKEN``), not a value."""
-    return [
-        (match.start("value"), match.end("tail") if match["tail"] else match.end("value"))
-        for match in _QUOTED_VALUE.finditer(text)
-        if match["value"][:1].strip() and _keyed_value(match, is_literal(match["value"], match["quote"]))
-    ]
+    spans: list[Span] = []
+    for match in _QUOTED_VALUE.finditer(text):
+        if match["value"][:1].strip() and _keyed_value(match, is_literal(match["value"], match["quote"])):
+            spans.append((match.start("value"), match.end("tail") if match["tail"] else match.end("value")))
+            if not match["tail"] and match.end("value") < len(text):
+                spans += _concatenated_spans(text, match.end())
+    return spans
+
+
+def _concatenated_spans(text: str, position: int) -> list[Span]:
+    """The literals concatenated onto a hidden value (``"abc" + "def"``, ``"abc" . "def"``, adjacent
+    literals across a line continuation): they are the same value."""
+    spans = []
+    while part := _CONCATENATED.match(text, position):
+        spans.append((part.start("value"), part.end("value")))
+        position = part.end()
+    return spans
 
 
 def _keyed(holds: Callable[[re.Match[str]], bool], scalar: bool = True) -> Callable[[re.Match[str]], bool]:

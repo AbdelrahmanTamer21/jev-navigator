@@ -3,7 +3,8 @@
 A key holds a secret when a secret word is one of its parts at a snake, kebab or camel boundary.
 It is secret when the secret word ends it (``DB_PASSWORD``, ``authToken``, ``db_pass``,
 ``credentials``), naming when a naming word ends it (``SECRET_ENV``, ``token_url``,
-``CREDENTIAL_PATTERNS``), and suffixed when any other word does (``SECRET_KEY_BASE``, ``GH_TOKEN_RO``);
+``CREDENTIAL_PATTERNS``), message when a message word ends it (``PASSWORD_ERROR``), and suffixed
+when any other word does (``SECRET_KEY_BASE``, ``GH_TOKEN_RO``);
 ``max_tokens``, ``tokenizer`` and ``bypass`` are none of these. ``hides_under`` says which literals each
 kind hides. A value is code when it refers to
 something: an identifier, dotted path, call, a whole ``${...}``, a command substitution ``$(...)``,
@@ -50,6 +51,21 @@ _NAMING_SUFFIXES = frozenset(
         "pattern", "patterns", "rule", "rules", "regex",
     }
 )  # fmt: skip
+_MESSAGE_SUFFIXES = frozenset(
+    {
+        "message",
+        "msg",
+        "error",
+        "err",
+        "text",
+        "hint",
+        "title",
+        "description",
+        "placeholder",
+        "prompt",
+        "help",
+    }
+)
 _DEFAULT_PASSWORDS = frozenset({"password", "passwd", "pwd", "secret", "admin", "root"})
 _KEY_SEPARATORS = re.compile(r"[._\-$\s]+")
 MASK = "[MASKED]"
@@ -64,14 +80,16 @@ _URL_SHAPED = re.compile(r"[a-z][a-z0-9+.-]*://\S+")
 
 
 def key_kind(key: str) -> str | None:
-    """The key's kind: "secret", "suffixed", "naming" or None, as the module docstring describes."""
+    """The key's kind ("secret", "suffixed", "message", "naming" or None), as the module docstring says."""
     parts = _key_parts(key)
     end = _last_secret_word_end(parts)
     if end is None:
         return None
     if end == len(parts):
         return "secret"
-    return "naming" if parts[-1] in _NAMING_SUFFIXES else "suffixed"
+    if parts[-1] in _NAMING_SUFFIXES:
+        return "naming"
+    return "message" if parts[-1] in _MESSAGE_SUFFIXES else "suffixed"
 
 
 def _key_parts(key: str) -> list[str]:
@@ -81,13 +99,16 @@ def _key_parts(key: str) -> list[str]:
 def hides_under(kind: str, key: str, value: str) -> bool:
     """Whether a literal under a key of this kind is hidden. A value that repeats its key (``PASS: "PASS"``)
     shows nothing the key does not. Otherwise a secret key hides every literal; a suffixed key every
-    literal but an environment variable's name, a path or a URL; a naming key only a credential-looking
+    literal but an environment variable's name, a path or a URL; a message key the same, except a
+    sentence; a naming key only a credential-looking
     word, one word of eight or more characters that names nothing."""
     if _repeats_its_key(key, value):
         return False
     if kind == "secret":
         return True
-    if kind == "suffixed":
+    if kind == "message" and any(character.isspace() for character in value):
+        return False
+    if kind in ("suffixed", "message"):
         return not (
             ENVIRONMENT_NAME.fullmatch(value) or _PATH_SHAPED.fullmatch(value) or _URL_SHAPED.fullmatch(value)
         )

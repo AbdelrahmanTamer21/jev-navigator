@@ -550,8 +550,10 @@ on its own scope, so searches sharing one judge never use up each other's budget
   (`DB_PASSWORD`, `authToken`, `db_pass`) every literal is hidden, in tables and blocks too. Under a key
   a naming word ends (`SECRET_ENV`, `token_url`, `CREDENTIAL_PATTERNS`) only a credential-looking word
   is hidden: one word of eight or more characters that is not a name, a path or a URL. Under any other
-  suffix (`SECRET_KEY_BASE`, `GH_TOKEN_RO`) every string literal is hidden except an environment
-  variable's name, a path or a URL. A value that repeats its key (`PASS: "PASS"`) is kept, unless it is a
+  suffix (`SECRET_KEY_BASE`, `GH_TOKEN_RO`) every string literal is hidden, sentences and passphrases
+  too, except an environment variable's name, a path or a URL; that includes a block scalar and the
+  literals concatenated onto one, while a nested table's inner keys are judged on their own. Under a
+  key a message word ends (`PASSWORD_ERROR`, `TOKEN_HELP_TEXT`) a sentence is kept. A value that repeats its key (`PASS: "PASS"`) is kept, unless it is a
   common default password such as `password`. A long unquoted run of letters and digits is a value,
   not a reference. A reference stays code: an
   identifier, dotted path, call, a whole `${...}`, a command substitution `$(...)`, or `$NAME`
