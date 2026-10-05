@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from jev_navigator.directives.find_all import (
     TOO_LARGE,
     NameHits,
     find_all,
+    find_all_async,
     match_check,
 )
 from jev_navigator.index.code_index import CodeIndex
@@ -23,7 +25,7 @@ from jev_navigator.index.units import UNSUPPORTED_LANGUAGE, RangeAnchor
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputBudgetExceededError, InputLimits
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
-from jev_navigator.testing import ScriptedJevClient
+from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 LIMIT = {"limit": "the check that limits the items of an order"}
 ORDERS = {
@@ -410,3 +412,133 @@ def test_a_failed_request_stays_failed_when_the_host_cancels_at_the_same_time(tm
     assert result.stopped_by == "failed"
     assert result.failure is error
     assert len(result.judged["limit"]) == provider.requests - 1
+
+
+def judged_shape(result) -> tuple:
+    """Everything a search decided: each answer's place and probability, what it left unjudged and
+    why, each name's hits, the units and the stop."""
+    answers = [(answer.place.id, answer.probability) for answer in result.judged["limit"]]
+    return answers, result.not_judged, result.names, [unit.id for unit in result.units], result.stopped_by
+
+
+def test_find_all_async_judges_exactly_what_find_all_judges(tmp_path: Path) -> None:
+    # Arrange
+    index = repository(tmp_path, {**ORDERS, **RARE_AND_COMMON})
+    labels = {("limit", "<= LIMIT"): 0.95, ("limit", "common(x)"): 0.6}
+    population = {
+        "files": ["rules.py", "api.py", "web.ts", "notes.md"],
+        "anchors": [RangeAnchor("web.ts", 1, 1)],
+        "names": ["common", "rare_token"],
+        "batches_per_wave": 2,
+    }
+
+    # Act
+    sync = find_all(index, Judge(labelled(labels), items_per_request=2), LIMIT, **population)
+    concurrent = asyncio.run(
+        find_all_async(
+            index, Judge(AsyncScriptedJevClient(labelled(labels)), items_per_request=2), LIMIT, **population
+        )
+    )
+
+    # Assert
+    assert judged_shape(concurrent) == judged_shape(sync)
+    assert len(sync.judged["limit"]) == 7
+
+
+class FailsSecondRequest:
+    """An async provider that answers its first request and fails its second."""
+
+    def __init__(self, error: Exception) -> None:
+        self.script = ScriptedJevClient(default_noul=0.5)
+        self.error = error
+        self.requests = 0
+
+    @property
+    def model(self) -> str:
+        return self.script.model
+
+    async def ask(self, state, questions):
+        await asyncio.sleep(0)
+        self.requests += 1
+        if self.requests == 2:
+            raise self.error
+        return self.script.ask(state, questions)
+
+
+def test_find_all_async_keeps_the_answers_a_wave_got_before_its_failed_request(tmp_path: Path) -> None:
+    # Arrange: one wave of four requests, sent one at a time, the second of them failing
+    index = repository(tmp_path)
+    error = RuntimeError("Jev answered 503")
+
+    # Act
+    result = asyncio.run(
+        find_all_async(
+            index,
+            Judge(FailsSecondRequest(error), items_per_request=1, max_concurrency=1),
+            LIMIT,
+            files=index.files,
+            batches_per_wave=4,
+        )
+    )
+
+    # Assert
+    assert (result.stopped_by, result.failure) == ("failed", error)
+    assert len(result.judged["limit"]) == 1
+
+
+def test_find_all_async_reads_cancellation_before_it_parses_anything(tmp_path: Path) -> None:
+    # Arrange
+    index = repository(tmp_path)
+    provider = AsyncScriptedJevClient(labelled({}))
+
+    # Act
+    result = asyncio.run(
+        find_all_async(index, Judge(provider), LIMIT, files=index.files, cancelled=lambda: True)
+    )
+
+    # Assert
+    assert (result.stopped_by, result.units) == ("cancelled", ())
+    assert index.parser_scans_pending == ("facts",)
+    assert provider.requests == []
+
+
+class CancelsDuringFirstRequest:
+    """An async provider that answers every request, and asks the host to cancel during its first."""
+
+    def __init__(self) -> None:
+        self.script = ScriptedJevClient(default_noul=0.5)
+        self.cancel_requested = False
+
+    @property
+    def model(self) -> str:
+        return self.script.model
+
+    @property
+    def requests(self) -> list:
+        return self.script.requests
+
+    async def ask(self, state, questions):
+        await asyncio.sleep(0)
+        self.cancel_requested = True
+        return self.script.ask(state, questions)
+
+
+def test_find_all_async_sends_no_further_wave_once_the_host_cancels(tmp_path: Path) -> None:
+    # Arrange
+    index = repository(tmp_path)
+    provider = CancelsDuringFirstRequest()
+
+    # Act
+    result = asyncio.run(
+        find_all_async(
+            index,
+            Judge(provider, items_per_request=1),
+            LIMIT,
+            files=index.files,
+            cancelled=lambda: provider.cancel_requested,
+            batches_per_wave=1,
+        )
+    )
+
+    # Assert
+    assert (result.stopped_by, len(provider.requests), len(result.judged["limit"])) == ("cancelled", 1, 1)

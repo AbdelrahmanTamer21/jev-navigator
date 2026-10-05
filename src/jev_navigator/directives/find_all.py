@@ -10,6 +10,7 @@ keeps every raw answer with its place; ranking and any bar belong to the caller.
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -164,23 +165,66 @@ def find_all(
     the error (see ``search_failure``), Ctrl-C ends it ``cancelled``, and either way ``judged`` keeps
     every answer that arrived.
     """
+    search = _begin(index, judge, targets, skip, completed, cancelled, batches_per_wave)
+    try:
+        search.run(anchors, files, names)
+    except (KeyboardInterrupt, Exception) as error:  # noqa: BLE001 - _stop_by owns how an error ends a search
+        return search.ended(error)
+    return search.ended(None)
+
+
+async def find_all_async(
+    index: CodeIndex,
+    judge: Judge,
+    targets: Mapping[str, str],
+    *,
+    files: Sequence[str] = (),
+    anchors: Sequence[Anchor] = (),
+    names: Sequence[str] = (),
+    skip: Callable[[Unit], bool] | None = None,
+    completed: Mapping[str, Sequence[CheckResult]] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    batches_per_wave: int = BATCHES_PER_WAVE,
+) -> FindAllResult:
+    """``find_all`` with each wave's requests sent concurrently through the Judge's async form, for an
+    async client. Listing, resolving and reading code run in a worker thread, so the event loop stays
+    free. ``cancelled`` is read before each parse and between waves, since the Judge's async form
+    reads none; a cancelled task's ``CancelledError`` is never caught."""
+    search = _begin(index, judge, targets, skip, completed, cancelled, batches_per_wave)
+    try:
+        await search.run_async(anchors, files, names)
+    except (KeyboardInterrupt, Exception) as error:  # noqa: BLE001 - _stop_by owns how an error ends a search
+        return search.ended(error)
+    return search.ended(None)
+
+
+def _begin(
+    index: CodeIndex,
+    judge: Judge,
+    targets: Mapping[str, str],
+    skip: Callable[[Unit], bool] | None,
+    completed: Mapping[str, Sequence[CheckResult]] | None,
+    cancelled: Callable[[], bool] | None,
+    batches_per_wave: int,
+) -> _Search:
     _require_identifiers(targets)
     if batches_per_wave < 1:
         raise ValueError("batches_per_wave must be at least 1")
     search = _Search(index, judge.scope(), targets, skip, cancelled, batches_per_wave)
     search.resume(completed or {})
-    stop, failure = "scope_examined", None
-    try:
-        search.run(anchors, files, names)
-    except CallCapReachedError:
-        stop = "budget"
-    except KeyboardInterrupt:
-        stop = "cancelled"
-    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
-        failure, stop = search_failure(error), "failed"
-    if search.stopped() and failure is None:
-        stop = "cancelled"
-    return search.result(stop, failure)
+    return search
+
+
+def _stop_by(error: KeyboardInterrupt | Exception | None) -> tuple[str, Exception | None]:
+    """How an error ends a search: a call cap ``budget``, Ctrl-C ``cancelled``, any other error
+    ``failed`` holding it (``search_failure`` decides), and no error ``scope_examined``."""
+    if error is None:
+        return "scope_examined", None
+    if isinstance(error, CallCapReachedError):
+        return "budget", None
+    if isinstance(error, KeyboardInterrupt):
+        return "cancelled", None
+    return "failed", search_failure(error)
 
 
 def _require_identifiers(targets: Mapping[str, str]) -> None:
@@ -229,9 +273,43 @@ class _Search:
                 self._record(target, answer)
 
     def run(self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]) -> None:
-        wave = self.judge.items_per_request * self.batches_per_wave
-        for places in _chunks(self._population(anchors, files, names), wave):
+        for places in self._waves(anchors, files, names):
             self._judge(places)
+
+    async def run_async(self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]) -> None:
+        waves = self._waves(anchors, files, names)
+        while (wave := await asyncio.to_thread(self._next_wave, waves)) is not None:
+            places, entries = wave
+            if self.stopped():
+                return
+            async for name, answer in self.judge.iter_check_every_async(
+                self.checks, entries, self.shared, list_name=ITEMS, places=places
+            ):
+                self._record(self.target_of[name], answer)
+
+    def ended(self, error: KeyboardInterrupt | Exception | None) -> FindAllResult:
+        stop, failure = _stop_by(error)
+        if self.stopped() and failure is None:
+            stop = "cancelled"
+        return self.result(stop, failure)
+
+    def _waves(
+        self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
+    ) -> Iterator[list[Item]]:
+        return _chunks(
+            self._population(anchors, files, names), self.judge.items_per_request * self.batches_per_wave
+        )
+
+    def _next_wave(self, waves: Iterator[list[Item]]) -> tuple[list[Item], list[dict]] | None:
+        """The next wave's places and the entries Jev reads for them; None when the population is spent."""
+        places = next(waves, None)
+        return None if places is None else (places, self._entries(places))
+
+    def _entries(self, places: Sequence[Item]) -> list[dict]:
+        return [
+            {"file": place.file, "code": read_ranges(self.index, place.file, place.ranges)}
+            for place in places
+        ]
 
     def _population(
         self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
@@ -296,12 +374,13 @@ class _Search:
     def _judge(self, places: Sequence[Item]) -> None:
         if not places or self.stopped():
             return
-        entries = [
-            {"file": place.file, "code": read_ranges(self.index, place.file, place.ranges)}
-            for place in places
-        ]
         for name, answer in self.judge.iter_check_every(
-            self.checks, entries, self.shared, list_name=ITEMS, cancelled=self.cancelled, places=places
+            self.checks,
+            self._entries(places),
+            self.shared,
+            list_name=ITEMS,
+            cancelled=self.cancelled,
+            places=places,
         ):
             self._record(self.target_of[name], answer)
 

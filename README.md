@@ -567,7 +567,8 @@ judge.choose_call(route, offers, state)  # function calling: operation plus its 
 ```
 
 Every one of these has an async form (`check_each_async`, `pick_async`, `ask_all_async`,
-`choose_call_async`, `ask_async`), and `find_code_async` is the async search. They take any
+`choose_call_async`, `ask_async`, and `iter_check_every_async`, which yields each wave's answers as
+the wave settles), and `find_code_async` and `find_all_async` are the async searches. They take any
 `AsyncJevClient` (an object with `model` and `async ask(state, questions)`, optionally an async
 `send`), such as a host's own orchestrator; a sync client also works there and runs in a worker
 thread. Both paths share one core: masking, the secret scan, the hash, the store lookup, the call

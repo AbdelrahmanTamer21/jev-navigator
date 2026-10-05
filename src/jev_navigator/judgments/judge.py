@@ -394,6 +394,40 @@ class Judge:
         judge-wide send slot still sends. The wave settles whole before its failure is raised, so no
         request of the call is still running when the error comes out."""
         plan = self._check_plan(checks, items, shared, list_name, thresholds, places)
+        async for _answered in self._settled_waves(plan):
+            pass
+        return plan.answers()
+
+    async def iter_check_every_async(
+        self,
+        checks: Sequence[Check],
+        items: Sequence[Mapping],
+        shared: Mapping | None = None,
+        *,
+        list_name: str = "items",
+        thresholds: Thresholds | None = None,
+        places: Sequence[Item] | None = None,
+    ) -> AsyncIterator[tuple[str, CheckResult]]:
+        """``iter_check_every`` sent as ``check_every_async`` sends: cached answers first, then each
+        wave's answers as the wave settles, each under the name of the check that asked for it. A
+        failure, a call cap included, raises after every batch its wave answered has yielded, so a
+        caller keeps them all."""
+        plan = self._check_plan(checks, items, shared, list_name, thresholds, places)
+        names = {check.question_id: check.name for check in checks}
+        for (position, question_id), answer in sorted(plan.answered.items()):
+            yield names[question_id], plan.result(position, answer)
+        async for answered in self._settled_waves(plan):
+            for batch in answered:
+                for question_id, position in sorted(batch.slots.items(), key=lambda slot: slot[1]):
+                    yield (
+                        names[question_id.split("#", 1)[0]],
+                        plan.result(position, plan.answered[(position, question_id)]),
+                    )
+
+    async def _settled_waves(self, plan: _CheckPlan) -> AsyncIterator[list[_Batch]]:
+        """The batches each wave answered, as the wave settles; a wave's failure is raised after its
+        answered batches, and the halves of a batch refused for its size go back on the queue only
+        when the wave had no failure."""
         queue = _WaveQueue(list(plan.batches))
         slots = asyncio.Semaphore(self.max_concurrency)
         halted = asyncio.Event()
@@ -403,20 +437,22 @@ class Judge:
                 *(self._answer_batch_async(plan, batch, slots, halted) for batch in wave),
                 return_exceptions=True,
             )
+            sent = [outcome for outcome in settled if not isinstance(outcome, BaseException)]
+            yield [answered for answered, _halves in sent if answered is not None]
             failure = _wave_failure([outcome for outcome in settled if isinstance(outcome, BaseException)])
             if failure is not None:
                 raise failure
-            queue.put_halves([half for halves in settled for half in halves])
-        return plan.answers()
+            queue.put_halves([half for _answered, halves in sent for half in halves])
 
     async def _answer_batch_async(
         self, plan: _CheckPlan, batch: _Batch, slots: asyncio.Semaphore, halted: asyncio.Event
-    ) -> list[_Batch]:
-        """Send one packed batch once a slot is free and apply its answers; a size refusal returns
-        its halves instead. After a sibling failed, a batch still waiting for a slot is not sent."""
+    ) -> tuple[_Batch | None, list[_Batch]]:
+        """Send one packed batch once a slot is free and apply its answers: the batch it answered,
+        or none, and the halves of a batch refused for its size. After a sibling failed, a batch
+        still waiting for a slot is not sent."""
         async with slots:
             if halted.is_set():
-                return []
+                return None, []
             try:
                 response = await self.ask_async(
                     batch.state,
@@ -430,12 +466,12 @@ class Judge:
                 if halves is None:
                     halted.set()
                     raise
-                return halves
+                return None, halves
             except Exception:
                 halted.set()
                 raise
         plan.answer(batch, response)
-        return []
+        return batch, []
 
     def ask_all(
         self,

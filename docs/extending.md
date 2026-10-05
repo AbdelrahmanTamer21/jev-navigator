@@ -136,7 +136,10 @@ lists, so a hit inside a nested function names the function holding it. No code 
 Judge's call cap is the only budget. The population goes to the Judge in waves of `batches_per_wave`
 requests' worth (16 by default). Its order holds between waves, and exactly only at one batch per
 wave. Like `items_per_request`, the wave size shapes the batches and so the answer store's keys.
-`skip` leaves out units the caller already has. Ranking and any bar belong to the caller:
+`skip` leaves out units the caller already has. `find_all_async` takes the same arguments for an
+async client, such as a host's orchestrator; it lists and reads code in a worker thread, reads
+`cancelled` between waves, and keeps every answer a wave received before a failure. Ranking and any
+bar belong to the caller:
 `scores(target)` gives every judged unit's answer, and `names` each name's hits found, reached and
 naming no unit.
 
