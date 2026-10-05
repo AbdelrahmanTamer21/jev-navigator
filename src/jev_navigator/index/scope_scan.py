@@ -118,8 +118,9 @@ class FileStructure:
     use may name, decided by each declaration's own syntax node. ``local_names`` are the names each
     function binds for its own body (see ``LOCAL_NAME_RULES``); a name a module-level block binds
     is not among them. ``object_members`` are the functions and classes of the objects module-level
-    variables hold (see ``ObjectMember``), and ``outer_symbols`` the symbols no function, class or
-    namespace holds, whatever value or property holds them."""
+    variables hold (see ``ObjectMember``), and ``argument_members`` those of the objects a
+    module-level call or `new` is passed: `errorFormatter` in `const t = create({ errorFormatter() {}
+    })`."""
 
     functions: tuple[Span, ...] = ()
     symbols: tuple[Span, ...] = ()
@@ -131,7 +132,7 @@ class FileStructure:
     local_names: tuple[LocalName, ...] = ()
     namespace_members: tuple[NamespaceMember, ...] = ()
     object_members: tuple[ObjectMember, ...] = ()
-    outer_symbols: tuple[Span, ...] = ()
+    argument_members: tuple[Span, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -390,7 +391,7 @@ class _FileFound:
             _local_names(self.ranges, self.classes, self.bound_names),
             nodes.namespace_members(declared),
             _object_members(self.ranges, self.marks[_OBJECT_MEMBER_RULE], self.object_owners),
-            _ordered(symbols & nodes.outermost(), positions),
+            _ordered(symbols & _marked(self.ranges, self.marks[_ARGUMENT_MEMBER_RULE]), positions),
         )
 
     def _references(self) -> tuple[ReferenceMatch, ...]:
@@ -605,11 +606,6 @@ class _Nodes:
             if holder is None and isinstance(span, Span) and (start, end) not in self.owned
         }
 
-    def outermost(self) -> set[Span]:
-        """The spans no other function, class or namespace holds, whatever value or property holds
-        them: `errorFormatter` in `const t = create({ errorFormatter() {} })`."""
-        return {span for _, _, span, holder in self._sweep(()) if holder is None and isinstance(span, Span)}
-
     def namespace_members(self, declared: Iterable[tuple[Span, _Declaration]]) -> tuple[NamespaceMember, ...]:
         """Each function, class and declaration whose innermost holder is a namespace, with that
         namespace's lines; a declaration enters the sweep as the point it starts at."""
@@ -734,8 +730,16 @@ _PROPERTY_VALUE_RULE = "property_value"
 _SELF_NAMED_RULE = "self_named"
 _MODULE_EXPORT_RULE = "module_export"
 _OBJECT_MEMBER_RULE = "object_member"
+_ARGUMENT_MEMBER_RULE = "argument_member"
 _OBJECT_OWNER_RULE = "object_owner"
-_MARK_RULES = (_HELD_RULE, _PROPERTY_VALUE_RULE, _MODULE_EXPORT_RULE, _SELF_NAMED_RULE, _OBJECT_MEMBER_RULE)
+_MARK_RULES = (
+    _HELD_RULE,
+    _PROPERTY_VALUE_RULE,
+    _MODULE_EXPORT_RULE,
+    _SELF_NAMED_RULE,
+    _OBJECT_MEMBER_RULE,
+    _ARGUMENT_MEMBER_RULE,
+)
 _STRUCTURE_RULE_IDS = frozenset(
     {
         "function",
@@ -832,27 +836,34 @@ def _property_rules(language: str) -> list[str]:
 
 
 def _object_member_rules(language: str) -> list[str]:
-    """Every function and class that is a method or a property value of an object literal a
-    module-level variable holds, past wrappers such as `satisfies`, and the name of every
-    module-level variable whose value is an object (see ``ObjectMember``)."""
-    symbol_kinds = (*FUNCTION_KINDS[language], *CLASS_KINDS[language])
-    expressions = _kinds([kind for kind in symbol_kinds if kind in EXPRESSION_KINDS])
-    held_object = (
-        f"{{kind: object, inside: {{stopBy: {_past_wrappers(language)}, any: [{MODULE_VARIABLE}]}}}}"
-    )
-    held_pair = f"{{kind: pair, inside: {held_object}}}"
-    member = (
-        "  any:\n"
-        f"    - {{kind: method_definition, not: {{not: {{inside: {held_object}}}}}}}\n"
-        f"    - {{any: {expressions}, {_held_past_wrappers(language, held_pair)}}}"
-    )
+    """The members of the object literals a module-level variable holds (see ``ObjectMember``) and of
+    those a module-level call or `new` is passed (see ``FileStructure.argument_members``), and the
+    name of every module-level variable whose value is an object. Module level is outside every
+    function, class and namespace."""
+    scopes = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language], *NAMESPACE_KINDS[language]))
+    passed = f"{{kind: arguments, not: {{inside: {{stopBy: end, any: {scopes}}}}}}}"
     values = _kinds(("object", *NAME_WRAPPERS[grammar_of(language)]))
     variable = f"{{field: name, all: [{MODULE_VARIABLE}, {{has: {{field: value, any: {values}}}}}]}}"
     owner = f"  kind: identifier\n  not: {{not: {{inside: {variable}}}}}"
     return [
-        _rule_document(_OBJECT_MEMBER_RULE, language, member),
+        _rule_document(_OBJECT_MEMBER_RULE, language, _members_of(language, MODULE_VARIABLE)),
+        _rule_document(_ARGUMENT_MEMBER_RULE, language, _members_of(language, passed)),
         _rule_document(_OBJECT_OWNER_RULE, language, owner),
     ]
+
+
+def _members_of(language: str, holder: str) -> str:
+    """Every function and class that is a method or a property value of an object literal whose first
+    ancestor past wrappers such as `satisfies` is ``holder``, a condition printed by no match."""
+    symbol_kinds = (*FUNCTION_KINDS[language], *CLASS_KINDS[language])
+    expressions = _kinds([kind for kind in symbol_kinds if kind in EXPRESSION_KINDS])
+    held_object = f"{{kind: object, inside: {{stopBy: {_past_wrappers(language)}, any: [{holder}]}}}}"
+    held_pair = f"{{kind: pair, inside: {held_object}}}"
+    return (
+        "  any:\n"
+        f"    - {{kind: method_definition, not: {{not: {{inside: {held_object}}}}}}}\n"
+        f"    - {{any: {expressions}, {_held_past_wrappers(language, held_pair)}}}"
+    )
 
 
 def _held_past_wrappers(language: str, holder: str) -> str:

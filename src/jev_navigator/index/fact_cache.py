@@ -183,7 +183,7 @@ def _encode(facts: FileFacts) -> dict:
             "object_members": [
                 [member.owner, asdict(member.span)] for member in facts.structure.object_members
             ],
-            "outer_symbols": [asdict(span) for span in facts.structure.outer_symbols],
+            "argument_members": [asdict(span) for span in facts.structure.argument_members],
         },
         "calls": [asdict(call) for call in facts.calls],
         "references": [asdict(reference) for reference in facts.references],
@@ -214,7 +214,7 @@ def _decode(file: str, raw: dict) -> FileFacts:
                 for first, last, span in structure["namespace_members"]
             ),
             tuple(ObjectMember(owner, _span(file, span)) for owner, span in structure["object_members"]),
-            tuple(_span(file, span) for span in structure["outer_symbols"]),
+            tuple(_span(file, span) for span in structure["argument_members"]),
         ),
         tuple(CallMatch(file, call["line"], call["name"], call.get("receiver")) for call in raw["calls"]),
         tuple(

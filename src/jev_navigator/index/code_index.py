@@ -376,20 +376,20 @@ class CodeIndex:
     def module_names(self, file: str) -> tuple[str, ...]:
         """The names a reader finds ``file``'s code by, best first: the functions and classes the
         module names (see ``FileStructure.module_symbols``) or assigns to its CommonJS exports, then
-        each function of an object a module-level variable holds, as `api.list`, and each function
-        or class of a namespace, each group in file order. A module offering none of these lists the
-        symbols no function, class or namespace holds, so a file of callbacks still shows them."""
+        each function of an object a module-level variable holds, as `api.list`, each function of an
+        object a module-level call or `new` is passed, and each function or class of a namespace,
+        each group in file order. A file holding none of these has no names."""
         structure = self._file_structure(file)
         symbols = set(structure.symbols)
         own = [(span, span.name) for span in (*structure.module_symbols, *structure.commonjs_exports)]
         held = [(member.span, f"{member.owner}.{member.span.name}") for member in structure.object_members]
+        held += [(span, span.name) for span in structure.argument_members]
         held += [
             (member.span, member.span.name)
             for member in structure.namespace_members
             if member.span in symbols
         ]
-        names = dict.fromkeys((*_named_in_file_order(own), *_named_in_file_order(held)))
-        return tuple(names) or _named_in_file_order((span, span.name) for span in structure.outer_symbols)
+        return tuple(dict.fromkeys((*_named_in_file_order(own), *_named_in_file_order(held))))
 
     def declarations_in(self, file: str) -> tuple[Span, ...]:
         """Constants, assignments, types, interfaces and enums at module level or directly in a

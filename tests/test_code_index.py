@@ -1050,12 +1050,14 @@ def test_module_names_list_what_the_module_names_or_exports_before_its_objects_m
 ) -> None:
     """A one-line function keeps its place beside the named arrow its default value holds, and a
     CommonJS export is the module's own. A method of an object literal is the object's, so it follows
-    under the object's name."""
+    under the object's name; a method of an object a module-level call is passed belongs to no
+    variable, so it follows under its own, never under the object variable named before it."""
     # Arrange
     (tmp_path / "retry.js").write_text(
         "function retry(again = () => 1) { return attempt(); }\n"
         "function attempt() {\n  return 1;\n}\n"
         "const api = {\n  list() { return []; },\n};\n"
+        "const t = create({\n  format() { return 1; },\n});\n"
         "exports.run = function () {\n  return 0;\n};\n"
     )
     index = CodeIndex(tmp_path, ("retry.js",), fact_cache_dir=tmp_path / "cache")
@@ -1064,7 +1066,7 @@ def test_module_names_list_what_the_module_names_or_exports_before_its_objects_m
     names = index.module_names("retry.js")
 
     # Assert
-    assert names == ("retry", "attempt", "run", "api.list")
+    assert names == ("retry", "attempt", "run", "api.list", "format")
 
 
 def test_a_rendered_component_is_a_call_and_a_platform_element_is_not(tmp_path: Path) -> None:

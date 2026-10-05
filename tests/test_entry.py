@@ -133,6 +133,29 @@ def test_a_function_whose_default_value_is_an_arrow_keeps_its_name_in_the_entry_
             "main, run",
         ),
         ("trpc.ts", "const t = create({\n  errorFormatter() {\n    return 1;\n  },\n});\n", "errorFormatter"),
+        (
+            "frames.ts",
+            'export const Frames = Reference("frames", {\n  defaultValue: () => 1,\n});\n',
+            "defaultValue",
+        ),
+        (
+            "server.ts",
+            "const server = new Server({\n  onConnect() {\n    return 1;\n  },\n});\n",
+            "onConnect",
+        ),
+        (
+            "setup.ts",
+            "function setup() {\n  return create({\n    inner() {\n      return 1;\n    },\n  });\n}\n",
+            "setup",
+        ),
+        (
+            "auth.ts",
+            "export const auth = betterAuth({\n  hooks: {\n"
+            "    before() {\n      return 1;\n    },\n  },\n});\n",
+            "",
+        ),
+        ("probes.ts", "const probes = [1, { valueOf: () => 1 }];\n", ""),
+        ("suite.ts", 'describe("x", () => {\n  const helper = () => 1;\n  return helper();\n});\n', ""),
     ],
     ids=[
         "an exported object beside a function",
@@ -140,7 +163,13 @@ def test_a_function_whose_default_value_is_an_arrow_keeps_its_name_in_the_entry_
         "a CommonJS module exporting its object",
         "a CommonJS exports object",
         "a namespace member",
-        "only a call's callback",
+        "a method of an object a module-level call is passed",
+        "a property function of an object a module-level call is passed",
+        "an object a module-level new is passed",
+        "a call inside a function",
+        "an object nested in the passed object",
+        "an object in a module-level array",
+        "a callback's own helpers",
     ],
 )
 def test_the_entry_text_lists_what_the_module_names_then_its_objects_members(
@@ -148,8 +177,10 @@ def test_the_entry_text_lists_what_the_module_names_then_its_objects_members(
 ) -> None:
     """The functions and classes the module names come first. A function of an object a module-level
     variable holds follows under the object's name, the same for ESM and CommonJS; a member of a
-    CommonJS exports object and of a namespace under its own. A module naming none of these still
-    lists the functions no other function holds, so no file is left without names."""
+    CommonJS exports object, of a namespace, and of an object a module-level call or `new` is passed
+    (trpc's `create({ errorFormatter() {} })`) under its own. Nothing else is a name of the module: a
+    call inside a function, an object nested in a passed object or held by an array, and a
+    callback's own helpers give none, so such a file's option lists no symbols."""
     # Arrange
     index = _index(tmp_path, {file: source, "util/x.py": "x = 1\n"})
 
@@ -157,7 +188,8 @@ def test_the_entry_text_lists_what_the_module_names_then_its_objects_members(
     options = _root_options(index)
 
     # Assert
-    assert _option_for(options, f"file {file}") == f"file {file}: Symbols: {symbols}"
+    listed = f" Symbols: {symbols}" if symbols else ""
+    assert _option_for(options, f"file {file}") == f"file {file}:{listed}"
 
 
 def test_the_option_set_is_the_same_directories_and_files_as_before(tmp_path: Path) -> None:
