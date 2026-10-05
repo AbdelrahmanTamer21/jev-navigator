@@ -74,18 +74,19 @@ def one_at_a_time(client, **settings) -> Judge:
 
 
 def test_a_point_at_the_bar_is_found_and_one_below_it_is_none_among_the_units_judged(tmp_path: Path) -> None:
-    # Arrange
+    # Arrange: the bar is exactly the limit's best answer
     index = shop(tmp_path)
+    bar = 0.9
 
     # Act
     result = find_all(index, Judge(answering()), POINTS, files=index.files)
-    limit, audit = point_results([Round(result)], BAR)
+    limit, audit = point_results([Round(result)], bar)
 
     # Assert
     assert (limit.outcome, audit.outcome) == (Outcome.FOUND, Outcome.NONE_AMONG_JUDGED)
-    assert limit.render(BAR) == "limit: found, best P=0.900 of 4 unit(s) judged; 0 not reached"
-    assert audit.render(BAR) == (
-        "audit: none at the bar 0.80 among 4 unit(s) judged, best P=0.100; 0 not reached (not negative proof)"
+    assert limit.render(bar) == "limit: found, best P=0.900 of 4 unit(s) judged; 0 not reached"
+    assert audit.render(bar) == (
+        "audit: none at the bar 0.90 among 4 unit(s) judged, best P=0.100; 0 not reached (not negative proof)"
     )
 
 
@@ -115,6 +116,24 @@ def test_units_a_spent_budget_leaves_unjudged_are_counted_by_the_source_that_lis
         "audit: none at the bar 0.80 among 1 unit(s) judged, best P=0.100; 3 not reached "
         "(1 from anchors, 1 from files, 1 from name hits) (not negative proof)"
     )
+
+
+def test_a_unit_two_sources_list_counts_under_the_first(tmp_path: Path) -> None:
+    # Arrange: the anchor names accept, and the file lists accept again and reject
+    index = shop(tmp_path)
+
+    # Act
+    result = find_all(
+        index,
+        Judge(answering(), max_calls=0),
+        AUDIT,
+        anchors=[LineAnchor("rules.py", 1)],
+        files=["rules.py"],
+    )
+    [audit] = point_results([Round(result)], BAR)
+
+    # Assert
+    assert audit.render(BAR) == "audit: unknown, no unit judged; 2 not reached (1 from anchors, 1 from files)"
 
 
 def test_a_search_that_failed_after_judging_some_units_is_unknown_never_none(tmp_path: Path) -> None:
