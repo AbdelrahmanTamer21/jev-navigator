@@ -3,10 +3,12 @@ client's input limits, and otherwise the longest start that fits, with a visible
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from conftest import BudgetedClient
 from git_repos import commit_files
+from search_deadline import searched_in_child
 
 from jev_navigator.adapters.routes import DREX_INPUT_LIMITS
 from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code
@@ -17,6 +19,7 @@ from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
 from jev_navigator.testing import ScriptedJevClient
 
+NEIGHBOUR_CAP_SEARCH = Path(__file__).with_name("neighbour_cap_search.py")
 ONE_OPENING = SearchBudget(max_steps=1, beam_width=1)
 CALLEES = {"callees": MOVES["callees"]}
 LINE_IN_A_REQUEST = 40
@@ -112,3 +115,27 @@ def test_a_function_shown_whole_leaves_room_for_each_neighbour_alone(tmp_path: P
         cut = "[cut after" in opened.code.text
         assert "app/audit.py:1-9" in offered
         assert (size, len(offered)) == (size, 2 if cut else 1)
+
+
+def test_a_cut_under_a_per_kind_cap_settles_and_every_request_fits(tmp_path: Path) -> None:
+    # Act: `jvn find --neighbours-per-kind 1` under Drex's box, in its own process
+    # (neighbour_cap_search.py): cutting the function brings its tail on as a callee in place of `audit`
+    seen = searched_in_child([sys.executable, str(NEIGHBOUR_CAP_SEARCH), str(tmp_path)])
+
+    # Assert: the search ended, nothing was refused, and its one request shows the cut beside the tail
+    # alone, while the cap set `audit` aside
+    search = seen["search"]
+    (start,) = search["starts"]
+    first, last = start["source"]["lines"]
+    (asked,) = seen["asked"]
+    set_aside = {entry["signature"]: entry["reason"] for entry in search["not_inspected"]}
+    assert seen["refusals"] == 0
+    assert (first, last) == (1, last) and last < seen["function_lines"]
+    assert asked["lines"] == f"1-{last}"
+    assert (
+        asked["last_line"]
+        == f"[cut after {last} of {seen['function_lines']} lines to fit the request size limit]"
+    )
+    (neighbour,) = asked["neighbours"]
+    assert neighbour.startswith(f"app/orders.py:{seen['tail_line']} `def place_tail(order):`")
+    assert set_aside["app/audit.py:1 audit"] == "capped"

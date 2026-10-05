@@ -719,7 +719,8 @@ marked "[line cut]"). An opened place goes to Jev whole when its requests fit th
 judge's client (Jev's 32,000 tokens are 76,800 characters, `judgments.client.JEV_INPUT_LIMITS`): the
 request asking whether it is the target, and, when the opening is split, the request asking about each
 neighbour alone. Larger code is cut on a line boundary with a visible note, and `Visit.code` ends at
-the last shown line. If not even its first line fits, the place stays `not_inspected` with reason
+the last shown line. A cut never grows back: under `neighbours_per_kind` a shorter cut can list a
+small neighbour in place of a large one, so the opening keeps that cut and the neighbours listed for it. If not even its first line fits, the place stays `not_inspected` with reason
 `budget`; Resume on a route with a larger box inspects that same source.
 `questions=SearchQuestions(found=...,
 could_contain=..., open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default

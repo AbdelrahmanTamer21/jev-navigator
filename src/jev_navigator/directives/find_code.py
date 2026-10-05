@@ -750,8 +750,11 @@ def _beside_neighbours(
 ) -> tuple[_Opening, list[Place]]:
     """The opening with the neighbours it asks about, and the places the per-kind cap left out. A split
     opening sends the shown code with each neighbour alone, so a neighbour too large for that request
-    cuts the code further, and a shorter cut can list more neighbours: listing repeats until the cut
-    holds. Each pass shows fewer lines, so it ends. When not even the first line fits beside the
+    cuts the code further, and a shorter cut can list more neighbours: listing repeats while each pass
+    shows fewer lines than the one before, so it ends. A cut never grows back: under a per-kind cap a
+    shorter cut can list a small neighbour in place of a large one, and growing back would list the
+    large one again. The opening returned fits, because its neighbours were listed for its cut and a
+    shorter start than the longest that fits also fits. When not even the first line fits beside the
     largest neighbour, the opening keeps its cut, and the provider refuses that neighbour's request."""
     while True:
         listed, omitted = neighbours_and_omissions(
@@ -761,7 +764,7 @@ def _beside_neighbours(
         opening = replace(opening, candidates=[place for place in unseen if place.open().text.strip()])
         fits = partial(_split_requests_fit, search, judge, _largest_neighbour(search, opening))
         shown = shown_slice(code, fits, search.budget.max_line_chars)
-        if shown is None or shown.span == opening.code.span:
+        if shown is None or shown.span.end >= opening.code.span.end:
             return opening, omitted
         opening = replace(opening, code=shown)
 
