@@ -1,21 +1,28 @@
 """JVN's memory limit: an allowance for each JVN process, and one ceiling for all of them on a machine.
 
-Every process JVN starts is started through ``started`` (the index's ast-grep, ripgrep and git, and a
-model step's command-line connector in ``connectors``), except the git call that records a pack's
-source revision (``cli``). The first started process takes one of the machine's memory slots, waiting up
-to ``wait_seconds`` for room. The process keeps the slot until it exits, and the operating system
-releases the lock then, however the process ends, so no slot outlives its holder. The ceiling holds
+Every process JVN starts is started through ``started``: the index's ast-grep, ripgrep and git, the
+git call that records a pack's source revision (``cli``), and a model step's command-line connector
+(``connectors``). The first started process takes one of the machine's memory slots, waiting up to
+``wait_seconds`` for room. The process keeps the slot until it exits, and the operating system releases
+the lock then, however the process ends, so no slot outlives its holder. The ceiling holds
 ``ceiling_mb // allowance_mb`` slots, one ``flock``-ed file each, in a folder that no HOME setting
 moves.
 
 While a started process runs, a watchdog thread measures, every ``SAMPLE_SECONDS``, how far this process
-has grown past its footprint when it took its slot, plus the footprint of every process it started.
-Over the allowance it kills those processes, and each ``started`` block whose process it killed raises
+has grown past its baseline (below), plus the footprint of every process it started. Over the allowance
+it kills those processes, and each ``started`` block whose process it killed raises
 ``MemoryLimitReachedError``. Growth while no process runs is refused at the next ``check``: before any
-process starts and while cached facts load. Growth is measured from the footprint the process had when
-it took its slot, so a host that embeds JVN, such as a long-lived server or a test runner, is not
-charged for what it held before; what it grows by after that counts against the allowance, whoever
-caused it.
+process starts and while cached facts load.
+
+Growth is measured from a baseline, so a host that embeds JVN, such as a long-lived server or a test
+runner, is not charged for what it held before. While no ``CodeIndex`` is alive the process holds nothing
+of JVN's, so the baseline moves to the footprint at every ``check`` made then and when the first index
+opens: what a host grows between two searches is never charged to the second. While an index is alive,
+what the process grows by counts against the allowance, whoever caused it. A host that keeps a search
+result keeps its index alive through the result's own places, so counting that memory is correct. A
+failed search leaves its dropped index in a reference cycle, its failure's traceback holding the frames
+that hold the index, so before an index counts as alive where that decides, the cycle collector runs
+once.
 
 The footprint is the operating system's physical footprint: libproc's ``ri_phys_footprint`` on macOS,
 which counts compressed pages that the resident size leaves out, and resident plus swapped memory on
@@ -27,19 +34,24 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import fcntl
+import gc
 import os
 import stat
 import subprocess
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import TYPE_CHECKING, BinaryIO
 
 from .index.file_shape import MAX_PARSE_PEAK_MB
+
+if TYPE_CHECKING:
+    from .index.code_index import CodeIndex
 
 ALLOWANCE_MB = 1024
 """What one JVN process may grow by, its children included. Measured on 04.10.2026 with the streaming
@@ -153,6 +165,26 @@ def check() -> None:
     process_guard().check()
 
 
+def index_opened(index: CodeIndex) -> None:
+    """Counts ``index`` as JVN's until it is freed. The first index to open while none is alive moves
+    every guard's baseline to the footprint now."""
+    if _LIVE_INDEXES:
+        _free_indexes_in_cycles()
+    with _LIVE_INDEXES_LOCK:
+        if not _LIVE_INDEXES:
+            with _GUARDS_LOCK:
+                guards = tuple(_GUARDS.values())
+            for guard in guards:
+                guard.rebaseline()
+        _LIVE_INDEXES.add(index)
+
+
+def _free_indexes_in_cycles() -> None:
+    """Frees the indexes only a reference cycle keeps alive. It runs without the live-index lock, since
+    a finalizer the collection runs may open or check JVN work."""
+    gc.collect()
+
+
 @contextmanager
 def parsing() -> Iterator[None]:
     """This process's one parse at a time. ``parse_threads`` and ``single_parse_mb`` each spend the
@@ -175,8 +207,12 @@ class MemoryGuard:
 
     def check(self) -> None:
         """Takes this process's slot if it holds none, then refuses if the process has grown past its
-        allowance."""
+        allowance. With no index alive, nothing the process holds is JVN's, so its growth starts now."""
         self._hold_slot()
+        self._rebaseline_while_no_index()
+        if self._growth() > self._allowance_bytes:
+            _free_indexes_in_cycles()
+            self._rebaseline_while_no_index()
         growth = self._growth()
         if growth > self._allowance_bytes:
             raise MemoryLimitReachedError(self._over_allowance(growth, {}))
@@ -201,14 +237,24 @@ class MemoryGuard:
             if reason is not None:
                 raise MemoryLimitReachedError(reason)
 
+    def rebaseline(self) -> None:
+        """Growth counts from the footprint now."""
+        self._baseline = footprint(os.getpid())
+
+    def _rebaseline_while_no_index(self) -> None:
+        with _LIVE_INDEXES_LOCK:
+            if not _LIVE_INDEXES:
+                self.rebaseline()
+
     @property
     def _allowance_bytes(self) -> int:
         return self.limit.allowance_mb * _MB
 
     def _hold_slot(self) -> None:
         """Takes a slot when this process holds none, and again when its slot's file was deleted, since
-        another process may hold that slot now. The baseline stays the footprint at the first slot.
-        Waiting for a slot holds only the slot lock, so the watchdog keeps watching running children."""
+        another process may hold that slot now. The first slot sets the baseline; only ``rebaseline``
+        moves it. Waiting for a slot holds only the slot lock, so the watchdog keeps watching running
+        children."""
         with self._slot_lock:
             if self._slot is not None and self._slot.still_ours():
                 return
@@ -258,15 +304,15 @@ class MemoryGuard:
         used = growth + sum(sizes.values())
         grew = f"process {os.getpid()} grew {_mb(growth)} past the {_mb(self._baseline or 0)} it held"
         held = [
-            f"{grew} when it took its memory slot",
+            f"{grew} when its JVN work began",
             *(f"{_name(child)} (process {child.pid}) held {_mb(size)}" for child, size in sizes.items()),
         ]
         names = ", ".join(_name(child) for child in sizes)
         stopped = f"; it stopped {names}" if sizes else "; it starts no more work"
         return (
             f"JVN reached its memory allowance of {self.limit.allowance_mb:,} MB with {_mb(used)} in use: "
-            f"{', '.join(held)}{stopped}. The growth counts everything this process holds, JVN's or not. "
-            f"Narrow the scope, run fewer searches in this process at once, or raise "
+            f"{', '.join(held)}{stopped}. The growth counts everything this process gained since, JVN's or "
+            f"not. Narrow the scope, run fewer searches in this process at once, or raise "
             f"{ENVIRONMENT_NAMES['allowance_mb']}, then resume"
         )
 
@@ -426,3 +472,5 @@ else:
 _GUARDS: dict[tuple[MemoryLimit, Path], MemoryGuard] = {}
 _GUARDS_LOCK = threading.Lock()
 _ONE_PARSE = threading.Lock()
+_LIVE_INDEXES: weakref.WeakSet[CodeIndex] = weakref.WeakSet()
+_LIVE_INDEXES_LOCK = threading.Lock()

@@ -222,11 +222,15 @@ flags when auditing bytes.
 Every JVN process has a memory allowance, and all JVN processes on one machine share a ceiling. This
 covers the `jvn` command and every program that imports `jev_navigator`.
 
-- **Allowance:** a process may grow by 1,024 MB past the memory it held when JVN first started a
-  tool, counting the ast-grep, ripgrep and git processes it runs. The growth counts everything the
-  process holds, so a program that imports JVN and later holds much data of its own uses up JVN's
-  allowance too. Over it, JVN stops those processes and raises `MemoryLimitReachedError`, which names
-  the allowance, the memory in use and that baseline.
+- **Allowance:** a process may grow by 1,024 MB past the memory it held when its JVN work began,
+  counting the ast-grep, ripgrep and git processes it runs. JVN's work begins when it first starts a
+  tool, and again whenever it starts work while no code index of it is alive, so a program that
+  imports JVN and grows between two searches is not charged for that growth. An index a failed search
+  left behind is freed by Python's cycle collector, which JVN runs once before it treats any index as
+  alive. While an index is alive the growth counts everything the process gains, JVN's or not. Over it, JVN stops those processes and
+  raises `MemoryLimitReachedError`, which names the allowance, the memory in use and that baseline.
+- **What it does not cover:** the model command a command-line connector runs (`CommandConnector`) is a
+  separate program the user names, so JVN neither counts nor stops its memory.
 - **One parse at a time:** a process runs one ast-grep scan at a time, and ast-grep parses only as
   many files at once as the allowance affords: 3 at the default. Scans started in parallel threads
   take turns instead of outgrowing the allowance together. A file too big to parse beside others is

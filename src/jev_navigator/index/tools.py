@@ -53,15 +53,27 @@ class ToolFailedError(RuntimeError):
 
 
 def run_command(
-    arguments: Sequence[str], cwd: Path, *, no_match_exit: int | None = None, stdin: str | None = None
+    arguments: Sequence[str],
+    cwd: Path,
+    *,
+    no_match_exit: int | None = None,
+    stdin: str | None = None,
+    timeout: float | None = None,
 ) -> str:
     """The command's output; ``no_match_exit`` is the exit code a search tool uses for "nothing found";
-    ``stdin``, when given, is written to the command's standard input."""
-    return command_output(arguments, cwd, no_match_exit=no_match_exit, stdin=stdin).decode()
+    ``stdin``, when given, is written to the command's standard input. A command still running after
+    ``timeout`` seconds is stopped and raises ``subprocess.TimeoutExpired``."""
+    options = {"no_match_exit": no_match_exit, "stdin": stdin, "timeout": timeout}
+    return command_output(arguments, cwd, **options).decode()
 
 
 def command_output(
-    arguments: Sequence[str], cwd: Path, *, no_match_exit: int | None = None, stdin: str | None = None
+    arguments: Sequence[str],
+    cwd: Path,
+    *,
+    no_match_exit: int | None = None,
+    stdin: str | None = None,
+    timeout: float | None = None,
 ) -> bytes:
     """``run_command``'s output as the bytes the command wrote, for output that quotes file content."""
     with memory_limit.started(
@@ -71,7 +83,7 @@ def command_output(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     ) as process:
-        output, error_output = process.communicate(None if stdin is None else stdin.encode())
+        output, error_output = process.communicate(None if stdin is None else stdin.encode(), timeout=timeout)
     if process.returncode not in (0, no_match_exit):
         raise _tool_failure(arguments[0], process.returncode, error_output.decode(errors="replace"))
     return output
@@ -405,8 +417,10 @@ def _decoded(field: dict) -> str:
     return base64.b64decode(field["bytes"]).decode("utf-8", errors="replace")
 
 
-def git(arguments: Sequence[str], cwd: Path, *, stdin: str | None = None) -> str:
-    return run_command(["git", *arguments], cwd, stdin=stdin)
+def git(
+    arguments: Sequence[str], cwd: Path, *, stdin: str | None = None, timeout: float | None = None
+) -> str:
+    return run_command(["git", *arguments], cwd, stdin=stdin, timeout=timeout)
 
 
 def export_blobs(repository: Path, blobs: Mapping[str, str], destination: Path) -> None:

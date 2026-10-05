@@ -5,7 +5,9 @@ import inspect
 import io
 import json
 import os
+import shutil
 import subprocess
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Thread
@@ -187,6 +189,45 @@ def test_a_git_failure_in_jvns_checkout_is_recorded_instead_of_raised(
     assert provenance["source_dirty"] is None
     assert provenance["source_revision_error"].startswith("git rev-parse HEAD failed: ")
     assert len(provenance["source_revision_error"]) > len("git rev-parse HEAD failed: ")
+
+
+def test_a_git_call_in_jvns_checkout_past_its_timeout_is_recorded_instead_of_waited_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: a git whose status in jvn's checkout takes five seconds, as in a large project
+    checkout = tmp_path / "jvn-checkout"
+    commit_files(checkout, {"README.md": "jvn\n"})
+    monkeypatch.setattr(cli, "checkout_root", lambda: checkout)
+    monkeypatch.setattr(cli, "CHECKOUT_GIT_TIMEOUT_SECONDS", 1)
+    _put_first_on_path(monkeypatch, tmp_path / "bin", _git_slow_in(checkout, "status"))
+
+    # Act
+    started = time.monotonic()
+    manifest = _small_search_manifest(tmp_path)
+
+    # Assert
+    provenance = manifest["navigator"]
+    assert provenance["source_revision"] is None
+    assert provenance["source_revision_error"].startswith(
+        "git status --porcelain --untracked-files=all failed: "
+    )
+    assert time.monotonic() - started < 5
+
+
+def _git_slow_in(checkout: Path, command: str) -> str:
+    """A git that sleeps five seconds before ``command`` in ``checkout``, and is the real git
+    otherwise."""
+    return f"""#!/bin/sh
+if [ "$PWD" = "{checkout.resolve()}" ] && [ "$1" = "{command}" ]; then sleep 5; fi
+exec "{shutil.which("git")}" "$@"
+"""
+
+
+def _put_first_on_path(monkeypatch: pytest.MonkeyPatch, folder: Path, git_script: str) -> None:
+    folder.mkdir()
+    (folder / "git").write_text(git_script)
+    (folder / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ['PATH']}")
 
 
 def _small_search_manifest(tmp_path: Path) -> dict:

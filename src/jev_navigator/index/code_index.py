@@ -101,6 +101,7 @@ class CodeIndex:
         blob_ids: Mapping[str, str] | None = None,
         not_indexed: Mapping[str, str] | None = None,
     ) -> None:
+        memory_limit.index_opened(self)
         self.root = Path(root)
         self.git_root = Path(git_root) if git_root is not None else self.root
         self.binding_resolver = binding_resolver
