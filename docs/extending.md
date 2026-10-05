@@ -426,6 +426,8 @@ The manifest retains the full static graph so resolved connections can be inspec
 Outcomes distinguish completion, an explicit depth boundary, call budget and cancellation.
 Cancellation is cooperative between static steps and live model batches; already answered batches
 are retained in full, and a request already in flight is not aborted by the callback.
-`answers_from` with the prior served-model identity reuses identical stored answers without calls.
+`answers_from` with the prior served-model identity reuses identical stored answers without calls. A
+store that kept its requests' text (written with `keep_requests=True`) seeds only a pack that keeps
+them too, and is refused otherwise before the output directory is made, so a default pack holds no code.
 Use `jvn trace "order request to HTTP result" --start app/orders.py:42` for the same pack from the
 CLI. `jvn schema trace` describes JSON input; [the CLI guide](cli.md#workflow-trace) explains options.

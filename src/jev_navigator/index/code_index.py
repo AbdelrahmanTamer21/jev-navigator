@@ -41,6 +41,8 @@ from .tsconfig import ScriptPaths, nearest_script_paths
 
 DEFAULT_WINDOW_RADIUS = 10
 MAX_TEXT_HITS = 20
+# The bytes kept on either side of a text hit, so a hit in a one-line bundle never holds the line.
+TEXT_HIT_CONTEXT_BYTES = 200
 CO_CHANGE_COMMITS = 200
 LINE_CACHE_FILES = 512
 _COMMIT_MARK = "@@commit@@"
@@ -312,8 +314,13 @@ class CodeIndex:
         return result
 
     def enclosing_symbol(self, file: str, line: int) -> Span | None:
-        containing = [span for span in self.functions_in(file) if span.contains(line)]
-        return min(containing, key=Span.size, default=None)
+        return _innermost(self.functions_in(file), line)
+
+    def known_enclosing_symbol(self, file: str, line: int) -> Span | None:
+        """``enclosing_symbol`` from the facts already in memory, or None while there are none: it
+        never parses or loads a file, so a caller that only labels a place starts no work."""
+        facts = self._facts.get(file)
+        return None if facts is None else _innermost(facts.structure.functions, line)
 
     def functions_in(self, file: str) -> tuple[Span, ...]:
         return self._file_structure(file).functions
@@ -354,6 +361,12 @@ class CodeIndex:
         self._ensure_facts(files)
         self._reached.update(files)
         return {file: self._facts[file] for file in files if file in self._facts}
+
+    def read_language(self, file: str) -> str | None:
+        """The language ``file``'s facts were read as, so every later scan of the file reads it with
+        the same grammar; None when no grammar read it."""
+        facts = self.facts_in_files([file]).get(file)
+        return facts.language if facts is not None else None
 
     def definitions_in(self, file: str) -> tuple[Span, ...]:
         """The named functions, classes and declarations in ``file``, from the name table, so a
@@ -633,12 +646,15 @@ class CodeIndex:
             self._unwritten = {}
 
     def _facts_in(self, file: str) -> FileFacts:
+        """The file counts as reached once its facts are known: a parse that fails, for any reason,
+        reaches nothing."""
         self._require_in_scope(file)
+        facts = self._facts.get(file)
+        if facts is None:
+            self._ensure_facts((file,))
+            facts = self._facts.get(file, FileFacts(_NO_STRUCTURE, (), ()))
         self._reached.add(file)
-        if (known := self._facts.get(file)) is not None:
-            return known
-        self._ensure_facts((file,))
-        return self._facts.get(file, FileFacts(_NO_STRUCTURE, (), ()))
+        return facts
 
     def _ensure_facts(self, files: Sequence[str]) -> None:
         with self._facts_lock:
@@ -649,8 +665,7 @@ class CodeIndex:
 
     def _parse(self, contents: Mapping[str, bytes]) -> None:
         """Parses the files whose bytes are ``contents``; the caller holds the facts lock."""
-        to_scan = tuple(contents)
-        scanned = self._run_scan("facts", lambda: self._scan_available_facts(to_scan), len(to_scan))
+        scanned = self._run_scan("facts", lambda: self._scan_available_facts(contents), len(contents))
         for file, facts in scanned.items():
             if self._read_bytes(file) is None:
                 continue
@@ -680,9 +695,12 @@ class CodeIndex:
                 self._unparsed.add("facts", (file,))
         return to_parse
 
-    def _scan_available_facts(self, files: Sequence[str]) -> dict[str, FileFacts]:
+    def _scan_available_facts(self, contents: Mapping[str, bytes]) -> dict[str, FileFacts]:
         return self._on_available(
-            tuple(files), lambda remaining: scan_facts(remaining, self.root, self._unparsed)
+            tuple(contents),
+            lambda remaining: scan_facts(
+                {file: contents[file] for file in remaining}, self.root, self._unparsed
+            ),
         )
 
     def _on_available(self, files: tuple[str, ...], run: Callable[[tuple[str, ...]], _Result]) -> _Result:
@@ -774,16 +792,22 @@ class CodeIndex:
         span = Span(file, max(1, line - radius), min(len(self._lines_of(file)), line + radius))
         return self.read_slice(span, origin)
 
-    def search_text(self, text: str, max_hits: int | None = MAX_TEXT_HITS) -> tuple[TextHit, ...]:
+    def search_text(
+        self, text: str, max_hits: int | None = MAX_TEXT_HITS, *, whole_word: bool = False
+    ) -> tuple[TextHit, ...]:
         """Lines holding ``text`` in file and line order, the first ``max_hits`` or every one when it is
-        None, searched once per text and cap for the life of the index."""
-        return self._search_text(text, max_hits)
+        None, searched once per text, cap and word rule for the life of the index. A hit's text is the
+        line up to ``TEXT_HIT_CONTEXT_BYTES`` around its first match; ``whole_word`` keeps only matches
+        no word character touches."""
+        return self._search_text(text, max_hits, whole_word)
 
     @memoized
-    def _search_text(self, text: str, max_hits: int | None) -> tuple[TextHit, ...]:
+    def _search_text(self, text: str, max_hits: int | None, whole_word: bool) -> tuple[TextHit, ...]:
         found = self._on_available(
             self._available_files(self.files),
-            lambda files: tools.ripgrep_fixed(text, files, self.root, max_hits),
+            lambda files: tools.ripgrep_fixed(
+                text, files, self.root, max_hits, TEXT_HIT_CONTEXT_BYTES, whole_word=whole_word
+            ),
         )
         hits = sorted(hit for hit in found if hit.file in self._scope)
         return tuple(hits if max_hits is None else hits[:max_hits])
@@ -1017,3 +1041,7 @@ def _outermost(symbols: Sequence[Span]) -> list[Span]:
     return [
         span for span in symbols if not any(other != span and other.contains(span.start) for other in symbols)
     ]
+
+
+def _innermost(functions: Iterable[Span], line: int) -> Span | None:
+    return min((span for span in functions if span.contains(line)), key=Span.size, default=None)
