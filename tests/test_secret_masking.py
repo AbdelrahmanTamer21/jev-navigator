@@ -1,6 +1,7 @@
 import re
 import time
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -229,6 +230,8 @@ CODE_REFERENCES = [
     " *   REQUESTY_API_KEY=... REQUESTY_RECEIPT=/absolute/path/receipt.json \\",
     "const USAGE = 'Usage: REQUESTY_API_KEY=<credential> '",
     "` -e HEEDVANE_ENROLLMENT_TOKEN=${shellQuote(input.enrollmentToken)}` +",
+    "  ? `never cached (${row.prefixTokens ?? '?'}-token prefix, likely below)`",
+    'lines = [line for line in values if line.startswith("DB_PASSWORD: ")]',
 ]
 
 
@@ -273,12 +276,12 @@ def test_only_the_value_is_masked_when_the_key_has_the_same_text() -> None:
     assert masked == 'password: "[MASKED]"\nexport const password = "[MASKED]"'
 
 
-def test_a_short_value_is_masked_where_it_stands_and_nowhere_else_in_the_request() -> None:
+def test_a_short_value_is_masked_wherever_it_stands_as_a_whole_word() -> None:
     # Arrange
     state = {
         "assignment": "password = 'test'",
         "path": "src/test/login_test.py",
-        "test": "a key that names the short value",
+        "note": "a test of the short value",
     }
 
     # Act
@@ -288,10 +291,10 @@ def test_a_short_value_is_masked_where_it_stands_and_nowhere_else_in_the_request
     # Assert
     assert masked == {
         "assignment": "password = '[MASKED]'",
-        "path": "src/test/login_test.py",
-        "test": "a key that names the short value",
+        "path": "src/[MASKED]/login_test.py",
+        "note": "a [MASKED] of the short value",
     }
-    assert values == frozenset()
+    assert values == frozenset({"test"})
 
 
 def test_a_long_bare_value_is_masked_everywhere_in_the_request() -> None:
@@ -587,3 +590,150 @@ def test_the_randomness_check_is_public_and_names_its_token_shape() -> None:
     assert random_enough and not is_high_entropy("a" * 24)
     assert len(token) >= HIGH_ENTROPY_MIN_CHARS
     assert re.fullmatch(f"{TOKEN_CHARACTER_CLASS}+", token)
+
+
+STRIPE_LIVE = "sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc"
+
+
+@pytest.mark.parametrize(
+    ("file", "code", "secret"),
+    [
+        (
+            "tests/test_x.py",
+            'items = [{"code": \'x = 1\\npassword = "hunter2hunter2"\'}]\n',
+            "hunter2hunter2",
+        ),
+        (
+            "scripts/env.mjs",
+            f'  const lines = [\n    "STRIPE_SECRET_KEY={STRIPE_LIVE}",\n  ];\n',
+            STRIPE_LIVE,
+        ),
+        ("app/pay.py", f"# live key {STRIPE_LIVE}\n", STRIPE_LIVE),
+        ("scripts/env.mjs", '  const lines = [\n    "DB_PASSWORD=hunter2hunter2",\n  ];\n', "hunter2hunter2"),
+        ("Makefile", "\tdocker run -e DB_PASSWORD=hunter2hunter2 app\n", "hunter2hunter2"),
+        ("scripts/run.sh", "psql --password=hunter2hunter2 -h db\n", "hunter2hunter2"),
+        ("scripts/run.sh", "deploy --api-token hunter2hunter2 --region eu\n", "hunter2hunter2"),
+        ("scripts/run.sh", "deploy \\\n--api-token hunter2hunter2\n", "hunter2hunter2"),
+    ],
+)
+def test_a_secret_the_base_masker_left_in_code_is_masked(file: str, code: str, secret: str) -> None:
+    # Act
+    masked_state, _, _ = mask_request({"slice": {"file": file, "code": code}}, {}, SecretMasker())
+
+    # Assert
+    assert secret not in masked_state["slice"]["code"]
+
+
+def test_a_short_value_masked_at_its_key_is_masked_wherever_it_stands_as_a_word() -> None:
+    # Arrange
+    state = {
+        "slice": {"file": "app/settings.py", "code": 'DB_PASSWORD_PROD = "hunter2"\n'},
+        "candidates": [{"file": "app/db.py", "code": 'connect(user, "hunter2")\nlabel = "hunter2x"\n'}],
+    }
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert masked_state["candidates"][0]["code"] == 'connect(user, "[MASKED]")\nlabel = "hunter2x"\n'
+
+
+def test_a_short_number_masked_at_its_key_stays_elsewhere() -> None:
+    # Arrange
+    state = {
+        "slice": {"file": "app/settings.ts", "code": 'CREDENTIAL_KEY_VERSION: "1.5",\n'},
+        "other": {"file": "app/math.ts", "code": "const ratio = 1.5;\n"},
+    }
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert masked_state["other"]["code"] == "const ratio = 1.5;\n"
+
+
+def test_a_short_masked_value_inside_a_longer_word_does_not_refuse_the_request() -> None:
+    # Arrange
+    state, questions, masked = mask_request(
+        {"slice": {"file": "app/a.py", "code": 'db_pass = "pw"\n'}, "pwd_hint": "x"}, {}, SecretMasker()
+    )
+
+    # Act
+    refuse_if_secret(state, questions, SecretScanner(), masked)
+
+    # Assert
+    assert "pw" in masked
+
+
+VALUE = "hunter2hunter2"
+
+
+@pytest.mark.parametrize(
+    ("file", "code"),
+    [
+        ("tests/test_x.py", f'files = {{"settings.py": \'WEBHOOK_TOKEN = "{VALUE}"\\n\'}}\n'),
+        ("package.json", f'{{"scripts": {{"start": "DB_PASSWORD=\'{VALUE}\' node app.js"}}}}\n'),
+        ("docker-compose.yml", f"    command: \"export API_TOKEN='{VALUE}' && run\"\n"),
+        ("app/docs.py", f"HELP = 'set password = \"{VALUE}\" first'\n"),
+        ("app/settings.py", f'DB_PASSWORD_PROD = """\n{VALUE}\n"""\n'),
+        ("app/settings.py", "DB_PASSWORD = " + "'" * 3 + f"\n    {VALUE}\n" + "'" * 3 + "\n"),
+        ("src/db.ts", f"const DB_PASSWORD = `\n  {VALUE}\n`;\n"),
+        ("src/Db.java", f'String password = """\n    {VALUE}\n    """;\n'),
+        ("config/app.toml", f'db_password = """\n{VALUE}"""\n'),
+        ("app/settings.py", f'DB_PASSWORD = " {VALUE}"\n'),
+        ("app/settings.py", f'SECRET_KEY = (\n    "{VALUE}"\n)\n'),
+        ("app/settings.py", f'SECRET_KEY = (\n    "first-part-x"\n    "{VALUE}"\n)\n'),
+    ],
+)
+def test_a_secret_inside_another_string_or_across_lines_is_masked(file: str, code: str) -> None:
+    # Act
+    masked_state, _, _ = mask_request({"slice": {"file": file, "code": code}}, {}, SecretMasker())
+
+    # Assert
+    assert VALUE not in masked_state["slice"]["code"]
+
+
+def test_masking_keeps_the_quotes_around_a_hidden_value() -> None:
+    # Act
+    masked = SecretMasker().mask(f"assert line == 'WEBHOOK_TOKEN = \"{VALUE}\"'", "tests/test_x.py")
+
+    # Assert
+    assert masked == "assert line == 'WEBHOOK_TOKEN = \"[MASKED]\"'"
+
+
+def test_a_value_hidden_at_its_key_is_hidden_where_it_stands_bare_in_the_same_request() -> None:
+    # Arrange
+    random_value = "Zx81kQ0pLw93mN2vB7cR" * 2
+    code = f'CASES = [(\'aws_secret_access_key = "{random_value}"\', "{random_value}")]\n'
+    state = {"slice": {"file": "tests/test_x.py", "code": code}}
+
+    # Act
+    masked_state, questions, masked = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert random_value not in masked_state["slice"]["code"]
+    refuse_if_secret(masked_state, questions, SecretScanner(), masked)
+
+
+@pytest.mark.parametrize(
+    "path", ["tests/test_judgments.py", "tests/test_round.py", "tests/test_secret_masking.py"]
+)
+def test_the_final_scan_finds_nothing_in_masked_repository_code(path: str) -> None:
+    # Arrange
+    text = (Path(__file__).parents[1] / path).read_text()
+
+    # Act
+    masked = SecretMasker().mask(text, path)
+
+    # Assert
+    assert SecretScanner().findings(masked, path) == []
+
+
+def test_an_unterminated_value_inside_another_string_ends_where_that_string_closes() -> None:
+    # Act
+    masked = SecretMasker().mask(
+        """('DB_PASSWORD="unterminated secret', "DB_PASSWORD=[REDACTED]"),""", "tests/x.py"
+    )
+
+    # Assert
+    assert masked == """('DB_PASSWORD="[MASKED]', "DB_PASSWORD=[REDACTED]"),"""

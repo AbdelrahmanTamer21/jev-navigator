@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 
-KEY = r"(?<![\w$.-])(?P<key>[A-Za-z_$][\w$.-]*+)"
+KEY = r"(?:(?<![\w$.\\-])|(?<=\\[nrt]))(?P<key>[A-Za-z_$][\w$.-]*+)"
 SEPARATOR = r"(?:[\"']?:|[\"']?[ \t]*=)(?![:=>])[ \t]*"
 
 CODE_REFERENCE = re.compile(

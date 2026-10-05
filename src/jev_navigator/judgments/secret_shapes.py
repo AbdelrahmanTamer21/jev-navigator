@@ -10,6 +10,7 @@ rules follow the analysis engine's audit masker, whose corpus both sides test.
 
 from __future__ import annotations
 
+import bisect
 import math
 import re
 from collections import Counter
@@ -46,6 +47,7 @@ _TOKEN_SHAPES = (
     re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}\b"),
+    re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b"),
     re.compile(r"\bglpat-[A-Za-z0-9_\-]{16,}\b"),
     re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}\b"),
     re.compile(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_\-]{20,}\b"),
@@ -68,14 +70,18 @@ _SHELL_ASSIGNMENT = re.compile(
     re.M,
 )
 _INLINE_ENV_ASSIGNMENT = re.compile(
-    r"(?:^|(?<=[ \t;&|]))(?:export[ \t]+)?(?P<key>[A-Z_][A-Z0-9_]*+)=(?P<value>(?![{\[(])[^\s\"'`;&|]++)"
-    r"(?=[ \t;&|`]|$)",
+    r"(?:^|(?<=[ \t;&|\"'`])|(?<=\\[nrt]))(?:export[ \t]+)?(?P<key>[A-Z_][A-Z0-9_]*+)="
+    r"(?P<value>(?![{\[(])[^\s\"'`;&|\\]++)(?=[ \t;&|\"'`\\]|$)",
     re.M,
+)
+_CLI_SECRET_FLAG = re.compile(
+    r"(?:^|(?<=\s))--?(?P<key>[A-Za-z][\w-]*+)(?:=|[ \t]++)(?P<value>[^\s\"'`=-][^\s\"'`]*+)"
 )
 _USAGE_PLACEHOLDER = re.compile(r"\.\.\.|…|<[^<>]*>|\*+|x+", re.I)
 _QUOTED_VALUE = re.compile(
-    rf"{KEY}{SEPARATOR}(?:[bBrRuUfF]{{1,2}}(?=[\"']))?(?P<quote>\"\"\"|'''|[\"'`])(?P<value>(?:\\[\s\S]|\\\Z|(?!(?P=quote))[^\\])*+)"
-    r"(?:(?P=quote)(?P<tail>[\w\"'][^\s,;})\]]*+)?|\Z)"
+    rf"{KEY}{SEPARATOR}(?P<paren>\([ \t\r\n]*+)?(?:[bBrRuUfF]{{1,2}}(?=[\"']))?"
+    rf"(?P<quote>\"\"\"|'''|[\"'`])(?P<value>(?:\\[\s\S]|\\\Z|(?!(?P=quote))[^\\])*+)"
+    r"(?:(?P=quote)(?P<tail>\w[^\s,;})\]\"'`]*+)?|\Z)"
 )
 _PLAIN_VALUE = re.compile(
     rf"^[ \t]*(?:-[ \t]+)?[\"']?{KEY}{SEPARATOR}"
@@ -145,26 +151,84 @@ def _matches(pattern: re.Pattern[str], hides: Callable[[re.Match[str]], bool] = 
 _CONCATENATED = re.compile(
     r"[ \t]*+(?:\+|\.\.?|\\\r?\n)?[ \t]*+(?P<quote>[\"'])(?P<value>(?:\\.|(?!(?P=quote))[^\\\n])*+)(?P=quote)"
 )
+_CONCATENATED_IN_PARENS = re.compile(
+    r"[ \t\r\n]*+(?:\+[ \t\r\n]*+)?(?P<quote>[\"'])(?P<value>(?:\\.|(?!(?P=quote))[^\\\n])*+)(?P=quote)"
+)
+MAX_NESTED_STRINGS = 3
 
 
-def _quoted_spans(text: str) -> list[Span]:
+def _quoted_spans(text: str, depth: int = 0) -> list[Span]:
     """A quoted value runs to its closing quote across escapes and lines, or to the end of the text
-    when it never closes; letters glued to the closing quote belong to it. A "value" that starts with
-    whitespace is the rest of a string the key sat in (``'GitLab token: ' GITLAB_TOKEN``), not a value."""
+    when it never closes; letters glued to the closing quote belong to it. A quote that closes a string
+    the key sat in (``'GitLab token: ' GITLAB_TOKEN``) opens no value. A string that is not hidden is
+    read again for the secret assignments inside it (``HELP = 'set password = "..."'``)."""
+    quotes = _QuotePositions(text)
     spans: list[Span] = []
     for match in _QUOTED_VALUE.finditer(text):
-        if match["value"][:1].strip() and _keyed_value(match, is_literal(match["value"], match["quote"])):
-            spans.append((match.start("value"), match.end("tail") if match["tail"] else match.end("value")))
-            if not match["tail"] and match.end("value") < len(text):
-                spans += _concatenated_spans(text, match.end())
+        if _hides_quoted(match, quotes):
+            end = match.end("tail") if match["tail"] else match.end("value")
+            clipped = quotes.enclosing_close(match.start("key"), match["quote"], match.start("value"), end)
+            spans.append((match.start("value"), clipped))
+            if clipped == end and not match["tail"] and match.end("value") < len(text):
+                spans += _concatenated_spans(text, match.end(), bool(match["paren"]))
+        elif depth < MAX_NESTED_STRINGS:
+            offset = match.start("value")
+            spans += [
+                (offset + start, offset + end) for start, end in _quoted_spans(match["value"], depth + 1)
+            ]
     return spans
 
 
-def _concatenated_spans(text: str, position: int) -> list[Span]:
+def _hides_quoted(match: re.Match[str], quotes: _QuotePositions) -> bool:
+    key_start = match.start("key")
+    quote, key_end = match["quote"], match.end("key")
+    own_quote = match.string[key_start - 1 : key_start] == quote == match.string[key_end : key_end + 1]
+    if quotes.closes_an_enclosing_string(key_start - own_quote, quote):
+        return False
+    return bool(match["value"]) and _keyed_value(match, is_literal(match["value"], match["quote"]))
+
+
+class _QuotePositions:
+    """Where each unescaped single-character quote and each line starts, to tell in logarithmic time
+    whether a quote after a key closes a string the key sat in: an odd count of that quote on the key's
+    line before the key (or before the key's own opening quote, for a quoted key)."""
+
+    def __init__(self, text: str) -> None:
+        self._lines = [match.end() for match in re.finditer(r"\n", text)]
+        self._quotes = {
+            quote: [match.start() for match in re.finditer(rf"(?<!\\){re.escape(quote)}", text)]
+            for quote in ('"', "'", "`")
+        }
+
+    def closes_an_enclosing_string(self, key_start: int, quote: str) -> bool:
+        positions = self._quotes.get(quote)
+        if positions is None:
+            return False
+        return self._count_on_line_before(positions, key_start) % 2 == 1
+
+    def enclosing_close(self, key_start: int, quote: str, value_start: int, value_end: int) -> int:
+        """Where the value ends at the latest: the closing quote of another quote's string the key sits in
+        (``'DB_PASSWORD="unterminated'``), or ``value_end`` when no such string encloses it."""
+        for other, positions in self._quotes.items():
+            if other == quote or self._count_on_line_before(positions, key_start) % 2 == 0:
+                continue
+            closing = bisect.bisect_left(positions, value_start)
+            if closing < len(positions) and positions[closing] < value_end:
+                return positions[closing]
+        return value_end
+
+    def _count_on_line_before(self, positions: list[int], position: int) -> int:
+        line_index = bisect.bisect_right(self._lines, position) - 1
+        line_start = self._lines[line_index] if line_index >= 0 else 0
+        return bisect.bisect_left(positions, position) - bisect.bisect_left(positions, line_start)
+
+
+def _concatenated_spans(text: str, position: int, in_parens: bool) -> list[Span]:
     """The literals concatenated onto a hidden value (``"abc" + "def"``, ``"abc" . "def"``, adjacent
-    literals across a line continuation): they are the same value."""
+    literals across a line continuation, or across lines inside parentheses): they are the same value."""
+    joiner = _CONCATENATED_IN_PARENS if in_parens else _CONCATENATED
     spans = []
-    while part := _CONCATENATED.match(text, position):
+    while part := joiner.match(text, position):
         spans.append((part.start("value"), part.end("value")))
         position = part.end()
     return spans
@@ -299,6 +363,7 @@ _RULES: tuple[Callable[[str], list[Span]], ...] = (
     _matches(_QUERY_VALUE, _query_secret),
     _matches(_SHELL_ASSIGNMENT, _keyed(_shell_literal)),
     _matches(_INLINE_ENV_ASSIGNMENT, _keyed(_inline_env_literal)),
+    _matches(_CLI_SECRET_FLAG, _keyed(_inline_env_literal)),
     _quoted_spans,
     flow_spans,
     yaml_block_spans,

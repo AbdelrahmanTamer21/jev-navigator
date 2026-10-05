@@ -8,6 +8,7 @@ passes its own objects; turning either off must be explicit (``masker=None`` or 
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import cache
@@ -21,6 +22,8 @@ from .secret_shapes import (
     hide_secrets,
     is_high_entropy,
 )
+
+_SHORT_NUMBER = re.compile(r"[\d.,:_+-]{1,7}")
 
 __all__ = [
     "BY_CONTENT_MIN_CHARS",
@@ -66,8 +69,9 @@ class SecretMasker:
     secret-named calls, and high-entropy quoted values in assignments. A value that is a reference
     (an identifier, dotted path, call, env lookup or interpolation) is code and stays.
 
-    ``masked_values`` lists only values of at least ``BY_CONTENT_MIN_CHARS`` characters: a shorter
-    value is masked where it stands, because hiding a short word everywhere would blank ordinary code.
+    ``masked_values`` lists every masked value but a short number (``"1.5"``, ``"0"``), so request masking
+    hides each copy elsewhere too: anywhere for a value of ``BY_CONTENT_MIN_CHARS`` or more characters,
+    as a whole word for a shorter one (see ``_copy_pattern``).
 
     ``path`` is the file the text comes from. In a config file, or in text from no file, an unquoted value
     under a secret key is a value (``POSTGRES_PASSWORD: example``); in code it stays (``token: str``)."""
@@ -76,7 +80,7 @@ class SecretMasker:
         return hide_secrets(text, path)[0]
 
     def masked_values(self, text: str, path: str | None = None) -> list[str]:
-        return [value for value in hide_secrets(text, path)[1] if len(value) >= BY_CONTENT_MIN_CHARS]
+        return [value for value in hide_secrets(text, path)[1] if not _SHORT_NUMBER.fullmatch(value)]
 
 
 @dataclass(frozen=True)
@@ -108,13 +112,13 @@ def masked_values(value: object, masker: Masker) -> frozenset[str]:
 def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> object:
     """Masks every string by the masker's rules, then hides each of ``values`` wherever it still
     appears. Keys are left as they are; ``refuse_if_secret`` refuses a request with one in a key."""
-    longest_first = sorted(values - {MASK}, key=len, reverse=True)
+    copies = [_copy_pattern(secret) for secret in sorted(values - {MASK}, key=len, reverse=True)]
 
     @cache
     def hide(text: str, path: str | None) -> str:
         text = masker.mask(text, path)
-        for secret in longest_first:
-            text = text.replace(secret, MASK)
+        for copy in copies:
+            text = copy.sub(MASK, text)
         return text
 
     return _each_string(value, hide)
@@ -133,13 +137,22 @@ def refuse_if_secret(
     """Refuses when a value masked elsewhere is still in the request (it can only sit in a key), or
     when the scanner finds a secret."""
     texts = _strings(state) + _strings(questions)
-    if any(value in text for text, _ in texts for value in masked):
+    copies = [_copy_pattern(value) for value in masked - {MASK}]
+    if any(copy.search(text) for text, _ in texts for copy in copies):
         raise SecretInRequestError("a masked value is still in the request, in a key; nothing was sent")
     if scanner is None:
         return
     for text, path in texts:
         if scanner.findings(text, path):
             raise SecretInRequestError("the final scan found a secret in the request; nothing was sent")
+
+
+def _copy_pattern(value: str) -> re.Pattern[str]:
+    """Where a masked value's copies stand: anywhere for a value of ``BY_CONTENT_MIN_CHARS`` or more
+    characters, and as a whole word for a shorter one, so ``hunter2`` is hidden but ``hunter2x`` stays."""
+    if len(value) >= BY_CONTENT_MIN_CHARS:
+        return re.compile(re.escape(value))
+    return re.compile(rf"(?<![\w$]){re.escape(value)}(?![\w$])")
 
 
 def _each_string(value: object, change: Callable[[str, str | None], str], path: str | None = None) -> object:
