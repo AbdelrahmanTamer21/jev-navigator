@@ -267,16 +267,23 @@ def _stderr_text(errors: IO[bytes]) -> str:
 
 
 def ripgrep_fixed(
-    text: str, files: Sequence[str], cwd: Path, max_hits: int, context_bytes: int, *, whole_word: bool = False
+    text: str,
+    files: Sequence[str],
+    cwd: Path,
+    max_hits: int | None,
+    context_bytes: int,
+    *,
+    whole_word: bool = False,
 ) -> list[TextHit]:
-    """The lines holding ``text``, at most ``max_hits`` per file, each as the bytes around one hit:
-    up to ``context_bytes`` before and after, so a one-line bundle costs no more than a short line.
-    ``whole_word`` keeps only hits no word character touches. The match runs on to the end of the
-    line, so each line matches once, and ``--replace`` prints only its window; ripgrep's JSON would
-    carry the whole line."""
+    """The lines holding ``text``, at most ``max_hits`` per file or every one when it is None, each as
+    the bytes around one hit: up to ``context_bytes`` before and after, so a one-line bundle costs no
+    more than a short line. ``whole_word`` keeps only hits no word character touches. The match runs
+    on to the end of the line, so each line matches once, and ``--replace`` prints only its window;
+    ripgrep's JSON would carry the whole line."""
     pattern = _hit_window(text, context_bytes, whole_word)
-    command = [*RIPGREP_SAFE, "--only-matching", "--line-number", "--with-filename", "--null"]
-    command += ["--max-count", str(max_hits), "--replace", "$window", "--regexp", pattern, "--"]
+    per_file = [] if max_hits is None else ["--max-count", str(max_hits)]
+    command = [*RIPGREP_SAFE, "--only-matching", "--line-number", "--with-filename", "--null", *per_file]
+    command += ["--replace", "$window", "--regexp", pattern, "--"]
     hits: dict[tuple[str, int], TextHit] = {}
     for chunk in file_chunks(files, bytes_only=True):
         for hit in _windows(command_output([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)):

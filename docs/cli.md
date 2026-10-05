@@ -14,7 +14,7 @@ that are absent from the source?” rather than “find everything important”.
 - [JSON requests](#json-requests)
 - [Results, progress and exit status](#results-progress-and-exit-status)
 - [Agent workflow](#agent-workflow)
-- [Find All function search](#find-all-function-search)
+- [Find All unit search](#find-all-unit-search)
 - [Workflow trace](#workflow-trace)
 - [Structural measurements](#structural-measurements)
 - [Disk use and housekeeping](#disk-use-and-housekeeping)
@@ -73,10 +73,9 @@ unlimited unless you set a limit.
 | `--beam-width N` | `3`. Places opened together in a navigation round. `1` makes navigation sequential. A wider round may do more work before a match stops the search. | `jvn find "the order limit" --beam-width 1` |
 | `--neighbours-per-kind N` | Unlimited. Retain at most this many candidates per relationship kind from each opened place. Explicitly omitted candidates stay visible in the result. | `jvn find "the order limit" --neighbours-per-kind 8` |
 | `--preview-lines N` | `8`. Leading source lines shown with a neighbour candidate's signature; `0` omits its code preview. | `jvn find "the order limit" --preview-lines 12` |
-| `--max-slice-chars N` | `12000`. Character allowance for an opened code slice, ending on a line boundary. This does not bound the entire request, its candidate previews or its questions. | `jvn find "the order limit" --max-slice-chars 24000` |
 | `--max-line-chars N` | `240`. Clip long lines in opened source, previews and signatures shown to the model. Source files are not edited. | `jvn find "the order limit" --max-line-chars 480` |
 | `--verbose` | Off. Print expanded masked requests on stderr as they are sent. Concise phase/request/elapsed progress is already on by default. | `jvn find "the order limit" --verbose` |
-| `--keep-requests` | Off. Keep the code in `manifest.json` and `report.md` and the exact request text in `journal.jsonl`. Without it the run folder holds code locations and request hashes only; Resume works either way. Use it only for your own or open-source code. | `jvn find "the order limit" --keep-requests` |
+| `--keep-requests` | Off. Keep the code in `manifest.json` and `report.md` and the exact request text in `journal.jsonl`. Without it the run folder holds code locations and request hashes only. A pack written without it resumes either way; a pack written with it resumes only with it, because the resumed run continues its journal and answers, and is refused otherwise with a message naming the flag. The library's `create_trace_evidence_pack(answers_from=...)` holds a store to the same rule. Use it only for your own or open-source code. | `jvn find "the order limit" --keep-requests` |
 | `--no-error-text` | Off, unless `JEV_NAVIGATOR_ERROR_TEXT=off`. Keep an error's message and the body of a response with an error status only as their length and SHA-256 in every run file. An error can quote its request, so this keeps code out of the run folder when a provider echoes it. stderr still shows the message, and `--keep-requests` keeps the text anyway. `find`, `findall` and `trace` accept it. | `jvn find "the order limit" --no-error-text` |
 | `-h`, `--help` | Print help and exit without searching. | `jvn find --help` |
 
@@ -156,7 +155,6 @@ All the options in the longer example can also be supplied as one object:
   "beam_width": 1,
   "neighbours_per_kind": 8,
   "preview_lines": 8,
-  "max_slice_chars": 12000,
   "max_line_chars": 240,
   "verbose": false
 }
@@ -181,7 +179,7 @@ JSON mode writes one result object to stdout. It contains:
 | `manifest` | Absolute path to the complete `manifest.json`. |
 | `report` | Absolute path to the readable `report.md`. |
 | `search` | Outcome, matched spans, source code, decisions, request counts and coverage details. |
-| `provider` | Requested/served model and `input_tokens`, the sum of the counts the provider reported. `responses_without_usage` counts responses that reported none (null when resumed from an older pack), so 0 tokens with a non-zero count means unknown, not free. `unanswered_requests` counts requests that were sent but got no response carrying usage (a cancelled call, or one that failed with an error), so their usage is unknown too; report.md calls them "Requests whose usage is unknown". `input_tokens_complete` is true only when both counts are 0; otherwise `input_tokens` is a lower bound. |
+| `provider` | Requested/served model and `input_tokens`, the sum of the counts the provider reported. `responses_without_usage` counts responses that reported none (null when resumed from an older pack), so 0 tokens with a non-zero count means unknown, not free. `unanswered_requests` counts requests that were sent but got no response carrying usage (a cancelled call, or one that failed with an error), so their usage is unknown too; report.md calls them "Requests whose usage is unknown". `input_tokens_complete` is true only when both counts are 0; otherwise `input_tokens` is a lower bound. `replayed_answers` counts the answers an answer store gave instead of Jev, summed over a resume chain (null when resumed from an older pack). |
 | `resume` | Evidence pack path to pass to `--resume` when the outcome is `budget` or `cancelled`; otherwise `null`. |
 
 Progress, expanded requests and errors go to stderr, so stdout remains parseable. For example:
@@ -213,7 +211,8 @@ the manifest, report, journal and resume state hold no source code: places appea
 when navigation parsed that file; a resumed search keeps each name its earlier save wrote, and shows by location a neighbour that an older pack stored with its code, in the manifest, the resume state and the journal it continues), a key mention as `mentions a key (path:line)`, and journal requests as hashes. Error messages and the bodies of responses with an error
 status are kept as they came; an error can quote its request (a 422 validation body often does), so
 `--no-error-text` (or `JEV_NAVIGATOR_ERROR_TEXT=off`) keeps them only as their length and SHA-256, while
-stderr still shows the message. With `--keep-requests` the manifest and report also carry the code, the
+stderr still shows the message. A resume applies its own setting to the journal it continues: resumed
+with error text off, the earlier pack's error messages and error bodies are rewritten to that form too. With `--keep-requests` the manifest and report also carry the code, the
 journal the exact request body, and every run file the error text; inspect the journal's exact-capture
 flags when auditing bytes.
 
@@ -230,19 +229,27 @@ Schema discovery and structured calls take inspiration from the
 [Google Workspace CLI's agent guidance](https://github.com/googleworkspace/cli/blob/main/CONTEXT.md).
 The Python library remains the interface for composing a custom planner or a broader workflow.
 
-## Find All function search
+## Find All unit search
 
 Use `jvn findall "functions enforcing the order item limit"` with the same scope, output and
 request-display options as `find`. `jvn schema findall` describes the JSON input. Find All defaults
 to 48 live model calls, twice the 24-call `find` default. Use `--max-calls N` to change it or
-`--max-calls none` (JSON `null`) to remove it. Parsing, graph traversal and cached answers are free. Depth/step/neighbour and preview options affect seed discovery only; the
-function enumeration reads complete bodies. The call allowance is shared across seed discovery and enumeration. A budget stop writes completed
-judgments and remaining coverage to a partial evidence pack.
+`--max-calls none` (JSON `null`) to remove it. Parsing and cached answers are free. Depth/step/neighbour
+and preview options affect seed discovery only. Find All then judges every unit in scope, each
+function, method and file's top-level code, with the units that hold the seed's found code in its first
+wave of requests;
+a unit larger than its room in a request is judged by its 60-line pieces and scored by its best one.
+The call allowance is shared across seed discovery and enumeration. A budget stop writes completed
+judgments and the units not yet judged to a partial evidence pack.
 
-The result includes `seed_search`, and `search` records `found`, `unsure`, `searched`, source hashes,
-request identities, the static graph and coverage gaps. `functions_examined` means every enumerated
-function was judged; it does not prove the model found every behavior. `scope_incomplete` retains
-unsupported, unparsed or unavailable files; a file too large to parse safely is unavailable, and report.md names each unavailable file with its reason. See the library composition in [extending.md](extending.md#compose-a-seed-first-find-all-search).
+The result includes `seed_search`, and `search` records the `found`, `unsure` and `searched` units
+(each with its kind, name, file and runs of lines, the piece judged when it was cut, its answer and
+request identity), `room_chars`, `not_judged` (each unit or piece left unjudged, with the reason)
+and coverage gaps: `unlisted_files`, `unresolved_seeds`, `unparsed_files` and `not_indexed_files`.
+`units_examined` means every unit was judged; it does not prove the model found every behavior.
+`scope_incomplete` retains files JVN does not parse or could not read, unparsed files and pieces too
+large to judge; a file too large to parse safely is unlisted, and report.md names each unlisted file
+with its reason. See the library composition in [extending.md](extending.md#judge-every-unit-with-find-all).
 
 `seed_search.calls` counts seed discovery; `search.enumeration_calls` counts the following enumeration.
 Their sum is `search.calls`, the whole workflow's actual model-request count.
@@ -255,9 +262,9 @@ jvn --json '{"command":"findall","target":"functions enforcing the order item li
 
 A stop during seed selection resumes that stage first. Once enumeration has begun, continuation
 restores the seed and all completed judgments, including negative and uncertain answers, and
-examines only the outstanding functions. Static graph reconstruction reuses parser caches; it is
-not a paid call. `calls_this_invocation` shows new calls; `calls` and `enumeration_calls` are cumulative.
-Source, scope, target, thresholds, model and containment-question identity must still match.
+judges only the outstanding units. `calls_this_invocation` shows new calls; `calls` and
+`enumeration_calls` are cumulative. Source, scope, target, thresholds, model and the Find All
+question must still match.
 
 ## Workflow trace
 

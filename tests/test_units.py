@@ -351,6 +351,19 @@ def test_a_cut_function_scores_by_its_best_piece_and_keeps_piece_ranges(shop: Co
     assert unit_score(big, {}) is None
 
 
+def test_on_a_tie_the_earliest_piece_is_the_place_to_read(shop: CodeIndex) -> None:
+    # Arrange: the second and third pieces share the best score
+    big = _units_by_id(shop, ("app/big.py",), SMALL_BOX)["app/big.py:1-149"]
+    first, second, third = big.pieces
+    scores = {big.piece_id(first): 0.2, big.piece_id(second): 0.8, big.piece_id(third): 0.8}
+
+    # Act
+    best = best_piece(big, scores)
+
+    # Assert
+    assert (best.start, best.end) == (61, 120)
+
+
 def test_round_zero_lists_outermost_units_and_every_line_of_code_is_in_one(shop: CodeIndex) -> None:
     source_files = tuple(file for file in shop.files if file.endswith((".py", ".ts", ".tsx", ".js")))
 
@@ -520,6 +533,23 @@ def test_a_file_gone_after_the_inventory_is_named_not_listed(tmp_path: Path) -> 
     # Assert
     assert [unit.id for unit in listing.units] == ["app/kept.py:1-2"]
     assert listing.unlisted == {"app/gone.py": "disappeared after inventory"}
+
+
+def test_a_file_the_index_never_held_is_named_with_the_index_reason_not_raised(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    write_files(root, {"app/kept.py": "def kept():\n    return 1\n"})
+    commit_all(root)
+    index = CodeIndex.from_git(root, ["app/kept.py", "app/removed.py"], fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    listing = list_units(index, ["app/kept.py", "app/removed.py", "app/never_asked.py"], box_chars=JEV_BOX)
+
+    # Assert: the index's own reason where it has one, else that the file is outside its scope.
+    assert [unit.id for unit in listing.units] == ["app/kept.py:1-2"]
+    assert listing.unlisted == {
+        "app/removed.py": "no file at this path",
+        "app/never_asked.py": "not in the index scope",
+    }
 
 
 def test_top_level_code_over_the_box_is_cut_into_pieces(shop: CodeIndex) -> None:
