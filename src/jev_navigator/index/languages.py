@@ -431,6 +431,40 @@ MODULE_BINDING_RULES = {
     "javascript": _script_module_bindings("javascript", _SCRIPT_LOCAL_EXCLUSIONS),
 }
 
+# A Python function's node starts at `def`: its decorators sit before it, beside it inside
+# `decorated_definition`. A TypeScript method's decorators sit before it in the class body. So in these
+# grammars a function's first decorator is the earliest decorator before it with only decorators and
+# comments between. JavaScript's grammar holds a method's decorators inside `method_definition`, whose
+# node already starts at the first one, and a class's decorators stay with the class head.
+DECORATED_KINDS = {
+    "python": ("function_definition",),
+    "typescript": ("method_definition",),
+    "tsx": ("method_definition",),
+    "javascript": (),
+}
+
+# A function whose body only declares a shape: `...`, `pass`, a docstring or `raise NotImplementedError`,
+# alone or together, as in a Protocol. TypeScript declares a shape without a body (an interface's or an
+# abstract method's signature, an overload), and such a signature is no function.
+STUB_RULES = {
+    "python": """  kind: function_definition
+  has:
+    field: body
+    not:
+      has:
+        not:
+          any:
+            - kind: pass_statement
+            - kind: comment
+            - kind: expression_statement
+              not: {has: {not: {any: [{kind: ellipsis}, {kind: string}]}}}
+            - kind: raise_statement
+              has:
+                any:
+                  - {kind: identifier, regex: ^NotImplementedError$}
+                  - {kind: call, has: {field: function, kind: identifier, regex: ^NotImplementedError$}}""",
+}
+
 # The installed ast-grep supports tsx but not Flow. Route marked files through tsx;
 # unsupported Flow constructs remain visible through ERROR nodes.
 FLOW_LANGUAGE = "flow"
@@ -445,6 +479,7 @@ DECLARED_NAME_RULES[FLOW_LANGUAGE] = _TYPED_SCRIPT_DECLARED_NAMES
 MODULE_ALIAS_RULES[FLOW_LANGUAGE] = _SCRIPT_MODULE_ALIASES
 LOCAL_NAME_RULES[FLOW_LANGUAGE] = LOCAL_NAME_RULES["tsx"]
 MODULE_BINDING_RULES[FLOW_LANGUAGE] = MODULE_BINDING_RULES["tsx"]
+DECORATED_KINDS[FLOW_LANGUAGE] = DECORATED_KINDS["tsx"]
 
 # ast-grep reads `languageGlobs` only from a config file: a scan of flow files passes this sgconfig,
 # which parses every JavaScript suffix with the tsx grammar. Plain-JS files are scanned in their own
