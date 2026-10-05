@@ -27,6 +27,7 @@ from test_cli_run_logs import TARGET, limit_client
 from test_oversized_guard import _real_code_file
 
 from jev_navigator import cli, memory_limit
+from jev_navigator.connectors import CommandConnector
 from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code, find_code_async
 from jev_navigator.directives.places import place_for_line
 from jev_navigator.index import tools
@@ -209,8 +210,13 @@ def _jvn_process(script: str, slots: Path, **settings: str) -> subprocess.Popen:
     )
 
 
+def _model_step(arguments: list[str], folder: Path) -> str:
+    return CommandConnector(arguments, name="model step").complete("a prompt")
+
+
+@pytest.mark.parametrize("run", [tools.run_command, _model_step], ids=["index tool", "model step connector"])
 def test_a_child_that_grows_past_the_allowance_is_stopped_and_named(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run
 ) -> None:
     # Arrange
     _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=150, ceiling_mb=150)
@@ -218,7 +224,7 @@ def test_a_child_that_grows_past_the_allowance_is_stopped_and_named(
 
     # Act
     with pytest.raises(MemoryLimitReachedError) as stopped:
-        tools.run_command([sys.executable, "-c", GROWS_TO_600_MB_THEN_STAYS], tmp_path)
+        run([sys.executable, "-c", GROWS_TO_600_MB_THEN_STAYS], tmp_path)
 
     # Assert
     message = str(stopped.value)
@@ -295,24 +301,34 @@ def test_growth_past_the_allowance_while_an_index_is_open_starts_no_further_proc
 
 
 @pytest.mark.parametrize(
-    "run_git",
-    [lambda folder: tools.git(["--version"], folder), tools.inside_git_worktree],
-    ids=["git", "inside_git_worktree"],
+    ("program", "run_once"),
+    [
+        ("git", lambda folder: tools.git(["--version"], folder)),
+        ("git", tools.inside_git_worktree),
+        ("cat", lambda folder: _model_step(["cat"], folder)),
+    ],
+    ids=["git", "inside_git_worktree", "model step connector"],
 )
-def test_growth_past_the_allowance_while_an_index_is_open_starts_no_git(
-    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: list[list[str]], run_git
+def test_growth_past_the_allowance_while_an_index_is_open_starts_no_git_or_model_step(
+    sample_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    commands: list[list[str]],
+    program: str,
+    run_once,
 ) -> None:
     # Arrange
     _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
     index = CodeIndex(sample_repo, ["app/orders.py"], fact_cache_dir=tmp_path / "facts")
-    run_git(tmp_path)
+    run_once(tmp_path)
     started_before = list(commands)
 
     # Act
     with _holding(200), pytest.raises(MemoryLimitReachedError, match="memory allowance of 100 MB"):
-        run_git(tmp_path)
+        run_once(tmp_path)
 
-    # Assert
+    # Assert: the process started before the growth is the last one started
+    assert started_before[-1][0] == program
     assert commands == started_before
     assert index.files == ("app/orders.py",)
 
