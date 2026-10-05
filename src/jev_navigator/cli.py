@@ -10,29 +10,36 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import MutableMapping, Sequence
+from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
-from functools import partial
 from pathlib import Path
 from time import monotonic
+from typing import TYPE_CHECKING
 
-from .adapters.typesafe import TypeSafeJevClient
+from .adapters.routes import RoutedJevClient, system_one_client
 from .cache_root import cache_root
 from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
-from .cli_trace import create_trace_evidence_pack, unavailable_file_lines
+from .cli_trace import create_trace_evidence_pack, not_indexed_lines, unavailable_file_lines
 from .data_root import default_run_folder
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
-from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code
+from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code, search_failure
 from .directives.places import Place, place_for_line
+from .environment import checkout_root, load_typesafe_environment
 from .housekeeping import FINISHED_RUN_DAYS, RESUMABLE_RUN_DAYS
 from .index.code_index import CodeIndex
 from .index.languages import language_of
-from .judgments.answers import TokenTotal
+from .judgments.answers import answered_by
 from .judgments.client import JevClient
+from .judgments.journal import (
+    ERROR_TEXT_VARIABLE,
+    error_message,
+    error_text_kept,
+    message_fields,
+)
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import (
     SHARED_STORE_VARIABLE,
@@ -44,16 +51,30 @@ from .judgments.store import (
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
-from .run_files import place_label, source_shown, step_shown
+from .run_files import (
+    PlaceLabels,
+    carried_over_journal_line,
+    failure_digested,
+    require_kept_request_text,
+    source_shown,
+    step_shown,
+)
 from .usage_receipt import usage_receipt, usage_report_lines
+
+if TYPE_CHECKING:
+    from .adapters.typesafe import TypeSafeJevClient
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 KEEP_REQUESTS_HELP = (
     "Keep the code and full request text in the run folder (default: code locations and request "
     "hashes only); for your own or open-source code"
 )
+NO_ERROR_TEXT_HELP = (
+    "Keep an error's message and an error response's body in the run folder only as their length and "
+    f"SHA-256 (default: the text, or ${ERROR_TEXT_VARIABLE}=off); stderr still shows the message"
+)
 NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
-POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
+POSITIVE_BUDGET_FIELDS = ("beam_width", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
@@ -99,10 +120,11 @@ def _run_search(args: argparse.Namespace) -> int:
     repository = Path(args.repo).resolve()
     output = Path(args.out).expanduser() if args.out else _default_output(repository)
     answer_store = _answer_store(args)
-    client: TypeSafeJevClient | None = None
+    client: TypeSafeJevClient | RoutedJevClient | None = None
     try:
-        _load_typesafe_environment(os.environ)
-        client = TypeSafeJevClient()  # model=None resolves TYPESAFE_DEFAULT_MODEL in the adapter
+        load_typesafe_environment(os.environ)
+        keep_error_text = error_text_kept(args.no_error_text)
+        client = system_one_client(os.environ)
         if args.command == "trace":
             manifest = create_trace_evidence_pack(
                 repository,
@@ -117,6 +139,7 @@ def _run_search(args: argparse.Namespace) -> int:
                 verbose=args.verbose,
                 answer_store=answer_store,
                 keep_requests=args.keep_requests,
+                keep_error_text=keep_error_text,
             )
         else:
             resume_from = Path(args.resume).expanduser() if getattr(args, "resume", None) else None
@@ -133,6 +156,7 @@ def _run_search(args: argparse.Namespace) -> int:
                     verbose=args.verbose,
                     answer_store=answer_store,
                     keep_requests=args.keep_requests,
+                    keep_error_text=keep_error_text,
                     workflow=args.command,
                     resume_from=resume_from,
                 )
@@ -277,9 +301,12 @@ def create_evidence_pack(
     workflow: str = "find",
     resume_from: Path | None = None,
     keep_requests: bool = False,
+    keep_error_text: bool = True,
 ) -> dict:
     """Run the real index/search owners and persist their reviewable evidence. By default the pack
-    keeps code locations and request hashes; ``keep_requests`` also keeps the code and request text."""
+    keeps code locations and request hashes; ``keep_requests`` also keeps the code and request text.
+    Error messages and error bodies are kept unless ``keep_error_text`` is False (see
+    ``journal.error_text_kept``)."""
     if workflow not in ("find", "findall"):
         raise ValueError(f"unknown search workflow: {workflow}")
     repository = repository.resolve()
@@ -287,16 +314,17 @@ def create_evidence_pack(
     _validate_budget(budget)
     thresholds = thresholds or Thresholds()
     previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client, workflow)
+    if resume_from is not None:
+        require_kept_request_text(resume_from.resolve() / "journal.jsonl", keep_requests)
     _prepare_output(output)
     if resume_from is not None:
-        for name in ("answers.jsonl", "journal.jsonl"):
-            source = resume_from.resolve() / name
-            if source.is_file():
-                shutil.copyfile(source, output / name)
+        _carry_over_run_logs(resume_from.resolve(), output, keep_requests, keep_error_text)
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
-    journal = ProgressJournal(journal_path, progress, keep_request_text=keep_requests)
+    journal = ProgressJournal(
+        journal_path, progress, keep_request_text=keep_requests, keep_error_text=keep_error_text
+    )
     progress.start()
     outcome = "failed"
     try:
@@ -311,7 +339,6 @@ def create_evidence_pack(
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )
-        journal.place_label = partial(place_label, index)
         if warning := _scope_warning(len(index.files)):
             print(warning, file=sys.stderr)
         checkpoint = SavedSearch(None)
@@ -319,6 +346,8 @@ def create_evidence_pack(
             if previous["source"]["revision"] != index.commit:
                 raise ValueError("repository revision changed since the evidence pack")
             checkpoint = load_resume(resume_from.resolve() / "resume.json", index)
+        labels = PlaceLabels(index, checkpoint.frontier_labels)
+        journal.place_label = labels
         resume = checkpoint.result
         resuming_enumeration = checkpoint.completed is not None
         if resuming_enumeration and checkpoint.check_id != CONTAINS_IMPLEMENTATION.question_id:
@@ -333,7 +362,8 @@ def create_evidence_pack(
         )
         selection: EntrySelection | None = None
         started = monotonic()
-        entry_pending = False
+        entry_stop: Outcome | None = None
+        entry_failure: Exception | None = None
         if resume is not None:
             start_places = []
             initial_candidates = ()
@@ -343,10 +373,7 @@ def create_evidence_pack(
         else:
             progress.phase("choosing an entry point")
             start_places = []
-            try:
-                selection = choose_initial_candidates(index, judge, target)
-            except CallCapReachedError:
-                entry_pending = True
+            selection, entry_stop, entry_failure = _choose_entry(index, judge, target)
             initial_candidates = (
                 tuple(
                     (
@@ -363,8 +390,8 @@ def create_evidence_pack(
         if resuming_enumeration:
             assert resume is not None
             result = resume
-        elif entry_pending:
-            result = FindResult(Outcome.BUDGET, (), (), (), (), 0, 0)
+        elif entry_stop is not None:
+            result = FindResult(entry_stop, (), (), (), (), 0, 0, failure=entry_failure)
         else:
             progress.phase("navigating code")
             result = find_code(
@@ -394,7 +421,7 @@ def create_evidence_pack(
         progress.phase("writing evidence pack")
         scope_unavailable: dict[str, str] = {}
         needs_resume = (
-            enumeration.stopped_by in ("budget", "cancelled")
+            enumeration.stopped_by in RESUMABLE_OUTCOMES
             if enumeration is not None
             else result.outcome in RESUMABLE_OUTCOMES
         )
@@ -403,7 +430,8 @@ def create_evidence_pack(
                 output / "resume.json",
                 index,
                 result,
-                entry_pending=entry_pending,
+                labels=labels,
+                entry_pending=entry_stop is not None,
                 completed=enumeration.judged if enumeration is not None else None,
                 check_id=CONTAINS_IMPLEMENTATION.question_id if enumeration is not None else None,
             )
@@ -417,15 +445,13 @@ def create_evidence_pack(
             index,
             result,
             requested_model=getattr(client, "model", "unknown"),
-            served_model=judge.served_model,
-            input_total=judge.input_total,
-            unanswered_requests=judge.unanswered_requests,
+            judge=judge,
             duration_seconds=seed_duration_seconds,
             total_calls=seed_calls,
             entry_selection=selection,
             previous=previous,
             resume_from=resume_from,
-            entry_pending=entry_pending,
+            entry_pending=entry_stop is not None,
             scope_unavailable=scope_unavailable,
         )
         manifest["workflow"] = workflow
@@ -443,19 +469,24 @@ def create_evidence_pack(
             )
         if enumeration is not None:
             manifest["seed_search"] = previous["seed_search"] if resuming_enumeration else manifest["search"]
-            manifest["search"] = _find_all_summary(enumeration, judge.calls, duration_seconds, previous)
-        if result.failure is not None:
-            manifest["search"]["failure"] = _failure_record(result.failure, judge, journal)
+            manifest["search"] = _find_all_summary(
+                enumeration, judge.calls, duration_seconds, previous, index.not_indexed_files
+            )
+        failure = enumeration.failure if enumeration is not None and enumeration.failure else result.failure
+        if failure is not None:
+            manifest["search"]["failure"] = _failure_record(failure, judge, journal)
         if not keep_requests:
-            _drop_code(manifest, index)
+            _drop_code(manifest, labels)
+        if not journal.keeps_error_text:
+            _digest_history_failures(manifest)
         _write_json(output / "manifest.json", manifest)
         (output / "report.md").write_text(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
         )
         outcome = str(manifest["search"]["outcome"])
-        if result.outcome == Outcome.FAILED:
+        if outcome == Outcome.FAILED and failure is not None:
             print(f"resume: use --resume {output} with the same target and repository", file=sys.stderr)
-            raise result.failure
+            raise failure
         return manifest
     except KeyboardInterrupt:
         outcome = "cancelled"
@@ -465,24 +496,59 @@ def create_evidence_pack(
         progress.close(outcome)
 
 
+def _choose_entry(
+    index: CodeIndex, judge: Judge, target: str
+) -> tuple[EntrySelection | None, Outcome | None, Exception | None]:
+    """The chosen entry point, or why choosing it stopped: the call cap, Ctrl-C, or a failed
+    request with its error. A stopped choice saves the entry stage, and Resume chooses again,
+    replaying the answers already stored."""
+    try:
+        return choose_initial_candidates(index, judge, target), None, None
+    except CallCapReachedError:
+        return None, Outcome.BUDGET, None
+    except KeyboardInterrupt:
+        return None, Outcome.CANCELLED, None
+    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
+        return None, Outcome.FAILED, search_failure(error)
+
+
 def _failure_record(error: BaseException, judge: Judge, journal: ProgressJournal) -> dict:
-    """The error that ended the search, with its cause chain and the journal request it failed in."""
+    """The error that ended the search, with its cause chain, the journal request it failed in, and
+    that request's route and HTTP status when known. Messages are kept as ``message_fields`` allows."""
     request_id = judge.failed_request(error)
+    keep = journal.keeps_error_text
     return {
-        **_error_fields(error),
-        "causes": [_error_fields(cause) for cause in _causes(error)],
+        **_error_fields(error, keep),
+        "causes": [_error_fields(cause, keep) for cause in _causes(error)],
         "request_id": request_id,
         "route": journal.routes.get(request_id) if request_id is not None else None,
+        "status": journal.statuses.get(request_id) if request_id is not None else None,
     }
+
+
+def _entry_pending_lines(search: dict) -> list[str]:
+    if not search["entry_selection_pending"]:
+        return []
+    if search["outcome"] == Outcome.BUDGET:
+        return ["- Entry selection awaits another call allowance."]
+    return [f"- Entry selection stopped ({search['outcome']}); Resume chooses it again."]
 
 
 def _failure_lines(search: dict, bullet: str) -> list[str]:
     failure = search.get("failure")
-    return [f"{bullet}Failure: {failure['type']}: {failure['message']}"] if failure else []
+    if not failure:
+        return []
+    status = f" (HTTP {failure['status']})" if failure["status"] is not None else ""
+    if "message" in failure:
+        return [f"{bullet}Failure: {failure['type']}{status}: {failure['message']}"]
+    return [
+        f"{bullet}Failure: {failure['type']}{status}; its message ({failure['message_length']} characters, "
+        f"SHA-256 `{failure['message_sha256']}`) was printed to stderr; --no-error-text kept only its digest"
+    ]
 
 
-def _error_fields(error: BaseException) -> dict:
-    return {"type": type(error).__name__, "message": str(error)}
+def _error_fields(error: BaseException, keep: bool) -> dict:
+    return {"type": type(error).__name__, **message_fields(error_message(error), keep_text=keep)}
 
 
 def _causes(error: BaseException) -> list[BaseException]:
@@ -516,7 +582,8 @@ def _parser() -> argparse.ArgumentParser:
 For agents: jvn schema find prints the request's JSON Schema without making model calls.
 JSON mode writes results to stdout; progress goes to stderr. Ctrl-C cancels.
 Results default to <directory>-<timestamp> under $XDG_DATA_HOME/jev-navigator/runs (~/.local/share).
-Credentials: process environment, then ~/.config/jvn/env (TYPESAFE_API_KEY / TYPESAFE_BASE_URL).
+Credentials: process environment, then the .env of the jev-navigator checkout jvn runs from (if any),
+then ~/.config/jvn/env (TYPESAFE_API_KEY / TYPESAFE_BASE_URL).
 Use jvn help find for options and examples. Exit codes: 0 completed, 1 failed, 2 invalid input, 130 cancelled.
 A completed search can have a non-found outcome; inspect search.outcome in JSON output.""",
     )
@@ -535,7 +602,7 @@ A completed search can have a non-found outcome; inspect search.outcome in JSON 
   jvn find "the order limit" --start app/orders.py:42 --out ./order-evidence
   jvn find "the order limit" --max-calls 8 --max-depth 3 --max-steps 8
   jvn find "the order limit" --beam-width 1 --neighbours-per-kind 8
-  jvn find "the order limit" --preview-lines 8 --max-slice-chars 12000 --max-line-chars 240
+  jvn find "the order limit" --preview-lines 8 --max-line-chars 240
   jvn find "the order limit" --verbose
 
 All flags are optional. Live calls stop at 24 unless --max-calls sets another cap ('none' lifts it);
@@ -612,6 +679,7 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     trace.add_argument("--verbose", action="store_true", help="Print expanded masked model requests")
     _add_answer_store_argument(trace)
     trace.add_argument("--keep-requests", action="store_true", help=KEEP_REQUESTS_HELP)
+    trace.add_argument("--no-error-text", action="store_true", help=NO_ERROR_TEXT_HELP)
     stats = commands.add_parser(
         "stats",
         help="count and rank parsed functions/classes without model calls",
@@ -735,12 +803,6 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         help="Leading lines shown for each candidate preview (default: 8; 0 hides preview code)",
     )
     evidence.add_argument(
-        "--max-slice-chars",
-        type=int,
-        default=defaults.max_slice_chars,
-        help="Characters allowed in one opened code slice (default: 12000; not the whole request)",
-    )
-    evidence.add_argument(
         "--max-line-chars",
         type=int,
         default=defaults.max_line_chars,
@@ -752,6 +814,7 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         help="show expanded masked requests on stderr (default: concise live progress)",
     )
     find.add_argument("--keep-requests", action="store_true", help=KEEP_REQUESTS_HELP)
+    find.add_argument("--no-error-text", action="store_true", help=NO_ERROR_TEXT_HELP)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -930,6 +993,23 @@ def _previous_pack(
     return previous
 
 
+def _carry_over_run_logs(source: Path, output: Path, keep_requests: bool, keep_error_text: bool) -> None:
+    """The earlier pack's answers and journal continue in this pack. With ``keep_requests`` the journal
+    is copied whole; otherwise each line goes through ``run_files.carried_over_journal_line``, which
+    also applies this pack's error-text setting."""
+    answers = source / "answers.jsonl"
+    if answers.is_file():
+        shutil.copyfile(answers, output / "answers.jsonl")
+    journal = source / "journal.jsonl"
+    if not journal.is_file():
+        return
+    if keep_requests:
+        shutil.copyfile(journal, output / "journal.jsonl")
+        return
+    with journal.open() as lines, (output / "journal.jsonl").open("w") as kept:
+        kept.writelines(carried_over_journal_line(line, keep_error_text=keep_error_text) for line in lines)
+
+
 def _default_output(repository: Path) -> Path:
     return default_run_folder(repository, datetime.now(UTC))
 
@@ -938,18 +1018,6 @@ def _scope_warning(file_count: int) -> str | None:
     if file_count <= 20_000:
         return None
     return f"jvn: large scope contains {file_count:,} tracked files; indexing may take longer"
-
-
-def _load_typesafe_environment(
-    environment: MutableMapping[str, str],
-    path: Path | None = None,
-) -> None:
-    """Load official TypeSafe SDK settings: process environment, then this tool's checkout `.env`
-    (never a repository under analysis), then the legacy `~/.config/jvn/env`; a process value always
-    takes precedence."""
-    from .environment import load_typesafe_environment
-
-    load_typesafe_environment(environment, legacy=path)
 
 
 def _parse_start(index: CodeIndex, value: str) -> Place:
@@ -976,9 +1044,7 @@ def _manifest(
     result: FindResult,
     *,
     requested_model: str,
-    served_model: str | None,
-    input_total: TokenTotal,
-    unanswered_requests: int,
+    judge: Judge,
     duration_seconds: float,
     total_calls: int,
     entry_selection: EntrySelection | None,
@@ -999,7 +1065,7 @@ def _manifest(
             "repository": str(repository),
             "revision": index.commit,
             "prefixes": list(prefixes),
-            "tracked_files": len(index.files),
+            "indexed_files": len(index.files),
         },
         "target": target,
         "requested_starts": list(starts),
@@ -1009,9 +1075,10 @@ def _manifest(
         "thresholds": thresholds.as_dict(),
         "provider": {
             "requested_model": requested_model,
-            "served_model": served_model,
-            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_total.reported,
-            **usage_receipt(previous, input_total, unanswered_requests),
+            "served_model": judge.served_model,
+            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0)
+            + judge.input_total.reported,
+            **usage_receipt(previous, judge),
         },
         "search": {
             "outcome": result.outcome,
@@ -1049,6 +1116,7 @@ def _manifest(
                 "pending": list(result.parser_scans_pending),
             },
             "unavailable_files": {**result.unavailable_files, **(scope_unavailable or {})},
+            "not_indexed_files": index.not_indexed_files,
             "history": [
                 *old_search.get("history", []),
                 *([step.to_json() for step in result.history.steps] if result.history else []),
@@ -1057,42 +1125,50 @@ def _manifest(
     }
 
 
-def _drop_code(manifest: dict, index: CodeIndex) -> None:
-    """Leave each place as its location: the code it held stays in the repository."""
-    _drop_entry_code(manifest.get("entry_selection") or {}, index)
+def _digest_history_failures(manifest: dict) -> None:
     for name in ("search", "seed_search"):
-        _drop_search_code(manifest.get(name) or {}, index)
+        search = manifest.get(name) or {}
+        search["history"] = [failure_digested(step) for step in search.get("history", [])]
 
 
-def _drop_entry_code(entry_selection: dict, index: CodeIndex) -> None:
+def _drop_code(manifest: dict, labels: PlaceLabels) -> None:
+    """Leave each place as its location: the code it held stays in the repository."""
+    _drop_entry_code(manifest.get("entry_selection") or {}, labels)
+    for name in ("search", "seed_search"):
+        _drop_search_code(manifest.get(name) or {}, labels)
+
+
+def _drop_entry_code(entry_selection: dict, labels: PlaceLabels) -> None:
     for decision in entry_selection.get("decisions", []):
         for option in decision.get("options", []):
             option.pop("description", None)
     for candidate in entry_selection.get("candidates", []):
-        candidate["signature"] = place_label(index, candidate["place"])
+        candidate["signature"] = labels(candidate["place"])
 
 
-def _drop_search_code(search: dict, index: CodeIndex) -> None:
+def _drop_search_code(search: dict, labels: PlaceLabels) -> None:
     visits = [visit for group in ("found", "starts", "searched", "unsure") for visit in search.get(group, [])]
     for visit in visits:
         visit.pop("code", None)
         if "place" in visit:
             visit["source"] = source_shown(visit["source"], visit["place"])
     for entry in search.get("not_inspected", []):
-        entry["signature"] = place_label(index, entry["place"])
-    search["history"] = [_step_without_code(step, index) for step in search.get("history", [])]
+        entry["signature"] = labels(entry["place"])
+    search["history"] = [_step_without_code(step, labels) for step in search.get("history", [])]
 
 
-def _step_without_code(step: dict, index: CodeIndex) -> dict:
+def _step_without_code(step: dict, labels: PlaceLabels) -> dict:
     shown = step_shown(step)
     for fetched in shown["fetched"]:
         fetched.pop("code", None)
     for offered in shown["judgments"].get("could_contain", []):
-        offered["signature"] = place_label(index, offered["place"])
+        offered["signature"] = labels(offered["place"])
     return shown
 
 
-def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previous: dict | None) -> dict:
+def _find_all_summary(
+    result: FindAllResult, calls: int, elapsed: float, previous: dict | None, not_indexed: dict[str, str]
+) -> dict:
     old_search = previous["search"] if previous else {}
 
     def answer(value):
@@ -1104,6 +1180,7 @@ def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previou
             "verdict": value.verdict,
             "request_sha256": value.request_sha256,
             "from_store": value.from_store,
+            **answered_by(value.source()),
         }
 
     return {
@@ -1121,8 +1198,16 @@ def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previou
         "unparsed_files": sorted(result.unparsed_files),
         "unsupported_files": list(result.unsupported_files),
         "unavailable_files": dict(result.unavailable_files),
+        "not_indexed_files": dict(not_indexed),
         "graph": asdict(result.graph),
     }
+
+
+def _not_indexed_section(search: dict) -> list[str]:
+    if not search["not_indexed_files"]:
+        return []
+    listed_in = "`search.not_indexed_files` in `manifest.json`"
+    return ["", "## Files not indexed", "", *not_indexed_lines(search["not_indexed_files"], listed_in)]
 
 
 def _find_all_report(manifest: dict) -> str:
@@ -1155,6 +1240,7 @@ def _find_all_report(manifest: dict) -> str:
         lines.append(f"- {field}: {', '.join(search[field]) or 'none'}")
     lines.append("- unavailable_files:" if search["unavailable_files"] else "- unavailable_files: none")
     lines += unavailable_file_lines(search["unavailable_files"])
+    lines += _not_indexed_section(search)
     lines += ["", "## Matching bodies", ""]
     for value in search["found"]:
         source = value["source"]
@@ -1172,18 +1258,30 @@ def _navigator_provenance() -> dict:
         digest.update(b"\0")
         digest.update(path.read_bytes())
         digest.update(b"\0")
-    repository = next((parent for parent in package_root.parents if (parent / ".git").exists()), None)
-    revision = None
-    dirty = None
-    if repository is not None:
-        revision = _git(repository, "rev-parse", "HEAD")
-        dirty = bool(_git(repository, "status", "--porcelain", "--untracked-files=all"))
     return {
         "package_version": importlib.metadata.version("jev-navigator"),
-        "source_revision": revision,
-        "source_dirty": dirty,
+        **_checkout_revision(checkout_root()),
         "source_tree_sha256": digest.hexdigest(),
     }
+
+
+def _checkout_revision(checkout: Path | None) -> dict:
+    """jvn's own checkout's HEAD and whether it has changes. Without a checkout there is no
+    revision to record; when git cannot answer, its message is kept instead of stopping a search
+    that has already finished."""
+    revision: dict = {"source_revision": None, "source_dirty": None, "source_revision_error": None}
+    if checkout is None:
+        return revision
+    try:
+        head = _git(checkout, "rev-parse", "HEAD")
+        dirty = bool(_git(checkout, "status", "--porcelain", "--untracked-files=all"))
+    except subprocess.CalledProcessError as error:
+        return revision | {
+            "source_revision_error": f"git {' '.join(error.cmd[1:])} failed: {error.stderr.strip()}"
+        }
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return revision | {"source_revision_error": f"git failed: {error}"}
+    return revision | {"source_revision": head, "source_dirty": dirty}
 
 
 def _git(repository: Path, *args: str) -> str:
@@ -1229,13 +1327,18 @@ def _outcome_summary(search: dict) -> str:
     judged, read, total = search["files_judged"], search["files_read"], search["code_files"]
     seen = f"Jev judged code in {judged} of {total} files"
     if outcome == "nothing_left":
-        return f"{outcome} (nothing left worth opening: {seen}; all {total} were read)"
-    parts = [f"not found: {seen}", f"{read - judged} more were read only to list links"]
-    parts.append(f"{total - read} never reached")
-    if search["unparsed_files"]:
-        parts.append(f"{len(search['unparsed_files'])} parsed only partly")
-    if search["unavailable_files"]:
-        parts.append(f"{len(search['unavailable_files'])} gone from disk")
+        parts = [f"nothing left worth opening: {seen}", f"all {total} were read"]
+    else:
+        parts = [f"not found: {seen}", f"{read - judged} more were read only to list links"]
+        parts.append(f"{total - read} never reached")
+        if search["unparsed_files"]:
+            parts.append(f"{len(search['unparsed_files'])} parsed only partly")
+        if search["unavailable_files"]:
+            parts.append(
+                f"{len(search['unavailable_files'])} unavailable (gone, changed or refused by the parser)"
+            )
+    if search.get("not_indexed_files"):
+        parts.append(f"{len(search['not_indexed_files'])} not indexed, such as ignored")
     return f"{outcome} ({'; '.join(parts)})"
 
 
@@ -1272,7 +1375,7 @@ def _report(manifest: dict) -> str:
         f"- Target: {manifest['target']}",
         f"- Outcome: **{_outcome_summary(search)}**",
         *_failure_lines(search, "- "),
-        *(["- Entry selection awaits another call allowance."] if search["entry_selection_pending"] else []),
+        *_entry_pending_lines(search),
         f"- Search: {search['steps']} opened places, {search['calls']} live calls",
         f"- Provider: requested `{provider['requested_model']}`, served `{provider['served_model']}`",
         *usage_report_lines(provider),
@@ -1284,6 +1387,9 @@ def _report(manifest: dict) -> str:
         "- Files unavailable (disappeared or changed on disk, or refused by the parser): "
         f"{len(search['unavailable_files'])}.",
         *unavailable_file_lines(search["unavailable_files"]),
+        f"- Files and folders not indexed (ignored, or otherwise left out of the listing): "
+        f"{len(search['not_indexed_files'])}.",
+        *_not_indexed_section(search),
         "",
         "## Opened code",
         "",
