@@ -135,6 +135,10 @@ SECRET_VALUES = {
         "s3cret-value",
     ),
     "unquoted hex key under a lower-case key": ("secret_key_base=" + "4f" * 64, "4f" * 64),
+    "short value under a suffixed key": ("DB_PASSWORD_PROD=hunter2", "hunter2"),
+    "short quoted value under a suffixed key": ('SECRET_KEY_BASE: "s3cret"', "s3cret"),
+    "dollar sign inside a password": ('password = "my$ecret"', "ecret"),
+    "dollar sign inside a token": ('token: "a$b1234567"', "b1234567"),
     "unquoted generated value": ("webhook_secret_v1=whsec_" + "a1B2" * 8, "a1B2" * 8),
     "high-entropy value under an ordinary name": (
         'const signingKey = "Zq8vT2mN4xR7pL1wK9sD3fH6";',
@@ -216,7 +220,6 @@ CODE_REFERENCES = [
     'export GOOGLE_APPLICATION_CREDENTIALS="$CI_TMP/google-adc.json"',
     "print(f\"GATE pass={c['gate_pass']} confidence={c.get('confidence')}\")",
     '"rawCredentialInherited": "GOOGLE_VERTEX_CREDENTIALS_JSON" in os.environ,',
-    '_CREDENTIAL_NAME_PROBE = "a" * 40',
 ]
 
 
@@ -322,7 +325,7 @@ SUFFIXED_SECRET_KEYS = [
     "dbPasswordProd", "STRIPE_SECRET_LIVE", "password1", "PASSWORD_CONFIRMATION", "access_token_secret",
     "client_secret_value", "refresh_token_old", "MYSQL_ROOT_PASSWORD", "mysql_password_root",
     "secretAccessKeyId", "GH_TOKEN_RO", "webhook_secret_v1", "PASSWORD_SALT", "pwd_admin", "credentials_json",
-    "db_pass", "userPwd", "credentials",
+    "db_pass", "db_passwd", "userPwd", "credentials",
 ]  # fmt: skip
 
 

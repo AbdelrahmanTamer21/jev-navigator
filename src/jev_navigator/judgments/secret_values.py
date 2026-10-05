@@ -81,12 +81,15 @@ def _last_secret_word_end(parts: list[str]) -> int | None:
 def is_literal(value: str, quote: str = '"') -> bool:
     """Whether a value is written out rather than referring to a variable or running a command. A value
     that interpolates into a name or a path (``GITLAB_CLIENT_SECRET_${slug}``, ``"$CI_TMP/adc.json"``)
-    builds that name or path, so it is code too; outside single quotes ``$NAME`` interpolates."""
+    builds that name or path, so it is code too; outside single quotes ``$NAME`` interpolates, and a
+    value it builds into a path (``"$CI_TMP/adc.json"``) is code, while ``"my$ecret"`` stays a literal."""
     if _INTERPOLATION.fullmatch(value) or "$(" in value:
         return False
     if quote == "'":
         return "${" not in value or not _builds_a_name_or_path(_INTERPOLATION.sub("", value))
-    if "$" in value and _builds_a_name_or_path(_VARIABLE.sub("", _INTERPOLATION.sub("", value))):
+    if "${" in value and _builds_a_name_or_path(_INTERPOLATION.sub("", value)):
+        return False
+    if "$" in value and _PATH_SHAPED.fullmatch(_VARIABLE.sub("", _INTERPOLATION.sub("", value))):
         return False
     return not _VARIABLE.fullmatch(value)
 

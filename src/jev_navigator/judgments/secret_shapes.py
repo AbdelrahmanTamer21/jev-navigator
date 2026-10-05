@@ -138,9 +138,9 @@ def _keyed(holds: Callable[[re.Match[str]], bool], scalar: bool = True) -> Calla
 
 
 def _keyed_value(match: re.Match[str], literal: bool, scalar: bool = True) -> bool:
-    """Under a secret key every literal is hidden. A scalar rule also hides a one-word literal of eight or
-    more characters under a suffixed key (``SECRET_KEY_BASE``, ``GH_TOKEN_RO``), unless it is a sentence
-    (a message) or an environment variable's name, and a literal
+    """Under a secret key every literal is hidden. A scalar rule also hides a one-word literal under a
+    suffixed key (``SECRET_KEY_BASE``, ``GH_TOKEN_RO``), unless it is a sentence (a message) or an
+    environment variable's name, and a literal
     that is not a name, path or URL under a naming key (``SECRET_ENV``, ``token_url``)."""
     kind = key_kind(match["key"])
     if not literal or kind is None:
@@ -151,11 +151,7 @@ def _keyed_value(match: re.Match[str], literal: bool, scalar: bool = True) -> bo
     if not scalar:
         return False
     if kind == "suffixed":
-        return (
-            len(value) >= BY_CONTENT_MIN_CHARS
-            and not any(character.isspace() for character in value)
-            and not ENVIRONMENT_NAME.fullmatch(value)
-        )
+        return not any(character.isspace() for character in value) and not ENVIRONMENT_NAME.fullmatch(value)
     return not names_something(value)
 
 
