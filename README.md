@@ -480,8 +480,14 @@ function (a `require` inside a block included), a loop over it, a module-level f
 assignment to it anywhere leaves the call a `candidate`. A name a function binds for its own body (a parameter, a local
 variable, a caught error or a loop variable) replaces any module-level definition or import of that
 name inside the function: `db.query()` with a parameter `db`, or `stop()` with a parameter `stop`,
-binds to no import; it is a `candidate` whose local value is not resolved. A function counts from its
-first line, so on `stream(c, async (stream) => ...)` the outer call counts as inside the callback.
+binds to no import; it is a `candidate` whose local value is not resolved. The one exception is a
+function's own `const db = require('./db')` when it is the function's only binding of `db`: a `const`
+is never bound again, so there `db.query()` binds through `./db` like a module alias, and `db()` to the
+module's default export (`module.exports = ...`). A `const` is block-scoped, so it holds the module
+from its own line to the end of its block, or of the function when it sits in the function's body;
+before it, after its block, or in a `switch` case, the call stays a `candidate`. A `let` or `var` may
+be bound again and holds no module. A function counts from its first line, so on
+`stream(c, async (stream) => ...)` the outer call counts as inside the callback.
 Types are looked up apart from values, so a local value never replaces a type. A call `halt()` where
 `halt` imports a definition under another name (`import { stop as halt }`, `const { stop: halt } =
 require(...)`, `from m import stop as halt`) binds the same way to `stop`, unless the file defines

@@ -36,14 +36,17 @@ def _repository(tmp_path: Path, bundle_characters: int) -> Path:
 
 class _AstGrepRecorder:
     """Stands in for the ast-grep process only: it records every command and answers 'no matches',
-    so a missing guard shows as a recorded command, never as a real multi-gigabyte parse."""
+    so a missing guard shows as a recorded command, never as a real multi-gigabyte parse. Given
+    ``standing_in_for``, it stands in only for the scans that would hand ast-grep that file, and
+    every other scan runs for real."""
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, standing_in_for: str | None = None) -> None:
         self.commands: list[list[str]] = []
         original = tools._json_lines
 
         def run(arguments, cwd, **callbacks):
-            if arguments[0] == tools.AST_GREP and "scan" in arguments:
+            scans = arguments[0] == tools.AST_GREP and "scan" in arguments
+            if scans and (standing_in_for is None or standing_in_for in arguments):
                 self.commands.append(list(arguments))
                 return iter(())
             return original(arguments, cwd, **callbacks)
@@ -151,6 +154,32 @@ def test_a_name_imported_from_a_guarded_file_binds_unknown_where_its_bytes_never
     assert GUARDED_EXPORTS in index.refused_files
     assert binding.status == BindingStatus.UNKNOWN
     assert GUARDED_EXPORTS in binding.reason
+
+
+def test_a_function_that_requires_a_guarded_file_binds_its_calls_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A function's own `const launch = require(...)` of a file too large to parse holds a module the
+    index never read: a call through it is unknown, never a module with no such export."""
+    # Arrange: only the guarded file's parse is stood in for; the importer is parsed for real
+    ast_grep = _AstGrepRecorder(monkeypatch, standing_in_for=BUNDLE)
+    files = {
+        BUNDLE: _one_line(668_777),
+        "src/runner.js": (
+            f"function run() {{\n  const launch = require('../{BUNDLE}');\n  return launch();\n}}\n"
+        ),
+    }
+    commit_files(tmp_path / "repo", files)
+    index = CodeIndex.from_git(tmp_path / "repo", fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    binding = index.binding_of("src/runner.js", 3, "launch", None)
+
+    # Assert
+    assert not ast_grep.received(BUNDLE)
+    assert BUNDLE in index.refused_files
+    assert binding.status == BindingStatus.UNKNOWN
+    assert BUNDLE in binding.reason
 
 
 def test_comment_scanning_never_parses_a_guarded_file(

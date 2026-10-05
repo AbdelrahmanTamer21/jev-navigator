@@ -216,7 +216,10 @@ def _decode(file: str, raw: dict) -> FileFacts:
             tuple(_span(file, span) for span in structure["commonjs_exports"]),
             tuple(_span(file, span) for span in structure["type_declarations"]),
             tuple(_span(file, span) for span in structure["value_declarations"]),
-            tuple(LocalName(int(first), int(last), name) for first, last, name in structure["local_names"]),
+            tuple(
+                LocalName(int(first), int(last), name, int(line), module, int(block_end))
+                for first, last, name, line, module, block_end in structure["local_names"]
+            ),
             tuple(
                 NamespaceMember(int(first), int(last), _span(file, span))
                 for first, last, span in structure["namespace_members"]

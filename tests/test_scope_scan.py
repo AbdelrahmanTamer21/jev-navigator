@@ -352,7 +352,7 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
             + _many("  m{n}() {{ return {n}; }},\n")
             + "};\n"
             + _wide_script_function(),
-            (1201, 301, 600, 602),
+            (1201, 301, 600, 902),
         ),
         (
             "module.js",
@@ -361,7 +361,7 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
             + _many("  e{n}() {{ return {n}; }},\n  s{n},\n  p{n}: p{n},\n")
             + "};\n"
             + _wide_script_function(),
-            (300, 601, 0, 602),
+            (300, 601, 0, 902),
         ),
         (
             "router.ts",
@@ -1376,6 +1376,37 @@ def test_a_call_through_a_python_module_import_reads_only_that_module(tmp_path: 
     assert (either.status.value, either.target) == ("candidate", None)
 
 
+def test_each_binding_of_a_functions_own_name_is_its_own_fact(tmp_path: Path) -> None:
+    """A function that binds `store` twice records two bindings, each with its line, so a lookup can
+    tell one binding in a scope from several, in Python and in scripts."""
+    # Arrange
+    sources = {
+        "load.js": (
+            "function load(flag) {\n  var store = require('./db');\n"
+            "  if (flag) { var store = require('./fake'); }\n"
+            "  const once = 1;\n  return store.query(once);\n}\n"
+        ),
+        "load.py": (
+            "def load(flag):\n    store = open_db()\n    if flag:\n        store = open_fake()\n"
+            "    once = 1\n    return store.query(once)\n"
+        ),
+    }
+    for file, source in sources.items():
+        (tmp_path / file).write_text(source)
+
+    # Act
+    facts = scan_facts(read_files(tmp_path, sources), tmp_path, Unparsed())
+
+    # Assert
+    assert {
+        file: sorted((local.name, local.line) for local in found.structure.local_names)
+        for file, found in facts.items()
+    } == {
+        "load.js": [("flag", 1), ("once", 4), ("store", 2), ("store", 3)],
+        "load.py": [("flag", 1), ("once", 5), ("store", 2), ("store", 4)],
+    }
+
+
 def test_a_call_through_a_module_a_from_import_names_reads_that_module(tmp_path: Path) -> None:
     """`jobs.run()` after `from app import jobs`, `from . import jobs as queue` or `from .sub import
     mail as post` calls what that module defines, as after `import app.jobs as jobs`. A parameter
@@ -1518,9 +1549,10 @@ def test_a_from_import_names_a_module_wherever_its_list_holds_it(
 
 
 def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_it(tmp_path: Path) -> None:
-    """`db.query()` binds to db.js's `query` where `db` is the module-level alias; a parameter `db`, a
-    `const store = require(...)` inside a function, a name module-level code binds to two modules, or
-    an alias that only a template string spells, leave the call a candidate."""
+    """`db.query()` binds to db.js's `query` where `db` is the module-level alias, and to the module a
+    function's own `const store = require(...)` names inside that function; a parameter `db`, a name
+    module-level code binds to two modules, or an alias that only a template string spells, leave the
+    call a candidate."""
     # Arrange
     index = committed(
         tmp_path,
@@ -1559,16 +1591,152 @@ def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_i
         for line, receiver in found
     }
     real = index.binding_of("handler.js", 2, "query", "db")
+    own = [index.binding_of("two.js", line, "query", "store").target for line in (1, 2)]
 
     # Assert
     assert (real.status.value, real.target) == ("resolved", Span("db.js", 1, 1, "query"))
+    assert own == [Span("db.js", 1, 1, "query"), Span("fake.js", 1, 1, "query")]
     assert bindings == {
         ("handler.js", 2): "resolved",
         ("handler.js", 3): "candidate",
-        ("two.js", 1): "candidate",
-        ("two.js", 2): "candidate",
+        ("two.js", 1): "resolved",
+        ("two.js", 2): "resolved",
         ("gen.js", 2): "candidate",
         ("twice.js", 3): "candidate",
+    }
+
+
+REST_QUERY = "function RestQuery(options) {\n  return options;\n}\nmodule.exports = RestQuery;\n"
+
+
+def test_a_name_a_function_binds_once_to_a_require_holds_that_module(tmp_path: Path) -> None:
+    """parse-server's Auth.js: a module-level `import RestQuery from './RestQuery'`, and inside a
+    function its own `const RestQuery = require('./RestQuery')`. The function binds the name once, to
+    the module, and a `const` is never bound again, so `RestQuery({...})` there calls the module's
+    export, `module.exports = RestQuery`, and `lib.find()` calls the `find` that `lib` exports. An
+    inner arrow that binds nothing reads the same binding."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "RestQuery.js": REST_QUERY,
+            "lib.js": "function find() {\n  return 1;\n}\nmodule.exports = { find };\n",
+            "Auth.js": (
+                "import RestQuery from './RestQuery';\n\n"
+                "async function load(config) {\n"
+                "  const RestQuery = require('./RestQuery');\n"
+                "  const lib = require('./lib');\n"
+                "  const query = await RestQuery({ config });\n"
+                "  const later = () => RestQuery({ config });\n"
+                "  return lib.find(query, later);\n"
+                "}\n"
+            ),
+        },
+    )
+
+    # Act
+    called = [index.binding_of("Auth.js", line, "RestQuery", None) for line in (6, 7)]
+    found = index.binding_of("Auth.js", 8, "find", "lib")
+
+    # Assert
+    rest_query = Span("RestQuery.js", 1, 3, "RestQuery")
+    assert [(binding.status.value, binding.target) for binding in called] == [("resolved", rest_query)] * 2
+    assert (found.status.value, found.target) == ("resolved", Span("lib.js", 1, 3, "find"))
+
+
+@pytest.mark.parametrize(
+    ("body", "line"),
+    [
+        (
+            "  const RestQuery = require('./RestQuery');\n"
+            "  if (name) {\n    const RestQuery = wrap();\n  }\n  return RestQuery({});\n",
+            8,
+        ),
+        (
+            "  let RestQuery = require('./RestQuery');\n"
+            "  RestQuery = wrap(RestQuery);\n  return RestQuery({});\n",
+            6,
+        ),
+        (
+            "  const RestQuery = require('./RestQuery');\n"
+            "  function inner(RestQuery) {\n    return RestQuery({});\n  }\n  return inner;\n",
+            6,
+        ),
+        ("  const RestQuery = require('fs');\n  return RestQuery({});\n", 5),
+        ("  const RestQuery = require(name);\n  return RestQuery({});\n", 5),
+    ],
+    ids=["bound twice", "a let", "an inner function binds it", "no module in scope", "a computed module"],
+)
+def test_a_name_a_function_binds_otherwise_stays_its_own_value(tmp_path: Path, body: str, line: int) -> None:
+    """A name a function binds twice, a `let` that may be bound again, a parameter of an inner
+    function, a require of a module outside the scope, or of a computed name, holds no module of the
+    scope there: the call is a candidate whose local value is not resolved."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "RestQuery.js": REST_QUERY,
+            "Auth.js": f"import RestQuery from './RestQuery';\n\nfunction load(name) {{\n{body}}}\n",
+        },
+    )
+
+    # Act
+    binding = index.binding_of("Auth.js", line, "RestQuery", None)
+
+    # Assert
+    assert (binding.status.value, binding.target) == ("candidate", None), binding
+
+
+def test_a_const_require_holds_its_module_from_its_line_to_the_end_of_its_block(tmp_path: Path) -> None:
+    """A `const` is block-scoped: `const db = require('./db')` inside an `if` or a loop body holds
+    ./db from its own line to the end of that block, and one directly in the function body to the
+    end of the function. Before it, or after its block, `db` is the module-level ./other again, which
+    the function's own binding hides, so the call stays a candidate (jvn-verifier's p31). A `const`
+    in a `switch` case is scoped to the whole `switch`, no statement block, so it holds no module."""
+    # Arrange
+    module = "exports.query = function query() {{ return {n}; }};\n"
+    head = "const db = require('./other');\n"
+    index = committed(
+        tmp_path,
+        {
+            "app/db.js": module.format(n=1),
+            "app/other.js": module.format(n=2),
+            "app/in_if.js": head
+            + "function h(flag) {\n  if (flag) {\n    const db = require('./db');\n    db.query();\n  }\n"
+            "  return db.query();\n}\n",
+            "app/before.js": head
+            + "function h(flag) {\n  db.query();\n  if (flag) {\n    const db = require('./db');\n  }\n}\n",
+            "app/in_loop.js": head
+            + "function h(items) {\n  for (const x of items) {\n    const db = require('./db');\n  }\n"
+            "  return db.query();\n}\n",
+            "app/in_body.js": head
+            + "function h() {\n  const db = require('./db');\n  return db.query();\n}\n",
+            "app/in_switch.js": head
+            + "function h(kind) {\n  switch (kind) {\n    case 1:\n      const db = require('./db');\n  }\n"
+            "  return db.query();\n}\n",
+        },
+    )
+    sites = {
+        "inside the if block": ("app/in_if.js", 5),
+        "after the if block": ("app/in_if.js", 7),
+        "before the block": ("app/before.js", 3),
+        "after the loop": ("app/in_loop.js", 6),
+        "in the function body": ("app/in_body.js", 4),
+        "after a switch": ("app/in_switch.js", 7),
+    }
+
+    # Act
+    bindings = {site: index.binding_of(file, line, "query", "db") for site, (file, line) in sites.items()}
+
+    # Assert
+    query = Span("app/db.js", 1, 1, "query")
+    assert {site: (binding.status.value, binding.target) for site, binding in bindings.items()} == {
+        "inside the if block": ("resolved", query),
+        "after the if block": ("candidate", None),
+        "before the block": ("candidate", None),
+        "after the loop": ("candidate", None),
+        "in the function body": ("resolved", query),
+        "after a switch": ("candidate", None),
     }
 
 

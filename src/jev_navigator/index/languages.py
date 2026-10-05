@@ -345,6 +345,54 @@ def _script_local_names(language: str, exclusions: str) -> str:
 {exclusions}"""
 
 
+# A function's own `const name = require('module')`, declared in a block: the name holds that
+# module from its line to the end of the block, and a `const` is never bound again. The binding
+# itself is one of the function's own names (see ``LOCAL_NAME_RULES``); this rule says which module
+# it holds, joined to it by the name's position. A `let` or `var` may be bound again, a computed
+# module names none, and a `const` in a loop head or a `switch` case holds none here.
+_CONST_DECLARATION = "{kind: lexical_declaration, has: {field: kind, regex: '^const$'}}"
+
+
+def _script_local_modules(language: str) -> str:
+    functions = ", ".join(f"{{kind: {kind}}}" for kind in FUNCTION_KINDS[language])
+    return f"""  pattern: {{context: 'var $NAME = require($SPEC)', selector: variable_declarator}}
+  all:
+    - not: {{not: {{has: {{field: name, kind: identifier}}}}}}
+    - not: {{not: {{has: {{field: value, has: {{field: arguments, has: {{kind: string}}}}}}}}}}
+    - not: {{not: {{inside: {{all: [{_CONST_DECLARATION}, {{inside: {{kind: statement_block}}}}]}}}}}}
+    - not: {{not: {{inside: {{stopBy: end, any: [{functions}]}}}}}}"""
+
+
+# The blocks a function's own `const` require ends in early: a statement block other than a
+# function's body that directly holds a `const` require. A body ends with its function, so it is
+# left out, which keeps the scan from printing every function body.
+_CONST_REQUIRE = (
+    "{kind: lexical_declaration, all: [{has: {field: kind, regex: '^const$'}},"
+    " {has: {kind: variable_declarator, has: {field: value, pattern: 'require($SPEC)'}}}]}"
+)
+
+
+def _script_local_module_blocks(language: str) -> str:
+    functions = ", ".join(f"{{kind: {kind}}}" for kind in FUNCTION_KINDS[language])
+    return f"""  kind: statement_block
+  all:
+    - not: {{not: {{has: {_CONST_REQUIRE}}}}}
+    - not: {{inside: {{any: [{functions}]}}}}
+    - not: {{not: {{inside: {{stopBy: end, any: [{functions}]}}}}}}"""
+
+
+LOCAL_MODULE_RULES = {
+    "typescript": _script_local_modules("typescript"),
+    "tsx": _script_local_modules("tsx"),
+    "javascript": _script_local_modules("javascript"),
+}
+LOCAL_MODULE_BLOCK_RULES = {
+    "typescript": _script_local_module_blocks("typescript"),
+    "tsx": _script_local_module_blocks("tsx"),
+    "javascript": _script_local_module_blocks("javascript"),
+}
+
+
 # The places a Python statement binds a name: an assignment's, an augmented assignment's or a loop's
 # target, a walrus, and a with or except target.
 _PYTHON_ASSIGNED_NAMES = """            - inside:
@@ -481,6 +529,8 @@ TYPE_AND_VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_ENUMS
 DECLARED_NAME_RULES[FLOW_LANGUAGE] = _TYPED_SCRIPT_DECLARED_NAMES
 MODULE_ALIAS_RULES[FLOW_LANGUAGE] = _SCRIPT_MODULE_ALIASES
 LOCAL_NAME_RULES[FLOW_LANGUAGE] = LOCAL_NAME_RULES["tsx"]
+LOCAL_MODULE_RULES[FLOW_LANGUAGE] = LOCAL_MODULE_RULES["tsx"]
+LOCAL_MODULE_BLOCK_RULES[FLOW_LANGUAGE] = LOCAL_MODULE_BLOCK_RULES["tsx"]
 MODULE_BINDING_RULES[FLOW_LANGUAGE] = MODULE_BINDING_RULES["tsx"]
 DECORATED_KINDS[FLOW_LANGUAGE] = DECORATED_KINDS["tsx"]
 

@@ -44,6 +44,7 @@ from .scope_scan import (
     CallMatch,
     FileFacts,
     FileStructure,
+    LocalName,
     ModuleAlias,
     ReferenceMatch,
     Unparsed,
@@ -536,8 +537,12 @@ class CodeIndex:
             enclosing = self._binding_beyond_the_function(file, line, name, receiver, role)
             if enclosing is not None:
                 return enclosing
-        elif receiver is None:
-            return local_binding(name)
+        else:
+            own_module = self._binding_through_local_module(file, line, name, receiver, role)
+            if own_module is not None:
+                return own_module
+            if receiver is None:
+                return local_binding(name)
         return binding_from_facts(self._call_facts(file, name, receiver, role))
 
     def _binding_beyond_the_function(
@@ -578,9 +583,7 @@ class CodeIndex:
         ]
         if not members:
             return None
-        first, last = max(
-            ((member.first, member.last) for member in members), key=lambda lines: (lines[0], -lines[1])
-        )
+        first, last = _innermost_lines((member.first, member.last) for member in members)
         if self._unread_lines_mention(file, name, first, last):
             return unparsed_binding(name, (file,))
         innermost = [member.span for member in members if (member.first, member.last) == (first, last)]
@@ -598,21 +601,53 @@ class CodeIndex:
     def _binds_locally(self, file: str, line: int, name: str, receiver: str | None, role: str | None) -> bool:
         """Whether a function holding ``line`` binds the name the use looks up first for its own body:
         ``stop`` in ``stop()``, ``db`` in ``db.query()``. That name then holds a local value, never a
-        definition, import or module alias of its module; a method on it is still looked up by its
-        own name. A type is looked up among types, which no local value replaces, and an export names
+        definition, import or module alias of its module (only the module a function's own require
+        binds, see ``_binding_through_local_module``); a method on it is still looked up by its own
+        name. A type is looked up among types, which no local value replaces, and an export names
         module-level code. A function counts from its first line, so a call on that line before the
         function starts counts as inside it."""
         if role in ("type", "export"):
             return False
         looked_up = name if receiver is None else first_identifier(receiver)
-        return any(first <= line <= last for first, last in self._read_local_scopes(file).get(looked_up, ()))
+        return any(
+            local.first <= line <= local.last for local in self._read_local_bindings(file).get(looked_up, ())
+        )
+
+    def _binding_through_local_module(
+        self, file: str, line: int, name: str, receiver: str | None, role: str | None
+    ) -> Binding | None:
+        """The binding of a use of a name that the innermost function around ``line`` binds exactly
+        once, and to a whole module of the scope (``const db = require('./db')``, see ``LocalName``):
+        ``db()`` calls the module's default export, ``db.query()`` the ``query`` it exports. None
+        when that function binds the name more than once or to anything else, or when the receiver is
+        longer than the name."""
+        module = self._local_module(file, line, name if receiver is None else receiver)
+        if module is None:
+            return None
+        return self._binding_through_exporters(file, module, "default" if receiver is None else name, role)
+
+    def _local_module(self, file: str, line: int, name: str) -> str | None:
+        """The module ``name`` holds at ``line`` when the innermost function there that binds it binds
+        it once, to a whole module, and ``line`` lies from that binding to the end of its block."""
+        holding = [
+            local
+            for local in self._read_local_bindings(file).get(name, ())
+            if local.first <= line <= local.last
+        ]
+        if not holding:
+            return None
+        innermost = _innermost_lines((local.first, local.last) for local in holding)
+        own = [local for local in holding if (local.first, local.last) == innermost]
+        if len(own) != 1 or not own[0].line <= line <= own[0].block_end:
+            return None
+        return own[0].module or None
 
     @memoized
-    def _read_local_scopes(self, file: str) -> dict[str, tuple[tuple[int, int], ...]]:
-        scopes: dict[str, list[tuple[int, int]]] = {}
+    def _read_local_bindings(self, file: str) -> dict[str, tuple[LocalName, ...]]:
+        bindings: dict[str, list[LocalName]] = {}
         for local in self._file_structure(file).local_names:
-            scopes.setdefault(local.name, []).append((local.first, local.last))
-        return {name: tuple(lines) for name, lines in scopes.items()}
+            bindings.setdefault(local.name, []).append(local)
+        return {name: tuple(found) for name, found in bindings.items()}
 
     def _load_facts_for_bindings(self, name: str, use_files: Iterable[str]) -> None:
         """Loads, in one scan, the facts that binding the uses of ``name`` reads: the files the uses
@@ -1322,6 +1357,12 @@ def _in_file_order(spans_and_names: Iterable[tuple[Span, str]]) -> tuple[str, ..
 def _commits(log: str) -> list[set[str]]:
     blocks = log.split(_COMMIT_MARK)
     return [{line.strip() for line in block.split("\n") if line.strip()} for block in blocks if block.strip()]
+
+
+def _innermost_lines(lines: Iterable[tuple[int, int]]) -> tuple[int, int]:
+    """Of the nested scopes around one line, as first and last lines, the innermost: the one that
+    starts last, and of those starting together the one that ends first."""
+    return max(lines, key=lambda scope: (scope[0], -scope[1]))
 
 
 def _innermost(functions: Iterable[Span], line: int) -> Span | None:
