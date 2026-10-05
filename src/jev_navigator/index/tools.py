@@ -5,14 +5,17 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 from typing import IO
+
+import msgspec
 
 from .. import memory_limit
 from .file_shape import Placement, placement_of
@@ -23,7 +26,7 @@ RIPGREP = "rg"
 # `--no-config` keeps ripgrep from reading `RIPGREP_CONFIG_PATH`: over an untrusted repository, a
 # config file could otherwise inject flags such as `--pre=<program>`, which runs an arbitrary
 # program. It also keeps a personal rg config from changing what the index sees.
-_RIPGREP_SAFE = (RIPGREP, "--no-config")
+RIPGREP_SAFE = (RIPGREP, "--no-config")
 _NO_MATCHES_EXIT = 1
 _SCANNED_FILE_PREFIX = "sg: entity|file|"
 NEUTRAL_AST_GREP_CONFIG = "ruleDirs: []\n"
@@ -54,18 +57,29 @@ def run_command(
 ) -> str:
     """The command's output; ``no_match_exit`` is the exit code a search tool uses for "nothing found";
     ``stdin``, when given, is written to the command's standard input."""
+    return command_output(arguments, cwd, no_match_exit=no_match_exit, stdin=stdin).decode()
+
+
+def command_output(
+    arguments: Sequence[str], cwd: Path, *, no_match_exit: int | None = None, stdin: str | None = None
+) -> bytes:
+    """``run_command``'s output as the bytes the command wrote, for output that quotes file content."""
     with memory_limit.started(
         arguments,
         cwd=cwd,
         stdin=None if stdin is None else subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
     ) as process:
-        output, errors = process.communicate(stdin)
+        output, error_output = process.communicate(None if stdin is None else stdin.encode())
     if process.returncode not in (0, no_match_exit):
-        raise ToolFailedError(f"{arguments[0]} exited {process.returncode}: {errors.strip()[:300]}")
+        raise _tool_failure(arguments[0], process.returncode, error_output.decode(errors="replace"))
     return output
+
+
+def _tool_failure(tool: str, returncode: int, stderr: str) -> ToolFailedError:
+    """The failure with the tool's whole error output, whose cause is often its last line."""
+    return ToolFailedError(f"{tool} exited {returncode}: {stderr.strip()}")
 
 
 @cache
@@ -80,6 +94,7 @@ def ast_grep_rules(
     config: str | None = None,
     *,
     refused: dict[str, str],
+    decode: Callable[[str], dict] = json.loads,
 ) -> Iterator[dict]:
     """The matches of ``rules_yaml`` over ``files``, one at a time as ast-grep prints them, so no
     process's whole output is ever held. Every parse passes through here, placed by its estimated parse
@@ -93,7 +108,8 @@ def ast_grep_rules(
     JVN-owned sgconfig: ``config``, when given, is sgconfig YAML text (a ``languageGlobs`` remapping,
     say), otherwise ``NEUTRAL_AST_GREP_CONFIG``. It is written to a temporary file outside every
     repository and passed with ``--config``, so the repository being analysed never configures the
-    parser."""
+    parser. ``decode`` turns one printed match into the dict the caller reads, in every run, side by
+    side or alone; a caller that reads few fields passes a decoder that skips the rest."""
     limit = memory_limit.process_guard().limit
     placed = _placed(files, cwd, limit.single_parse_mb)
     refused.update(placed.refused)
@@ -107,19 +123,24 @@ def ast_grep_rules(
         command = [AST_GREP, "scan", "--inline-rules", rules_yaml, "--config", str(path)]
         side_by_side = [*command, "--threads", str(limit.parse_threads)]
         for chunk in file_chunks(placed.side_by_side):
-            yield from _scanned(side_by_side, chunk, cwd, refused)
+            yield from _scanned(side_by_side, chunk, cwd, refused, decode)
         for file in placed.alone:
-            yield from _scanned([*command, "--threads", "1"], [file], cwd, refused)
+            yield from _scanned([*command, "--threads", "1"], [file], cwd, refused, decode)
 
 
 def _scanned(
-    command: Sequence[str], files: Sequence[str], cwd: Path, refused: dict[str, str]
+    command: Sequence[str],
+    files: Sequence[str],
+    cwd: Path,
+    refused: dict[str, str],
+    decode: Callable[[str], dict],
 ) -> Iterator[dict]:
-    """The matches of one ast-grep run over ``files``; a file it skipped without parsing is added to
-    ``refused`` when the run ends."""
+    """The matches of one ast-grep run over ``files``, each decoded with ``decode``; a file it skipped
+    without parsing is added to ``refused`` when the run ends."""
     yield from _json_lines(
         [*command, "--json=stream", "--inspect=entity", "--", *files],
         cwd,
+        decode=decode,
         on_stderr=lambda inspection: refused.update(_skipped_files(files, inspection, cwd)),
     )
 
@@ -194,9 +215,13 @@ def _not_parsed_reason(path: Path) -> str | None:
 
 
 def _json_lines(
-    arguments: Sequence[str], cwd: Path, on_stderr: Callable[[str], None] | None = None
+    arguments: Sequence[str],
+    cwd: Path,
+    *,
+    decode: Callable[[str], dict],
+    on_stderr: Callable[[str], None] | None = None,
 ) -> Iterator[dict]:
-    """Each line the command prints, parsed as JSON while it runs. stderr goes to a file, so a full
+    """Each line the command prints, decoded with ``decode`` while it runs. stderr goes to a file, so a full
     stderr pipe cannot stall the command; the process is killed if the reader stops early. A line
     that is no JSON (the process died partway through it) fails with the process's exit code and
     stderr, which say why it stopped. ``on_stderr`` gets the whole stderr text once the command has
@@ -207,16 +232,22 @@ def _json_lines(
         ) as process:
             for line in process.stdout:
                 if line.strip():
-                    yield _json_object(line, process, errors, arguments[0])
+                    yield _json_object(line, process, errors, arguments[0], decode)
         if process.returncode not in (0, _NO_MATCHES_EXIT):
             raise _tool_failed(arguments[0], process.returncode, errors)
         if on_stderr is not None:
             on_stderr(_stderr_text(errors))
 
 
-def _json_object(line: str, process: subprocess.Popen, errors: IO[bytes], tool: str) -> dict:
+def _json_object(
+    line: str, process: subprocess.Popen, errors: IO[bytes], tool: str, decode: Callable[[str], dict]
+) -> dict:
+    """A whole line the decoder rejects for a missing or mistyped field raises as it is: the tool
+    printed it in full, so the decoder's expectation, not the tool, is what failed."""
     try:
-        return json.loads(line)
+        return decode(line)
+    except msgspec.ValidationError:
+        raise
     except ValueError as malformed:
         process.kill()
         raise _tool_failed(tool, process.wait(), errors) from malformed
@@ -227,7 +258,7 @@ def _tool_failed(tool: str, returncode: int, errors: IO[bytes]) -> ToolFailedErr
     files, which can run to one line per file of the scope."""
     lines = _stderr_text(errors).splitlines()
     message = "\n".join(line for line in lines if not line.startswith(_SCANNED_FILE_PREFIX))
-    return ToolFailedError(f"{tool} exited {returncode}: {message.strip()}")
+    return _tool_failure(tool, returncode, message)
 
 
 def _stderr_text(errors: IO[bytes]) -> str:
@@ -235,48 +266,124 @@ def _stderr_text(errors: IO[bytes]) -> str:
     return errors.read().decode(errors="replace")
 
 
-def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:
-    """The lines holding ``text``. JSON events are split at newlines only, since a line of code may
-    hold a Unicode line separator that ``str.splitlines`` would split."""
-    command = [*_RIPGREP_SAFE, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
-    hits = []
+def ripgrep_fixed(
+    text: str, files: Sequence[str], cwd: Path, max_hits: int, context_bytes: int, *, whole_word: bool = False
+) -> list[TextHit]:
+    """The lines holding ``text``, at most ``max_hits`` per file, each as the bytes around one hit:
+    up to ``context_bytes`` before and after, so a one-line bundle costs no more than a short line.
+    ``whole_word`` keeps only hits no word character touches. The match runs on to the end of the
+    line, so each line matches once, and ``--replace`` prints only its window; ripgrep's JSON would
+    carry the whole line."""
+    pattern = _hit_window(text, context_bytes, whole_word)
+    command = [*RIPGREP_SAFE, "--only-matching", "--line-number", "--with-filename", "--null"]
+    command += ["--max-count", str(max_hits), "--replace", "$window", "--regexp", pattern, "--"]
+    hits: dict[tuple[str, int], TextHit] = {}
     for chunk in file_chunks(files, bytes_only=True):
-        output = run_command([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
-        events = (json.loads(line) for line in output.split("\n") if line.strip())
-        hits += [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
+        for hit in _windows(command_output([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)):
+            hits.setdefault((hit.file, hit.line), hit)
+    return list(hits.values())
+
+
+def _hit_window(text: str, context_bytes: int, whole_word: bool) -> str:
+    """A regular expression capturing, as ``window``, ``text`` with up to ``context_bytes`` of any
+    bytes on either side, then matching the rest of the line. The text's characters other than
+    letters, digits and underscores are written as code points, so no character of it is read as
+    syntax."""
+    context = f"(?-u:.){{0,{context_bytes}}}"
+    literal = "".join(char if char.isalnum() or char == "_" else f"\\x{{{ord(char):x}}}" for char in text)
+    if whole_word:
+        literal = rf"(?:^|\W){literal}(?:\W|$)"
+    return f"(?P<window>{context}{literal}{context})(?-u:.)*"
+
+
+def _windows(output: bytes) -> Iterator[TextHit]:
+    """The hits of ripgrep's ``--null`` printer, ``path NUL line:window`` per line of output. A window
+    holds no newline, and a path ends at its NUL, so a newline in a path cannot split a record.
+    Bytes that are not UTF-8 are decoded the way the index reads files, with invalid bytes replaced."""
+    position = 0
+    while position < len(output):
+        path_end = output.index(b"\0", position)
+        number_end = output.index(b":", path_end)
+        window_end = output.find(b"\n", number_end)
+        window_end = len(output) if window_end < 0 else window_end
+        path = output[position:path_end].decode(errors="replace").removeprefix("./")
+        window = output[number_end + 1 : window_end].decode(errors="replace").rstrip("\r")
+        yield TextHit(path, int(output[path_end + 1 : number_end]), window)
+        position = window_end + 1
+
+
+def ripgrep_lines(texts: Sequence[str], files: Sequence[str], cwd: Path) -> list[TextHit]:
+    """Every line of the supplied files holding any of the exact ``texts``, all texts searched in one
+    pass over the files."""
+    if not files or not texts:
+        return []
+    hits = []
+    with _pattern_file(texts) as patterns:
+        command = [*RIPGREP_SAFE, "--json", "--fixed-strings", "-f", patterns]
+        for chunk in file_chunks(files, bytes_only=True):
+            hits += _match_lines(run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT))
     return hits
 
 
-def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
-    """Regular, non-symlink files owned by this working directory, including hidden paths.
+def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -> tuple[str, ...]:
+    """Every supplied file containing any of the exact ``texts``, without a result-count cutoff. Only
+    paths come back, and ripgrep stops reading a file at its first match, so a 20 MB one-line bundle
+    costs what a small file does; ``ripgrep_lines`` would print that line with every match."""
+    patterns = [texts] if isinstance(texts, str) else list(texts)
+    if not files or not patterns:
+        return ()
+    found: list[str] = []
+    with _pattern_file(patterns) as pattern_path:
+        command = [*RIPGREP_SAFE, "--files-with-matches", "--null", "--fixed-strings", "-f", pattern_path]
+        for chunk in file_chunks(files, bytes_only=True):
+            output = run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
+            found += [path.removeprefix("./") for path in output.split("\0") if path]
+    return tuple(found)
 
-    A Git worktree uses its tracked and untracked, non-ignored inventory, which naturally excludes
-    nested repositories and managed worktrees. A non-Git directory uses ripgrep's ignore policy.
-    """
-    if inside_git_worktree(cwd):
-        output = git(["ls-files", "-z", "-c", "-o", "--exclude-standard", "--", *prefixes], cwd)
-    else:
-        output = run_command(
-            [
-                *_RIPGREP_SAFE,
-                "--files",
-                "--hidden",
-                "--null",
-                "--glob",
-                "!.git",
-                "--glob",
-                "!.git/**",
-                *prefixes,
-            ],
-            cwd,
-        )
-    files = []
-    for raw in output.split("\0"):
-        path = raw.removeprefix("./")
-        candidate = cwd / path
-        if path and candidate.is_file() and not candidate.is_symlink():
-            files.append(path)
-    return tuple(sorted(dict.fromkeys(files)))
+
+@contextmanager
+def _pattern_file(texts: Sequence[str]) -> Iterator[str]:
+    """The path of a temporary ripgrep pattern file holding ``texts``, one per line, so their number
+    never meets the argument limit."""
+    if any("\n" in text for text in texts):
+        raise ValueError("a text searched for by file cannot hold a line break")
+    with tempfile.NamedTemporaryFile("w", prefix="jev-navigator-patterns-", suffix=".txt") as pattern_file:
+        pattern_file.write("".join(f"{text}\n" for text in texts))
+        pattern_file.flush()
+        yield pattern_file.name
+
+
+def _match_lines(output: str) -> list[TextHit]:
+    """The match events of ripgrep's JSON output. Events are split at newlines only, since a line of
+    code may hold a Unicode line separator that ``str.splitlines`` would split."""
+    events = (json.loads(line) for line in output.split("\n") if line.strip())
+    return [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
+
+
+def inside_git_worktree(cwd: Path) -> bool:
+    """Whether ``cwd`` lies in a Git worktree. Only git's own "not a git repository" means no; any
+    other failure, such as a repository git refuses for dubious ownership, is raised, so it is never
+    listed as a plain directory. Git runs in the C locale so that message is never translated."""
+    with memory_limit.started(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+    ) as process:
+        output, error_output = process.communicate()
+    if process.returncode == 0:
+        return output.strip() == "true"
+    if "not a git repository" in error_output:
+        return False
+    raise _tool_failure("git", process.returncode, error_output)
+
+
+def head_commit(cwd: Path) -> str:
+    """HEAD's commit in the Git worktree at ``cwd``; empty before its first commit, which is the one
+    case `git rev-parse -q --verify` reports with exit 1 and no message. Any other failure raises."""
+    return run_command(["git", "rev-parse", "-q", "--verify", "HEAD"], cwd, no_match_exit=1).strip()
 
 
 def _text_hit(match: dict) -> TextHit:
@@ -289,13 +396,6 @@ def _decoded(field: dict) -> str:
     if "text" in field:
         return field["text"]
     return base64.b64decode(field["bytes"]).decode("utf-8", errors="replace")
-
-
-def inside_git_worktree(cwd: Path) -> bool:
-    try:
-        return git(["rev-parse", "--is-inside-work-tree"], cwd).strip() == "true"
-    except ToolFailedError:
-        return False
 
 
 def git(arguments: Sequence[str], cwd: Path, *, stdin: str | None = None) -> str:
@@ -328,9 +428,9 @@ def _cat_file_batch(repository: Path, object_ids: Iterable[str]) -> list[bytes]:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     ) as process:
-        output, errors = process.communicate(requests)
+        output, error_output = process.communicate(requests)
     if process.returncode != 0:
-        raise ToolFailedError(f"git cat-file exited {process.returncode}: {errors.decode()[:300]}")
+        raise _tool_failure("git cat-file", process.returncode, error_output.decode(errors="replace"))
     return _batch_contents(output)
 
 

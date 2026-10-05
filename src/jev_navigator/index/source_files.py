@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 import zlib
+from collections import OrderedDict
 from collections.abc import Callable, MutableMapping
-from functools import lru_cache
 from pathlib import Path
 
 from .languages import split_lines
@@ -34,7 +35,9 @@ class SourceFiles:
         self._standing_first_read = standing_first_read
         self._sha256: dict[str, str] = {}
         self._first_read: dict[str, bytes] = {}
-        self._lines = lru_cache(maxsize=line_cache_files)(self._read_lines)
+        self._line_cache_files = line_cache_files
+        self._lines: OrderedDict[str, tuple[str, ...]] = OrderedDict()
+        self._lines_lock = threading.Lock()
 
     def current(self, file: str) -> bytes | None:
         """The file's bytes while they still equal its first read; ``None`` once it changed or
@@ -59,7 +62,18 @@ class SourceFiles:
         return zlib.decompress(stored) if stored is not None else None
 
     def lines(self, file: str) -> tuple[str, ...]:
-        return self._lines(file)
+        """The file's lines as first read; the most recently read ``line_cache_files`` files keep
+        theirs split."""
+        with self._lines_lock:
+            if file in self._lines:
+                self._lines.move_to_end(file)
+                return self._lines[file]
+        lines = self._read_lines(file)
+        with self._lines_lock:
+            self._lines[file] = lines
+            while len(self._lines) > self._line_cache_files:
+                self._lines.popitem(last=False)
+        return lines
 
     def sha256(self, file: str) -> str:
         """The SHA-256 of the bytes the index first read from ``file``."""

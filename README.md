@@ -111,9 +111,11 @@ When its code runs from a jev-navigator source checkout (`uv run jvn` there, or 
 install), `jvn` first fills what is missing from that checkout's `.env` (see `.env.example`). Any
 install into site-packages (`uv tool install`, `pipx`, a non-editable `pip install`) reads no
 `.env`, and when the directory it runs in holds one, it says on stderr that it did not read it. It
-never reads a `.env` from the directory or repository it searches. A settings file can set only
+never reads a `.env` from the directory or repository it searches, unless that is the checkout
+its own code runs from. A settings file can set only
 `jvn`'s own `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names; `jvn` names on stderr any
-other name it ignores, never its value.
+other name it ignores, never its value. The `JEV_NAVIGATOR_*` settings hold the judgment thresholds
+only; a search's budget comes from its flags or the request's JSON fields.
 
 ### Decision-model routes
 
@@ -281,7 +283,9 @@ applies every rule now.
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator import operations, comments
 
-index = CodeIndex.from_git(repo_root, prefixes=("app/", "web/"))
+index = CodeIndex.from_directory(repo_root, prefixes=("app/", "web/"))  # tracked or not, minus ignored
+index.not_indexed_files  # {"node_modules/": "ignored", ...}: every file or folder left out, with the reason
+tracked = CodeIndex.from_git(repo_root, ["app/orders.py"])  # only what git tracks; the rest is not_indexed
 old = CodeIndex.at_commit(repo_root, "abc123", prefixes=("app/",))  # from git objects, checkout untouched
 index.find_definition("LIMITS_KEY")  # functions, classes, constants, assignments, types, enums
 index.find_callers("validate_order")  # CallSite(file, line, caller, binding), found by name
@@ -390,7 +394,8 @@ index first read, the text its SHA-256 names, never in its new form. The index k
 first read compressed for the run, about 2 MB per 1,000 files of Heedvane's web app. Each call
 site's binding is computed once, and `search_text` and `co_changed_files` each run their tool once
 per argument for the life of the index. The index keeps the lines of a bounded number of recently
-read files (`LINE_CACHE_FILES`). There is no default file-count refusal or parser timeout, and no requested file is silently
+read files (`LINE_CACHE_FILES`). Every cache an index keeps lives in the index itself and none holds
+it back, so a dropped index, with its facts and first reads, is freed at once. There is no default file-count refusal or parser timeout, and no requested file is silently
 omitted.
 
 Before that pass, `.js` files whose leading comments (before any code, after an optional byte-order
@@ -500,6 +505,15 @@ else:
   under dist/" and its measured facts. Anywhere else it stays in `files`, counted toward the cap, and
   is listed in `resolved.awaiting_generated_judgment` with its measured facts, for Jev to judge. With
   `with_generated` nothing is measured and nothing awaits a judgment.
+- `judgments.generated_files.judge_generated_files(judge, index, resolved.awaiting_generated_judgment)`
+  asks Jev about those files, one question each: is the file generated, meaning no person edits it as
+  source? Each file is sent as its path, its measured facts, up to 10 files that import it with their
+  true count, up to 5 files that name its path with the naming line (at most 200 characters around
+  the path; files outside the scope count, non-test files come first; a path written relative to the
+  naming file, such as `../src/a.js`, or joined to a variable folder, such as `$root/src/a.js`, is not
+  found) and their true count, and two 2,000-character excerpts (the opening and the middle). A file
+  the secret scan would refuse is never sent and comes back in `not_judged` with the reason. Nothing calls it yet: the
+  search that acts on the answers lands with Find v2's round controller.
 - `include` and `exclude` entries without `*`, `?` or `[` are folders or files. Other entries are
   globs over the whole path: `**` crosses folders, and a glob without `/` matches the file name at any
   depth unless a leading `/` anchors it at the root.
@@ -779,8 +793,14 @@ costs no calls. A `choose_next` step lists the places opened next, each with its
 code, the `contains_target` probability and verdict, every neighbour offered with its `could_contain`
 probability, the `open_first` pick, and places set aside (`capped` or `depth`). A final `stop` step
 names the outcome, the not-inspected frontier with reasons, and the last stop check, so the history
-and the result agree. Without a stop rule nothing reads the history; with one, the stop check reads the
-sections it selects (by default only the fetched code). `HistoryStep` is generic: append your own steps (an agent's tool call and result) the same way.
+and the result agree. Each Jev judgment in a step names the answer behind it in `answered_by` (a place
+`choose_next` opens names the answer that scored it in `scored_by`): the request's `request_sha256`, the
+`question_id` it was asked under, and `from_store`. The journal's `request` row with that hash lists the
+question id, and that row's `response` holds the answer, also for an opening split into several requests;
+packs written before these fields resume as before. Each automatic entry selection decision in the
+manifest's `entry_selection`, and each Find All verdict in `found`, `unsure` and `searched`, names its
+answer the same way. Without a stop rule nothing reads the history; with
+one, the stop check reads the sections it selects (by default only the fetched code). `HistoryStep` is generic: append your own steps (an agent's tool call and result) the same way.
 
 ## LlmStep: an LLM call you add yourself
 
@@ -863,8 +883,11 @@ Neither a question hash nor a frozen manifest proves model quality or dataset co
 `uv run pytest --basetemp=<scratch dir>`. Tests run offline against small real git repositories and
 `ScriptedJevClient`. The suite retains the ten Express/Next.js and FastAPI/GraphQL graph
 capability regressions and verifies request/response capture through a real local HTTP socket.
-The TypeSafe adapter's tests run only with the extra installed:
-`uv run --extra typesafe pytest`. Run `uv run ruff check src tests` and
+Plain `uv run pytest` installs the TypeSafe extra with the dev group, so every test runs. A skipped
+test did not run, so a run with a skip fails and names it, unless the test declares a platform it
+cannot run on with a `skipif` condition. To show the core works without the extra, run
+`uv run --no-dev --with pytest pytest --without-typesafe`: only there may the TypeSafe tests skip,
+and it refuses to start when the extra is installed. Run `uv run ruff check src tests` and
 `uv run ruff format --check src tests` before pushing. Local checks are the normal validation
 path for this small library; pushes and pull requests do not launch hosted CI. The `tests`
 workflow is available through GitHub Actions **Run workflow** when an explicit cross-version

@@ -1,5 +1,6 @@
 """A small real repository (Python and TypeScript, two commits) that the index tests run against,
-and every test's isolation from the developer's own decision-model settings."""
+every test's isolation from the developer's own decision-model settings, and the guard that fails a
+run with an undeclared skip."""
 
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from pathlib import Path
 import pytest
 from git_repos import git, write_files
 from isolated_jvn import NO_SETTINGS
+from no_skipped_tests import *  # noqa: F403
 
 from jev_navigator.cache_root import cache_root
 from jev_navigator.data_root import data_root

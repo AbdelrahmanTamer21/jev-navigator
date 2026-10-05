@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from git_repos import commit_all, git, write_files
 
+from jev_navigator.index import tools
 from jev_navigator.index.file_shape import Trigger, shape_of
 from jev_navigator.index.scope import (
     KNOWN_LANGUAGES,
@@ -252,6 +253,18 @@ def test_code_that_has_decided_a_flagged_file_sends_no_question(
 
     assert set(resolved.files) == {path for path in files if path.endswith(".js")}
     assert (dict(resolved.awaiting_generated_judgment), dict(resolved.set_aside)) == ({}, {})
+
+
+def test_a_repository_git_refuses_is_never_scoped_as_a_plain_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    repo = _repository(tmp_path / "repo", {"app.py": SOURCE})
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+
+    # Act and assert
+    with pytest.raises(tools.ToolFailedError, match="dubious ownership"):
+        resolve_scope(_scope(repo))
 
 
 def test_a_false_linguist_attribute_keeps_a_file_the_path_rule_would_leave_out(tmp_path: Path) -> None:

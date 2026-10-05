@@ -55,7 +55,7 @@ def test_trace_command_writes_a_real_pack_with_default_output(
     client = _evidence_client()
     client.close = lambda: None
     monkeypatch.setattr(cli, "system_one_client", lambda environment: client)
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
     monkeypatch.chdir(tmp_path)
     request = {
         "command": "trace",
@@ -413,6 +413,23 @@ def test_second_pack_replays_the_persisted_answers_from_the_store(tmp_path: Path
         for obligation in manifest["trace"]["obligations"]
         for evidence in obligation["evidence"]
     )
+
+
+def test_trace_names_each_ignored_file_as_not_indexed(tmp_path: Path) -> None:
+    # Arrange
+    repository = _workflow_repository(tmp_path)
+    (repository / ".gitignore").write_text("build/\n")
+    (repository / "build").mkdir()
+    (repository / "build" / "respond.py").write_text("def respond():\n    return 1\n")
+
+    # Act
+    manifest = _pack(repository, tmp_path / "pack", _evidence_client())
+
+    # Assert
+    assert manifest["trace"]["not_indexed_files"] == {"build/": "ignored"}
+    report = (tmp_path / "pack" / "report.md").read_text()
+    assert "| ignored | `build/` | 1 |" in report
+    assert "`trace.not_indexed_files` in `manifest.json`" in report
 
 
 def test_trace_names_each_file_the_parser_refused_with_its_reason(tmp_path: Path) -> None:

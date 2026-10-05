@@ -4,6 +4,7 @@ and real JVN processes contending for real slot files."""
 from __future__ import annotations
 
 import asyncio
+import json
 import mmap
 import os
 import shutil
@@ -230,7 +231,7 @@ def test_a_reader_that_stops_early_does_not_wait_for_its_child(
             started_processes.append(self)
 
     monkeypatch.setattr(subprocess, "Popen", RecordedPopen)
-    lines = tools._json_lines([sys.executable, "-c", PRINTS_A_LINE_THEN_STAYS], tmp_path)
+    lines = tools._json_lines([sys.executable, "-c", PRINTS_A_LINE_THEN_STAYS], tmp_path, decode=json.loads)
     started = time.monotonic()
 
     # Act
@@ -267,19 +268,24 @@ def test_a_real_parse_over_the_allowance_is_stopped_and_caches_no_facts(
     assert bundle not in index.unavailable_files
 
 
+@pytest.mark.parametrize(
+    "run_git",
+    [lambda folder: tools.git(["--version"], folder), tools.inside_git_worktree],
+    ids=["git", "inside_git_worktree"],
+)
 def test_growth_past_the_allowance_starts_no_further_process(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: list[list[str]]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: list[list[str]], run_git
 ) -> None:
     # Arrange
     _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
-    tools.git(["--version"], tmp_path)
+    run_git(tmp_path)
 
     # Act
     with _holding(200), pytest.raises(MemoryLimitReachedError, match="memory allowance of 100 MB"):
-        tools.git(["--version"], tmp_path)
+        run_git(tmp_path)
 
-    # Assert
-    assert commands == [["git", "--version"]]
+    # Assert: the one git process started before the growth
+    assert [command[0] for command in commands] == ["git"]
 
 
 def test_growth_past_the_allowance_stops_loading_cached_facts(
