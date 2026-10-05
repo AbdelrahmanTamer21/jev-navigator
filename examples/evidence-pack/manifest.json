@@ -20,6 +20,7 @@
   "provider": {
     "input_tokens": 200,
     "input_tokens_complete": true,
+    "replayed_answers": 0,
     "requested_model": "jev-scripted",
     "responses_without_usage": 0,
     "served_model": "jev-scripted",
@@ -325,6 +326,7 @@
     ],
     "steps": 2,
     "unavailable_files": {},
+    "not_indexed_files": {},
     "unparsed_files": [],
     "unsure": []
   },
@@ -334,7 +336,7 @@
     ],
     "repository": "https://github.com/example/orders",
     "revision": "1111111111111111111111111111111111111111",
-    "tracked_files": 2
+    "indexed_files": 2
   },
   "target": "the check that limits how many items an order may have",
   "thresholds": {

@@ -228,7 +228,7 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   same questions replays from it after the live requests that learn the served model (one for Find
   All and Trace, one per place a Find's first round opens, up to `--beam-width`; Find All and
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
-  `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
+  `answers.jsonl`. Every pack reports those answers as `provider.replayed_answers` beside its live calls.
   `--answer-store PATH` points a run at another store file; each run prints the store it uses.
 - `resume.json` (budget-stopped, cancelled or failed runs): the frontier as locations; Resume re-reads the
   code from the unchanged repository.
@@ -276,8 +276,11 @@ applies every rule now.
 ```python
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator import operations, comments
+from jev_navigator.index import units
 
-index = CodeIndex.from_git(repo_root, prefixes=("app/", "web/"))
+index = CodeIndex.from_directory(repo_root, prefixes=("app/", "web/"))  # tracked or not, minus ignored
+index.not_indexed_files  # {"node_modules/": "ignored", ...}: every file or folder left out, with the reason
+tracked = CodeIndex.from_git(repo_root, ["app/orders.py"])  # only what git tracks; the rest is not_indexed
 old = CodeIndex.at_commit(repo_root, "abc123", prefixes=("app/",))  # from git objects, checkout untouched
 index.find_definition("LIMITS_KEY")  # functions, classes, constants, assignments, types, enums
 index.find_callers("validate_order")  # CallSite(file, line, caller, binding), found by name
@@ -286,12 +289,17 @@ index.find_references("send_invoice")  # Reference(name, file, line, role, holde
 index.references_in(span)  # names a function passes on without calling (callbacks, registries)
 index.enclosing_symbol(file, line)
 index.symbols_in(file)
+index.decorator_starts_in(file)  # each decorated function's span and its first decorator line
+index.stubs_in(file)  # functions whose body is only ..., pass, a docstring or raise NotImplementedError
 index.read_slice(span)
 index.read_window(file, line, radius=10)
 index.search_text("orders.max_items")  # ripgrep over the narrowed files only
 index.imports(file)
 index.dependents(file)
 index.co_changed_files(file)
+
+units.list_units(index, files, box_chars=room)  # outermost functions and methods, top-level code; room: docs/extending.md
+units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=room)  # the units holding lines or line ranges
 
 operations.slice_around(index, file, line)  # the enclosing function, or a window
 operations.code_described_by_comment(index, file, line)  # the whole next symbol or block
@@ -386,7 +394,8 @@ index first read, the text its SHA-256 names, never in its new form. The index k
 first read compressed for the run, about 2 MB per 1,000 files of Heedvane's web app. Each call
 site's binding is computed once, and `search_text` and `co_changed_files` each run their tool once
 per argument for the life of the index. The index keeps the lines of a bounded number of recently
-read files (`LINE_CACHE_FILES`). There is no default file-count refusal or parser timeout, and no requested file is silently
+read files (`LINE_CACHE_FILES`). Every cache an index keeps lives in the index itself and none holds
+it back, so a dropped index, with its facts and first reads, is freed at once. There is no default file-count refusal or parser timeout, and no requested file is silently
 omitted.
 
 Before that pass, `.js` files whose leading comments (before any code, after an optional byte-order
@@ -791,8 +800,14 @@ costs no calls. A `choose_next` step lists the places opened next, each with its
 code, the `contains_target` probability and verdict, every neighbour offered with its `could_contain`
 probability, the `open_first` pick, and places set aside (`capped` or `depth`). A final `stop` step
 names the outcome, the not-inspected frontier with reasons, and the last stop check, so the history
-and the result agree. Without a stop rule nothing reads the history; with one, the stop check reads the
-sections it selects (by default only the fetched code). `HistoryStep` is generic: append your own steps (an agent's tool call and result) the same way.
+and the result agree. Each Jev judgment in a step names the answer behind it in `answered_by` (a place
+`choose_next` opens names the answer that scored it in `scored_by`): the request's `request_sha256`, the
+`question_id` it was asked under, and `from_store`. The journal's `request` row with that hash lists the
+question id, and that row's `response` holds the answer, also for an opening split into several requests;
+packs written before these fields resume as before. Each automatic entry selection decision in the
+manifest's `entry_selection`, and each Find All verdict in `found`, `unsure` and `searched`, names its
+answer the same way. Without a stop rule nothing reads the history; with
+one, the stop check reads the sections it selects (by default only the fetched code). `HistoryStep` is generic: append your own steps (an agent's tool call and result) the same way.
 
 ## LlmStep: an LLM call you add yourself
 

@@ -29,6 +29,8 @@ jvn trace 'how the source quote becomes an accepted or rejected claim' --start a
 ```
 
 Run in the source directory, or add `--repo /path/to/repo`. Dirty trees and non-Git directories work.
+Every file under it is searched whether git tracks it or not; ignored files (a .gitignore, or outside
+Git ripgrep's ignore files) are not, and the report lists them as not indexed with the reason.
 Output defaults to a unique run folder under `~/.local/share/jev-navigator/runs/` whose path the run prints; nothing is written into the project. Trace starts must be repository-relative
 `PATH:LINE` values inside a function or method, not a class declaration. Unknown entry? Find first,
 inspect the returned function, then trace it. Quote the entire natural-language argument once.
@@ -80,7 +82,7 @@ requests that learn the served model: one for Find All and Trace, one per place 
 opens. Give each experiment or eval arm its own store with `--answer-store PATH` (or
 `JEV_NAVIGATOR_ANSWER_STORE`) outside the cache folder so arms never reuse each other's answers;
 stderr names the store in use, and a store inside the cache folder is refused with exit status 2.
-`jvn trace` reports `replayed_answers` beside its live `calls`.
+Every pack reports `provider.replayed_answers`, the answers a store gave instead of Jev, beside its live calls.
 
 The first search in a scope parses every file in it once and records each name and its lines in the
 name table under the same cache folder; later searches over unchanged files look names up there

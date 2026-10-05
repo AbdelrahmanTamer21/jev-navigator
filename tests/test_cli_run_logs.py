@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import subprocess
+import threading
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 from git_repos import commit_files
+from isolated_jvn import JVN
+from stored_messages import digested
 
 from jev_navigator.cli import create_evidence_pack
+from jev_navigator.cli_resume import load_resume
 from jev_navigator.cli_trace import create_trace_evidence_pack
 from jev_navigator.directives.find_code import SearchBudget
+from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.judgments.journal import ERROR_TEXT_VARIABLE, error_text_kept
 from jev_navigator.judgments.questions import request_sha256
 from jev_navigator.testing import ScriptedJevClient
 
@@ -74,7 +84,9 @@ def files_holding_code(folder: Path) -> list[str]:
     return sorted(path.name for path in folder.iterdir() if holds_code(path))
 
 
-def find_pack(repository: Path, output: Path, workflow: str, max_calls: int, **options) -> dict:
+def find_pack(
+    repository: Path, output: Path, workflow: str, max_calls: int, client: object | None = None, **options
+) -> dict:
     return create_evidence_pack(
         repository,
         ("app/",),
@@ -82,7 +94,7 @@ def find_pack(repository: Path, output: Path, workflow: str, max_calls: int, **o
         ("app/entry.py:5",),
         output,
         SearchBudget(max_calls=max_calls, beam_width=1),
-        limit_client(),
+        client or limit_client(),
         fact_cache_dir=output.parent / "fact-cache",
         workflow=workflow,
         **options,
@@ -161,6 +173,125 @@ def test_a_resumed_default_run_replays_its_stored_answers_and_finds_the_code(tmp
     assert len(client.requests) == 1
     assert resumed["search"]["calls"] == 2
     assert files_holding_code(first) == files_holding_code(second) == []
+
+
+def test_a_pack_that_kept_its_request_text_is_not_resumed_without_keep_requests(tmp_path: Path) -> None:
+    # Arrange: a budget-stopped pack whose journal holds the text of its requests
+    repository = marked_repository(tmp_path / "repository")
+    first, second = tmp_path / "first", tmp_path / "second"
+    find_pack(repository, first, "find", 1, keep_requests=True)
+
+    # Act
+    with pytest.raises(ValueError) as refusal:
+        find_pack(repository, second, "find", 1, resume_from=first)
+
+    # Assert: the run writes nothing, and says which flag the pack needs
+    assert str(first) in str(refusal.value)
+    assert "--keep-requests" in str(refusal.value)
+    assert not second.exists()
+
+
+def test_a_pack_that_kept_its_request_text_resumes_with_keep_requests(tmp_path: Path) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    first, second = tmp_path / "first", tmp_path / "second"
+    find_pack(repository, first, "find", 1, keep_requests=True)
+
+    # Act
+    resumed = find_pack(repository, second, "find", 1, keep_requests=True, resume_from=first)
+
+    # Assert
+    assert resumed["search"]["calls"] == 2
+
+
+def with_code_signatures(value: object, code_signatures: Mapping[str, str]) -> object:
+    """``value`` with the ``signature`` of every place named in ``code_signatures`` set to its code."""
+    if isinstance(value, list):
+        return [with_code_signatures(item, code_signatures) for item in value]
+    if not isinstance(value, dict):
+        return value
+    shown = {key: with_code_signatures(item, code_signatures) for key, item in value.items()}
+    place = value.get("place", value.get("place_key"))
+    if "signature" in value and place in code_signatures:
+        shown["signature"] = code_signatures[place]
+    return shown
+
+
+def save_as_before_labels(pack: Path, code_signatures: Mapping[str, str]) -> None:
+    """Rewrite ``pack`` as JVN wrote it from 29.09 to 03.10: the manifest, the journal and resume.json
+    gave each neighbour its code signature, which quotes the neighbour's first line."""
+    for name in ("manifest.json", "resume.json"):
+        record = json.loads((pack / name).read_text())
+        (pack / name).write_text(json.dumps(with_code_signatures(record, code_signatures)))
+    lines = (pack / "journal.jsonl").read_text().splitlines()
+    records = [with_code_signatures(json.loads(line), code_signatures) for line in lines]
+    (pack / "journal.jsonl").write_text("".join(json.dumps(record) + "\n" for record in records))
+
+
+def test_a_run_resumed_from_a_pack_that_saved_neighbour_code_holds_no_code_text(tmp_path: Path) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    first, second = tmp_path / "first", tmp_path / "second"
+    find_pack(repository, first, "find", 1)
+    index = CodeIndex.from_directory(repository, ("app/",), fact_cache_dir=tmp_path / "fact-cache")
+    frontier = load_resume(first / "resume.json", index).result.not_inspected
+    save_as_before_labels(first, {entry.place_key: entry.signature for entry in frontier})
+    assert files_holding_code(first) == ["journal.jsonl", "manifest.json", "resume.json"]
+
+    # Act
+    find_pack(repository, second, "find", 1, resume_from=first)
+
+    # Assert
+    assert files_holding_code(second) == []
+
+
+@pytest.mark.parametrize("keep_requests", [False, True])
+def test_a_resumed_run_continues_a_journal_written_in_its_own_mode_unchanged(
+    tmp_path: Path, keep_requests: bool
+) -> None:
+    # Arrange: a default journal names each neighbour by its label; with keep_requests it quotes the
+    # neighbour's code.
+    repository = marked_repository(tmp_path / "repository")
+    first, second = tmp_path / "first", tmp_path / "second"
+    find_pack(repository, first, "find", 1, keep_requests=keep_requests)
+    earlier = (first / "journal.jsonl").read_text()
+
+    # Act
+    find_pack(repository, second, "find", 1, keep_requests=keep_requests, resume_from=first)
+
+    # Assert
+    assert (MARKER in earlier) is keep_requests
+    assert (second / "journal.jsonl").read_text().startswith(earlier)
+
+
+def test_a_search_stopped_in_a_folder_whose_name_holds_a_tilde_resumes(tmp_path: Path) -> None:
+    # Arrange: the stopped search leaves unopened the import line before `handle`, a line range whose
+    # key, app/v~2/entry.py:1-2, holds a tilde before its line numbers.
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/v~2/entry.py": "from .policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "app/v~2/policy.py": "def admit(item):\n    return len(item) <= 3\n",
+        },
+    )
+
+    def search(output: Path, **options) -> dict:
+        start, budget = ("app/v~2/entry.py:4",), SearchBudget(max_calls=1, beam_width=1)
+        options["fact_cache_dir"] = tmp_path / "fact-cache"
+        return create_evidence_pack(
+            repository, ("app/",), TARGET, start, output, budget, limit_client(), **options
+        )
+
+    stopped = search(tmp_path / "first")
+
+    # Act
+    resumed = search(tmp_path / "second", resume_from=tmp_path / "first")
+
+    # Assert
+    assert "app/v~2/entry.py:1-2" in [entry["place"] for entry in stopped["search"]["not_inspected"]]
+    assert resumed["search"]["outcome"] == "found"
+    assert [visit["place"] for visit in resumed["search"]["found"]] == ["app/v~2/policy.py:1-2"]
 
 
 @pytest.mark.parametrize("keep_requests", [False, True])
@@ -550,3 +681,202 @@ def test_a_key_mention_outside_any_function_is_shown_at_its_mention_line_everywh
     opened = [visit["place"] for visit in manifest["search"]["searched"] + manifest["search"]["unsure"]]
     assert any(place.startswith("app/other.py:15~") for place in opened)
     assert strings_starting_with(manifest, "mentions a key") == {"mentions a key (app/other.py:15)"}
+
+
+def echoing_server() -> ThreadingHTTPServer:
+    """A provider that refuses every request with 422 and echoes the request it got, as many
+    validation errors do: the request, and so the code, comes back in the error. ``served`` counts
+    the requests it received."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            self.server.served += 1
+            sent = json.loads(self.rfile.read(int(self.headers["content-length"])))
+            served = json.dumps({"detail": [{"msg": "unprocessable request", "input": sent}]}).encode()
+            self.send_response(422)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(served)))
+            self.end_headers()
+            self.wfile.write(served)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.served = 0
+    threading.Thread(target=server.serve_forever, name="echoing-jev", daemon=True).start()
+    return server
+
+
+ERROR_TEXT_SETTINGS = {
+    "default": ([], {}),
+    "flag": (["--no-error-text"], {}),
+    "variable": ([], {"JEV_NAVIGATOR_ERROR_TEXT": "off"}),
+}
+
+
+def echoed_run(tmp_path: Path, command: str, setting: str) -> tuple[subprocess.CompletedProcess, Path, int]:
+    """``jvn COMMAND`` through the real TypeSafe client against a provider that echoes every request
+    in a 422, with the error-text setting named by ``setting``; also how many requests the provider
+    received."""
+    repository = marked_repository(tmp_path / "repository")
+    output = tmp_path / "pack"
+    options, variables = ERROR_TEXT_SETTINGS[setting]
+    arguments = [
+        command,
+        TARGET,
+        "--repo",
+        str(repository),
+        "--start",
+        "app/entry.py:5",
+        "--out",
+        str(output),
+    ]
+    server = echoing_server()
+    environment = {
+        **os.environ,
+        **variables,
+        "TYPESAFE_API_KEY": "local-test-key",
+        "TYPESAFE_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+    }
+    try:
+        finished = subprocess.run(
+            [*JVN, *arguments, *options], capture_output=True, text=True, env=environment
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    return finished, output, server.served
+
+
+@pytest.mark.parametrize("command", ["find", "findall", "trace"])
+@pytest.mark.parametrize("setting", ["default", "flag", "variable"])
+def test_an_echoed_error_body_stays_in_the_run_folder_unless_error_text_is_off(
+    tmp_path: Path, command: str, setting: str
+) -> None:
+    # Arrange
+    pytest.importorskip("typesafe_sdk")
+
+    # Act
+    finished, output, served = echoed_run(tmp_path, command, setting)
+
+    # Assert
+    assert finished.returncode == 1, finished.stderr
+    records = [json.loads(line) for line in (output / "journal.jsonl").read_text().splitlines()]
+    assert any(record["kind"] == "failure" for record in records)
+    assert served == sum(record["kind"] == "http_attempt" for record in records) > 0
+    assert files_holding_code(output) == (["journal.jsonl"] if setting == "default" else [])
+    if command != "trace":
+        assert json.loads((output / "manifest.json").read_text())["search"]["failure"]["status"] == 422
+
+
+class EchoesTheRequest:
+    """Answers its first request, then fails with an error whose message quotes the request."""
+
+    def __init__(self) -> None:
+        self.script = limit_client()
+        self.model = self.script.model
+        self.asked = 0
+
+    def ask(self, state, questions):
+        self.asked += 1
+        if self.asked == 2:
+            raise RuntimeError(f"422 Unprocessable Entity: {json.dumps(state)}")
+        return self.script.ask(state, questions)
+
+    def close(self) -> None:
+        pass
+
+
+class CausedByTheRequest(EchoesTheRequest):
+    """Fails its second request with a plain message, raised from a cause that quotes the request."""
+
+    def ask(self, state, questions):
+        try:
+            return super().ask(state, questions)
+        except RuntimeError as quoting:
+            raise RuntimeError("the provider rejected the request") from quoting
+
+
+@pytest.mark.parametrize("keep_error_text", [True, False])
+def test_a_cause_quoting_its_request_stays_out_of_the_run_files_when_error_text_is_off(
+    tmp_path: Path, keep_error_text: bool
+) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    output = tmp_path / "pack"
+
+    # Act
+    with pytest.raises(RuntimeError, match="the provider rejected the request"):
+        find_pack(repository, output, "find", 5, CausedByTheRequest(), keep_error_text=keep_error_text)
+
+    # Assert
+    [cause] = json.loads((output / "manifest.json").read_text())["search"]["failure"]["causes"]
+    assert (MARKER in cause.get("message", "")) is keep_error_text
+    assert files_holding_code(output) == (["manifest.json"] if keep_error_text else [])
+
+
+@pytest.mark.parametrize("workflow", ["find", "findall"])
+@pytest.mark.parametrize("keep_error_text", [True, False])
+def test_an_error_quoting_its_request_reaches_stderr_and_the_run_files_unless_error_text_is_off(
+    tmp_path: Path, workflow: str, keep_error_text: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    output = tmp_path / "pack"
+
+    # Act
+    with pytest.raises(RuntimeError, match=MARKER):
+        find_pack(repository, output, workflow, 5, EchoesTheRequest(), keep_error_text=keep_error_text)
+
+    # Assert
+    assert MARKER in capsys.readouterr().err
+    assert json.loads((output / "manifest.json").read_text())["search"]["outcome"] == "failed"
+    expected = ["journal.jsonl", "manifest.json", "report.md"] if keep_error_text else []
+    assert files_holding_code(output) == expected
+
+
+def test_keep_requests_keeps_the_whole_error_message_even_with_error_text_off(tmp_path: Path) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    output = tmp_path / "pack"
+
+    # Act
+    with pytest.raises(RuntimeError) as raised:
+        find_pack(
+            repository, output, "find", 5, EchoesTheRequest(), keep_requests=True, keep_error_text=False
+        )
+
+    # Assert
+    message = str(raised.value)
+    records = [json.loads(line) for line in (output / "journal.jsonl").read_text().splitlines()]
+    assert [record["message"] for record in records if record["kind"] == "failure"] == [message]
+    assert json.loads((output / "manifest.json").read_text())["search"]["failure"]["message"] == message
+
+
+def test_error_text_off_keeps_each_message_as_its_length_and_sha256(tmp_path: Path) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    output = tmp_path / "pack"
+
+    # Act
+    with pytest.raises(RuntimeError) as raised:
+        find_pack(repository, output, "find", 5, EchoesTheRequest(), keep_error_text=False)
+
+    # Assert
+    stored = digested(str(raised.value))
+    records = [json.loads(line) for line in (output / "journal.jsonl").read_text().splitlines()]
+    failure_rows = [record for record in records if record["kind"] == "failure"]
+    assert [row.items() >= stored.items() and "message" not in row for row in failure_rows] == [True]
+    manifest_failure = json.loads((output / "manifest.json").read_text())["search"]["failure"]
+    assert manifest_failure.items() >= stored.items() and "message" not in manifest_failure
+
+
+@pytest.mark.parametrize("value", ["", "no", "OFF"])
+def test_an_error_text_setting_other_than_on_or_off_is_refused(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(ERROR_TEXT_VARIABLE, value)
+
+    with pytest.raises(ValueError, match=ERROR_TEXT_VARIABLE):
+        error_text_kept(no_error_text=False)

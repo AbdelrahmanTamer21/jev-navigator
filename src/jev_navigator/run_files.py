@@ -11,14 +11,29 @@ owner of how a key mention is shown without its literal.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from .index.code_index import CodeIndex
+from .judgments.journal import keeps_request_text, message_fields
 from .judgments.relations import without_quoted_code
 
 _LINE_RANGE = re.compile(r"[-~]")
+_LABEL_NAME = re.compile(r"(?: [^\s`]+)?")
 _NEIGHBOUR_LISTS = ("could_contain", "not_inspected", "not_opened")
+
+
+def require_kept_request_text(run_file: Path, keep_requests: bool) -> None:
+    """A run continues ``run_file``, an earlier journal or answer store, without ``keep_requests``
+    only when the file kept no request's text, so a folder written without the flag holds no code."""
+    if not keep_requests and run_file.is_file() and keeps_request_text(run_file):
+        raise ValueError(
+            f"{run_file} keeps the text of its requests, so a run that continues it must keep it too: "
+            'add --keep-requests (JSON "keep_requests": true)'
+        )
 
 
 def place_location(place_key: str) -> str:
@@ -28,11 +43,53 @@ def place_location(place_key: str) -> str:
 
 
 def place_label(index: CodeIndex, place_key: str) -> str:
-    """``path:line name``, or ``path:line`` where no symbol encloses that line."""
+    """``path:line name``, or ``path:line`` where no symbol encloses that line or the index holds no
+    facts of the file yet. A label shows only facts already in memory, so writing the journal or the
+    evidence pack starts no parse, which could fail."""
     location = place_location(place_key)
     file, _, line = location.rpartition(":")
-    symbol = index.enclosing_symbol(file, int(line)) if file in index.files and line.isdigit() else None
+    symbol = index.known_enclosing_symbol(file, int(line)) if line.isdigit() else None
     return f"{location} {symbol.name}" if symbol is not None and symbol.name else location
+
+
+def is_place_label(place_key: str, text: str) -> bool:
+    """Whether ``text`` has the form ``place_label`` gives ``place_key``: its location, then optionally
+    one name. A signature, which quotes a line of code, does not."""
+    location = place_location(place_key)
+    return text.startswith(location) and _LABEL_NAME.fullmatch(text, len(location)) is not None
+
+
+def carried_over_journal_line(line: str) -> str:
+    """A line of an earlier pack's journal as this pack keeps it. A history step neighbour whose
+    signature is not a label, the code signature an older pack wrote, shows its location instead; a
+    line that is not a JSON record stays as written."""
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return line
+    if record["kind"] != "history_step":
+        return line
+    coded = [
+        offered
+        for offered in record["step"].get("judgments", {}).get("could_contain", [])
+        if not is_place_label(offered["place"], offered["signature"])
+    ]
+    for offered in coded:
+        offered["signature"] = place_location(offered["place"])
+    return json.dumps(record, sort_keys=True) + "\n" if coded else line
+
+
+@dataclass(frozen=True)
+class PlaceLabels:
+    """The labels one run writes. A place an earlier save labelled keeps that label: the earlier save
+    owns it, and a resumed run may never parse the place's file. Any other place gets ``place_label``."""
+
+    index: CodeIndex
+    saved: Mapping[str, str] = field(default_factory=dict)
+
+    def __call__(self, place_key: str) -> str:
+        saved = self.saved.get(place_key)
+        return saved if saved is not None else place_label(self.index, place_key)
 
 
 def relation_shown(relation: str, place_key: str) -> str:
@@ -64,6 +121,16 @@ def step_shown(step: Mapping) -> dict:
     }
     fetched = [source_shown(source, step["arguments"]["place"]) for source in step.get("fetched", [])]
     return {**step, "judgments": judgments, "fetched": fetched}
+
+
+def failure_digested(step: Mapping) -> Mapping:
+    """A history step whose failure keeps its message only as a digest (``--no-error-text``). A step
+    read back from a saved pack may already hold the digest, and stays as it is."""
+    failure = step.get("judgments", {}).get("failure", {})
+    if "message" not in failure:
+        return step
+    digest = {"type": failure["type"], **message_fields(failure["message"], keep_text=False)}
+    return {**step, "judgments": {**step["judgments"], "failure": digest}}
 
 
 def _entry_shown(entry: Mapping) -> Mapping:

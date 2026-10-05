@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import Barrier
 
 import pytest
-from git_repos import commit_files
+from git_repos import commit_files, read_files
 
 from jev_navigator.confirmation import day_of, today
 from jev_navigator.index import fact_cache, imports, languages, scope_scan, spans, tools
@@ -64,13 +64,40 @@ def test_warm_index_preserves_incomplete_parser_coverage(tmp_path):
     assert warm.find_callers("broken")[0].binding.status == "unknown", "the unread lines must persist"
 
 
+def test_warm_index_preserves_decorator_starts_and_stubs(tmp_path, monkeypatch):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "views.py").write_text(
+        "@app.route('/')\ndef home():\n    return page()\n\n\ndef draft():\n    ...\n"
+    )
+    cache = tmp_path / "cache"
+    cold = CodeIndex.from_directory(repository, fact_cache_dir=cache)
+    expected = ({Span("views.py", 2, 3, "home"): 1}, (Span("views.py", 6, 7, "draft"),))
+    assert (cold.decorator_starts_in("views.py"), cold.stubs_in("views.py")) == expected
+    scans = []
+    actual_scan = tools.ast_grep_rules
+
+    def observe_scan(rules, files, *arguments, **options):
+        scans.append(tuple(files))
+        return actual_scan(rules, files, *arguments, **options)
+
+    monkeypatch.setattr(tools, "ast_grep_rules", observe_scan)
+
+    # Act
+    warm = CodeIndex.from_directory(repository, fact_cache_dir=cache)
+
+    # Assert
+    assert (warm.decorator_starts_in("views.py"), warm.stubs_in("views.py")) == expected
+    assert scans == [], "the facts must come from the cache"
+
+
 @pytest.fixture
 def example(tmp_path):
     content = b"def handler():\n    return service()\n"
     source = tmp_path / "module.py"
     source.write_bytes(content)
     unparsed = Unparsed()
-    facts = scan_facts(["module.py"], tmp_path, unparsed)
+    facts = scan_facts(read_files(tmp_path, ["module.py"]), tmp_path, unparsed)
     assert not unparsed.files
     assert facts["module.py"].calls
     return content, facts["module.py"]
@@ -109,6 +136,23 @@ def test_content_language_parser_and_rules_invalidate(tmp_path, example, monkeyp
     monkeypatch.setitem(languages.FUNCTION_KINDS, "python", ("function_definition", "lambda"))
     fact_cache._rules_identity.cache_clear()
     assert cache.load("module.py", content) is None
+
+
+def test_a_change_to_the_flow_rules_is_a_cache_miss_for_javascript(
+    tmp_path, monkeypatch, rule_identity_reset
+):
+    # Arrange: JavaScript the JavaScript grammar only partly reads takes its facts from the flow rules
+    content = b"export function typed(value: string): string {\n  return value;\n}\n"
+    cache = FactCache(tmp_path / "cache")
+    cache.save("typed.js", content, FileFacts(FileStructure((), (), ()), (), ()))
+
+    # Act
+    monkeypatch.setitem(languages.FUNCTION_KINDS, languages.FLOW_LANGUAGE, ("function_declaration",))
+    fact_cache._rules_identity.cache_clear()
+    reused = cache.load("typed.js", content)
+
+    # Assert
+    assert reused is None
 
 
 @pytest.mark.parametrize("broken", ["{", "null", "[]", '{"structure":{}}'])
