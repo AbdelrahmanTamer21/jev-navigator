@@ -18,11 +18,13 @@ from .languages import FLOW_LANGUAGE, parse_language, sgconfig_of
 from .scope_scan import (
     READ_AGAIN_AS_FLOW,
     CallMatch,
+    ConstantFunction,
     FileFacts,
     FileStructure,
     LocalName,
     ModuleAlias,
     NamespaceMember,
+    ObjectMember,
     ReferenceMatch,
     fact_rules,
 )
@@ -179,6 +181,14 @@ def _encode(facts: FileFacts) -> dict:
                 [member.first, member.last, asdict(member.span)]
                 for member in facts.structure.namespace_members
             ],
+            "object_members": [
+                [member.owner, asdict(member.span)] for member in facts.structure.object_members
+            ],
+            "argument_members": [asdict(span) for span in facts.structure.argument_members],
+            "constant_functions": [
+                [function.constant, list(function.keys), asdict(function.span)]
+                for function in facts.structure.constant_functions
+            ],
             "decorated": [list(decorated) for decorated in facts.structure.decorated],
             "stubs": [list(stub) for stub in facts.structure.stubs],
         },
@@ -190,6 +200,7 @@ def _encode(facts: FileFacts) -> dict:
         "module_aliases": [list(alias) for alias in facts.module_aliases],
         "exported_values": list(facts.exported_values),
         "renamed_exports": [list(pair) for pair in facts.renamed_exports],
+        "module_bindings": list(facts.module_bindings),
         "language": facts.language,
     }
 
@@ -205,10 +216,19 @@ def _decode(file: str, raw: dict) -> FileFacts:
             tuple(_span(file, span) for span in structure["commonjs_exports"]),
             tuple(_span(file, span) for span in structure["type_declarations"]),
             tuple(_span(file, span) for span in structure["value_declarations"]),
-            tuple(LocalName(int(first), int(last), name) for first, last, name in structure["local_names"]),
+            tuple(
+                LocalName(int(first), int(last), name, int(line), module, int(block_end))
+                for first, last, name, line, module, block_end in structure["local_names"]
+            ),
             tuple(
                 NamespaceMember(int(first), int(last), _span(file, span))
                 for first, last, span in structure["namespace_members"]
+            ),
+            tuple(ObjectMember(owner, _span(file, span)) for owner, span in structure["object_members"]),
+            tuple(_span(file, span) for span in structure["argument_members"]),
+            tuple(
+                ConstantFunction(constant, tuple(keys), _span(file, span))
+                for constant, keys, span in structure["constant_functions"]
             ),
             tuple((int(start), int(end), int(line)) for start, end, line in structure["decorated"]),
             tuple((int(start), int(end)) for start, end in structure["stubs"]),
@@ -223,8 +243,12 @@ def _decode(file: str, raw: dict) -> FileFacts:
         bool(raw["incomplete"]),
         tuple(raw.get("export_names", ())),
         tuple((int(start), int(end)) for start, end in raw["unparsed_lines"]),
-        tuple(ModuleAlias(name, specifier) for name, specifier in raw["module_aliases"]),
+        tuple(
+            ModuleAlias(name, specifier, bool(from_import))
+            for name, specifier, from_import in raw["module_aliases"]
+        ),
         tuple(raw["exported_values"]),
         tuple((exported, own) for exported, own in raw["renamed_exports"]),
+        tuple(raw["module_bindings"]),
         language=raw["language"],
     )

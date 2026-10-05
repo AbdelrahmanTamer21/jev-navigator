@@ -324,7 +324,14 @@ than AST parent identities. The `jvn stats` CLI writes these measurements as JSO
 model:
 
 ```python
-from jev_navigator.index.units import LineAnchor, RangeAnchor, items_to_judge, list_units, read_ranges, resolve_anchors
+from jev_navigator.index.units import (
+    LineAnchor,
+    RangeAnchor,
+    items_to_judge,
+    list_units,
+    read_ranges,
+    resolve_anchors,
+)
 
 room = judge.input_limits.box_chars - beside_the_unit  # the characters one unit's text may take in a request
 listing = list_units(index, index.files, box_chars=room)
@@ -334,7 +341,9 @@ print(listing.unlisted)  # files that gave no units, each with its reason
 for item in items_to_judge(listing.units[0]):  # the unit, or its pieces that fit the box
     print(item.id, item.ranges, read_ranges(index, item.file, item.ranges)[:60])
 
-resolved = resolve_anchors(index, [LineAnchor("app/routes.py", 21), RangeAnchor("app/orders.py", 5, 7)], box_chars=room)
+resolved = resolve_anchors(
+    index, [LineAnchor("app/routes.py", 21), RangeAnchor("app/orders.py", 5, 7)], box_chars=room
+)
 print([unit.id for unit in resolved.units], resolved.unresolved)
 ```
 
@@ -349,7 +358,11 @@ the location `path:start-end`; top-level code is `path:top`. `list_units` lists 
 methods no other function holds, the blocks of each schema, and each file's top-level code, so every
 line of code sits in a listed unit once: a nested function or callback is inside its holder's text and is not listed. A unit's
 `symbol` names every holder, `OrderService.place`, and names an anonymous function by the line it
-starts on, `<anonymous:4>`. `content_sha256` hashes the unit's own text, so
+starts on, `<anonymous:4>`. A function a module-level constant's call builds goes by the name the
+entry text gives it, `CodeIndex.constant_function_names`: `run` for `export const run =
+Effect.fn("run")(function* ...)` and `userRouter.list` for a router's procedure, so a callback inside
+one is `run.<anonymous:2>`. A callback that builds data, as in `items.map((item) => item.id)` or
+`new Map(...)`, gets no constant's name. `content_sha256` hashes the unit's own text, so
 an unchanged function keeps its hash when other lines of its file change. The record holds locations
 and hashes, never code; its `ranges` are its (start, end) line pairs in file order, one for a
 function and one per run for top-level code. `read_ranges(index, file, ranges)` is the one reader of

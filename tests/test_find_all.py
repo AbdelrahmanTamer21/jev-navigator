@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from conftest import WEBSITE_QUERIES, BudgetedClient
-from test_opened_code_size import ShortSecretMasker, _numbered_secret
+from short_secrets import ShortSecretMasker, numbered_secret
 
 from jev_navigator.directives.find_all import (
     DELIVERED,
@@ -344,7 +344,7 @@ def test_a_unit_of_exactly_its_room_is_judged_whole_and_one_character_more_is_to
 
 def secrets_function(lines: int) -> str:
     """A function of ``lines`` short secret assignments, each 2 characters longer once masked."""
-    return "def settings():\n" + "".join(_numbered_secret(line) for line in range(lines)) + "    return 1\n"
+    return "def settings():\n" + "".join(numbered_secret(line) for line in range(lines)) + "    return 1\n"
 
 
 def test_a_unit_that_fits_its_room_only_unmasked_is_too_large_and_the_search_goes_on(tmp_path: Path) -> None:

@@ -65,7 +65,9 @@ Read Find's outcome before claiming anything; no outcome proves the code is abse
   links; U never reached"): claim only that the places Jev judged, in N files, did not show it.
 - `nothing_left`: all files were read, Jev judged code in N. Claim nothing worth opening was left.
 - `budget`, `cancelled` or `failed`: unfinished. Resume it; claim nothing about the rest. `failed`
-  exits 1 and names the error: fix its cause first.
+  exits 1 and names the error: fix its cause first. `MemoryLimitReachedError` means JVN's memory
+  allowance (1,024 MB per process) or the machine's JVN ceiling (eight such processes) was reached:
+  narrow the scope, or resume once other JVN runs have ended. Never retry it in a loop.
 
 Find defaults to 24 live requests, Findall to 48. Only requests sent to the provider count: answers
 replayed from the answer store and local work are free, and `--max-calls none` removes the cap. After

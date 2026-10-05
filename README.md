@@ -74,6 +74,12 @@ Needs Python 3.11 or newer, and `ast-grep`, `rg` (ripgrep) and `git` on the PATH
 the official SDK for live calls; set `TYPESAFE_API_KEY`. Everything else, including the tests, runs
 offline.
 
+JVN limits its own memory, for the command and for every program that imports the library. Each
+process may grow by 1,024 MB, its ast-grep, ripgrep and git processes included, and all JVN processes
+on a machine share 8,192 MB; a process waits up to two minutes for room, then stops with
+`MemoryLimitReachedError`. See [Memory limit](docs/cli.md#memory-limit) for what a refusal does and
+the settings.
+
 ## Live evidence-pack command
 
 Start in the directory you want to search:
@@ -195,6 +201,15 @@ file lives elsewhere. Use `--json` on its own; put any search options inside the
 Use `--prefix app/` to narrow the scope, `--start app/orders.py:42` to supply a known caller or entry
 point, and `--out /path/to/new-pack` to select the result directory. Prefixes and starts are repeatable.
 Without a start, `jvn` uses typed Jev judgments to select entry candidates from the source inventory.
+Each file option shows the file's first doc line and up to eight names: the functions and classes the
+module names or exports through CommonJS and each module-level constant whose call or `new` builds a
+function, as `run` in `export const run = Effect.fn("run")(function* ...)` or `userRouter` for a
+router, but not one that builds data through a callback, such as `items.map((item) => item.id)` or
+`new Map(...)`, then each function of an object a module-level variable holds,
+as `api.list`, each function of an object a module-level call or `new` is passed, as `errorFormatter` in
+`create({ errorFormatter() {} })`, and each member of a namespace, in file order within each group. A
+file holding none of these, such as one of types only or one whose functions are all callbacks, shows
+no names.
 
 Every live call is a paid request, so `--max-calls` defaults to 24 for the whole run, choosing an entry
 point included; a search that reaches it ends with outcome `budget` and a resumable `not_inspected`
@@ -294,14 +309,17 @@ index.decorator_starts_in(file)  # each decorated function's span and its first 
 index.stubs_in(file)  # functions whose body is only ..., pass, a docstring or raise NotImplementedError
 index.read_slice(span)
 index.read_window(file, line, radius=10)
-index.search_text("orders.max_items")  # ripgrep over the narrowed files only, every hit in file and line order
+# ripgrep over the narrowed files only, every hit in file and line order
+index.search_text("orders.max_items")
 index.search_text("orders.max_items", max_hits=30)  # only the first 30 hits
 index.imports(file)
 index.dependents(file)
 index.co_changed_files(file)
 
-units.list_units(index, files, box_chars=room)  # outermost functions and methods, Prisma schema blocks, top-level code; room: docs/extending.md
-units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=room)  # the units holding lines or line ranges
+# outermost functions and methods, Prisma schema blocks, top-level code; room: docs/extending.md
+units.list_units(index, files, box_chars=room)
+# the units holding lines or line ranges
+units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=room)
 
 operations.slice_around(index, file, line)  # the enclosing function, or a window
 operations.code_described_by_comment(index, file, line)  # the whole next symbol or block
@@ -422,7 +440,8 @@ parse passes through, estimates each file's parse peak (`index/file_shape.py`): 
 file, every byte counted as code, plus the square of the punctuation `{}();,[]` on each line,
 which a minified bundle of a few tens of kilobytes on one line drives up. Files estimated at up to
 250 MB are parsed side by side. A file over that, but within the single-file limit
-(`tools.single_parse_limit_mb()`), is parsed alone, one at a time, with no other file beside it. A file
+(`MemoryLimit.single_parse_mb`: the memory allowance less Python's 270 MB share, so 754 MB at the
+default), is parsed alone on one thread, one at a time, with no other file beside it. A file
 over the single-file limit is never handed to ast-grep, and neither is a large file that cannot be read
 to measure it. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
 peak, the limit it is over, and the longest line in bytes. A file that ast-grep itself skips without
@@ -446,20 +465,36 @@ no module-level definition. Lines are the unit, so a use on the namespace's firs
 candidate, and one namespace split over two blocks is not merged. Lines the parser lost inside the
 namespace that mention the name leave the use `unknown`; lost lines elsewhere never pass the member over. A call `jwt.verify()` where module-level
 code binds `jwt` to a whole module of the scope (`import * as jwt`, `const jwt = require('./jwt')`,
-in Python `import app.jwt as jwt`, and `app.jwt.verify()` after `import app.jwt`, all read from the
-syntax tree) binds to the `verify` that module, or one it re-exports from, defines; only that module's
-facts are read. A name a function binds for its own body (a parameter, a local
+in Python `import app.jwt as jwt`, `from app import jwt` and `from . import jwt as tokens`, and
+`app.jwt.verify()` after `import app.jwt`, all read from the syntax tree) binds to the `verify` that
+module, or one it re-exports from, defines; only that module's facts are read. Python's `from app
+import jwt` takes the package's own `jwt` before it imports the module `app.jwt`, so it holds the
+module only when `app/__init__.py` binds nothing named `jwt` (a definition, an assignment, a loop or
+`with` target), imports nothing else under that name,
+has no star import and no lost line that mentions it; otherwise `jwt.verify()` stays a `candidate`.
+In Python the alias must also be its module's one binding of the name: module-level code that
+assigns `jwt`, defines a function or class `jwt`, loops, opens or catches into it, or deletes it, or a
+function that declares it `global`, leaves `jwt.verify()` a `candidate`; after `import app.jwt` the
+name is `app`. A script module alias is held the same way: a second declaration of `jwt` outside every
+function (a `require` inside a block included), a loop over it, a module-level function `jwt`, or an
+assignment to it anywhere leaves the call a `candidate`. A name a function binds for its own body (a parameter, a local
 variable, a caught error or a loop variable) replaces any module-level definition or import of that
 name inside the function: `db.query()` with a parameter `db`, or `stop()` with a parameter `stop`,
-binds to no import; it is a `candidate` whose local value is not resolved. A function counts from its
-first line, so on `stream(c, async (stream) => ...)` the outer call counts as inside the callback.
+binds to no import; it is a `candidate` whose local value is not resolved. The one exception is a
+function's own `const db = require('./db')` when it is the function's only binding of `db`: a `const`
+is never bound again, so there `db.query()` binds through `./db` like a module alias, and `db()` to the
+module's default export (`module.exports = ...`). A `const` is block-scoped, so it holds the module
+from its own line to the end of its block, or of the function when it sits in the function's body;
+before it, after its block, or in a `switch` case, the call stays a `candidate`. A `let` or `var` may
+be bound again and holds no module. A function counts from its first line, so on
+`stream(c, async (stream) => ...)` the outer call counts as inside the callback.
 Types are looked up apart from values, so a local value never replaces a type. A call `halt()` where
 `halt` imports a definition under another name (`import { stop as halt }`, `const { stop: halt } =
 require(...)`, `from m import stop as halt`) binds the same way to `stop`, unless the file defines
 `halt` itself. A default import, under any local name, takes the module's default export; the default's own name is no named export, so `import { make }`, `defaults.make()` and `const { solo } = require(...)` of a default reach nothing. Every import, by name, under another
 name, as a default or through a module alias, is decided the same way from the module it names and
 the modules that one re-exports the name from: one definition proves the target, several leave a
-`candidate`, an exporting module that could not be parsed where it mentions the name, or that
+`candidate`, any of these modules that could not be parsed where it mentions the name, or that
 vanished, leaves it `unknown`, and a module with no definition exported under the name leaves a
 `candidate` that says so. A name a module imports and passes on without an `export ... from`, as a
 Python module's own `from pkg.core import compute`, is not followed. A function or class
@@ -679,7 +714,10 @@ on its own scope, so searches sharing one judge never use up each other's budget
   of 8 or more characters wherever it appears, a shorter one as a whole word, and a number of at most four characters or a value without letters
   or digits only where it stands. JVN's own question wording (instructions, and the criteria of a
   question that is not a choice) keeps its words, and a key of the request equal to a short masked
-  value does not refuse it.
+  value does not refuse it. A name that holds a hidden copy
+  (`x-runs-[MASKED]`) is still a name, and a string a copy changed is masked once more, so the
+  request sent is always one the rules leave as it is and the final scan refuses only what a
+  host's own scanner finds.
   A quoted value may run across lines (triple quotes, template literals, text blocks) or sit in
   parentheses with its joined parts; a quote that closes a string the key sat in opens no value; a string
   that is not hidden is read again for the secret assignments inside it; and a value inside another

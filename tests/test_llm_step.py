@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -178,6 +180,19 @@ def test_a_failing_connector_keeps_its_whole_error_output() -> None:
 
     # Assert
     assert str(raised.value).endswith(cause)
+
+
+def test_a_connector_past_its_timeout_is_stopped_and_raises_the_timeout() -> None:
+    # Arrange: a CLI that never answers
+    hung = CommandConnector(["sleep", "30"], name="hung", timeout=0.5)
+    started = time.monotonic()
+
+    # Act
+    with pytest.raises(subprocess.TimeoutExpired):
+        hung.complete("prompt")
+
+    # Assert: the hung process was killed, not waited for
+    assert time.monotonic() - started < 5
 
 
 def test_a_failing_connector_attempt_is_recorded_and_its_exception_still_propagates(tmp_path: Path) -> None:

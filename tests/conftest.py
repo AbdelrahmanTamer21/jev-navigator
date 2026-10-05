@@ -23,6 +23,7 @@ from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
 from jev_navigator.judgments.questions import serialized_chars
+from jev_navigator.memory_limit import SLOTS_DIR_VARIABLE
 
 
 @pytest.fixture(autouse=True)
@@ -124,10 +125,11 @@ API_TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 """
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def python_sigint_handler():
-    """Python's own Ctrl-C handler for a test that sends SIGINT. A suite started as a background job
-    (``cmd &``) inherits SIGINT as ignored, so without this the signal never arrives."""
+    """Python's own Ctrl-C handler for every test, as a terminal gives it. A suite started as a
+    background job (``cmd &``) inherits SIGINT as ignored, so without this a test that sends SIGINT
+    would never receive it."""
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
     yield
     signal.signal(signal.SIGINT, previous)
@@ -208,6 +210,23 @@ def private_cache_root(
     ``JEV_NAVIGATOR_`` variable, so the answer store variable is unset and the store lives here."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("cache")))
     return cache_root()
+
+
+@pytest.fixture(scope="session")
+def memory_slots_folder(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return tmp_path_factory.mktemp("memory-slots")
+
+
+@pytest.fixture(autouse=True)
+def private_memory_slots(
+    no_developer_settings, memory_slots_folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """The suite's JVN processes take their memory slots in a folder of their own, never the
+    machine's, so no test waits for a live JVN run and no test makes one wait. It runs after
+    ``no_developer_settings`` has dropped every ``JEV_NAVIGATOR_`` variable. The folder lasts the whole
+    session, because a process keeps its slot in a folder for as long as it lives."""
+    monkeypatch.setenv(SLOTS_DIR_VARIABLE, str(memory_slots_folder))
+    return memory_slots_folder
 
 
 @pytest.fixture(autouse=True)
