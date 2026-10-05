@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from conftest import BudgetedClient
 from git_repos import commit_files
+from neighbour_cap_search import PLACE
 from search_deadline import searched_in_child
 from test_find_code import find_with
 
@@ -24,7 +25,9 @@ from jev_navigator.directives.find_code import (
     shown_for_target,
 )
 from jev_navigator.directives.places import MOVES, place_for_line
+from jev_navigator.directives.shown import shown_slice
 from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.index.spans import Span
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
@@ -68,6 +71,43 @@ def _opened(index: CodeIndex, client, file: str, line: int = 1):
     start = place_for_line(index, file, line, "start")
     result = find_code(index, Judge(client), "the order total", [start], moves=CALLEES, budget=ONE_OPENING)
     return start, result
+
+
+def test_an_opening_whose_first_cut_already_fits_beside_its_neighbour_settles(tmp_path: Path) -> None:
+    # Act: `jvn find` in its own process (neighbour_cap_search.py), so a neighbour loop that never
+    # settles fails at the suite's deadline; it runs first, before any in-process search could hang
+    seen = searched_in_child([sys.executable, str(NEIGHBOUR_CAP_SEARCH), str(tmp_path), "common"])
+
+    # Assert: one request shows the whole function beside its callee and the lines before it
+    (asked,) = seen["asked"]
+    assert asked["lines"] == "4-6"
+    assert [neighbour.split(" ", 1)[0] for neighbour in asked["neighbours"]] == [
+        "app/audit.py:1",
+        "app/orders.py:1-3",
+    ]
+    assert seen["refusals"] == 0
+
+
+def test_the_start_a_cut_returns_is_one_its_measure_accepted_even_when_the_measure_is_not_monotone(
+    tmp_path: Path,
+) -> None:
+    # Arrange: a measure that accepts 1 to 3 and 6 shown lines of 8, as a masked measure can when a
+    # cut leaves a secret's key line out and its copies unmasked
+    index = _index(tmp_path, {"app/eight.py": "".join(f"line_{number} = {number}\n" for number in range(8))})
+    code = index.read_slice(Span("app/eight.py", 1, 8))
+    accepted = {1, 2, 3, 6}
+    measured = []
+
+    def fits(shown) -> bool:
+        measured.append(shown.span.end)
+        return shown.span.end in accepted
+
+    # Act
+    shown = shown_slice(code, fits)
+
+    # Assert
+    assert shown.span.end in accepted
+    assert shown.span.end in measured
 
 
 def test_a_function_of_20000_characters_goes_to_jev_whole(tmp_path: Path) -> None:
@@ -138,7 +178,9 @@ def test_a_function_shown_whole_leaves_room_for_each_neighbour_alone(tmp_path: P
 def test_a_cut_under_a_per_kind_cap_settles_and_every_request_fits(tmp_path: Path) -> None:
     # Act: `jvn find --neighbours-per-kind 1` under Drex's box, in its own process
     # (neighbour_cap_search.py): cutting the function brings its tail on as a callee in place of `audit`
-    seen = searched_in_child([sys.executable, str(NEIGHBOUR_CAP_SEARCH), str(tmp_path)])
+    seen = searched_in_child([sys.executable, str(NEIGHBOUR_CAP_SEARCH), str(tmp_path), "per-kind-cap"])
+    function_lines = PLACE.count("\n")
+    tail_line = PLACE.split("\n").index("    def place_tail(order):") + 1
 
     # Assert: the search ended, nothing was refused, and its one request shows the cut beside the tail
     # alone, while the cap set `audit` aside
@@ -148,14 +190,11 @@ def test_a_cut_under_a_per_kind_cap_settles_and_every_request_fits(tmp_path: Pat
     (asked,) = seen["asked"]
     set_aside = {entry["signature"]: entry["reason"] for entry in search["not_inspected"]}
     assert seen["refusals"] == 0
-    assert (first, last) == (1, last) and last < seen["function_lines"]
+    assert (first, last) == (1, last) and last < function_lines
     assert asked["lines"] == f"1-{last}"
-    assert (
-        asked["last_line"]
-        == f"[cut after {last} of {seen['function_lines']} lines to fit the request size limit]"
-    )
+    assert asked["last_line"] == f"[cut after {last} of {function_lines} lines to fit the request size limit]"
     (neighbour,) = asked["neighbours"]
-    assert neighbour.startswith(f"app/orders.py:{seen['tail_line']} `def place_tail(order):`")
+    assert neighbour.startswith(f"app/orders.py:{tail_line} `def place_tail(order):`")
     assert set_aside["app/audit.py:1 audit"] == "capped"
 
 
