@@ -10,6 +10,7 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `resolve_scope` | the files a search covers from folders, patterns, languages and a git ref, with tests, generated, vendored code and docs left out by default; a file only its shape marks as possibly generated is set aside under an output folder (`dist`, `build`, `generated`), and otherwise awaits Jev's generated judgment with its measured facts; a scope over its cap is refused with counts per folder and language (README, "Choosing the files a search covers") |
 | `judge_generated_files` | Jev's generated-file judgment for the files a scope left undecided: one question per file over its path, measured facts, up to 10 importers and up to 5 files naming its path, each with their true count, and two excerpts; a file the secret scan refuses is named as not judged (README, "Choosing the files a search covers") |
 | `CodeIndex` | mechanical lookups over a narrowed scope: definitions, callers, callees, references, text, imports, git history |
+| `index.units` | the units a search judges (functions, methods, each file's top-level code), cut into 60-line pieces only when larger than their room in a request, and the one resolver of lines and line ranges to units |
 | `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc |
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
@@ -301,6 +302,82 @@ all source parsed successfully. An unrequested symbol kind is omitted, not repre
 `None` when that file was not measured; only a measured empty file has zero counts.
 Same-line nesting can have no known holder because the current index records line spans rather
 than AST parent identities. The `jvn stats` CLI writes these measurements as JSON and Markdown; see [the CLI guide](cli.md#structural-measurements).
+
+## Units
+
+`index.units` lists what a search judges and names the units that hold a caller's lines, with no
+model:
+
+```python
+from jev_navigator.index.units import LineAnchor, RangeAnchor, items_to_judge, list_units, read_ranges, resolve_anchors
+
+room = judge.input_limits.box_chars - beside_the_unit  # the characters one unit's text may take in a request
+listing = list_units(index, index.files, box_chars=room)
+for unit in listing.units:
+    print(unit.id, unit.kind, unit.symbol, unit.content_sha256[:12])
+print(listing.unlisted)  # files that gave no units, each with its reason
+for item in items_to_judge(listing.units[0]):  # the unit, or its pieces that fit the box
+    print(item.id, item.ranges, read_ranges(index, item.file, item.ranges)[:60])
+
+resolved = resolve_anchors(index, [LineAnchor("app/routes.py", 21), RangeAnchor("app/orders.py", 5, 7)], box_chars=room)
+print([unit.id for unit in resolved.units], resolved.unresolved)
+```
+
+`box_chars` is the room a unit's text has in one request, counted as escaped JSON like every request
+(`judgments.questions.serialized_chars`): the client's box, `judge.input_limits.box_chars` (Jev's is
+76,800 characters), less what the request carries beside the unit, such as its shared state and its
+longest question. Passing the whole box would let a unit just under it through, and the request
+carrying it would be refused.
+
+A unit is one function, one method, or one file's top-level code. Its id is the location
+`path:start-end`; top-level code is `path:top`. `list_units` lists the functions and methods no
+other function holds, and each file's top-level code, so every line of code sits in a listed unit
+once: a nested function or callback is inside its holder's text and is not listed. A unit's
+`symbol` names every holder, `OrderService.place`, and names an anonymous function by the line it
+starts on, `<anonymous:4>`. `content_sha256` hashes the unit's own text, so
+an unchanged function keeps its hash when other lines of its file change. The record holds locations
+and hashes, never code; its `ranges` are its (start, end) line pairs in file order, one for a
+function and one per run for top-level code. `read_ranges(index, file, ranges)` is the one reader of
+that code, joining the ranges in order with a newline.
+
+A function's or method's unit starts at its first decorator, so a route such as
+`@app.route("/orders")` or NestJS `@Get()` is judged with its handler and is not top-level code.
+Only the unit's `ranges` reach back to the decorator: its id, like the index's span
+(`CodeIndex.decorator_starts_in`), still starts at the function's own first line. Python and
+TypeScript put decorators before the function node; JavaScript's parser already starts a method at
+its decorators. A class's decorators stay with the class head in the top-level code. A stub, a Python
+function whose body is only `...`, `pass`, a docstring or `raise NotImplementedError`
+(`CodeIndex.stubs_in`), is no unit of its own: its lines are top-level code, so a Protocol is judged
+whole.
+
+Top-level code is a file's lines outside every function and method, class bodies included, kept as
+runs of lines in order (`ranges`) without the blank lines at their edges. A file whose top-level code
+is only imports, comments, directives such as `"use client"`, lines of closing brackets and blank
+lines lists no top-level unit. A file in a language JVN does not parse gives no units and is named
+in `unlisted` with `language not supported`, as is a file that disappeared after the inventory.
+
+A unit whose text fits `box_chars` is one item, whatever its length. Only a larger unit is cut into
+`pieces` of at most 60 lines, in order, with no overlap and never across two runs of top-level code;
+each piece has its own range, hash and size. A piece still larger than `box_chars` is
+`too_large_to_judge`: it keeps its range and size, and `judged_pieces` leaves it out. A cut unit
+stays one unit: `unit_score` gives it its best piece's score, and `best_piece` names that piece's
+lines as the place to read. `items_to_judge(unit)` gives what a request judges: the whole unit as
+one `Item(id, file, ranges)`, or each piece that fits, with the id `unit.piece_id(piece)`, the unit
+id plus `#p<index>`.
+
+Spans are lines, so functions on the same lines are one unit named by the first named one, and a
+callback that shares a line with top-level code (`app.post("/orders", (req, res) => ...)`) takes
+that line: its unit's text holds the registration.
+
+`resolve_anchors` is the one way to turn lines into units. A line names the innermost unit holding it:
+a function, its decorators included, or the file's top-level code when the line lies outside every
+function, stubs included, even top-level code the listing leaves out. A line inside a nested
+function names that function, which the listing leaves out; its `nested_in` names the function that
+holds its text. A range names each unit its non-blank lines touch, without the units nested in
+another one it names. Each unit comes back once, in the order first named. A file outside the scope,
+a file in a language JVN does not parse, a line outside its file, a reversed range, and a blank line
+in a file with no top-level code are reported in `unresolved` with their problem, and a file is
+parsed only after its anchor is known to point inside it.
 
 ## Trace a workflow and retain its evidence
 
