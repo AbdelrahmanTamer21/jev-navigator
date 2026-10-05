@@ -560,14 +560,17 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `.conf`, `.properties`, `.toml`, a Dockerfile) or in text from no file, an unquoted value under a
   secret key is masked too (`POSTGRES_PASSWORD: example`), unless it is empty, a boolean or a whole
   `${VAR}`, `$VAR` or `${{ ... }}` reference; in code it stays (`token: str`). A request mapping's
-  `file` names the file of the strings inside it. A reference stays code: an identifier, dotted
-  path, call, a whole `${...}`, a command substitution `$(...)`, or `$NAME` outside single quotes, so
-  `secret: process.env.AUTH_SECRET` reaches Jev unchanged, and so does nested metadata such as a
-  Kubernetes `secret:` volume. Every rule scans in time linear in the text length. The analysis
-  engine's audit-masker corpus is shared in `tests/test_secret_shape_corpus.py`. Masking works by
-  content: a value of at least 8 characters hidden in one place is hidden everywhere in the request,
-  for example where a relation text or another candidate quotes it; a shorter value is masked only
-  where it stands.
+  `file` names the file of the strings inside it. An upper-case environment assignment is a value
+  wherever it stands on a shell, Makefile or CI line (`run: API_TOKEN=... npm test`), unless it is a
+  usage placeholder (`KEY=...`, `KEY=<credential>`). `is_high_entropy`, `HIGH_ENTROPY_MIN_CHARS` and
+  `TOKEN_CHARACTER_CLASS` are public, for callers that judge a lone token. A reference stays code: an
+  identifier, dotted path, call, a whole `${...}`, a command substitution `$(...)`, or `$NAME` outside
+  single quotes, so `secret: process.env.AUTH_SECRET` reaches Jev unchanged, and so does nested
+  metadata such as a Kubernetes `secret:` volume. Every rule scans in time linear in the text length.
+  The analysis engine's audit-masker corpus is shared in `tests/test_secret_shape_corpus.py`. Masking
+  works by content: a value of at least 8 characters hidden in one place is hidden everywhere in the
+  request, for example where a relation text or another candidate quotes it; a shorter value is
+  masked only where it stands.
   The complete candidate set is masked once, before packing, so copied values stay hidden across
   batches; the final scan still runs on every request before it is sent.
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value

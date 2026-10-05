@@ -13,7 +13,33 @@ from dataclasses import dataclass
 from functools import cache
 from typing import Protocol
 
-from .secret_shapes import BY_CONTENT_MIN_CHARS, MASK, hide_secrets
+from .secret_shapes import (
+    BY_CONTENT_MIN_CHARS,
+    HIGH_ENTROPY_MIN_CHARS,
+    MASK,
+    TOKEN_CHARACTER_CLASS,
+    hide_secrets,
+    is_high_entropy,
+)
+
+__all__ = [
+    "BY_CONTENT_MIN_CHARS",
+    "HIGH_ENTROPY_MIN_CHARS",
+    "MASK",
+    "TOKEN_CHARACTER_CLASS",
+    "Masker",
+    "Scanner",
+    "SecretInRequestError",
+    "SecretMasker",
+    "SecretScanner",
+    "is_high_entropy",
+    "mask_by_content",
+    "mask_everywhere",
+    "mask_request",
+    "masked_values",
+    "refuse_if_secret",
+    "safe_options",
+]
 
 
 class Masker(Protocol):

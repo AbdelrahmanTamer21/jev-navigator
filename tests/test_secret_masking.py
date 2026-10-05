@@ -1,13 +1,17 @@
+import re
 import time
 from collections import Counter
 
 import pytest
 
 from jev_navigator.judgments.secrets import (
+    HIGH_ENTROPY_MIN_CHARS,
     MASK,
+    TOKEN_CHARACTER_CLASS,
     SecretInRequestError,
     SecretMasker,
     SecretScanner,
+    is_high_entropy,
     mask_by_content,
     mask_request,
     refuse_if_secret,
@@ -222,6 +226,9 @@ CODE_REFERENCES = [
     '"rawCredentialInherited": "GOOGLE_VERTEX_CREDENTIALS_JSON" in os.environ,',
     "clientSecret: `[MASKED]_${slug}`,",
     "secret-scan: run the scan nightly",
+    " *   REQUESTY_API_KEY=... REQUESTY_RECEIPT=/absolute/path/receipt.json \\",
+    "const USAGE = 'Usage: REQUESTY_API_KEY=<credential> '",
+    "` -e HEEDVANE_ENROLLMENT_TOKEN=${shellQuote(input.enrollmentToken)}` +",
 ]
 
 
@@ -547,3 +554,36 @@ def test_the_final_scan_reads_a_slice_as_its_file_type() -> None:
     # Assert
     with pytest.raises(SecretInRequestError):
         refuse_if_secret(config_slice, {}, SecretScanner())
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "API_TOKEN=hunter2xyz OUT=web/gen.js node build.mjs",
+        "\tAPI_TOKEN=hunter2xyz OUT=web/gen.js $(MAKE) gen",
+        "run: API_TOKEN=hunter2xyz npm test",
+        "RUN API_TOKEN=hunter2xyz ./build.sh && echo done",
+        "cd web && API_TOKEN=hunter2xyz make",
+    ],
+)
+@pytest.mark.parametrize("path", ["Makefile", "build.sh", ".github/workflows/ci.yml", "Dockerfile", None])
+def test_an_assignment_followed_by_more_of_the_line_is_masked(line: str, path: str | None) -> None:
+    # Act
+    masked = SecretMasker().mask(line, path)
+
+    # Assert
+    assert "hunter2xyz" not in masked
+    assert "gen.js" in masked or "gen.js" not in line
+
+
+def test_the_randomness_check_is_public_and_names_its_token_shape() -> None:
+    # Arrange
+    token = "aZ3kQ9pL2xV7mN4bR8tY1wE6"
+
+    # Act
+    random_enough = is_high_entropy(token)
+
+    # Assert
+    assert random_enough and not is_high_entropy("a" * 24)
+    assert len(token) >= HIGH_ENTROPY_MIN_CHARS
+    assert re.fullmatch(f"{TOKEN_CHARACTER_CLASS}+", token)

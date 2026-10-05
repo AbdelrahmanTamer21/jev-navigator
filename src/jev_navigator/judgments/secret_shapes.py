@@ -33,6 +33,8 @@ from .secret_values import (
 
 BY_CONTENT_MIN_CHARS = 8
 HIGH_ENTROPY_BITS_PER_CHAR = 4.0
+HIGH_ENTROPY_MIN_CHARS = 20
+TOKEN_CHARACTER_CLASS = r"[A-Za-z0-9+/=_\-]"
 
 Span = tuple[int, int]
 
@@ -65,6 +67,12 @@ _SHELL_ASSIGNMENT = re.compile(
     r"(?=[ \t]*(?:$|#|;|&&|\|\||[A-Za-z_]\w*=))",
     re.M,
 )
+_INLINE_ENV_ASSIGNMENT = re.compile(
+    r"(?:^|(?<=[ \t;&|]))(?:export[ \t]+)?(?P<key>[A-Z_][A-Z0-9_]*+)=(?P<value>(?![{\[(])[^\s\"'`;&|]++)"
+    r"(?=[ \t;&|`]|$)",
+    re.M,
+)
+_USAGE_PLACEHOLDER = re.compile(r"\.\.\.|…|<[^<>]*>|\*+|x+", re.I)
 _QUOTED_VALUE = re.compile(
     rf"{KEY}{SEPARATOR}(?:[bBrRuUfF]{{1,2}}(?=[\"']))?(?P<quote>\"\"\"|'''|[\"'`])(?P<value>(?:\\[\s\S]|\\\Z|(?!(?P=quote))[^\\])*+)"
     r"(?:(?P=quote)(?P<tail>[\w\"'][^\s,;})\]]*+)?|\Z)"
@@ -92,7 +100,9 @@ _CALL = re.compile(r"(?<![\w.$])(?P<name>[\w.$]++)\((?P<arguments>[^(){}\[\]\n]*
 _SECRET_CALL_WORD = re.compile(r"(?i)secret|token|password|passwd|credential|api_?key|hmac")
 _QUOTED_LITERAL = re.compile(r"(?P<quote>[\"'`])(?P<value>[^\"'`\n]+)(?P=quote)")
 _ALGORITHM_NAME = re.compile(r"(?i)(?:sha|md|blake2[bs]?|hs|rs|es|ps)-?\d+")
-_QUOTED_ASSIGNMENT = re.compile(r"""[:=]\s*["'](?P<value>[A-Za-z0-9+/=_\-]{20,}+)["']""")
+_QUOTED_ASSIGNMENT = re.compile(
+    rf"""[:=]\s*["'](?P<value>{TOKEN_CHARACTER_CLASS}{{{HIGH_ENTROPY_MIN_CHARS},}}+)["']"""
+)
 _IDENTIFIER_WORDS = re.compile(r"[A-Za-z]+(?:_[A-Za-z]+)*")
 _PLACEHOLDER = re.compile(r"(?i)pass(?:word|wd)?|pwd|secret|token|x+|\*+|<[^>]*>|\.\.\.|…")
 
@@ -206,6 +216,12 @@ def _is_key_material(value: str, quote: str) -> bool:
     )
 
 
+def _inline_env_literal(match: re.Match[str]) -> bool:
+    """An upper-case assignment anywhere on a shell, Makefile or CI line (``run: API_TOKEN=... npm test``),
+    unless it is a usage placeholder (``KEY=...``, ``KEY=<credential>``)."""
+    return _shell_literal(match) and not _USAGE_PLACEHOLDER.fullmatch(match["value"])
+
+
 def _shell_literal(match: re.Match[str]) -> bool:
     """A shell word, unless it is code: a reference, call or index, an interpolation, or a keyword
     argument ending in a comma or bracket."""
@@ -263,10 +279,12 @@ def _bearer_value(match: re.Match[str]) -> bool:
 def _high_entropy_value(match: re.Match[str]) -> bool:
     """Identifier words (``RunAttemptConflictError``, ``max_items``) are code, whatever their entropy."""
     value = match["value"]
-    return not _IDENTIFIER_WORDS.fullmatch(value) and _is_high_entropy(value)
+    return not _IDENTIFIER_WORDS.fullmatch(value) and is_high_entropy(value)
 
 
-def _is_high_entropy(value: str) -> bool:
+def is_high_entropy(value: str) -> bool:
+    """Whether a value's characters are spread like a random token's: at least
+    ``HIGH_ENTROPY_BITS_PER_CHAR`` bits of Shannon entropy per character."""
     counts = Counter(value)
     bits = -sum(count / len(value) * math.log2(count / len(value)) for count in counts.values())
     return bits >= HIGH_ENTROPY_BITS_PER_CHAR
@@ -280,6 +298,7 @@ _RULES: tuple[Callable[[str], list[Span]], ...] = (
     _matches(_URL_PASSWORD, _url_password),
     _matches(_QUERY_VALUE, _query_secret),
     _matches(_SHELL_ASSIGNMENT, _keyed(_shell_literal)),
+    _matches(_INLINE_ENV_ASSIGNMENT, _keyed(_inline_env_literal)),
     _quoted_spans,
     flow_spans,
     yaml_block_spans,
