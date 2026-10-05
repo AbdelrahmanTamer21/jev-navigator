@@ -741,8 +741,8 @@ def _same_lines_as_a_named_symbol(symbols: set[Span]) -> set[Span]:
     """Anonymous functions spanning exactly a named symbol's lines: ``xs.map((x) => x.id)`` on the
     one line of ``ids``. A place is lines, so such a callback is that symbol; kept apart, it would
     be a second place on the same lines."""
-    named = {(span.start, span.end) for span in symbols if span.name != "<anonymous>"}
-    return {span for span in symbols if span.name == "<anonymous>" and (span.start, span.end) in named}
+    named = {(span.start, span.end) for span in symbols if span.is_named}
+    return {span for span in symbols if not span.is_named and (span.start, span.end) in named}
 
 
 def _merged_stretches(ranges: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
