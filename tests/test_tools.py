@@ -9,6 +9,7 @@ import msgspec
 import pytest
 from git_repos import git
 
+from jev_navigator import memory_limit
 from jev_navigator.index import file_shape, tools
 from jev_navigator.index.file_shape import Placement
 
@@ -150,10 +151,9 @@ class _NeedsAFieldAstGrepNeverPrints(TypedDict):
 
 
 def _parsed_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every file too big to be placed by its size alone is parsed alone: the side-by-side share is
-    lowered to the parser's base and the single-file limit lifted."""
+    """Every file too big to be placed by its size alone is parsed alone, within the memory allowance's
+    single-file limit: the side-by-side share is lowered to the parser's base."""
     monkeypatch.setattr(file_shape, "MAX_PARSE_PEAK_MB", file_shape.BASE_PEAK_MB)
-    monkeypatch.setattr(tools, "single_parse_limit_mb", lambda: float("inf"))
 
 
 @pytest.mark.parametrize("placement", [Placement.SIDE_BY_SIDE, Placement.ALONE])
@@ -165,7 +165,8 @@ def test_a_whole_line_the_decoder_rejects_raises_the_decoders_error_not_the_tool
     (tmp_path / "a.py").write_text(function * (file_shape.PARSEABLE_UP_TO_BYTES // len(function) + 1))
     if placement is Placement.ALONE:
         _parsed_alone(monkeypatch)
-    assert file_shape.placement_of(tmp_path, "a.py", tools.single_parse_limit_mb())[0] is placement
+    single_parse_mb = memory_limit.process_guard().limit.single_parse_mb
+    assert file_shape.placement_of(tmp_path, "a.py", single_parse_mb)[0] is placement
     decode = msgspec.json.Decoder(_NeedsAFieldAstGrepNeverPrints).decode
 
     # Act / Assert

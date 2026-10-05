@@ -1,6 +1,7 @@
 """One search of many places, run in its own process by ``test_send_bound``: a judge that
 deadlocks leaves worker threads Python waits for at exit, so only a process the test can kill
-fails cleanly. Prints what the provider saw as one JSON object."""
+fails cleanly. Prints what the provider saw, and the most threads alive during a send, as one JSON
+object."""
 
 from __future__ import annotations
 
@@ -47,6 +48,7 @@ class HeldClient:
     script: ScriptedJevClient = field(default_factory=lambda: ScriptedJevClient(default_noul=0.05))
     in_flight: int = 0
     peak: int = 0
+    peak_threads: int = 0
     filled_at: float | None = None
     _changed: threading.Condition = field(default_factory=threading.Condition)
 
@@ -79,6 +81,7 @@ class HeldClient:
         with self._changed:
             self.in_flight += 1
             self.peak = max(self.peak, self.in_flight)
+            self.peak_threads = max(self.peak_threads, threading.active_count())
             if self.filled_at is None and self.in_flight >= self.bound:
                 self.filled_at = time.monotonic()
             self._changed.notify_all()
@@ -130,7 +133,7 @@ class AsyncHeldClient:
         return self.held.parse(raw)
 
 
-def _many_functions_index(tmp_path: Path, count: int) -> CodeIndex:
+def many_functions_index(tmp_path: Path, count: int) -> CodeIndex:
     """A repository of ``count`` distinct functions, one per file, each calling two shared helpers."""
     root = tmp_path / "repo"
     root.mkdir()
@@ -145,14 +148,14 @@ def _many_functions_index(tmp_path: Path, count: int) -> CodeIndex:
     return CodeIndex.from_git(root, fact_cache_dir=tmp_path / "fact-cache")
 
 
-def _starts(index: CodeIndex, count: int) -> list[Place]:
+def function_starts(index: CodeIndex, count: int) -> list[Place]:
     return [function_place(index, index.enclosing_symbol(f"app/f{number}.py", 5)) for number in range(count)]
 
 
 def _search(mode: str, index: CodeIndex, held: HeldClient, width: int) -> FindResult:
     """One round of a search opening ``width`` places at once, through the sync or the async path."""
     budget = SearchBudget(beam_width=width, max_steps=width, neighbours_per_kind=2)
-    starts = _starts(index, width)
+    starts = function_starts(index, width)
     if mode == "sync":
         return find_code(index, Judge(held, items_per_request=1), TARGET, starts, budget=budget)
     judge = Judge(AsyncHeldClient(held), items_per_request=1)
@@ -160,7 +163,7 @@ def _search(mode: str, index: CodeIndex, held: HeldClient, width: int) -> FindRe
 
 
 def main(mode: str, width: int, refuse_lists: bool, workspace: Path) -> dict:
-    index = _many_functions_index(workspace, width)
+    index = many_functions_index(workspace, width)
     held = HeldClient(refuse_lists=refuse_lists, fill=not refuse_lists)
     result = _search(mode, index, held, width)
     candidates = [len(state.get("candidates", ())) for state, _ in held.requests]
@@ -169,6 +172,7 @@ def main(mode: str, width: int, refuse_lists: bool, workspace: Path) -> dict:
         "requests": len(held.requests),
         "neighbour_batches": candidates.count(1),
         "peak": held.peak,
+        "threads": held.peak_threads,
     }
 
 

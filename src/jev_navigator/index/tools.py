@@ -1,4 +1,5 @@
-"""Thin wrappers over the command-line tools the index runs: ast-grep, ripgrep and git."""
+"""Thin wrappers over the command-line tools the index runs: ast-grep, ripgrep and git. Every process
+starts through ``memory_limit.started``, so JVN's memory allowance and ceiling cover all of them."""
 
 from __future__ import annotations
 
@@ -16,7 +17,8 @@ from typing import IO
 
 import msgspec
 
-from .file_shape import MAX_PARSE_PEAK_MB, Placement, placement_of
+from .. import memory_limit
+from .file_shape import Placement, placement_of
 from .spans import TextHit
 
 AST_GREP = "ast-grep"
@@ -62,12 +64,17 @@ def command_output(
     arguments: Sequence[str], cwd: Path, *, no_match_exit: int | None = None, stdin: str | None = None
 ) -> bytes:
     """``run_command``'s output as the bytes the command wrote, for output that quotes file content."""
-    completed = subprocess.run(
-        list(arguments), cwd=cwd, input=None if stdin is None else stdin.encode(), capture_output=True
-    )
-    if completed.returncode not in (0, no_match_exit):
-        raise _tool_failure(arguments[0], completed.returncode, completed.stderr.decode(errors="replace"))
-    return completed.stdout
+    with memory_limit.started(
+        arguments,
+        cwd=cwd,
+        stdin=None if stdin is None else subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as process:
+        output, error_output = process.communicate(None if stdin is None else stdin.encode())
+    if process.returncode not in (0, no_match_exit):
+        raise _tool_failure(arguments[0], process.returncode, error_output.decode(errors="replace"))
+    return output
 
 
 def _tool_failure(tool: str, returncode: int, stderr: str) -> ToolFailedError:
@@ -91,18 +98,20 @@ def ast_grep_rules(
 ) -> Iterator[dict]:
     """The matches of ``rules_yaml`` over ``files``, one at a time as ast-grep prints them, so no
     process's whole output is ever held. Every parse passes through here, placed by its estimated parse
-    peak (``file_shape``): files within ``MAX_PARSE_PEAK_MB`` are parsed side by side; a file over it
-    but within ``single_parse_limit_mb()`` is parsed alone, one at a time; a file over that
-    is never handed to ast-grep and is added to ``refused`` with its reason when the iteration starts,
-    so read ``refused`` after the matches. A file that ast-grep itself skipped without parsing
+    peak (``file_shape``) against JVN's memory settings (``memory_limit.MemoryLimit``): files within
+    ``MAX_PARSE_PEAK_MB`` are parsed side by side, as many at once as the allowance affords; a file over
+    it but within ``single_parse_mb`` is parsed alone, on one thread, one at a time, after them; a file
+    over that is never handed to ast-grep and is added to ``refused`` with its reason when the iteration
+    starts, so read ``refused`` after the matches. A file that ast-grep itself skipped without parsing
     (``NOT_PARSED_REASON``) is added when its process ends, so it is never taken for a file without
-    symbols. ast-grep always runs with a JVN-owned sgconfig: ``config``,
-    when given, is sgconfig YAML text (a ``languageGlobs`` remapping, say), otherwise
-    ``NEUTRAL_AST_GREP_CONFIG``. It is written to a temporary file outside every repository and passed
-    with ``--config``, so the repository being analysed never configures the parser. ``decode`` turns
-    one printed match into the dict the caller reads, in every run, side by side or alone; a caller
-    that reads few fields passes a decoder that skips the rest."""
-    placed = _placed(files, cwd, single_parse_limit_mb())
+    symbols. One scan runs at a time in a process (``memory_limit.parsing``). ast-grep always runs with a
+    JVN-owned sgconfig: ``config``, when given, is sgconfig YAML text (a ``languageGlobs`` remapping,
+    say), otherwise ``NEUTRAL_AST_GREP_CONFIG``. It is written to a temporary file outside every
+    repository and passed with ``--config``, so the repository being analysed never configures the
+    parser. ``decode`` turns one printed match into the dict the caller reads, in every run, side by
+    side or alone; a caller that reads few fields passes a decoder that skips the rest."""
+    limit = memory_limit.process_guard().limit
+    placed = _placed(files, cwd, limit.single_parse_mb)
     refused.update(placed.refused)
     if not placed.side_by_side and not placed.alone:
         return
@@ -110,9 +119,11 @@ def ast_grep_rules(
         directory = resources.enter_context(tempfile.TemporaryDirectory(prefix="jev-navigator-sgconfig-"))
         path = Path(directory) / "sgconfig.yml"
         path.write_text(NEUTRAL_AST_GREP_CONFIG if config is None else config)
+        resources.enter_context(memory_limit.parsing())
         command = [AST_GREP, "scan", "--inline-rules", rules_yaml, "--config", str(path)]
+        side_by_side = [*command, "--threads", str(limit.parse_threads)]
         for chunk in file_chunks(placed.side_by_side):
-            yield from _scanned(command, chunk, cwd, refused, decode)
+            yield from _scanned(side_by_side, chunk, cwd, refused, decode)
         for file in placed.alone:
             yield from _scanned([*command, "--threads", "1"], [file], cwd, refused, decode)
 
@@ -132,12 +143,6 @@ def _scanned(
         decode=decode,
         on_stderr=lambda inspection: refused.update(_skipped_files(files, inspection, cwd)),
     )
-
-
-def single_parse_limit_mb() -> float:
-    """The most one file may take when parsed alone. It is the side-by-side bound, so no file is parsed
-    alone, until JVN's memory settings provide a single-file limit."""
-    return MAX_PARSE_PEAK_MB
 
 
 @dataclass
@@ -222,19 +227,14 @@ def _json_lines(
     stderr, which say why it stopped. ``on_stderr`` gets the whole stderr text once the command has
     ended successfully."""
     with tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(list(arguments), cwd=cwd, stdout=subprocess.PIPE, stderr=errors, text=True)
-        try:
+        with memory_limit.started(
+            arguments, cwd=cwd, stdout=subprocess.PIPE, stderr=errors, text=True
+        ) as process:
             for line in process.stdout:
                 if line.strip():
                     yield _json_object(line, process, errors, arguments[0], decode)
-        except BaseException:
-            process.kill()
-            raise
-        finally:
-            process.stdout.close()
-            returncode = process.wait()
-        if returncode not in (0, _NO_MATCHES_EXIT):
-            raise _tool_failed(arguments[0], returncode, errors)
+        if process.returncode not in (0, _NO_MATCHES_EXIT):
+            raise _tool_failed(arguments[0], process.returncode, errors)
         if on_stderr is not None:
             on_stderr(_stderr_text(errors))
 
@@ -371,18 +371,20 @@ def inside_git_worktree(cwd: Path) -> bool:
     """Whether ``cwd`` lies in a Git worktree. Only git's own "not a git repository" means no; any
     other failure, such as a repository git refuses for dubious ownership, is raised, so it is never
     listed as a plain directory. Git runs in the C locale so that message is never translated."""
-    completed = subprocess.run(
+    with memory_limit.started(
         ["git", "rev-parse", "--is-inside-work-tree"],
         cwd=cwd,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         env={**os.environ, "LC_ALL": "C"},
-    )
-    if completed.returncode == 0:
-        return completed.stdout.strip() == "true"
-    if "not a git repository" in completed.stderr:
+    ) as process:
+        output, error_output = process.communicate()
+    if process.returncode == 0:
+        return output.strip() == "true"
+    if "not a git repository" in error_output:
         return False
-    raise _tool_failure("git", completed.returncode, completed.stderr)
+    raise _tool_failure("git", process.returncode, error_output)
 
 
 def head_commit(cwd: Path) -> str:
@@ -426,15 +428,17 @@ def git_blob(repository: Path, object_id: str) -> bytes:
 
 def _cat_file_batch(repository: Path, object_ids: Iterable[str]) -> list[bytes]:
     requests = "".join(f"{object_id}\n" for object_id in object_ids).encode()
-    completed = subprocess.run(
+    with memory_limit.started(
         ["git", "cat-file", "--batch"],
         cwd=repository,
-        input=requests,
-        capture_output=True,
-    )
-    if completed.returncode != 0:
-        raise _tool_failure("git cat-file", completed.returncode, completed.stderr.decode())
-    return _batch_contents(completed.stdout)
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as process:
+        output, error_output = process.communicate(requests)
+    if process.returncode != 0:
+        raise _tool_failure("git cat-file", process.returncode, error_output.decode(errors="replace"))
+    return _batch_contents(output)
 
 
 def _batch_contents(output: bytes) -> list[bytes]:

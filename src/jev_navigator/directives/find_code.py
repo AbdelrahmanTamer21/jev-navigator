@@ -62,6 +62,7 @@ from ..judgments.questions import (
 )
 from ..judgments.secrets import DEFAULT_MASKER, Masker
 from ..judgments.thresholds import NoulVerdict, Thresholds
+from ..memory_limit import MemoryLimitReachedError
 from .places import MOVES, Move, Place, neighbours_and_omissions, place_relationship
 from .shown import MAX_LINE_CHARS, cut_long_line, shown_slice
 
@@ -352,7 +353,7 @@ def find_code(
     stop = None
     try:
         while (stop := _stop_reason(search, index)) is None:
-            opened = _open_round(index, search, judge)
+            opened = _open_round_or_fail(index, search, judge)
             if not opened:
                 continue
             responses, cancelled = _ask_round(judge, search, opened)
@@ -393,12 +394,10 @@ async def find_code_async(
     )
     search, judge = _begin(index, judge, target_description, start, options)
     while (stop := _stop_reason(search, index)) is None:
-        opened = await asyncio.to_thread(_open_round, index, search, judge)
+        opened = await asyncio.to_thread(_open_round_or_fail, index, search, judge)
         if not opened:
             continue
-        responses = await asyncio.gather(
-            *(_ask_within_cap_async(judge, search, opening) for opening in opened)
-        )
+        responses = await _ask_round_async(judge, search, opened)
         _merge_round(search, opened, responses)
         await _apply_stop_rule_async(judge, search)
     return _result(search, stop, judge, index)
@@ -472,6 +471,16 @@ def _begin(
     return search, scoped_judge
 
 
+def _open_round_or_fail(index: CodeIndex, search: _Search, judge: Judge) -> list[_Opening]:
+    """``_open_round``. An error it raises has already put the round's places back on the frontier,
+    and ``search_failure`` decides whether it ends the search ``failed`` or raises."""
+    try:
+        return _open_round(index, search, judge)
+    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
+        search.failure = search_failure(error, opening=True)
+        return []
+
+
 def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Opening]:
     beam = []
     opened = []
@@ -499,9 +508,10 @@ def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Openin
 
 
 def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[list, bool]:
-    """Ask one beam concurrently. A caller interrupt stops future rounds after the already-sent
-    requests settle; successful responses still count and interrupted places return to the frontier."""
-    with ThreadPoolExecutor(max_workers=len(opened)) as pool:
+    """Ask one beam concurrently, at most ``judge.max_concurrency`` places at once, whatever the beam
+    width. A caller interrupt stops future rounds after the already-sent requests settle; successful
+    responses still count and interrupted places return to the frontier."""
+    with ThreadPoolExecutor(max_workers=min(len(opened), judge.max_concurrency)) as pool:
         futures: list[Future] = []
         try:
             for opening in opened:
@@ -509,6 +519,17 @@ def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[l
             return [future.result() for future in futures], False
         except KeyboardInterrupt:
             return _cancel_round(judge, futures, len(opened)), True
+
+
+async def _ask_round_async(judge: Judge, search: _Search, opened: list[_Opening]) -> list:
+    """Ask one beam concurrently on the event loop, at most ``judge.max_concurrency`` places at once."""
+    slots = asyncio.Semaphore(judge.max_concurrency)
+
+    async def ask(opening: _Opening):
+        async with slots:
+            return await _ask_within_cap_async(judge, search, opening)
+
+    return list(await asyncio.gather(*(ask(opening) for opening in opened)))
 
 
 def _cancel_round(judge: Judge, futures: list[Future], asked: int) -> list:
@@ -559,12 +580,19 @@ class _Failed:
     error: Exception
 
 
-def search_failure(error: Exception) -> Exception:
+OPENING_FAILURES: tuple[type[Exception], ...] = (MemoryLimitReachedError,)
+"""The errors that end a search ``failed`` while it opens places. Opening runs the index, and an index
+or parser error there raises; JVN's memory limit is the exception, because Resume opens the same places
+again once there is room."""
+
+
+def search_failure(error: Exception, *, opening: bool = False) -> Exception:
     """The one rule for what ends a search ``failed``: every error a request raises gets resume
     state, the search holding this same error, and the CLI re-raises it after saving, so its edge
     still decides between one line and a traceback. Only a send the abort stopped is re-raised, to
-    count as cancelled. Find, entry selection and Find All all apply it."""
-    if isinstance(error, ABORTED_SEND_ERRORS):
+    count as cancelled. While the search is ``opening`` places, only ``OPENING_FAILURES`` end it
+    failed, and any other error is re-raised. Find, entry selection and Find All all apply it."""
+    if isinstance(error, ABORTED_SEND_ERRORS) or (opening and not isinstance(error, OPENING_FAILURES)):
         raise error
     return error
 

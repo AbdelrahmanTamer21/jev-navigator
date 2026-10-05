@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
+from .. import memory_limit
 from . import listing, tools
 from .bindings import (
     Binding,
@@ -762,13 +763,16 @@ class CodeIndex:
             self._fact_cache.save(file, contents[file], facts)
 
     def _load_cached_facts(self, files: Sequence[str]) -> dict[str, bytes]:
-        """Remembers the persisted facts of ``files``; returns the bytes of those still to parse.
+        """Remembers the persisted facts of ``files``; returns the bytes of those still to parse. Facts
+        loaded from the cache grow the process with no parser running, so each file is first checked
+        against JVN's memory allowance.
 
         The caller holds the facts lock."""
         to_parse: dict[str, bytes] = {}
         for file in files:
             if language_of(file) is None or file in self._facts or file in self._refused:
                 continue
+            memory_limit.check()
             content = self._read_bytes(file)
             if content is None:
                 continue

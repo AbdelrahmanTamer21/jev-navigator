@@ -14,6 +14,7 @@ from jev_navigator.index import file_shape, tools
 from jev_navigator.index.bindings import BindingStatus
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.fact_cache import FactCache
+from jev_navigator.memory_limit import MemoryLimit
 
 BUNDLE = "orchestrator/contracts/launch-contract.mjs"
 STATEMENT = "export function launch(){return 1};"
@@ -528,8 +529,8 @@ def test_a_refused_file_is_measured_once_for_the_life_of_the_index(tmp_path: Pat
     assert [event for event in scans if event[1] == "started"] == [("facts", "started", 1)]
 
 
-SINGLE_PARSE_LIMIT_MB = 754
-"""The single-file limit at JVN's default memory settings: the allowance less Python's share."""
+SINGLE_PARSE_LIMIT_MB = MemoryLimit.from_env({}).single_parse_mb
+"""The single-file limit at JVN's default memory settings, which every test runs with: 754 MB."""
 REAL_CODE = Path(tools.__file__).with_name("code_index.py").read_text()
 
 
@@ -537,10 +538,6 @@ def _real_code_file(size_bytes: int) -> str:
     """JVN's own code_index.py repeated to ``size_bytes``: real code of ordinary short lines."""
     copies = size_bytes // len(REAL_CODE) + 1
     return REAL_CODE * copies
-
-
-def _with_single_parse_limit(monkeypatch: pytest.MonkeyPatch, megabytes: float) -> None:
-    monkeypatch.setattr(tools, "single_parse_limit_mb", lambda: megabytes)
 
 
 class _AstGrepCommands:
@@ -566,7 +563,6 @@ def test_a_file_over_the_side_by_side_share_is_parsed_alone_and_its_facts_are_co
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Arrange: 4.7 MB of real code is over the 250 MB side-by-side share and under the single-file limit
-    _with_single_parse_limit(monkeypatch, SINGLE_PARSE_LIMIT_MB)
     ast_grep = _AstGrepCommands(monkeypatch)
     big = _real_code_file(4_700_000)
     commit_files(
@@ -592,7 +588,6 @@ def test_a_file_over_the_single_file_limit_is_refused_and_names_that_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Arrange: 55,000 dense lines of 45 operands, 14.7 MB, really peaked at 909 MB alone
-    _with_single_parse_limit(monkeypatch, SINGLE_PARSE_LIMIT_MB)
     ast_grep = _AstGrepCommands(monkeypatch)
     dense_line = "v = " + " + ".join(f"a{operand}" for operand in range(45)) + "\n"
     commit_files(
@@ -616,7 +611,6 @@ def test_a_long_string_of_data_is_still_parsed_side_by_side(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Arrange: documenso's background.tsx holds one 2.5 MB SVG path on one line and peaks at 58 MB
-    _with_single_parse_limit(monkeypatch, SINGLE_PARSE_LIMIT_MB)
     ast_grep = _AstGrepCommands(monkeypatch)
     path = "M708 195.8c.4-1.5.8-3.5 2-4.7 " * 84_000
     background = f'export function Background() {{\n  return <path d="{path}" />;\n}}\n'
@@ -637,9 +631,7 @@ def test_a_long_string_of_data_is_still_parsed_side_by_side(
 ALONE_IN_A_FRESH_PROCESS = """
 import json, resource, sys
 from pathlib import Path
-from jev_navigator.index import tools
 from jev_navigator.index.code_index import CodeIndex
-tools.single_parse_limit_mb = lambda: float(sys.argv[3])
 index = CodeIndex.from_git(Path(sys.argv[1]), fact_cache_dir=Path(sys.argv[2]))
 functions = len(index.functions_in("src/big.py"))
 peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
@@ -659,7 +651,6 @@ def test_a_file_parsed_alone_peaks_inside_the_single_file_limit(tmp_path: Path) 
             ALONE_IN_A_FRESH_PROCESS,
             str(tmp_path / "repo"),
             str(tmp_path / "facts"),
-            str(SINGLE_PARSE_LIMIT_MB),
         ],
         capture_output=True,
         text=True,
@@ -673,24 +664,9 @@ def test_a_file_parsed_alone_peaks_inside_the_single_file_limit(tmp_path: Path) 
     assert peak_megabytes < SINGLE_PARSE_LIMIT_MB
 
 
-def test_without_a_single_file_limit_a_file_over_the_side_by_side_share_is_refused(tmp_path: Path) -> None:
-    # Arrange: no memory settings name a single-file limit, so nothing may be parsed alone
-    commit_files(tmp_path / "repo", {"src/big.py": _real_code_file(4_700_000)})
-    index = CodeIndex.from_git(tmp_path / "repo", fact_cache_dir=tmp_path / "facts")
-
-    # Act
-    index.functions_in_files(index.files)
-
-    # Assert
-    assert ", over the 250 MB one file may take," in index.refused_files["src/big.py"]
-
-
-def test_a_file_parsed_alone_that_ast_grep_skips_is_named_not_taken_for_empty(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_file_parsed_alone_that_ast_grep_skips_is_named_not_taken_for_empty(tmp_path: Path) -> None:
     # Arrange: 110,000 small functions, 3.4 MB on 220,000 lines, over ast-grep's own size skip but within
     # the single-file limit, so the file is parsed alone and ast-grep prints nothing for it
-    _with_single_parse_limit(monkeypatch, SINGLE_PARSE_LIMIT_MB)
     many = "".join(f"def f{n}():\n    return {n}\n" for n in range(110_000))
     commit_files(tmp_path / "repo", {"src/many.py": many, "src/one.py": "def one():\n    return 1\n"})
     index = CodeIndex.from_git(tmp_path / "repo", fact_cache_dir=tmp_path / "facts")
