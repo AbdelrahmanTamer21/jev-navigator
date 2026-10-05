@@ -240,6 +240,17 @@ def test_the_entry_text_lists_what_the_module_names_then_its_objects_members(
             "    return 1;\n  });\n  return run;\n}\n",
             "setup",
         ),
+        ("mapped.ts", "export const ids = items.map((item) => item.id);\n", ""),
+        ("filtered.ts", "export const CORE = LENSES.filter((lens) => lens.core);\n", ""),
+        ("sorted.ts", "export const ordered = [...items].sort((a, b) => a - b);\n", ""),
+        ("indexed.ts", "export const byId = new Map(items.map((item) => [item.id, item]));\n", ""),
+        ("table.ts", 'export const lines = new Map([\n  ["paused", (at: string) => at],\n]);\n', ""),
+        ("range.ts", "export const steps = Array.from({ length: 3 }, (_, index) => index);\n", ""),
+        (
+            "now.ts",
+            "export const now = Effect.map(Clock.currentTimeMillis, (millis) => new Date(millis));\n",
+            "now",
+        ),
     ],
     ids=[
         "an Effect.fn",
@@ -254,6 +265,13 @@ def test_the_entry_text_lists_what_the_module_names_then_its_objects_members(
         "an array under as const, which is no call either",
         "a call under as",
         "a constant inside a function",
+        "data mapped from a variable",
+        "data filtered from a constant",
+        "data sorted from an array",
+        "a map built from mapped data",
+        "a map holding functions",
+        "an array from a callback",
+        "an Effect mapped by the Effect module, which is no collection",
     ],
 )
 def test_the_entry_text_names_a_function_a_module_level_constant_builds_by_the_constant(
@@ -264,7 +282,9 @@ def test_the_entry_text_names_a_function_a_module_level_constant_builds_by_the_c
     under the constant's own name, once, among the module's own names in file order. A router
     holding several procedures is named once, also under `as` or `satisfies`. A constant holding no
     function, or holding functions in an array rather than a call, under `as const` too, and a
-    constant inside a function, give no name."""
+    constant inside a function, give no name. Neither does data built through a callback: a
+    callback a collection step takes (`.map`, `.filter`, `.sort` on a collection, not on a module
+    such as `Effect`), or one inside `new Map`, `new Set` or `Array.from`."""
     # Arrange
     index = _index(tmp_path, {file: source, "util/x.py": "x = 1\n"})
 

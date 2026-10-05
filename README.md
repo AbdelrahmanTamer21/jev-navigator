@@ -197,7 +197,8 @@ Without a start, `jvn` uses typed Jev judgments to select entry candidates from 
 Each file option shows the file's first doc line and up to eight names: the functions and classes the
 module names or exports through CommonJS and each module-level constant whose call or `new` builds a
 function, as `run` in `export const run = Effect.fn("run")(function* ...)` or `userRouter` for a
-router, then each function of an object a module-level variable holds,
+router, but not one that builds data through a callback, such as `items.map((item) => item.id)` or
+`new Map(...)`, then each function of an object a module-level variable holds,
 as `api.list`, each function of an object a module-level call or `new` is passed, as `errorFormatter` in
 `create({ errorFormatter() {} })`, and each member of a namespace, in file order within each group. A
 file holding none of these, such as one of types only or one whose functions are all callbacks, shows

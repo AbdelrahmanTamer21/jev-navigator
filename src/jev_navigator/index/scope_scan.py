@@ -112,7 +112,8 @@ class ConstantFunction(NamedTuple):
     names, inside the call or `new` that is the value of the module-level variable ``constant``;
     ``keys`` are the keys of the pairs around it there, outer first: `export const run =
     Effect.fn("run")(function* () {})` holds one with no keys, `createWebRouter({ list:
-    procedure.query(() => []) })` one with the key `list`."""
+    procedure.query(() => []) })` one with the key `list`. A callback that builds data holds none:
+    `items.map((item) => item.id)`, or one inside `new Map`, `new Set` or `Array.from`."""
 
     constant: str
     keys: tuple[str, ...]
@@ -436,7 +437,8 @@ class _FileFound:
                 self.ranges,
                 _held_by_no_name(
                     symbols & nodes.outermost(), _marked(self.ranges, self.marks[_SELF_NAMED_RULE])
-                ),
+                )
+                - _marked(self.ranges, self.marks[_DATA_CALLBACK_RULE]),
                 self.declaration_nodes,
                 self.constant_owners,
                 self.constant_keys,
@@ -848,6 +850,7 @@ _ARGUMENT_MEMBER_RULE = "argument_member"
 _OBJECT_OWNER_RULE = "object_owner"
 _CONSTANT_OWNER_RULE = "constant_owner"
 _CONSTANT_KEY_RULE = "constant_key"
+_DATA_CALLBACK_RULE = "data_callback"
 _MARK_RULES = (
     _HELD_RULE,
     _PROPERTY_VALUE_RULE,
@@ -855,6 +858,7 @@ _MARK_RULES = (
     _SELF_NAMED_RULE,
     _OBJECT_MEMBER_RULE,
     _ARGUMENT_MEMBER_RULE,
+    _DATA_CALLBACK_RULE,
 )
 _STRUCTURE_RULE_IDS = frozenset(
     {
@@ -1002,7 +1006,37 @@ def _constant_rules(language: str) -> list[str]:
     return [
         _rule_document(_CONSTANT_OWNER_RULE, language, owner),
         _rule_document(_CONSTANT_KEY_RULE, language, key),
+        _rule_document(_DATA_CALLBACK_RULE, language, _data_callback(language)),
     ]
+
+
+# The steps a collection takes a callback for. Called on a PascalCase name the step belongs to a
+# module, such as `Effect.map(effect, (value) => ...)`, which builds an Effect rather than data.
+_COLLECTION_STEPS = (
+    "^(map|flatMap|filter|reduce|reduceRight|find|findIndex|findLast|findLastIndex|some|every|forEach"
+    "|sort|toSorted)$"
+)
+_COLLECTION_STEP_CALL = (
+    "{kind: call_expression, has: {field: function, kind: member_expression, all: ["
+    f"{{has: {{field: property, regex: '{_COLLECTION_STEPS}'}}}}, "
+    "{not: {has: {field: object, kind: identifier, regex: '^[A-Z][a-z]'}}}]}}"
+)
+_COLLECTION_BUILDERS = (
+    "[{kind: new_expression, has: {field: constructor, regex: '^(Map|Set)$'}}, "
+    "{kind: call_expression, has: {field: function, regex: '^Array\\.from$'}}]"
+)
+
+
+def _data_callback(language: str) -> str:
+    """Every function that builds data rather than being one: a callback a collection step takes,
+    `items.map((item) => item.id)`, and one inside `new Map`, `new Set` or `Array.from`. A module-level
+    constant built through one names no function (see ``ConstantFunction``)."""
+    return (
+        f"  any: {_kinds(FUNCTION_KINDS[language])}\n"
+        "  not:\n    not:\n      any:\n"
+        f"        - inside: {{kind: arguments, inside: {_COLLECTION_STEP_CALL}}}\n"
+        f"        - inside: {{stopBy: end, any: {_COLLECTION_BUILDERS}}}"
+    )
 
 
 def _past_wrappers_of(language: str, kinds: Sequence[str]) -> str:
