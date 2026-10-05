@@ -56,7 +56,6 @@ from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
 
 DEFAULT_WINDOW_RADIUS = 10
-MAX_TEXT_HITS = 20
 # The bytes kept on either side of a text hit, so a hit in a one-line bundle never holds the line.
 TEXT_HIT_CONTEXT_BYTES = 200
 CO_CHANGE_COMMITS = 200
@@ -397,9 +396,40 @@ class CodeIndex:
         """Functions and classes."""
         return self._file_structure(file).symbols
 
-    def top_level_symbols(self, file: str) -> tuple[Span, ...]:
-        """The functions and classes no other function or class of the file contains, in file order."""
-        return tuple(sorted(_outermost(self.symbols_in(file)), key=lambda span: (span.start, -span.end)))
+    def module_names(self, file: str) -> tuple[str, ...]:
+        """The names a reader finds ``file``'s code by, best first: the functions and classes the
+        module names (see ``FileStructure.module_symbols``) or assigns to its CommonJS exports and
+        each module-level constant a call builds a function for (see ``ConstantFunction``), then
+        each function of an object a module-level variable holds, as `api.list`, each function of an
+        object a module-level call or `new` is passed, and each function or class of a namespace,
+        each group in file order. A file holding none of these has no names."""
+        structure = self._file_structure(file)
+        symbols = set(structure.symbols)
+        own = _named((*structure.module_symbols, *structure.commonjs_exports))
+        own += [(function.span, function.constant) for function in structure.constant_functions]
+        held = [(member.span, f"{member.owner}.{member.span.name}") for member in structure.object_members]
+        held += [(span, span.name) for span in structure.argument_members]
+        held += [
+            (member.span, member.span.name)
+            for member in structure.namespace_members
+            if member.span in symbols
+        ]
+        named_held = [(span, name) for span, name in held if span.is_named]
+        return tuple(dict.fromkeys((*_in_file_order(own), *_in_file_order(named_held))))
+
+    def constant_function_names(self, file: str) -> dict[Span, str]:
+        """The name each function a module-level constant's call holds goes by (see
+        ``ConstantFunction``): the constant's, then the keys around it, `userRouter.list`. Functions on
+        one line share a span, which goes by the first one's name. Functions that would share one
+        name are told apart by their first line, `pair.<anonymous:4>`."""
+        names: dict[Span, str] = {}
+        for function in self._file_structure(file).constant_functions:
+            names.setdefault(function.span, ".".join((function.constant, *function.keys)))
+        counts = Counter(names.values())
+        return {
+            span: f"{name}.<anonymous:{span.start}>" if counts[name] > 1 else name
+            for span, name in names.items()
+        }
 
     def declarations_in(self, file: str) -> tuple[Span, ...]:
         """Constants, assignments, types, interfaces and enums at module level or directly in a
@@ -1036,15 +1066,16 @@ class CodeIndex:
         return self.read_slice(span, origin)
 
     def search_text(
-        self, text: str, max_hits: int = MAX_TEXT_HITS, *, whole_word: bool = False
+        self, text: str, max_hits: int | None = None, *, whole_word: bool = False
     ) -> tuple[TextHit, ...]:
-        """Lines holding ``text``, searched once per text for the life of the index. A hit's text is
-        the line up to ``TEXT_HIT_CONTEXT_BYTES`` around its first match; ``whole_word`` keeps only
-        matches no word character touches."""
+        """Every line holding ``text``, in file and line order, or only the first ``max_hits`` when a
+        caller bounds them, searched once per text, bound and word rule for the life of the index. A
+        hit's text is the line up to ``TEXT_HIT_CONTEXT_BYTES`` around its first match; ``whole_word``
+        keeps only matches no word character touches."""
         return self._search_text(text, max_hits, whole_word)
 
     @memoized
-    def _search_text(self, text: str, max_hits: int, whole_word: bool) -> tuple[TextHit, ...]:
+    def _search_text(self, text: str, max_hits: int | None, whole_word: bool) -> tuple[TextHit, ...]:
         found = self._on_available(
             self._available_files(self.files),
             lambda files: tools.ripgrep_fixed(
@@ -1052,7 +1083,7 @@ class CodeIndex:
             ),
         )
         hits = sorted(hit for hit in found if hit.file in self._scope)
-        return tuple(hits[:max_hits])
+        return tuple(hits if max_hits is None else hits[:max_hits])
 
     def imports(self, file: str) -> tuple[str, ...]:
         source = "\n".join(self._lines_of(file))
@@ -1274,15 +1305,19 @@ def _regular_blobs(listing: str) -> dict[str, str]:
     return blobs
 
 
+def _named(spans: Iterable[Span]) -> list[tuple[Span, str]]:
+    return [(span, span.name) for span in spans if span.is_named]
+
+
+def _in_file_order(spans_and_names: Iterable[tuple[Span, str]]) -> tuple[str, ...]:
+    """The names by their spans' order, outer first where spans start together, each name once."""
+    ordered = sorted(spans_and_names, key=lambda entry: (entry[0].start, -entry[0].end))
+    return tuple(dict.fromkeys(name for _, name in ordered))
+
+
 def _commits(log: str) -> list[set[str]]:
     blocks = log.split(_COMMIT_MARK)
     return [{line.strip() for line in block.split("\n") if line.strip()} for block in blocks if block.strip()]
-
-
-def _outermost(symbols: Sequence[Span]) -> list[Span]:
-    return [
-        span for span in symbols if not any(other != span and other.contains(span.start) for other in symbols)
-    ]
 
 
 def _innermost(functions: Iterable[Span], line: int) -> Span | None:

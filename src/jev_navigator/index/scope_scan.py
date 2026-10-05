@@ -36,6 +36,7 @@ from .languages import (
     LOCAL_NAME_RULES,
     MODULE_ALIAS_RULES,
     MODULE_BINDING_RULES,
+    MODULE_VARIABLE,
     NAME_HOLDERS,
     NAME_WRAPPERS,
     NAMESPACE_KINDS,
@@ -104,6 +105,27 @@ class NamespaceMember(NamedTuple):
     span: Span
 
 
+class ObjectMember(NamedTuple):
+    """``span`` is a function or class of the object literal the module-level variable ``owner``
+    holds: a method, or a property's value (``const api = { list() {}, get: (id) => id }``)."""
+
+    owner: str
+    span: Span
+
+
+class ConstantFunction(NamedTuple):
+    """``span`` is a function or class that no function, class or namespace holds and no holder
+    names, inside the call or `new` that is the value of the module-level variable ``constant``;
+    ``keys`` are the keys of the pairs around it there, outer first: `export const run =
+    Effect.fn("run")(function* () {})` holds one with no keys, `createWebRouter({ list:
+    procedure.query(() => []) })` one with the key `list`. A callback that builds data holds none:
+    `items.map((item) => item.id)`, or one inside `new Map`, `new Set` or `Array.from`."""
+
+    constant: str
+    keys: tuple[str, ...]
+    span: Span
+
+
 @dataclass(frozen=True)
 class FileStructure:
     """``module_symbols`` are the symbols their module names: one of their syntax nodes no function,
@@ -116,7 +138,11 @@ class FileStructure:
     ``type_declarations`` and ``value_declarations`` are the declarations a type use and a value
     use may name, decided by each declaration's own syntax node. ``local_names`` are the names each
     function binds for its own body (see ``LOCAL_NAME_RULES``); a name a module-level block binds
-    is not among them."""
+    is not among them. ``object_members`` are the functions and classes of the objects module-level
+    variables hold (see ``ObjectMember``), and ``argument_members`` those of the objects a
+    module-level call or `new` is passed: `errorFormatter` in `const t = create({ errorFormatter() {}
+    })`. ``constant_functions`` are the functions module-level constants built by a call hold (see
+    ``ConstantFunction``)."""
 
     functions: tuple[Span, ...] = ()
     symbols: tuple[Span, ...] = ()
@@ -127,6 +153,9 @@ class FileStructure:
     value_declarations: tuple[Span, ...] = ()
     local_names: tuple[LocalName, ...] = ()
     namespace_members: tuple[NamespaceMember, ...] = ()
+    object_members: tuple[ObjectMember, ...] = ()
+    argument_members: tuple[Span, ...] = ()
+    constant_functions: tuple[ConstantFunction, ...] = ()
     # (start, end, first decorator line) of each function whose decorators sit before its first line.
     decorated: tuple[tuple[int, int, int], ...] = ()
     # (start, end) of each function whose body only declares a shape (``languages.STUB_RULES``).
@@ -201,6 +230,7 @@ class _CapturedNode(TypedDict):
 class _Captured(TypedDict, total=False):
     CALLEE: _Text
     FROM: _Text
+    KEY: _Text
     NAME: _Text
     OWN: _Text
     SPEC: _Text
@@ -330,6 +360,12 @@ class _FileFound:
         default_factory=lambda: {rule: set() for rule in _MARK_RULES}
     )
     namespaces: list[_Namespace] = field(default_factory=list)
+    # The byte offset and the name of each module-level variable whose value is an object.
+    object_owners: list[tuple[int, str]] = field(default_factory=list)
+    # Each module-level constant built by a call, by its name's offset, and each key of a pair that
+    # holds a function in such a value, by the pair's byte range (see ``ConstantFunction``).
+    constant_owners: list[tuple[int, str]] = field(default_factory=list)
+    constant_keys: list[tuple[int, int, str]] = field(default_factory=list)
     declaration_nodes: list[_Declaration] = field(default_factory=list)
     declared_names: list[tuple[int, str]] = field(default_factory=list)
     bound_names: list[tuple[int, str]] = field(default_factory=list)
@@ -419,6 +455,18 @@ class _FileFound:
             _sorted(span for span, declaration in declared if declaration.kind.named_by_values),
             _local_names(self.ranges, self.classes, self.bound_names),
             nodes.namespace_members(declared),
+            _object_members(self.ranges, self.marks[_OBJECT_MEMBER_RULE], self.object_owners),
+            _ordered(symbols & _marked(self.ranges, self.marks[_ARGUMENT_MEMBER_RULE]), positions),
+            _constant_functions(
+                self.ranges,
+                _held_by_no_name(
+                    symbols & nodes.outermost(), _marked(self.ranges, self.marks[_SELF_NAMED_RULE])
+                )
+                - _marked(self.ranges, self.marks[_DATA_CALLBACK_RULE]),
+                self.declaration_nodes,
+                self.constant_owners,
+                self.constant_keys,
+            ),
             tuple(sorted(self.decorated)),
             tuple(sorted(self.stubs)),
         )
@@ -450,6 +498,12 @@ class _FileFound:
             self.marks[rule].add((offsets["start"], offsets["end"]))
         elif rule == _NAMESPACE_RULE:
             self.namespaces.append(_Namespace(offsets["start"], offsets["end"], start, end))
+        elif rule == _OBJECT_OWNER_RULE:
+            self.object_owners.append((offsets["start"], match["text"]))
+        elif rule == _CONSTANT_OWNER_RULE:
+            self.constant_owners.append((offsets["start"], match["text"]))
+        elif rule == _CONSTANT_KEY_RULE:
+            self.constant_keys.append((offsets["start"], offsets["end"], _key_text(_captured(match, "KEY"))))
         elif rule == _DECLARED_NAME_RULE:
             self.declared_names.append((offsets["start"], match["text"]))
         elif rule == _LOCAL_NAME_RULE:
@@ -586,6 +640,52 @@ def _innermost(ordered: Sequence[_Nested], starts: list[int], offset: int) -> _N
     return None
 
 
+def _held_by_no_name(spans: set[Span], self_named: set[Span]) -> set[Span]:
+    """The spans no holder names: unnamed ones, and those only their own expression names."""
+    return {span for span in spans if not span.is_named or span in self_named}
+
+
+def _constant_functions(
+    ranges: list[tuple[int, int, Span]],
+    candidates: set[Span],
+    declarations: Sequence[_Declaration],
+    owners: list[tuple[int, str]],
+    keys: list[tuple[int, int, str]],
+) -> tuple[ConstantFunction, ...]:
+    """Each candidate with the constant built by a call whose module-level declaration holds it,
+    and the keys of the pairs around it, outer first, in file order: functions on one line share a
+    span, and each is recorded."""
+    ordered_owners = sorted(owners)
+    found: dict[ConstantFunction, None] = {}
+    for start, end, span in sorted(ranges, key=lambda entry: entry[:2]):
+        constant = _constant_holding(start, declarations, ordered_owners) if span in candidates else None
+        if constant is not None:
+            found[ConstantFunction(constant, _keys_around(start, end, keys), span)] = None
+    return tuple(found)
+
+
+def _constant_holding(
+    offset: int, declarations: Sequence[_Declaration], ordered_owners: list[tuple[int, str]]
+) -> str | None:
+    """The constant built by a call named last before ``offset`` in the declaration holding it: one
+    statement may declare several, and a declarator's value follows its name."""
+    declaration = next((node for node in declarations if node.start <= offset < node.end), None)
+    index = bisect_right(ordered_owners, offset, key=lambda owner: owner[0]) - 1
+    if declaration is None or index < 0 or ordered_owners[index][0] < declaration.start:
+        return None
+    return ordered_owners[index][1]
+
+
+def _keys_around(start: int, end: int, keys: list[tuple[int, int, str]]) -> tuple[str, ...]:
+    """The keys of the pairs holding bytes ``start`` to ``end``, outer first."""
+    return tuple(key for key_start, key_end, key in sorted(keys) if key_start <= start and end <= key_end)
+
+
+def _key_text(key: str) -> str:
+    """A pair's key without the quotes a string key carries."""
+    return key[1:-1] if key[:1] in ("'", '"', "`") else key
+
+
 def _source_positions(ranges: Iterable[tuple[int, int, Span]]) -> dict[Span, int]:
     positions: dict[Span, int] = {}
     for start, _, span in ranges:
@@ -595,6 +695,21 @@ def _source_positions(ranges: Iterable[tuple[int, int, Span]]) -> dict[Span, int
 
 def _marked(ranges: list[tuple[int, int, Span]], marked: set[tuple[int, int]]) -> set[Span]:
     return {span for start, end, span in ranges if (start, end) in marked}
+
+
+def _object_members(
+    ranges: list[tuple[int, int, Span]], marked: set[tuple[int, int]], owners: list[tuple[int, str]]
+) -> tuple[ObjectMember, ...]:
+    """Each marked member with the module-level variable whose object holds it: the last one named
+    before it, since module-level variables never nest."""
+    ordered = sorted(owners)
+    starts = [start for start, _ in ordered]
+    members = {
+        ObjectMember(ordered[index - 1][1], span)
+        for start, end, span in ranges
+        if (start, end) in marked and (index := bisect_right(starts, start)) > 0
+    }
+    return tuple(sorted(members, key=lambda member: member.span))
 
 
 @dataclass(frozen=True)
@@ -646,6 +761,11 @@ class _Nodes:
             if holder is None and isinstance(span, Span) and (start, end) not in self.owned
         }
 
+    def outermost(self) -> set[Span]:
+        """The spans no other function, class or namespace holds, whatever value or property holds
+        them: the generator in `const run = Effect.fn("run")(function* () {})`."""
+        return {span for _, _, span, holder in self._sweep(()) if holder is None and isinstance(span, Span)}
+
     def namespace_members(self, declared: Iterable[tuple[Span, _Declaration]]) -> tuple[NamespaceMember, ...]:
         """Each function, class and declaration whose innermost holder is a namespace, with that
         namespace's lines; a declaration enters the sweep as the point it starts at."""
@@ -675,8 +795,8 @@ def _same_lines_as_a_named_symbol(symbols: set[Span]) -> set[Span]:
     """Anonymous functions spanning exactly a named symbol's lines: ``xs.map((x) => x.id)`` on the
     one line of ``ids``. A place is lines, so such a callback is that symbol; kept apart, it would
     be a second place on the same lines."""
-    named = {(span.start, span.end) for span in symbols if span.name != "<anonymous>"}
-    return {span for span in symbols if span.name == "<anonymous>" and (span.start, span.end) in named}
+    named = {(span.start, span.end) for span in symbols if span.is_named}
+    return {span for span in symbols if not span.is_named and (span.start, span.end) in named}
 
 
 def _merged_stretches(ranges: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
@@ -780,7 +900,21 @@ _MODULE_BINDING_RULE = "module_binding"
 _PROPERTY_VALUE_RULE = "property_value"
 _SELF_NAMED_RULE = "self_named"
 _MODULE_EXPORT_RULE = "module_export"
-_MARK_RULES = (_HELD_RULE, _PROPERTY_VALUE_RULE, _MODULE_EXPORT_RULE, _SELF_NAMED_RULE)
+_OBJECT_MEMBER_RULE = "object_member"
+_ARGUMENT_MEMBER_RULE = "argument_member"
+_OBJECT_OWNER_RULE = "object_owner"
+_CONSTANT_OWNER_RULE = "constant_owner"
+_CONSTANT_KEY_RULE = "constant_key"
+_DATA_CALLBACK_RULE = "data_callback"
+_MARK_RULES = (
+    _HELD_RULE,
+    _PROPERTY_VALUE_RULE,
+    _MODULE_EXPORT_RULE,
+    _SELF_NAMED_RULE,
+    _OBJECT_MEMBER_RULE,
+    _ARGUMENT_MEMBER_RULE,
+    _DATA_CALLBACK_RULE,
+)
 _STRUCTURE_RULE_IDS = frozenset(
     {
         "function",
@@ -790,6 +924,9 @@ _STRUCTURE_RULE_IDS = frozenset(
         _LOCAL_NAME_RULE,
         *_MARK_RULES,
         _NAMESPACE_RULE,
+        _OBJECT_OWNER_RULE,
+        _CONSTANT_OWNER_RULE,
+        _CONSTANT_KEY_RULE,
         _ERROR_RULE,
     }
 )
@@ -859,6 +996,8 @@ def _structure_rules(languages: Sequence[str]) -> str:
         if VALUE_KINDS[language]:
             documents.append(_held_rule(language))
             documents += _property_rules(language)
+            documents += _object_member_rules(language)
+            documents += _constant_rules(language)
             documents.append(_self_named_rule(language))
         if NAMESPACE_KINDS[language]:
             documents.append(
@@ -891,6 +1030,99 @@ def _property_rules(language: str) -> list[str]:
         ),
         _rule_document(_MODULE_EXPORT_RULE, language, export),
     ]
+
+
+def _object_member_rules(language: str) -> list[str]:
+    """The members of the object literals a module-level variable holds (see ``ObjectMember``) and of
+    those a module-level call or `new` is passed (see ``FileStructure.argument_members``), and the
+    name of every module-level variable whose value is an object. Module level is outside every
+    function, class and namespace."""
+    scopes = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language], *NAMESPACE_KINDS[language]))
+    passed = f"{{kind: arguments, not: {{inside: {{stopBy: end, any: {scopes}}}}}}}"
+    objects = _past_wrappers_of(language, ("object",))
+    variable = f"{{field: name, all: [{MODULE_VARIABLE}, {{has: {{field: value, any: {objects}}}}}]}}"
+    owner = f"  kind: identifier\n  not: {{not: {{inside: {variable}}}}}"
+    return [
+        _rule_document(_OBJECT_MEMBER_RULE, language, _members_of(language, MODULE_VARIABLE)),
+        _rule_document(_ARGUMENT_MEMBER_RULE, language, _members_of(language, passed)),
+        _rule_document(_OBJECT_OWNER_RULE, language, owner),
+    ]
+
+
+def _constant_rules(language: str) -> list[str]:
+    """The name of every module-level variable whose value is a call or `new`, also under wrappers
+    such as `as`, and the key of every pair outside every function, class and namespace in such a
+    variable's value that holds a function (see ``ConstantFunction``). A key that is computed names
+    nothing. The pair rule prints the pair; every relation sits under a double negation."""
+    calls = _past_wrappers_of(language, ("call_expression", "new_expression"))
+    variable = f"{{field: name, all: [{MODULE_VARIABLE}, {{has: {{field: value, any: {calls}}}}}]}}"
+    owner = f"  kind: identifier\n  not: {{not: {{inside: {variable}}}}}"
+    symbols = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language]))
+    scopes = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language], *NAMESPACE_KINDS[language]))
+    key = (
+        "  kind: pair\n"
+        "  has: {field: key, any: [{kind: property_identifier}, {kind: string}], pattern: $KEY}\n"
+        "  all:\n"
+        f"    - not: {{not: {{has: {{stopBy: end, any: {symbols}}}}}}}\n"
+        f"    - not: {{not: {{inside: {{stopBy: end, all: [{MODULE_VARIABLE}]}}}}}}\n"
+        f"    - not: {{inside: {{stopBy: end, any: {scopes}}}}}"
+    )
+    return [
+        _rule_document(_CONSTANT_OWNER_RULE, language, owner),
+        _rule_document(_CONSTANT_KEY_RULE, language, key),
+        _rule_document(_DATA_CALLBACK_RULE, language, _data_callback(language)),
+    ]
+
+
+# The steps a collection takes a callback for. Called on a PascalCase name the step belongs to a
+# module, such as `Effect.map(effect, (value) => ...)`, which builds an Effect rather than data.
+_COLLECTION_STEPS = (
+    "^(map|flatMap|filter|reduce|reduceRight|find|findIndex|findLast|findLastIndex|some|every|forEach"
+    "|sort|toSorted)$"
+)
+_COLLECTION_STEP_CALL = (
+    "{kind: call_expression, has: {field: function, kind: member_expression, all: ["
+    f"{{has: {{field: property, regex: '{_COLLECTION_STEPS}'}}}}, "
+    "{not: {has: {field: object, kind: identifier, regex: '^[A-Z][a-z]'}}}]}}"
+)
+_COLLECTION_BUILDERS = (
+    "[{kind: new_expression, has: {field: constructor, regex: '^(Map|Set)$'}}, "
+    "{kind: call_expression, has: {field: function, regex: '^Array\\.from$'}}]"
+)
+
+
+def _data_callback(language: str) -> str:
+    """Every function that builds data rather than being one: a callback a collection step takes,
+    `items.map((item) => item.id)`, and one inside `new Map`, `new Set` or `Array.from`. A module-level
+    constant built through one names no function (see ``ConstantFunction``)."""
+    return (
+        f"  any: {_kinds(FUNCTION_KINDS[language])}\n"
+        "  not:\n    not:\n      any:\n"
+        f"        - inside: {{kind: arguments, inside: {_COLLECTION_STEP_CALL}}}\n"
+        f"        - inside: {{stopBy: end, any: {_COLLECTION_BUILDERS}}}"
+    )
+
+
+def _past_wrappers_of(language: str, kinds: Sequence[str]) -> str:
+    """A node of ``kinds``, itself or as the first node no wrapper (see ``NAME_WRAPPERS``) holds: a
+    call is `wrap(...)` and `wrap(...) as Runner`, never `[...] as const`."""
+    wanted = _kinds(kinds)
+    wrapped = f"{{stopBy: {_past_wrappers(language)}, any: {wanted}}}"
+    return f"[{{any: {wanted}}}, {{any: {_kinds(NAME_WRAPPERS[grammar_of(language)])}, has: {wrapped}}}]"
+
+
+def _members_of(language: str, holder: str) -> str:
+    """Every function and class that is a method or a property value of an object literal whose first
+    ancestor past wrappers such as `satisfies` is ``holder``, a condition printed by no match."""
+    symbol_kinds = (*FUNCTION_KINDS[language], *CLASS_KINDS[language])
+    expressions = _kinds([kind for kind in symbol_kinds if kind in EXPRESSION_KINDS])
+    held_object = f"{{kind: object, inside: {{stopBy: {_past_wrappers(language)}, any: [{holder}]}}}}"
+    held_pair = f"{{kind: pair, inside: {held_object}}}"
+    return (
+        "  any:\n"
+        f"    - {{kind: method_definition, not: {{not: {{inside: {held_object}}}}}}}\n"
+        f"    - {{any: {expressions}, {_held_past_wrappers(language, held_pair)}}}"
+    )
 
 
 def _held_past_wrappers(language: str, holder: str) -> str:

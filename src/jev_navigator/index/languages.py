@@ -145,6 +145,9 @@ COMMONJS_EXPORTS_OBJECT = (
     f"has: {{field: left, {_MODULE_EXPORTS}}}}}}}"
 )
 COMMONJS_EXPORT_PAIR = f"{{kind: pair, inside: {COMMONJS_EXPORTS_OBJECT}}}"
+# A `const`, `let` or `var` of the module itself, exported or not, whose object literal value holds
+# functions named after it: `const api = { list() {} }` holds `api.list`.
+MODULE_VARIABLE = f"{{kind: variable_declarator, inside: {{{_ANY_VARIABLES}, {_IN_MODULE}}}}}"
 
 # ast-grep prints every node a rule's relations match, so a relation to a large ancestor (the
 # program, a module statement, an object literal) printed that ancestor once per match, and the

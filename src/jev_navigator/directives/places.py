@@ -16,6 +16,7 @@ from ..index.code_index import CodeIndex
 from ..index.scope import is_test_file
 from ..index.spans import CallEdge, CodeSlice, Span, TextHit
 from ..judgments.relations import key_mention
+from .shown import LINE_CUT_MARK
 
 MAX_DEFINITION_LINES = 120
 REST_OF_FILE_LINES = 40
@@ -27,6 +28,8 @@ _ENVIRONMENT_READ = re.compile(
 _QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{5,79})["'`]""")
 _KEY_SHAPE = re.compile(r"[._:/-]")
 _WINDOW_KEY_LINES = re.compile(r"(\d+)~\d+")
+_PLACE_LINES = re.compile(r":\d+(?:-\d+)? ")
+_WINDOW_LINE = re.compile(r"line \d+ ")
 MAX_KEY_HITS = 30
 _PASSED_ON_ROLES = frozenset(
     {"argument", "decorator", "collection", "assignment", "export", "return", "receiver", "type", "base"}
@@ -133,6 +136,31 @@ def _range_signature(index: CodeIndex, span: Span, relation: str) -> str:
         next((line.strip() for line in lines if line.strip()), "") if code_line is None else lines[code_line]
     )
     return f"{span.key} `{quoted.strip()}` ({relation})"
+
+
+def located_file(signature: str) -> str | None:
+    """The file a place's signature names, parsed by the grammar the signature builders write: the
+    file, ``:lines`` and a space at each separator, then the place's text (see ``_is_place_text``).
+    None when no split fits, and when more than one does (a path or a quoted code line that holds a
+    separator itself), so a caller that needs the file reads such a signature as config."""
+    files: list[str] = []
+    for separator in _PLACE_LINES.finditer(signature):
+        if separator.start() and _is_place_text(signature[separator.end() :]):
+            files.append(signature[: separator.start()])
+            if len(files) > 1:
+                return None
+    return files[0] if files else None
+
+
+def _is_place_text(text: str) -> bool:
+    """A place's text: an optional ``line N `` then quoted code, ending with the closing quote or a
+    parenthesised relation, or anywhere when ``cut_long_line`` cut it."""
+    body = text.removesuffix(LINE_CUT_MARK)
+    window_line = _WINDOW_LINE.match(body)
+    quoted = body[window_line.end() :] if window_line else body
+    if not quoted.startswith("`"):
+        return False
+    return body != text or quoted.endswith("`") or ("` (" in quoted and quoted.endswith(")"))
 
 
 def first_code_line(lines: Sequence[str], file: str) -> int | None:
@@ -266,7 +294,7 @@ def _within(inner: Span, outer: Span) -> bool:
 
 
 def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    if not _is_named(opened.span):
+    if not opened.span.is_named:
         return []
     sites = sorted(
         (site for site in index.find_callers(opened.span.name) if falls_inside(site.binding, opened.span)),
@@ -298,7 +326,7 @@ def _callee_rank(index: CodeIndex, edge: CallEdge) -> tuple[bool, bool, int]:
 
 
 def _referenced_by(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    if not _is_named(opened.span):
+    if not opened.span.is_named:
         return []
     name = opened.span.name
     return [
@@ -365,13 +393,13 @@ def _same_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     relation = f"in the same file as {_span_label(opened.span)}"
     functions = index.functions_in(opened.span.file)
     container = None
-    if not _is_named(opened.span):
+    if not opened.span.is_named:
         containers = [
             span
             for span in index.symbols_in(opened.span.file)
             if span != opened.span and span.contains(opened.span.start)
         ]
-        named = [span for span in containers if _is_named(span)]
+        named = [span for span in containers if span.is_named]
         container = min(named or containers, key=Span.size, default=None)
     outermost = [span for span in functions if not any(_encloses(other, span) for other in functions)]
     others = [span for span in outermost if not span.overlaps(opened.span)]
@@ -443,12 +471,8 @@ def _rest_of_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     return [range_place(index, span.file, span.end + 1, end, f"the lines after {span.key}")]
 
 
-def _is_named(span: Span) -> bool:
-    return bool(span.name) and not span.name.startswith("<")
-
-
 def _span_label(span: Span) -> str:
-    return span.name if _is_named(span) else span.key
+    return span.name if span.is_named else span.key
 
 
 def starting_places(index: CodeIndex, locations: Sequence[tuple[str, int]]) -> list[Place]:
