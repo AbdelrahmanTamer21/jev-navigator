@@ -18,7 +18,8 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TypeVar
 
 from ..index.code_index import CodeIndex
@@ -64,6 +65,17 @@ them."""
 T = TypeVar("T")
 
 
+class Source(StrEnum):
+    """How a unit entered a population: find_all lists the units of the caller's anchors (``ANCHOR``),
+    then of its files (``FILE``), then of each name's hits (``NAME``). A caller composing searches names
+    the rest, such as a round of callees (``CALLEE``) it fed as anchors."""
+
+    ANCHOR = "anchor"
+    FILE = "file"
+    NAME = "name"
+    CALLEE = "callee"
+
+
 def match_check(target: str) -> Check:
     """The one question asked of every unit for ``target``: no criteria, the description in the
     shared state, as jgrep asks it."""
@@ -104,7 +116,8 @@ class FindAllResult:
     ``room`` is what one unit's code had in a request and ``batches_per_wave`` the wave size, both
     None when the search never started. ``unlisted`` files gave no units and ``unresolved`` caller
     anchors named none. ``refusals`` keeps each refused place's error; the place is ``not_judged``
-    as ``REFUSED`` and the search goes on past it."""
+    as ``REFUSED`` and the search goes on past it. ``entered_by`` gives the source each unit entered
+    the population by, the first when several listed it."""
 
     targets: Mapping[str, str]
     room: int | None
@@ -120,6 +133,7 @@ class FindAllResult:
     calls: int
     failure: Exception | None = None
     refusals: tuple[Refusal, ...] = ()
+    entered_by: Mapping[str, Source] = field(default_factory=dict)
 
     @classmethod
     def not_started(cls, targets: Mapping[str, str], stopped_by: str) -> FindAllResult:
@@ -351,6 +365,7 @@ class _Search:
         self.answered: set[tuple[str, str]] = set()
         self.judged: dict[str, list[CheckResult]] = {target: [] for target in targets}
         self.units: dict[str, Unit] = {}
+        self.entered_by: dict[str, Source] = {}
         self.not_judged: dict[str, str] = {}
         self.unlisted: dict[str, str] = {}
         self.unresolved: list[UnresolvedAnchor] = []
@@ -420,10 +435,10 @@ class _Search:
         resolved together, and only when the next wave needs it."""
         if self.stopped():
             return
-        yield from self._admitted(self._anchored(anchors))
+        yield from self._admitted(self._anchored(anchors), Source.ANCHOR)
         if self.stopped():
             return
-        yield from self._admitted(self._listed(files))
+        yield from self._admitted(self._listed(files), Source.FILE)
         if not names or self.stopped():
             return
         hits = {name: self._hits(name) for name in dict.fromkeys(names)}
@@ -431,7 +446,7 @@ class _Search:
         for chunk in _chunks(_rarest_first(hits), self.judge.items_per_request):
             if self.stopped():
                 return
-            yield from self._admitted(self._units_of(chunk))
+            yield from self._admitted(self._units_of(chunk), Source.NAME)
 
     def _hits(self, name: str) -> tuple[TextHit, ...]:
         hits = self.index.search_text(name)
@@ -463,12 +478,14 @@ class _Search:
             self.without_unit[name] += anchor in missed
         return resolution.units
 
-    def _admitted(self, units: Iterable[Unit]) -> list[Item]:
-        """The places still to judge of the units not seen before, each unit registered on first sight."""
+    def _admitted(self, units: Iterable[Unit], source: Source) -> list[Item]:
+        """The places still to judge of the units not seen before, each unit registered on first sight
+        with the ``source`` that listed it."""
         places = []
         for unit in units:
             if unit.id not in self.units:
                 self.units[unit.id] = unit
+                self.entered_by[unit.id] = source
                 places += self._pending_places(unit)
         return places
 
@@ -550,6 +567,7 @@ class _Search:
             self.judge.calls,
             failure,
             tuple(self.refusals),
+            dict(self.entered_by),
         )
 
 

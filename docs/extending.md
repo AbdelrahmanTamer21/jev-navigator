@@ -139,9 +139,8 @@ whose request asking every target does not fit the client's limits once masked, 
 lengthen code past the room (`Judge.fits_alone`). A unit or piece whose request is refused anyway, by
 the provider for its size with no smaller split or by the final secret scan, is named `REFUSED` in
 `not_judged`, its error is kept in `refusals`, and the search goes on. One unit never fails the
-search. Every unit is one
-a listing lists, so a hit inside a nested function names the function holding it. No code step is capped: the
-Judge's call cap is the only budget. The population goes to the Judge in waves of `batches_per_wave`
+search. Every unit is one a listing lists, so a hit inside a nested function names the function
+holding it. No code step is capped: the Judge's call cap is the only budget. The population goes to the Judge in waves of `batches_per_wave`
 requests' worth (16 by default). Its order holds between waves, and exactly only at one batch per
 wave. Like `items_per_request`, the wave size shapes the batches and so the answer store's keys.
 `delivered` names the line ranges the caller already shows: a unit or piece whose every line lies
@@ -151,7 +150,17 @@ async client, such as a host's orchestrator; it lists and reads code in a worker
 `cancelled` between waves, and keeps every answer a wave received before a failure. Ranking and any
 bar belong to the caller:
 `scores(target)` gives every judged unit's answer, and `names` each name's hits found, reached and
-naming no unit.
+naming no unit. `entered_by` gives the source each unit entered the population by
+(`Source.ANCHOR`, `FILE` or `NAME`, the first when several listed it).
+
+`search_coverage.point_results(rounds, bar)` turns one search's rounds into each point's result:
+`found` when a unit's answer reaches the bar, `none_among_judged` over the units judged, or `unknown`
+when no unit was judged or a round failed, never "none". Its coverage counts units once over the
+rounds: the units considered, the ones judged for the point, and the rest cut by source and reason. A
+unit left unjudged for several reasons counts under the first of not reached, refused, too large and
+delivered. A caller composing rounds names the source of a round it fed, such as
+`Round(callees, Source.CALLEE)`. `PointResult.render(bar)` gives the fact line, for example
+`audit: none at the bar 0.80 among 16 unit(s) judged, best P=0.100; 284 not reached (not negative proof)`.
 
 `units_examined` means every unit of the population was judged, not that every semantic answer is
 correct. Uncertain answers, parser failures, unlisted files and unresolved anchors remain visible.
