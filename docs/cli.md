@@ -13,6 +13,7 @@ that are absent from the source?” rather than “find everything important”.
 - [Continue after a call limit](#continue-after-a-call-limit)
 - [JSON requests](#json-requests)
 - [Results, progress and exit status](#results-progress-and-exit-status)
+- [Memory limit](#memory-limit)
 - [Agent workflow](#agent-workflow)
 - [Find All unit search](#find-all-unit-search)
 - [Workflow trace](#workflow-trace)
@@ -194,7 +195,7 @@ Check the command's exit status before reading a result file:
 | Exit code | Meaning |
 |---|---|
 | `0` | A search finished and wrote its result. Read `search.outcome`; this does not guarantee a match. |
-| `1` | Search, configuration, filesystem or provider failure. Read stderr. When a request of a Find or Find All search failed, the pack is written first: `search.outcome` is `failed`, `search.failure` holds the error's type, its causes, the journal `request_id`, the HTTP `status` when known and the `message` (only `message_length` and `message_sha256` with `--no-error-text`), and stderr shows the whole message and names the `--resume` path. |
+| `1` | Search, configuration, filesystem or provider failure. Read stderr. When a request of a Find or Find All search failed, the pack is written first: `search.outcome` is `failed`, `search.failure` holds the error's type, its causes, the journal `request_id`, the HTTP `status` when known and the `message` (only `message_length` and `message_sha256` with `--no-error-text`), and stderr shows the whole message and names the `--resume` path. JVN's memory limit stopping a search is reported the same way; see [Memory limit](#memory-limit). |
 | `2` | Invalid command or request. Read stderr. |
 | `130` | Cancelled with Ctrl-C. Existing journal records remain available. A failure that arrives while the command is cancelling exits `1` with that failure instead, with the same resume state. |
 
@@ -215,6 +216,45 @@ stderr still shows the message. A resume applies its own setting to the journal 
 with error text off, the earlier pack's error messages and error bodies are rewritten to that form too. With `--keep-requests` the manifest and report also carry the code, the
 journal the exact request body, and every run file the error text; inspect the journal's exact-capture
 flags when auditing bytes.
+
+## Memory limit
+
+Every JVN process has a memory allowance, and all JVN processes on one machine share a ceiling. This
+covers the `jvn` command and every program that imports `jev_navigator`.
+
+- **Allowance:** a process may grow by 1,024 MB past the memory it held when its JVN work began,
+  counting the ast-grep, ripgrep and git processes it runs. JVN's work begins when it first starts a
+  tool, and again whenever it starts work while no code index of it is alive, so a program that
+  imports JVN and grows between two searches is not charged for that growth. An index a failed search
+  left behind is freed by Python's cycle collector, which JVN runs once before it treats any index as
+  alive. While an index is alive the growth counts everything the process gains, JVN's or not. Over it, JVN stops those processes and
+  raises `MemoryLimitReachedError`, which names the allowance, the memory in use and that baseline.
+- **What it does not cover:** the model command a command-line connector runs (`CommandConnector`) is a
+  separate program the user names, so JVN neither counts nor stops its memory.
+- **One parse at a time:** a process runs one ast-grep scan at a time, and ast-grep parses only as
+  many files at once as the allowance affords: 3 at the default. Scans started in parallel threads
+  take turns instead of outgrowing the allowance together. A file too big to parse beside others is
+  parsed alone on one thread, up to the allowance less Python's 270 MB share (754 MB at the default);
+  a file estimated above that is refused and named.
+- **Ceiling:** 8,192 MB, so eight slots of 1,024 MB. A process takes a slot when it first starts a
+  tool and keeps it until it exits. When every slot is held, it waits up to 120 seconds for one, then
+  raises `MemoryLimitReachedError`, which names the processes holding the slots. The slots are files
+  in `/tmp/jev-navigator-memory-<uid>`, and the operating system frees a slot when its process ends,
+  however it ends.
+- **What a refusal does:** during a Find, its entry selection or Find All's enumeration, the search
+  ends `failed` with resume state, and `--resume` continues it once there is room. A refusal before
+  any search starts, such as a full ceiling at the first file listing, exits `1` having done no work:
+  run the command again later.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `JEV_NAVIGATOR_MEMORY_ALLOWANCE_MB` | `1024` | What one JVN process may grow by, its tools included. |
+| `JEV_NAVIGATOR_MEMORY_CEILING_MB` | `8192` | What all JVN processes on the machine may hold; slots are ceiling divided by allowance. |
+| `JEV_NAVIGATOR_MEMORY_WAIT_SECONDS` | `120` | How long a process waits for a free slot. |
+| `JEV_NAVIGATOR_MEMORY_SLOTS_DIR` | `/tmp/jev-navigator-memory-<uid>` | The slot folder. It must be a folder of this user, never a link. |
+
+The defaults are measured (04.10.2026): parsing every file of an app-sized scope, the largest measured
+(15.6 MB of code) peaked at 333 MB, and the worst, a folder of generated bundles, at 471 MB.
 
 ## Agent workflow
 

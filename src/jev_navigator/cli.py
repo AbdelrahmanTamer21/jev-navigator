@@ -31,6 +31,7 @@ from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find
 from .directives.places import Place, place_for_line
 from .environment import checkout_root, load_typesafe_environment
 from .housekeeping import FINISHED_RUN_DAYS, RESUMABLE_RUN_DAYS
+from .index import tools
 from .index.code_index import CodeIndex
 from .index.units import RangeAnchor
 from .judgments.answers import answered_by
@@ -83,6 +84,7 @@ FIND_ALL_TARGET = "target"
 FIND_ALL_QUESTION = match_check(FIND_ALL_TARGET)
 """A search that stopped before it finished: it saves its frontier, a Find All does not enumerate
 after it, and ``--resume`` continues it."""
+
 OUT_HELP = (
     "New or empty output directory, never pruned (default: a unique run under "
     f"$XDG_DATA_HOME/jev-navigator/runs, pruned after {FINISHED_RUN_DAYS} days, {RESUMABLE_RUN_DAYS} "
@@ -314,6 +316,7 @@ def create_evidence_pack(
     repository = repository.resolve()
     output = output.resolve()
     _validate_budget(budget)
+    navigator = _navigator_provenance()
     thresholds = thresholds or Thresholds()
     previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client, workflow)
     if resume_from is not None:
@@ -449,6 +452,7 @@ def create_evidence_pack(
             thresholds,
             index,
             result,
+            navigator=navigator,
             requested_model=getattr(client, "model", "unknown"),
             judge=judge,
             duration_seconds=seed_duration_seconds,
@@ -1038,6 +1042,7 @@ def _manifest(
     index: CodeIndex,
     result: FindResult,
     *,
+    navigator: dict,
     requested_model: str,
     judge: Judge,
     duration_seconds: float,
@@ -1055,7 +1060,7 @@ def _manifest(
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "navigator": _navigator_provenance(),
+        "navigator": navigator,
         "source": {
             "repository": str(repository),
             "revision": index.commit,
@@ -1274,6 +1279,8 @@ def _judged_location(value: dict) -> str:
 
 
 def _navigator_provenance() -> dict:
+    """JVN's own build. A run reads it before it searches: its git calls take a memory slot, so read
+    while writing a pack after a memory stop, the limit would refuse them and the pack would be lost."""
     package_root = Path(__file__).resolve().parent
     source_files = sorted(package_root.rglob("*.py"))
     digest = hashlib.sha256()
@@ -1291,32 +1298,33 @@ def _navigator_provenance() -> dict:
 
 def _checkout_revision(checkout: Path | None) -> dict:
     """jvn's own checkout's HEAD and whether it has changes. Without a checkout there is no
-    revision to record; when git cannot answer, its message is kept instead of stopping a search
-    that has already finished."""
+    revision to record; when git cannot answer, its message is kept instead of stopping the run."""
     revision: dict = {"source_revision": None, "source_dirty": None, "source_revision_error": None}
     if checkout is None:
         return revision
     try:
         head = _git(checkout, "rev-parse", "HEAD")
         dirty = bool(_git(checkout, "status", "--porcelain", "--untracked-files=all"))
-    except subprocess.CalledProcessError as error:
-        return revision | {
-            "source_revision_error": f"git {' '.join(error.cmd[1:])} failed: {error.stderr.strip()}"
-        }
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return revision | {"source_revision_error": f"git failed: {error}"}
+    except _CheckoutGitError as error:
+        return revision | {"source_revision_error": str(error)}
     return revision | {"source_revision": head, "source_dirty": dirty}
 
 
+CHECKOUT_GIT_TIMEOUT_SECONDS = 10
+
+
+class _CheckoutGitError(RuntimeError):
+    """A git call about jvn's own checkout that failed, named by its arguments, with git's message."""
+
+
 def _git(repository: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", *args],
-        cwd=repository,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    ).stdout.strip()
+    """The checkout above JVN's own source can be a whole project, when JVN is installed in a virtual
+    environment inside it, so its status may take long. A failure, a timeout or a git that cannot
+    start raises ``_CheckoutGitError``."""
+    try:
+        return tools.git(args, repository, timeout=CHECKOUT_GIT_TIMEOUT_SECONDS).strip()
+    except (tools.ToolFailedError, OSError, subprocess.TimeoutExpired) as error:
+        raise _CheckoutGitError(f"git {' '.join(args)} failed: {error}") from error
 
 
 def _visit(visit: Visit) -> dict:

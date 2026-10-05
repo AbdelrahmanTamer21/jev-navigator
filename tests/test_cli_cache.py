@@ -110,7 +110,7 @@ def test_a_housekeeping_failure_never_fails_the_run(
 
 
 @pytest.fixture
-def ctrl_c_as_the_sweep_starts(monkeypatch: pytest.MonkeyPatch, python_sigint_handler: None) -> None:
+def ctrl_c_as_the_sweep_starts(monkeypatch: pytest.MonkeyPatch) -> None:
     """The terminal sends a real Ctrl-C as the end-of-run sweep starts."""
     real_sweep = housekeeping._sweep
 

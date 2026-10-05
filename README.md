@@ -74,6 +74,12 @@ Needs Python 3.11 or newer, and `ast-grep`, `rg` (ripgrep) and `git` on the PATH
 the official SDK for live calls; set `TYPESAFE_API_KEY`. Everything else, including the tests, runs
 offline.
 
+JVN limits its own memory, for the command and for every program that imports the library. Each
+process may grow by 1,024 MB, its ast-grep, ripgrep and git processes included, and all JVN processes
+on a machine share 8,192 MB; a process waits up to two minutes for room, then stops with
+`MemoryLimitReachedError`. See [Memory limit](docs/cli.md#memory-limit) for what a refusal does and
+the settings.
+
 ## Live evidence-pack command
 
 Start in the directory you want to search:
@@ -300,7 +306,7 @@ index.imports(file)
 index.dependents(file)
 index.co_changed_files(file)
 
-units.list_units(index, files, box_chars=room)  # outermost functions and methods, top-level code; room: docs/extending.md
+units.list_units(index, files, box_chars=room)  # outermost functions and methods, Prisma schema blocks, top-level code; room: docs/extending.md
 units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=room)  # the units holding lines or line ranges
 
 operations.slice_around(index, file, line)  # the enclosing function, or a window
@@ -422,7 +428,8 @@ parse passes through, estimates each file's parse peak (`index/file_shape.py`): 
 file, every byte counted as code, plus the square of the punctuation `{}();,[]` on each line,
 which a minified bundle of a few tens of kilobytes on one line drives up. Files estimated at up to
 250 MB are parsed side by side. A file over that, but within the single-file limit
-(`tools.single_parse_limit_mb()`), is parsed alone, one at a time, with no other file beside it. A file
+(`MemoryLimit.single_parse_mb`: the memory allowance less Python's 270 MB share, so 754 MB at the
+default), is parsed alone on one thread, one at a time, with no other file beside it. A file
 over the single-file limit is never handed to ast-grep, and neither is a large file that cannot be read
 to measure it. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
 peak, the limit it is over, and the longest line in bytes. A file that ast-grep itself skips without
@@ -459,7 +466,7 @@ require(...)`, `from m import stop as halt`) binds the same way to `stop`, unles
 `halt` itself. A default import, under any local name, takes the module's default export; the default's own name is no named export, so `import { make }`, `defaults.make()` and `const { solo } = require(...)` of a default reach nothing. Every import, by name, under another
 name, as a default or through a module alias, is decided the same way from the module it names and
 the modules that one re-exports the name from: one definition proves the target, several leave a
-`candidate`, an exporting module that could not be parsed where it mentions the name, or that
+`candidate`, any of these modules that could not be parsed where it mentions the name, or that
 vanished, leaves it `unknown`, and a module with no definition exported under the name leaves a
 `candidate` that says so. A name a module imports and passes on without an `export ... from`, as a
 Python module's own `from pkg.core import compute`, is not followed. A function or class
@@ -678,7 +685,10 @@ on its own scope, so searches sharing one judge never use up each other's budget
   of 8 or more characters wherever it appears, a shorter one as a whole word, and a number of at most four characters or a value without letters
   or digits only where it stands. JVN's own question wording (instructions, and the criteria of a
   question that is not a choice) keeps its words, and a key of the request equal to a short masked
-  value does not refuse it.
+  value does not refuse it. A name that holds a hidden copy
+  (`x-runs-[MASKED]`) is still a name, and a string a copy changed is masked once more, so the
+  request sent is always one the rules leave as it is and the final scan refuses only what a
+  host's own scanner finds.
   A quoted value may run across lines (triple quotes, template literals, text blocks) or sit in
   parentheses with its joined parts; a quote that closes a string the key sat in opens no value; a string
   that is not hidden is read again for the secret assignments inside it; and a value inside another

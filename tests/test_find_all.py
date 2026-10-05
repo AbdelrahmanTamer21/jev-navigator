@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from conftest import BudgetedClient
+from conftest import WEBSITE_QUERIES, BudgetedClient
 from short_secrets import ShortSecretMasker, numbered_secret
 
 from jev_navigator.directives.find_all import (
@@ -22,6 +22,7 @@ from jev_navigator.directives.find_all import (
     match_check,
 )
 from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.index.prisma_schema import schema_blocks
 from jev_navigator.index.units import OUTSIDE_SCOPE, UNSUPPORTED_LANGUAGE, RangeAnchor, UnitKind
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputBudgetExceededError, InputLimits
 from jev_navigator.judgments.judge import Judge
@@ -259,6 +260,32 @@ def test_a_scope_file_the_index_lacks_is_named_unlisted_and_the_rest_is_still_ju
     # Assert
     assert (result.failure, result.unlisted) == (None, {"removed.py": OUTSIDE_SCOPE})
     assert [score.unit.id for score in result.scores("limit") if score.probability >= 0.9] == ["rules.py:4-5"]
+
+
+def test_a_schema_start_judges_its_models_and_a_models_client_calls_reach_the_code_querying_it(
+    tmp_path: Path, umami_schema: str
+) -> None:
+    # Arrange: a search that starts at a Prisma schema and names `Website`'s client calls, the way a
+    # caller adds them from the schema's blocks.
+    index = repository(tmp_path, {"schema.prisma": umami_schema, "website.ts": WEBSITE_QUERIES})
+    [accessor] = [
+        block.client_accessor
+        for block in schema_blocks(index.lines("schema.prisma"))
+        if block.name == "Website"
+    ]
+    writes = {"writes": "every place that writes the website table"}
+    provider = labelled({("writes", '@@map("website")'): 0.6, ("writes", "website.update("): 0.95})
+
+    # Act
+    result = find_all(index, Judge(provider), writes, files=["schema.prisma"], names=[f".{accessor}."])
+
+    # Assert: no file is unlisted, every model is judged, and both client calls reach their functions.
+    assert (result.unlisted, result.unresolved) == ({}, ())
+    scores = {score.unit.symbol: score.probability for score in result.scores("writes")}
+    assert sum(symbol.startswith("model ") for symbol in scores) == 26
+    assert (scores["model Website"], scores["updateWebsite"], scores["getWebsiteCount"]) == (0.6, 0.95, 0.05)
+    assert result.names[".website."] == NameHits(found=2, reached=2, without_unit=0)
+    assert result.coverage == "units_examined"
 
 
 @dataclass

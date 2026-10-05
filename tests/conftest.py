@@ -1,6 +1,6 @@
-"""A small real repository (Python and TypeScript, two commits) that the index tests run against,
-every test's isolation from the developer's own decision-model settings, and the guard that fails a
-run with an undeclared skip."""
+"""A small real repository (Python and TypeScript, two commits) that the index tests run against, a
+real Prisma schema, every test's isolation from the developer's own decision-model settings, and the
+guard that fails a run with an undeclared skip."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
 from jev_navigator.judgments.questions import serialized_chars
+from jev_navigator.memory_limit import SLOTS_DIR_VARIABLE
 
 
 @pytest.fixture(autouse=True)
@@ -124,10 +125,11 @@ API_TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 """
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def python_sigint_handler():
-    """Python's own Ctrl-C handler for a test that sends SIGINT. A suite started as a background job
-    (``cmd &``) inherits SIGINT as ignored, so without this the signal never arrives."""
+    """Python's own Ctrl-C handler for every test, as a terminal gives it. A suite started as a
+    background job (``cmd &``) inherits SIGINT as ignored, so without this a test that sends SIGINT
+    would never receive it."""
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
     yield
     signal.signal(signal.SIGINT, previous)
@@ -166,6 +168,29 @@ def sample_repo(tmp_path: Path) -> Path:
     return root
 
 
+UMAMI_SCHEMA = Path(__file__).parent / "fixtures" / "umami" / "schema.prisma"
+
+WEBSITE_QUERIES = """\
+import prisma from '@/lib/prisma';
+
+export async function updateWebsite(websiteId: string, data: { name: string }) {
+  return prisma.client.website.update({ where: { id: websiteId }, data });
+}
+
+export async function getWebsiteCount(userId: string) {
+  return prisma.client.website.count({ where: { userId, deletedAt: null } });
+}
+"""
+
+
+@pytest.fixture
+def umami_schema() -> str:
+    """umami's real Prisma schema at ec0ff50 (MIT, its license beside it): a generator, a datasource
+    and 26 models, ``Website`` on lines 98 to 131. ``WEBSITE_QUERIES`` queries that model through its
+    client accessor, as umami's own queries do."""
+    return UMAMI_SCHEMA.read_text()
+
+
 OUTER_CACHE_ROOT = cache_root()
 
 
@@ -185,6 +210,23 @@ def private_cache_root(
     ``JEV_NAVIGATOR_`` variable, so the answer store variable is unset and the store lives here."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("cache")))
     return cache_root()
+
+
+@pytest.fixture(scope="session")
+def memory_slots_folder(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return tmp_path_factory.mktemp("memory-slots")
+
+
+@pytest.fixture(autouse=True)
+def private_memory_slots(
+    no_developer_settings, memory_slots_folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """The suite's JVN processes take their memory slots in a folder of their own, never the
+    machine's, so no test waits for a live JVN run and no test makes one wait. It runs after
+    ``no_developer_settings`` has dropped every ``JEV_NAVIGATOR_`` variable. The folder lasts the whole
+    session, because a process keeps its slot in a folder for as long as it lives."""
+    monkeypatch.setenv(SLOTS_DIR_VARIABLE, str(memory_slots_folder))
+    return memory_slots_folder
 
 
 @pytest.fixture(autouse=True)
