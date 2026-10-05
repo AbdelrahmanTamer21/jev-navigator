@@ -179,6 +179,8 @@ def _encode(facts: FileFacts) -> dict:
                 [member.first, member.last, asdict(member.span)]
                 for member in facts.structure.namespace_members
             ],
+            "decorated": [list(decorated) for decorated in facts.structure.decorated],
+            "stubs": [list(stub) for stub in facts.structure.stubs],
         },
         "calls": [asdict(call) for call in facts.calls],
         "references": [asdict(reference) for reference in facts.references],
@@ -211,6 +213,8 @@ def _decode(file: str, raw: dict) -> FileFacts:
                 NamespaceMember(int(first), int(last), _span(file, span))
                 for first, last, span in structure["namespace_members"]
             ),
+            tuple((int(start), int(end), int(line)) for start, end, line in structure["decorated"]),
+            tuple((int(start), int(end)) for start, end in structure["stubs"]),
         ),
         tuple(CallMatch(file, call["line"], call["name"], call.get("receiver")) for call in raw["calls"]),
         tuple(
