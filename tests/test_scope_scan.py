@@ -386,7 +386,7 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
             (600, 1, 600, 601),
         ),
     ],
-    ids=["typescript", "javascript", "python", "router and config"],
+    ids=["typescript", "javascript", "router and config", "python"],
 )
 def test_no_fact_rule_prints_more_than_the_node_it_matched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str, source: str, counts: tuple[int, ...]
