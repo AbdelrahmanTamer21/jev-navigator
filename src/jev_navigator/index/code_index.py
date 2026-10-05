@@ -375,13 +375,15 @@ class CodeIndex:
 
     def module_names(self, file: str) -> tuple[str, ...]:
         """The names a reader finds ``file``'s code by, best first: the functions and classes the
-        module names (see ``FileStructure.module_symbols``) or assigns to its CommonJS exports, then
+        module names (see ``FileStructure.module_symbols``) or assigns to its CommonJS exports and
+        each module-level constant a call builds a function for (see ``ConstantFunction``), then
         each function of an object a module-level variable holds, as `api.list`, each function of an
         object a module-level call or `new` is passed, and each function or class of a namespace,
         each group in file order. A file holding none of these has no names."""
         structure = self._file_structure(file)
         symbols = set(structure.symbols)
-        own = [(span, span.name) for span in (*structure.module_symbols, *structure.commonjs_exports)]
+        own = _named((*structure.module_symbols, *structure.commonjs_exports))
+        own += [(function.span, function.constant) for function in structure.constant_functions]
         held = [(member.span, f"{member.owner}.{member.span.name}") for member in structure.object_members]
         held += [(span, span.name) for span in structure.argument_members]
         held += [
@@ -389,7 +391,20 @@ class CodeIndex:
             for member in structure.namespace_members
             if member.span in symbols
         ]
-        return tuple(dict.fromkeys((*_named_in_file_order(own), *_named_in_file_order(held))))
+        named_held = [(span, name) for span, name in held if span.is_named]
+        return tuple(dict.fromkeys((*_in_file_order(own), *_in_file_order(named_held))))
+
+    def constant_function_names(self, file: str) -> dict[Span, str]:
+        """The name each function a module-level constant's call holds goes by (see
+        ``ConstantFunction``): the constant's, then the keys around it, `userRouter.list`. Functions
+        that would share one name are told apart by their first line, `pair.<anonymous:4>`."""
+        functions = self._file_structure(file).constant_functions
+        names = [".".join((function.constant, *function.keys)) for function in functions]
+        shared = {name for name in names if names.count(name) > 1}
+        return {
+            function.span: f"{name}.<anonymous:{function.span.start}>" if name in shared else name
+            for function, name in zip(functions, names, strict=True)
+        }
 
     def declarations_in(self, file: str) -> tuple[Span, ...]:
         """Constants, assignments, types, interfaces and enums at module level or directly in a
@@ -1221,10 +1236,14 @@ def _regular_blobs(listing: str) -> dict[str, str]:
     return blobs
 
 
-def _named_in_file_order(spans_and_names: Iterable[tuple[Span, str]]) -> tuple[str, ...]:
-    """The names of the named spans, outer first where spans start together, each name once."""
+def _named(spans: Iterable[Span]) -> list[tuple[Span, str]]:
+    return [(span, span.name) for span in spans if span.is_named]
+
+
+def _in_file_order(spans_and_names: Iterable[tuple[Span, str]]) -> tuple[str, ...]:
+    """The names by their spans' order, outer first where spans start together, each name once."""
     ordered = sorted(spans_and_names, key=lambda entry: (entry[0].start, -entry[0].end))
-    return tuple(dict.fromkeys(name for span, name in ordered if span.is_named))
+    return tuple(dict.fromkeys(name for _, name in ordered))
 
 
 def _commits(log: str) -> list[set[str]]:

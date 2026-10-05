@@ -18,6 +18,7 @@ from .languages import FLOW_LANGUAGE, parse_language, sgconfig_of
 from .scope_scan import (
     READ_AGAIN_AS_FLOW,
     CallMatch,
+    ConstantFunction,
     FileFacts,
     FileStructure,
     LocalName,
@@ -184,6 +185,10 @@ def _encode(facts: FileFacts) -> dict:
                 [member.owner, asdict(member.span)] for member in facts.structure.object_members
             ],
             "argument_members": [asdict(span) for span in facts.structure.argument_members],
+            "constant_functions": [
+                [function.constant, list(function.keys), asdict(function.span)]
+                for function in facts.structure.constant_functions
+            ],
         },
         "calls": [asdict(call) for call in facts.calls],
         "references": [asdict(reference) for reference in facts.references],
@@ -215,6 +220,10 @@ def _decode(file: str, raw: dict) -> FileFacts:
             ),
             tuple(ObjectMember(owner, _span(file, span)) for owner, span in structure["object_members"]),
             tuple(_span(file, span) for span in structure["argument_members"]),
+            tuple(
+                ConstantFunction(constant, tuple(keys), _span(file, span))
+                for constant, keys, span in structure["constant_functions"]
+            ),
         ),
         tuple(CallMatch(file, call["line"], call["name"], call.get("receiver")) for call in raw["calls"]),
         tuple(

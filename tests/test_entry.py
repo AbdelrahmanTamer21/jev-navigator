@@ -192,6 +192,81 @@ def test_the_entry_text_lists_what_the_module_names_then_its_objects_members(
     assert _option_for(options, f"file {file}") == f"file {file}:{listed}"
 
 
+@pytest.mark.parametrize(
+    ("file", "source", "symbols"),
+    [
+        (
+            "effect.ts",
+            'export const run = Effect.fn("run")(function* (id: string) {\n  return yield* load(id);\n});\n',
+            "run",
+        ),
+        ("untraced.ts", "export const quiet = Effect.fnUntraced(function* () {\n  return 1;\n});\n", "quiet"),
+        (
+            "layer.ts",
+            "export const StoreLive = Layer.effect(\n  Store,\n"
+            "  Effect.gen(function* () {\n    return {};\n  }),\n);\n",
+            "StoreLive",
+        ),
+        (
+            "cached.ts",
+            "export const getSession = cache((headers: Headers) => read(headers));\n",
+            "getSession",
+        ),
+        (
+            "router.ts",
+            "export const userRouter = createWebRouter({\n  list: procedure.query(({ ctx }) => ctx.users),\n"
+            "  remove: procedure.mutation(async ({ input }) => {\n    return input;\n  }),\n});\n",
+            "userRouter",
+        ),
+        (
+            "order.ts",
+            "function helper() {\n  return 1;\n}\n"
+            'export const run = Effect.fn("run")(function* () {\n  return helper();\n});\n'
+            "const api = {\n  list() {\n    return [];\n  },\n};\n",
+            "helper, run, api.list",
+        ),
+        ("plain.ts", "export const direct = (x: number) => x;\n", "direct"),
+        ("data.ts", 'export const LIMIT = 3;\nexport const labels = ["a", "b"];\n', ""),
+        ("steps.ts", "export const steps = [() => 1, () => 2];\n", ""),
+        (
+            "inner.ts",
+            'function setup() {\n  const run = Effect.fn("run")(function* () {\n'
+            "    return 1;\n  });\n  return run;\n}\n",
+            "setup",
+        ),
+    ],
+    ids=[
+        "an Effect.fn",
+        "an Effect.fnUntraced",
+        "a layer built from a generator",
+        "a cached function",
+        "a router of procedures",
+        "beside a function and an object",
+        "an arrow it holds itself",
+        "constants holding no function",
+        "an array of functions, which is no call",
+        "a constant inside a function",
+    ],
+)
+def test_the_entry_text_names_a_function_a_module_level_constant_builds_by_the_constant(
+    tmp_path: Path, file: str, source: str, symbols: str
+) -> None:
+    """`export const run = Effect.fn("run")(function* ...)` is how an Effect codebase writes a
+    function: a module-level constant whose value is a call holding an unnamed function is named
+    under the constant's own name, once, among the module's own names in file order. A router
+    holding several procedures is named once. A constant holding no function, or holding functions in
+    an array rather than a call, and a constant inside a function, give no name."""
+    # Arrange
+    index = _index(tmp_path, {file: source, "util/x.py": "x = 1\n"})
+
+    # Act
+    options = _root_options(index)
+
+    # Assert
+    listed = f" Symbols: {symbols}" if symbols else ""
+    assert _option_for(options, f"file {file}") == f"file {file}:{listed}"
+
+
 def test_the_option_set_is_the_same_directories_and_files_as_before(tmp_path: Path) -> None:
     options = _root_options(_index(tmp_path, {**LIBRARY, "setup.py": "def setup():\n    pass\n"}))
 

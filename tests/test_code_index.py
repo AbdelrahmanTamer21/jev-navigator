@@ -1069,6 +1069,52 @@ def test_module_names_list_what_the_module_names_or_exports_before_its_objects_m
     assert names == ("retry", "attempt", "run", "api.list", "format")
 
 
+def test_a_function_a_module_level_constant_builds_goes_by_the_constant_and_its_keys(tmp_path: Path) -> None:
+    """A function no other one holds, inside the call that is a module-level constant's value, goes by
+    the constant's name and then the key of every pair around it: `run` for an Effect.fn, also when
+    the generator names only itself, `userRouter.list` for a router's procedure, and
+    `auth.hooks.before` beside `auth.session.before` for a nested config. Several functions with the
+    same name are told apart by their first line; each declarator of one statement names its own.
+    A callback inside one of them, or in a later statement (`app.get(...)` after `const app =
+    express()`), is none of the constant's. Spans are lines, so each function has lines of its own."""
+    # Arrange
+    (tmp_path / "built.ts").write_text(
+        'export const run = Effect.fn("run")(function* (ids: string[]) {\n'
+        "  return yield* Effect.forEach(\n    ids,\n    (id) => load(id),\n  );\n});\n"
+        'export const named = Effect.fn("named")(function* named() {\n  return 1;\n});\n'
+        "export const userRouter = createWebRouter({\n"
+        "  list: procedure.query(({ ctx }) => ctx.users),\n"
+        "  remove: procedure.mutation(async ({ input }) => input),\n"
+        "});\n"
+        "export const auth = betterAuth({\n"
+        "  hooks: { before: middleware((ctx) => ctx) },\n"
+        "  session: { before: middleware((ctx) => ctx) },\n"
+        "});\n"
+        "export const pair = combine(\n  () => 1,\n  () => 2,\n);\n"
+        "const first = wrap(() => 1),\n  second = wrap(() => 2);\n"
+        "export const app = express();\n"
+        'app.get("/", (request) => request);\n'
+    )
+    index = CodeIndex(tmp_path, ("built.ts",), fact_cache_dir=tmp_path / "cache")
+
+    # Act
+    names = sorted((span.start, name) for span, name in index.constant_function_names("built.ts").items())
+
+    # Assert
+    assert names == [
+        (1, "run"),
+        (7, "named"),
+        (11, "userRouter.list"),
+        (12, "userRouter.remove"),
+        (15, "auth.hooks.before"),
+        (16, "auth.session.before"),
+        (19, "pair.<anonymous:19>"),
+        (20, "pair.<anonymous:20>"),
+        (22, "first"),
+        (23, "second"),
+    ]
+
+
 def test_a_rendered_component_is_a_call_and_a_platform_element_is_not(tmp_path: Path) -> None:
     (tmp_path / "notices.tsx").write_text("export function LoadFailed() {\n  return <p>Not loaded</p>;\n}\n")
     (tmp_path / "basket.tsx").write_text(

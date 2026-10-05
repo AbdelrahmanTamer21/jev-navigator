@@ -98,6 +98,7 @@ def test_roundtrip_keeps_every_fact_a_script_module_records(tmp_path):
         b"exports.run = run;\nexports.stop = function () { return 0; };\nexport const LIMIT = 3;\n"
         b"export { run as start };\nconst api = { list() { return []; } };\n"
         b"const t = create({ format() { return 1; } });\n"
+        b"const routes = createRouter({ list: procedure.query(() => []) });\n"
     )
     (tmp_path / "module.js").write_bytes(content)
     facts = scan_facts(read_files(tmp_path, ["module.js"]), tmp_path, Unparsed())["module.js"]
@@ -109,6 +110,7 @@ def test_roundtrip_keeps_every_fact_a_script_module_records(tmp_path):
     assert facts.structure.local_names and facts.module_aliases and facts.exported_values
     assert facts.structure.commonjs_exports and facts.export_names and facts.renamed_exports
     assert facts.structure.object_members and facts.structure.argument_members
+    assert facts.structure.constant_functions
     assert restored == facts
 
 

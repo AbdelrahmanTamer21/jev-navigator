@@ -329,6 +329,16 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
             (300, 601, 0, 602),
         ),
         (
+            "router.ts",
+            "export const appRouter = createWebRouter({\n"
+            + _many("  p{n}: procedure.query(({{ ctx }}) => ctx.v{n}),\n")
+            + "});\n"
+            + "export const auth = betterAuth({\n  hooks: {\n"
+            + _many("    h{n}: wrap((ctx) => ctx.h{n}),\n")
+            + "  },\n});\n",
+            (2, 600, 0, 600),
+        ),
+        (
             "module.py",
             _many("first{n}, second{n} = {n}, {n}\napp.debug{n} = True\n")
             + "def wide(\n"
@@ -338,7 +348,7 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
             (600, 1, 0, 601),
         ),
     ],
-    ids=["typescript", "javascript", "python"],
+    ids=["typescript", "javascript", "python", "router and config"],
 )
 def test_no_fact_rule_prints_more_than_the_node_it_matched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str, source: str, counts: tuple[int, ...]
