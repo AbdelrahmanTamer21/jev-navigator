@@ -69,6 +69,7 @@ _MESSAGE_SUFFIXES = frozenset(
 _DEFAULT_PASSWORDS = frozenset({"password", "passwd", "pwd", "secret", "admin", "root"})
 _KEY_SEPARATORS = re.compile(r"[._\-$\s]+")
 MASK = "[MASKED]"
+_MASK_AS_NAME_PART = "masked"
 CREDENTIAL_WORD_MIN_CHARS = 8
 RANDOM_VALUE_MIN_CHARS = 16
 ENVIRONMENT_NAME = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+")
@@ -100,10 +101,12 @@ def hides_under(kind: str, key: str, value: str) -> bool:
     """Whether a literal under a key of this kind is hidden. A value that repeats its key (``PASS: "PASS"``)
     shows nothing the key does not. Otherwise a secret key hides every literal; a suffixed key every
     literal but an environment variable's name, a path or a URL; a message key the same, except a
-    sentence; a naming key only a credential-looking
-    word, one word of eight or more characters that names nothing."""
+    sentence; a naming key only a credential-looking word, one word of eight or more characters that
+    names nothing. An already masked part counts as a name part, so a name that holds a hidden copy
+    (``x-runs-[MASKED]``) is still a name."""
     if _repeats_its_key(key, value):
         return False
+    value = value.replace(MASK, _MASK_AS_NAME_PART)
     if kind == "secret":
         return True
     if kind == "message" and any(character.isspace() for character in value):

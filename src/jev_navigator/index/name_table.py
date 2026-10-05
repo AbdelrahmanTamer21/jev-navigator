@@ -37,7 +37,6 @@ DECLARATION = "declaration"
 CALL = "call"
 REFERENCE = "reference"
 DEFINITION_KINDS = (SYMBOL, DECLARATION)
-_ANONYMOUS = "<anonymous>"
 _logger = logging.getLogger(__name__)
 _QUERY_CHUNK = 500
 ROWS_PER_TRANSACTION = 10_000
@@ -211,7 +210,7 @@ def _rows(blob: str, facts: FileFacts) -> Iterator[tuple]:
     structure = facts.structure
     for kind, spans in ((SYMBOL, structure.symbols), (DECLARATION, structure.declarations)):
         for position, span in enumerate(spans):
-            if span.name != _ANONYMOUS:
+            if span.is_named:
                 yield span.name, blob, kind, position, span.start, span.end, None, None
     for position, call in enumerate(facts.calls):
         yield call.name, blob, CALL, position, call.line, call.line, None, call.receiver

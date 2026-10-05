@@ -294,7 +294,7 @@ def _within(inner: Span, outer: Span) -> bool:
 
 
 def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    if not _is_named(opened.span):
+    if not opened.span.is_named:
         return []
     sites = sorted(
         (site for site in index.find_callers(opened.span.name) if falls_inside(site.binding, opened.span)),
@@ -355,7 +355,7 @@ def _queried_models(index: CodeIndex, opened: CodeSlice) -> list[Place]:
 
 
 def _referenced_by(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    if not _is_named(opened.span):
+    if not opened.span.is_named:
         return []
     name = opened.span.name
     return [
@@ -423,13 +423,13 @@ def _same_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     relation = f"in the same file as {_span_label(opened.span)}"
     functions = (*index.functions_in(opened.span.file), *_schema_block_spans(index, opened.span.file))
     container = None
-    if not _is_named(opened.span):
+    if not opened.span.is_named:
         containers = [
             span
             for span in index.symbols_in(opened.span.file)
             if span != opened.span and span.contains(opened.span.start)
         ]
-        named = [span for span in containers if _is_named(span)]
+        named = [span for span in containers if span.is_named]
         container = min(named or containers, key=Span.size, default=None)
     outermost = [span for span in functions if not any(_encloses(other, span) for other in functions)]
     others = [span for span in outermost if not span.overlaps(opened.span)]
@@ -506,12 +506,8 @@ def _schema_block_spans(index: CodeIndex, file: str) -> list[Span]:
     return [Span(file, block.start, block.end, block.name) for block in index.schema_blocks_in(file)]
 
 
-def _is_named(span: Span) -> bool:
-    return bool(span.name) and not span.name.startswith("<")
-
-
 def _span_label(span: Span) -> str:
-    return span.name if _is_named(span) else span.key
+    return span.name if span.is_named else span.key
 
 
 def starting_places(index: CodeIndex, locations: Sequence[tuple[str, int]]) -> list[Place]:

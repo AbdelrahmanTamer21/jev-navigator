@@ -3,7 +3,6 @@ client's input limits, and otherwise the longest start that fits, with a visible
 
 from __future__ import annotations
 
-import re
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -12,7 +11,8 @@ import pytest
 from conftest import BudgetedClient
 from git_repos import commit_files
 from neighbour_cap_search import PLACE
-from search_deadline import searched_in_child
+from search_deadline import SEARCH_DEADLINE_SECONDS, searched_in_child
+from short_secrets import ShortSecretMasker, hunter2, numbered_secret
 from test_find_code import find_with
 
 from jev_navigator.adapters.routes import DREX_INPUT_LIMITS
@@ -31,10 +31,13 @@ from jev_navigator.index.spans import Span
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
-from jev_navigator.judgments.secrets import DEFAULT_MASKER, MASK
+from jev_navigator.judgments.secrets import DEFAULT_MASKER
 from jev_navigator.testing import ScriptedJevClient
 
 NEIGHBOUR_CAP_SEARCH = Path(__file__).with_name("neighbour_cap_search.py")
+# A search that never settles fails its test at this deadline instead of hanging the suite. It is longer
+# than the shared search deadline, so a search run in its own process reports that deadline first.
+pytestmark = pytest.mark.timeout(2 * SEARCH_DEADLINE_SECONDS)
 ONE_OPENING = SearchBudget(max_steps=1, beam_width=1)
 CALLEES = {"callees": MOVES["callees"]}
 LINE_IN_A_REQUEST = 40
@@ -229,31 +232,7 @@ def test_find_shows_what_shown_for_target_shows(tmp_path: Path, found, character
     assert (opened.code.span, opened.code.text) == (shown.span, shown.text)
 
 
-class ShortSecretMasker:
-    """The rule #99 adds to the masker: the quoted value of every assignment to a name holding
-    PASSWORD is masked however short it is, so a value shorter than the 8-character mask makes the
-    request longer."""
-
-    _VALUE = re.compile(r'PASSWORD\w* = "([^"]+)"')
-
-    def mask(self, text: str, path: str | None = None) -> str:
-        return self._VALUE.sub(lambda match: match[0].replace(match[1], MASK), text)
-
-    def masked_values(self, text: str, path: str | None = None) -> list[str]:
-        return [match[1] for match in self._VALUE.finditer(text)]
-
-
-def _numbered_secret(line: int) -> str:
-    """A 6-character value under a secret-named key, 2 characters longer once masked."""
-    return f'    DB_PASSWORD_{line:05d} = "k{line:05d}"\n'
-
-
-def _hunter2(_line: int) -> str:
-    """jvn-verifier's measured case: 7 characters under a suffixed secret key, 1 longer once masked."""
-    return '    DB_PASSWORD_PROD = "hunter2"\n'
-
-
-def _holding_short_secrets(characters: int, calls_audit: bool, secret_line=_numbered_secret) -> str:
+def _holding_short_secrets(characters: int, calls_audit: bool, secret_line=numbered_secret) -> str:
     """A function of more than ``characters`` characters whose lines give secret-named keys short
     values."""
     lines = [secret_line(line) for line in range(characters)]
@@ -307,7 +286,7 @@ def test_a_function_whose_masked_request_is_over_the_box_is_cut_shorter_than_its
 
 @pytest.mark.parametrize(
     ("masker", "secret_line"),
-    [(ShortSecretMasker(), _numbered_secret), (DEFAULT_MASKER, _hunter2)],
+    [(ShortSecretMasker(), numbered_secret), (DEFAULT_MASKER, hunter2)],
     ids=["#99's rule", "the judge's default masker"],
 )
 @pytest.mark.parametrize("calls_audit", [False, True], ids=["no neighbour", "a neighbour"])

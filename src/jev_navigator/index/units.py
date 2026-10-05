@@ -372,6 +372,7 @@ class _SourceFile(_FileUnits):
     def __init__(self, index: CodeIndex, file: str, box_chars: int) -> None:
         super().__init__(index, file, box_chars)
         self._symbols = index.symbols_in(file)
+        self._constant_names = index.constant_function_names(file)
         self._all_functions = frozenset(index.functions_in(file))
         self._decorator_starts = index.decorator_starts_in(file)
 
@@ -381,13 +382,21 @@ class _SourceFile(_FileUnits):
         return tuple(self._function_unit(span, functions) for span in functions)
 
     def qualified(self, span: Span) -> str:
-        """``span``'s name after every holder's: ``OrderService.place``, ``registerRoutes.<anonymous:4>``."""
+        """``span``'s name after every holder's: ``OrderService.place``, ``registerRoutes.<anonymous:4>``,
+        ``run.<anonymous:2>`` inside a function a module-level constant's call builds."""
         names = []
         current: Span | None = span
         while current is not None:
-            names.append(current.name if _is_named(current) else f"<anonymous:{current.start}>")
+            names.append(self._own_name(current))
             current = holder_of(self._symbols, current)
         return ".".join(reversed(names))
+
+    def _own_name(self, span: Span) -> str:
+        """The index's name for a function a module-level constant's call builds, ``userRouter.list``
+        (``CodeIndex.constant_function_names``), else the syntax's, else the line it starts on."""
+        if span in self._constant_names:
+            return self._constant_names[span]
+        return span.name if span.is_named else f"<anonymous:{span.start}>"
 
     def _function_unit(self, span: Span, functions: Sequence[Span]) -> Unit:
         holder = holder_of(self._symbols, span)
@@ -504,7 +513,7 @@ def _one_per_range(spans: Iterable[Span]) -> tuple[Span, ...]:
     by_range: dict[LineRange, list[Span]] = {}
     for span in spans:
         by_range.setdefault((span.start, span.end), []).append(span)
-    chosen = (min(group, key=lambda span: (not _is_named(span), span.name)) for group in by_range.values())
+    chosen = (min(group, key=lambda span: (not span.is_named, span.name)) for group in by_range.values())
     return tuple(sorted(chosen, key=lambda span: (span.start, -span.end)))
 
 
@@ -531,10 +540,6 @@ def _nests(inner: Unit, outer: Unit) -> bool:
     if inner == outer or UnitKind.TOP_LEVEL in (inner.kind, outer.kind):
         return False
     return outer.start <= inner.start and inner.end <= outer.end
-
-
-def _is_named(span: Span) -> bool:
-    return bool(span.name) and not span.name.startswith("<")
 
 
 def _sha256(text: str) -> str:

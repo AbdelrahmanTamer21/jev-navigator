@@ -117,13 +117,16 @@ def test_roundtrip_rebinds_paths_without_retaining_source(tmp_path, example):
 
 def test_roundtrip_keeps_every_fact_a_script_module_records(tmp_path):
     """Each fact the scan records comes back from the cache unchanged: a function's own names,
-    module aliases, exported values, CommonJS exports, declarations, the export surface and the
-    exports under another name."""
+    module aliases, exported values, CommonJS exports, declarations, the export surface, the
+    exports under another name, an object's members and the symbols nothing holds."""
     content = (
         b"const db = require('./db');\nimport * as jwt from './jwt';\n"
-        b"function run(task, { retries }) {\n  const done = db.save(task);\n  return done;\n}\n"
+        b"function run(task, { retries }) {\n  const store = require('./store');\n"
+        b"  const done = db.save(task);\n  return store.keep(done);\n}\n"
         b"exports.run = run;\nexports.stop = function () { return 0; };\nexport const LIMIT = 3;\n"
-        b"export { run as start };\n"
+        b"export { run as start };\nconst api = { list() { return []; } };\n"
+        b"const t = create({ format() { return 1; } });\n"
+        b"const routes = createRouter({ list: procedure.query(() => []) });\n"
     )
     (tmp_path / "module.js").write_bytes(content)
     facts = scan_facts(read_files(tmp_path, ["module.js"]), tmp_path, Unparsed())["module.js"]
@@ -133,7 +136,27 @@ def test_roundtrip_keeps_every_fact_a_script_module_records(tmp_path):
     restored = cache.load("module.js", content)
 
     assert facts.structure.local_names and facts.module_aliases and facts.exported_values
+    assert [local.module for local in facts.structure.local_names if local.name == "store"] == ["./store"]
     assert facts.structure.commonjs_exports and facts.export_names and facts.renamed_exports
+    assert facts.structure.object_members and facts.structure.argument_members
+    assert facts.structure.constant_functions
+    assert restored == facts
+
+
+def test_roundtrip_keeps_whether_a_module_alias_is_a_from_import(tmp_path):
+    """A Python module alias comes back from the cache with its specifier and whether a from-import
+    bound it, which decides whether the package's own name comes first, and so does a name module
+    code binds otherwise."""
+    content = b"import app.jobs as jobs\nfrom app import mail\nfor jobs in queues:\n    pass\n"
+    (tmp_path / "module.py").write_bytes(content)
+    facts = scan_facts(read_files(tmp_path, ["module.py"]), tmp_path, Unparsed())["module.py"]
+    cache = FactCache(tmp_path / "cache")
+
+    cache.save("module.py", content, facts)
+    restored = cache.load("module.py", content)
+
+    assert [alias.from_import for alias in facts.module_aliases] == [False, True]
+    assert facts.module_bindings == ("jobs",)
     assert restored == facts
 
 

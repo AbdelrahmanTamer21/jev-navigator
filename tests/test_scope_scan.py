@@ -14,7 +14,14 @@ from jev_navigator.index import listing, scope_scan, tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.languages import FLOW_LANGUAGE, FLOW_SGCONFIG, has_flow_pragma, language_of
-from jev_navigator.index.scope_scan import OPAQUE_RECEIVER, FileFacts, FileStructure, Unparsed, scan_facts
+from jev_navigator.index.scope_scan import (
+    OPAQUE_RECEIVER,
+    ConstantFunction,
+    FileFacts,
+    FileStructure,
+    Unparsed,
+    scan_facts,
+)
 from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
@@ -335,7 +342,7 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
 
 
 @pytest.mark.parametrize(
-    ("file", "source"),
+    ("file", "source", "counts"),
     [
         (
             "module.ts",
@@ -345,6 +352,7 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
             + _many("  m{n}() {{ return {n}; }},\n")
             + "};\n"
             + _wide_script_function(),
+            (1201, 301, 600, 902),
         ),
         (
             "module.js",
@@ -353,27 +361,43 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
             + _many("  e{n}() {{ return {n}; }},\n  s{n},\n  p{n}: p{n},\n")
             + "};\n"
             + _wide_script_function(),
+            (300, 601, 0, 902),
+        ),
+        (
+            "router.ts",
+            "export const appRouter = createWebRouter({\n"
+            + _many("  p{n}: procedure.query(({{ ctx }}) => ctx.v{n}),\n")
+            + "});\n"
+            + "export const auth = betterAuth({\n  hooks: {\n"
+            + _many("    h{n}: wrap((ctx) => ctx.h{n}),\n")
+            + "  },\n});\n",
+            (2, 600, 0, 600),
         ),
         (
             "module.py",
-            _many("first{n}, second{n} = {n}, {n}\napp.debug{n} = True\n")
+            "from app.models import (\n"
+            + _many("    m{n},\n    n{n} as k{n},\n")
+            + ")\n"
+            + _many("first{n}, second{n} = {n}, {n}\napp.debug{n} = True\n")
             + "def wide(\n"
             + _many("    p{n},\n")
             + "):\n    for item in items:\n"
             + _many("        l{n} = p{n}\n"),
+            (600, 1, 600, 601),
         ),
     ],
-    ids=["typescript", "javascript", "python"],
+    ids=["typescript", "javascript", "router and config", "python"],
 )
 def test_no_fact_rule_prints_more_than_the_node_it_matched(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str, source: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str, source: str, counts: tuple[int, ...]
 ) -> None:
     """ast-grep prints every node a rule's relations match. A relation to a large ancestor, such as
     the program, a module statement or an object literal, printed that ancestor once per match, so
     the parser's output and memory grew with matches times file size: 1.2 MB of ordinary code
     peaked over 2.5 GB. A match prints its own node three times (its text, its lines and its primary
     label), each as JSON. The matches are recorded as printed, every field decoded, because the
-    scan's own decoder skips the related nodes the whole file was printed in."""
+    scan's own decoder skips the related nodes the whole file was printed in. The facts are still all
+    found: the declarations, functions, module aliases and local names the source holds."""
     # Arrange
     (tmp_path / file).write_text(source)
     printed: list[dict] = []
@@ -387,9 +411,17 @@ def test_no_fact_rule_prints_more_than_the_node_it_matched(
     monkeypatch.setattr(tools, "ast_grep_rules", recorded_rules)
 
     # Act
-    scan_facts(read_files(tmp_path, [file]), tmp_path, Unparsed())
+    facts = scan_facts(read_files(tmp_path, [file]), tmp_path, Unparsed())[file]
 
     # Assert
+    structure = facts.structure
+    found = (
+        len(structure.declarations),
+        len(structure.functions),
+        len(facts.module_aliases),
+        len(structure.local_names),
+    )
+    assert found == counts
     oversized = {
         match["ruleId"]
         for match in printed
@@ -487,6 +519,25 @@ def test_the_pragma_scan_stops_at_real_code_even_when_the_head_is_long() -> None
     assert not has_flow_pragma([*long_head, "const a = 1; // @flow"])
     assert not has_flow_pragma([*long_head, "const a = 1;", "// @flow"])
     assert not has_flow_pragma([*long_head, "const a = 1; /* @flow */"])
+
+
+def test_the_functions_a_constant_builds_are_recorded_in_file_order_also_on_one_line(tmp_path: Path) -> None:
+    """Two functions on one line are one span; the scan records each with its own keys, in the order
+    the file holds them, so the facts are the same on every run."""
+    # Arrange
+    (tmp_path / "api.ts").write_text(
+        "export const api = router({ list: procedure.query(() => 1), remove: procedure.query(() => 2) });\n"
+    )
+
+    # Act
+    structure = scan_facts(read_files(tmp_path, ["api.ts"]), tmp_path, Unparsed())["api.ts"].structure
+
+    # Assert
+    (function,) = structure.functions
+    assert structure.constant_functions == (
+        ConstantFunction("api", ("list",), function),
+        ConstantFunction("api", ("remove",), function),
+    )
 
 
 def test_a_method_on_a_one_line_class_is_named_and_counted_itself(tmp_path: Path) -> None:
@@ -1231,23 +1282,32 @@ def test_a_module_alias_is_read_from_module_level_code_only(tmp_path: Path) -> N
     aliases = index._facts_in("src/main.ts").module_aliases
 
     # Assert
-    assert dict(aliases) == {"jwt": "./jwt", "db": "./db", "legacy": "./legacy"}
+    assert {alias.name: alias.specifier for alias in aliases} == {
+        "jwt": "./jwt",
+        "db": "./db",
+        "legacy": "./legacy",
+    }
+    assert not any(alias.from_import for alias in aliases)
 
 
 def test_a_python_module_alias_is_read_from_module_level_imports_only(tmp_path: Path) -> None:
     """`import a.b as n` binds `n` to `a.b`, and `import a.b` makes `a` and `a.b` reach the modules
-    of those names; one statement may import several modules, and a module-level `try` counts. A
-    name imported from a module, an import inside a function or class, and a comment hold none."""
+    of those names; one statement may import several modules, and a module-level `try` counts.
+    `from a import b as n` binds `n` to the attribute `b` of `a`, which may be the module `a.b`, also
+    relative and over several lines. An import inside a function or class, the module a from-import
+    names, and a comment hold none."""
     # Arrange
     index = committed(
         tmp_path,
         {
             "app/main.py": (
                 "import app.jobs as jobs\nimport app.mail  # sends receipts\n"
-                "import json, app.billing as billing\nfrom app import tools\n# import app.old as old\n"
+                "import json, app.billing as billing\nimport os, app.tasks\nfrom app import tools\n"
+                "# import app.old as old\n"
+                "from . import mail as post\nfrom ..lib.text import (\n    slug,\n    words as split,\n)\n"
                 "try:\n    import ujson as fast\nexcept ImportError:\n    pass\n\n\n"
-                "def f():\n    import app.local as local\n    return local\n\n\n"
-                "class K:\n    import app.inner as inner\n"
+                "def f():\n    import app.local as local\n    from app import nearby\n    return local\n\n\n"
+                "class K:\n    import app.inner as inner\n    from app import held\n"
             ),
         },
     )
@@ -1256,13 +1316,19 @@ def test_a_python_module_alias_is_read_from_module_level_imports_only(tmp_path: 
     aliases = index._facts_in("app/main.py").module_aliases
 
     # Assert
-    assert dict(aliases) == {
-        "jobs": "app.jobs",
-        "app": "app",
-        "app.mail": "app.mail",
-        "json": "json",
-        "billing": "app.billing",
-        "fast": "ujson",
+    assert {alias.name: (alias.specifier, alias.from_import) for alias in aliases} == {
+        "jobs": ("app.jobs", False),
+        "app": ("app", False),
+        "app.mail": ("app.mail", False),
+        "json": ("json", False),
+        "billing": ("app.billing", False),
+        "os": ("os", False),
+        "app.tasks": ("app.tasks", False),
+        "tools": ("app.tools", True),
+        "post": (".mail", True),
+        "slug": ("..lib.text.slug", True),
+        "split": ("..lib.text.words", True),
+        "fast": ("ujson", False),
     }
 
 
@@ -1310,10 +1376,183 @@ def test_a_call_through_a_python_module_import_reads_only_that_module(tmp_path: 
     assert (either.status.value, either.target) == ("candidate", None)
 
 
+def test_each_binding_of_a_functions_own_name_is_its_own_fact(tmp_path: Path) -> None:
+    """A function that binds `store` twice records two bindings, each with its line, so a lookup can
+    tell one binding in a scope from several, in Python and in scripts."""
+    # Arrange
+    sources = {
+        "load.js": (
+            "function load(flag) {\n  var store = require('./db');\n"
+            "  if (flag) { var store = require('./fake'); }\n"
+            "  const once = 1;\n  return store.query(once);\n}\n"
+        ),
+        "load.py": (
+            "def load(flag):\n    store = open_db()\n    if flag:\n        store = open_fake()\n"
+            "    once = 1\n    return store.query(once)\n"
+        ),
+    }
+    for file, source in sources.items():
+        (tmp_path / file).write_text(source)
+
+    # Act
+    facts = scan_facts(read_files(tmp_path, sources), tmp_path, Unparsed())
+
+    # Assert
+    assert {
+        file: sorted((local.name, local.line) for local in found.structure.local_names)
+        for file, found in facts.items()
+    } == {
+        "load.js": [("flag", 1), ("once", 4), ("store", 2), ("store", 3)],
+        "load.py": [("flag", 1), ("once", 5), ("store", 2), ("store", 4)],
+    }
+
+
+def test_a_call_through_a_module_a_from_import_names_reads_that_module(tmp_path: Path) -> None:
+    """`jobs.run()` after `from app import jobs`, `from . import jobs as queue` or `from .sub import
+    mail as post` calls what that module defines, as after `import app.jobs as jobs`. A parameter
+    named like the import replaces it inside its function, and a from-import of a function names no
+    module."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "app/__init__.py": "",
+            "app/jobs.py": "def run(task):\n    return task\n",
+            "app/unrelated.py": "def run():\n    return 0\n\n\ndef send():\n    return 0\n",
+            "app/sub/__init__.py": "",
+            "app/sub/mail.py": "def send():\n    return 1\n",
+            "app/tools.py": "def helper():\n    return 2\n",
+            "app/worker.py": (
+                "from app import jobs\nfrom . import jobs as queue\nfrom .sub import mail as post\n"
+                "from app.tools import helper\n\n\n"
+                "def absolute(task):\n    return jobs.run(task)\n\n\n"
+                "def relative(task):\n    return queue.run(task)\n\n\n"
+                "def nested():\n    return post.send()\n\n\n"
+                "def injected(jobs, task):\n    return jobs.run(task)\n\n\n"
+                "def function():\n    return helper.run()\n"
+            ),
+        },
+    )
+    caller = {span.name: span for span in index.functions_in("app/worker.py")}
+
+    # Act
+    bindings = {name: index.callee_edges(caller[name])[0].binding for name in caller}
+
+    # Assert
+    assert {name: (binding.status.value, binding.target) for name, binding in bindings.items()} == {
+        "absolute": ("resolved", Span("app/jobs.py", 1, 2, "run")),
+        "relative": ("resolved", Span("app/jobs.py", 1, 2, "run")),
+        "nested": ("resolved", Span("app/sub/mail.py", 1, 2, "send")),
+        "injected": ("candidate", None),
+        "function": ("candidate", None),
+    }
+
+
+@pytest.mark.parametrize(
+    ("package", "status"),
+    [
+        ("from .config import config\n", "candidate"),
+        ("def config():\n    return 0\n", "candidate"),
+        ("config = None\n", "candidate"),
+        ("from .config import *\n", "candidate"),
+        ("config = Config(:\n", "candidate"),
+        ("for config in sources:\n    pass\n", "candidate"),
+        ("with open('x') as config:\n    pass\n", "candidate"),
+        ("from . import config\n", "resolved"),
+        ("from pkg import config\n", "resolved"),
+        ("", "resolved"),
+    ],
+    ids=[
+        "imports a value",
+        "defines a function",
+        "assigns",
+        "star-imports its module",
+        "loses a line that names it",
+        "loops over it",
+        "opens it",
+        "imports itself",
+        "imports itself by path",
+        "empty",
+    ],
+)
+def test_a_from_import_takes_the_packages_own_name_before_its_module(
+    tmp_path: Path, package: str, status: str
+) -> None:
+    """`from pkg import config` takes `pkg`'s attribute `config` when the package's `__init__` binds
+    one, and imports the module `pkg.config` only otherwise. So `config.get()` is proven to the
+    module's `get` only where `__init__` binds no other `config`: here the module also holds an
+    instance named `config`, whose method the call may reach, and a star import of the module
+    copies that instance over the module's name. A line the parser lost may bind it too."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "pkg/__init__.py": package,
+            "pkg/config.py": (
+                "class Config:\n    def get(self):\n        return 1\n\n\n"
+                "config = Config()\n\n\ndef get():\n    return 0\n"
+            ),
+            "use.py": "from pkg import config\n\n\ndef read():\n    return config.get()\n",
+        },
+    )
+
+    # Act
+    binding = index.binding_of("use.py", 5, "get", "config")
+
+    # Assert
+    assert binding.status.value == status, binding
+    if status == "resolved":
+        assert binding.target == Span("pkg/config.py", 9, 10, "get")
+
+
+@pytest.mark.parametrize(
+    ("statement", "alias"),
+    [
+        ("from pkg import mod, other\n", "mod"),
+        ("from pkg import other, mod\n", "mod"),
+        ("from pkg import (\n    other,\n    mod,\n)\n", "mod"),
+        ("from pkg import other as o, mod\n", "mod"),
+        ("from pkg import other, mod as m\n", "m"),
+        (
+            "from pkg import (\n"
+            + "".join(f"    n{n},\n    n{n} as k{n},\n" for n in range(300))
+            + "    mod,\n)\n",
+            "mod",
+        ),
+    ],
+    ids=[
+        "first",
+        "second",
+        "second over several lines",
+        "after an as-name",
+        "second as a name",
+        "last of 601",
+    ],
+)
+def test_a_from_import_names_a_module_wherever_its_list_holds_it(
+    tmp_path: Path, statement: str, alias: str
+) -> None:
+    """Each name a from-import lists may name a module, not only the first: `mod.run()` calls the
+    `run` of `pkg/mod.py` wherever the statement lists `mod`."""
+    # Arrange
+    module = "def run():\n    return 1\n"
+    use = statement + f"{alias}.run()\n"
+    index = committed(
+        tmp_path, {"pkg/__init__.py": "", "pkg/mod.py": module, "pkg/other.py": module, "use.py": use}
+    )
+
+    # Act
+    binding = index.binding_of("use.py", use.count("\n"), "run", alias)
+
+    # Assert
+    assert (binding.status.value, binding.target) == ("resolved", Span("pkg/mod.py", 1, 2, "run"))
+
+
 def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_it(tmp_path: Path) -> None:
-    """`db.query()` binds to db.js's `query` where `db` is the module-level alias; a parameter `db`, a
-    `const store = require(...)` inside a function, a name module-level code binds to two modules, or
-    an alias that only a template string spells, leave the call a candidate."""
+    """`db.query()` binds to db.js's `query` where `db` is the module-level alias, and to the module a
+    function's own `const store = require(...)` names inside that function; a parameter `db`, a name
+    module-level code binds to two modules, or an alias that only a template string spells, leave the
+    call a candidate."""
     # Arrange
     index = committed(
         tmp_path,
@@ -1352,17 +1591,289 @@ def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_i
         for line, receiver in found
     }
     real = index.binding_of("handler.js", 2, "query", "db")
+    own = [index.binding_of("two.js", line, "query", "store").target for line in (1, 2)]
 
     # Assert
     assert (real.status.value, real.target) == ("resolved", Span("db.js", 1, 1, "query"))
+    assert own == [Span("db.js", 1, 1, "query"), Span("fake.js", 1, 1, "query")]
     assert bindings == {
         ("handler.js", 2): "resolved",
         ("handler.js", 3): "candidate",
-        ("two.js", 1): "candidate",
-        ("two.js", 2): "candidate",
+        ("two.js", 1): "resolved",
+        ("two.js", 2): "resolved",
         ("gen.js", 2): "candidate",
         ("twice.js", 3): "candidate",
     }
+
+
+REST_QUERY = "function RestQuery(options) {\n  return options;\n}\nmodule.exports = RestQuery;\n"
+
+
+def test_a_name_a_function_binds_once_to_a_require_holds_that_module(tmp_path: Path) -> None:
+    """parse-server's Auth.js: a module-level `import RestQuery from './RestQuery'`, and inside a
+    function its own `const RestQuery = require('./RestQuery')`. The function binds the name once, to
+    the module, and a `const` is never bound again, so `RestQuery({...})` there calls the module's
+    export, `module.exports = RestQuery`, and `lib.find()` calls the `find` that `lib` exports. An
+    inner arrow that binds nothing reads the same binding."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "RestQuery.js": REST_QUERY,
+            "lib.js": "function find() {\n  return 1;\n}\nmodule.exports = { find };\n",
+            "Auth.js": (
+                "import RestQuery from './RestQuery';\n\n"
+                "async function load(config) {\n"
+                "  const RestQuery = require('./RestQuery');\n"
+                "  const lib = require('./lib');\n"
+                "  const query = await RestQuery({ config });\n"
+                "  const later = () => RestQuery({ config });\n"
+                "  return lib.find(query, later);\n"
+                "}\n"
+            ),
+        },
+    )
+
+    # Act
+    called = [index.binding_of("Auth.js", line, "RestQuery", None) for line in (6, 7)]
+    found = index.binding_of("Auth.js", 8, "find", "lib")
+
+    # Assert
+    rest_query = Span("RestQuery.js", 1, 3, "RestQuery")
+    assert [(binding.status.value, binding.target) for binding in called] == [("resolved", rest_query)] * 2
+    assert (found.status.value, found.target) == ("resolved", Span("lib.js", 1, 3, "find"))
+
+
+@pytest.mark.parametrize(
+    ("body", "line"),
+    [
+        (
+            "  const RestQuery = require('./RestQuery');\n"
+            "  if (name) {\n    const RestQuery = wrap();\n  }\n  return RestQuery({});\n",
+            8,
+        ),
+        (
+            "  let RestQuery = require('./RestQuery');\n"
+            "  RestQuery = wrap(RestQuery);\n  return RestQuery({});\n",
+            6,
+        ),
+        (
+            "  const RestQuery = require('./RestQuery');\n"
+            "  function inner(RestQuery) {\n    return RestQuery({});\n  }\n  return inner;\n",
+            6,
+        ),
+        ("  const RestQuery = require('fs');\n  return RestQuery({});\n", 5),
+        ("  const RestQuery = require(name);\n  return RestQuery({});\n", 5),
+    ],
+    ids=["bound twice", "a let", "an inner function binds it", "no module in scope", "a computed module"],
+)
+def test_a_name_a_function_binds_otherwise_stays_its_own_value(tmp_path: Path, body: str, line: int) -> None:
+    """A name a function binds twice, a `let` that may be bound again, a parameter of an inner
+    function, a require of a module outside the scope, or of a computed name, holds no module of the
+    scope there: the call is a candidate whose local value is not resolved."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "RestQuery.js": REST_QUERY,
+            "Auth.js": f"import RestQuery from './RestQuery';\n\nfunction load(name) {{\n{body}}}\n",
+        },
+    )
+
+    # Act
+    binding = index.binding_of("Auth.js", line, "RestQuery", None)
+
+    # Assert
+    assert (binding.status.value, binding.target) == ("candidate", None), binding
+
+
+def test_a_const_require_holds_its_module_from_its_line_to_the_end_of_its_block(tmp_path: Path) -> None:
+    """A `const` is block-scoped: `const db = require('./db')` inside an `if` or a loop body holds
+    ./db from its own line to the end of that block, and one directly in the function body to the
+    end of the function. Before it, or after its block, `db` is the module-level ./other again, which
+    the function's own binding hides, so the call stays a candidate (jvn-verifier's p31). A `const`
+    in a `switch` case is scoped to the whole `switch`, no statement block, so it holds no module."""
+    # Arrange
+    module = "exports.query = function query() {{ return {n}; }};\n"
+    head = "const db = require('./other');\n"
+    index = committed(
+        tmp_path,
+        {
+            "app/db.js": module.format(n=1),
+            "app/other.js": module.format(n=2),
+            "app/in_if.js": head
+            + "function h(flag) {\n  if (flag) {\n    const db = require('./db');\n    db.query();\n  }\n"
+            "  return db.query();\n}\n",
+            "app/before.js": head
+            + "function h(flag) {\n  db.query();\n  if (flag) {\n    const db = require('./db');\n  }\n}\n",
+            "app/in_loop.js": head
+            + "function h(items) {\n  for (const x of items) {\n    const db = require('./db');\n  }\n"
+            "  return db.query();\n}\n",
+            "app/in_body.js": head
+            + "function h() {\n  const db = require('./db');\n  return db.query();\n}\n",
+            "app/in_switch.js": head
+            + "function h(kind) {\n  switch (kind) {\n    case 1:\n      const db = require('./db');\n  }\n"
+            "  return db.query();\n}\n",
+        },
+    )
+    sites = {
+        "inside the if block": ("app/in_if.js", 5),
+        "after the if block": ("app/in_if.js", 7),
+        "before the block": ("app/before.js", 3),
+        "after the loop": ("app/in_loop.js", 6),
+        "in the function body": ("app/in_body.js", 4),
+        "after a switch": ("app/in_switch.js", 7),
+    }
+
+    # Act
+    bindings = {site: index.binding_of(file, line, "query", "db") for site, (file, line) in sites.items()}
+
+    # Assert
+    query = Span("app/db.js", 1, 1, "query")
+    assert {site: (binding.status.value, binding.target) for site, binding in bindings.items()} == {
+        "inside the if block": ("resolved", query),
+        "after the if block": ("candidate", None),
+        "before the block": ("candidate", None),
+        "after the loop": ("candidate", None),
+        "in the function body": ("resolved", query),
+        "after a switch": ("candidate", None),
+    }
+
+
+_PYTHON_REBINDINGS = {
+    "an assignment": "mod = make()\n",
+    "an augmented assignment": "mod += 1\n",
+    "a tuple target": "mod, other = make()\n",
+    "a function": "def mod():\n    return 0\n",
+    "a class": "class mod:\n    pass\n",
+    "a loop": "for mod in items:\n    pass\n",
+    "a with target": "with open('x') as mod:\n    pass\n",
+    "a caught error": "try:\n    pass\nexcept Exception as mod:\n    pass\n",
+    "a walrus": "if (mod := make()):\n    pass\n",
+    "an assignment in a module-level block": "if flag:\n    mod = make()\n",
+    "a function's global": "def reset():\n    global mod\n    mod = make()\n",
+    "a deletion": "del mod\n",
+}
+_PYTHON_OTHER_SCOPES = {
+    "nothing else": "",
+    "another function's own name": "def local():\n    mod = make()\n    return mod\n",
+    "a class attribute": "class K:\n    mod = make()\n",
+    "a comprehension's name": "names = [mod for mod in items]\n",
+}
+
+
+@pytest.mark.parametrize(
+    "statement", ["import pkg.mod as mod\n", "from pkg import mod\n"], ids=["import as", "from import"]
+)
+def test_a_python_module_alias_holds_its_module_only_where_module_level_code_binds_the_name_once(
+    tmp_path: Path, statement: str
+) -> None:
+    """`mod.run()` reads pkg/mod.py only while the import is the module's one binding of `mod`. An
+    assignment, a definition, a loop, a with or except target, a walrus, a function's `global` or a
+    deletion may leave `mod` holding something else, so the call stays a candidate. A name another
+    function, a class body or a comprehension binds is not the module's."""
+    # Arrange
+    cases = {**_PYTHON_REBINDINGS, **_PYTHON_OTHER_SCOPES}
+    use = "\n\ndef use():\n    return mod.run()\n"
+    files = {f"use_{number}.py": statement + cases[case] + use for number, case in enumerate(cases)}
+    index = committed(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/mod.py": "def run():\n    return 1\n",
+            "pkg/other.py": "def run():\n    return 2\n",
+            **files,
+        },
+    )
+
+    # Act
+    statuses = {
+        case: index.binding_of(file, files[file].count("\n"), "run", "mod").status.value
+        for case, file in zip(cases, files, strict=True)
+    }
+
+    # Assert
+    assert statuses == {
+        **{case: "candidate" for case in _PYTHON_REBINDINGS},
+        **{case: "resolved" for case in _PYTHON_OTHER_SCOPES},
+    }
+
+
+def test_a_dotted_python_import_holds_its_module_only_while_nothing_else_binds_its_first_name(
+    tmp_path: Path,
+) -> None:
+    """`import pkg.mod` makes `pkg.mod.run()` read pkg/mod.py, until module-level code binds `pkg`
+    again: the dotted name is looked up from `pkg`."""
+    # Arrange
+    use = "\n\ndef use():\n    return pkg.mod.run()\n"
+    index = committed(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/mod.py": "def run():\n    return 1\n",
+            "pkg/other.py": "def run():\n    return 2\n",
+            "kept.py": "import pkg.mod\n" + use,
+            "rebound.py": "import pkg.mod\npkg = make()\n" + use,
+        },
+    )
+
+    # Act
+    statuses = {
+        file: index.binding_of(file, line, "run", "pkg.mod").status.value
+        for file, line in (("kept.py", 5), ("rebound.py", 6))
+    }
+
+    # Assert
+    assert statuses == {"kept.py": "resolved", "rebound.py": "candidate"}
+
+
+def test_a_script_module_alias_holds_its_module_only_where_module_code_binds_the_name_once(
+    tmp_path: Path,
+) -> None:
+    """`db.query()` reads db.js only while the require or namespace import is the module's one binding
+    of `db`. Assigning `db` anywhere, declaring it again (a require inside a block declares no alias),
+    or a module-level function named `db` may leave it holding something else, so the call stays a
+    candidate. A name another function declares for itself is that function's own."""
+    # Arrange
+    cases = {
+        "a const require": ("const db = require('./db');\n", "resolved"),
+        "a namespace import": ("import * as db from './db';\n", "resolved"),
+        "another function's own db": (
+            "const db = require('./db');\nfunction other() { const db = 1; return db; }\n",
+            "resolved",
+        ),
+        "an assignment": ("let db = require('./db');\ndb = make();\n", "candidate"),
+        "an assignment in a function": (
+            "let db = require('./db');\nfunction reset() { db = make(); }\n",
+            "candidate",
+        ),
+        "a second declaration": ("var db = require('./db');\nvar db = wrap(db);\n", "candidate"),
+        "a function": ("var db = require('./db');\nfunction db() { return 0; }\n", "candidate"),
+        "a loop": ("var db = require('./db');\nfor (db of pools) {}\n", "candidate"),
+        "a require in a block": (
+            "var db = require('./db');\nif (legacy) {\n  var db = require('./fake');\n}\n",
+            "candidate",
+        ),
+    }
+    use = "function use() {\n  return db.query();\n}\n"
+    files = {f"use_{number}.js": head + use for number, (head, _) in enumerate(cases.values())}
+    index = committed(
+        tmp_path,
+        {
+            "db.js": "function query() { return 1; }\nmodule.exports = { query };\n",
+            "fake.js": "function query() { return 2; }\nmodule.exports = { query };\n",
+            **files,
+        },
+    )
+
+    # Act
+    statuses = {
+        case: index.binding_of(file, files[file].count("\n") - 1, "query", "db").status.value
+        for case, file in zip(cases, files, strict=True)
+    }
+
+    # Assert
+    assert statuses == {case: status for case, (_, status) in cases.items()}
 
 
 def test_an_import_alias_replaced_by_a_local_name_binds_nothing_through_the_import(tmp_path: Path) -> None:
@@ -1598,6 +2109,74 @@ def test_a_default_whose_definition_may_sit_in_unparsed_lines_stays_unknown(tmp_
 
     # Assert
     assert binding.status.value == "unknown", binding
+
+
+def test_a_name_passed_on_from_a_module_whose_export_sits_in_unparsed_lines_stays_unknown(
+    tmp_path: Path,
+) -> None:
+    """A barrel passes `make` on from a module whose `exports.make = 1 +* build` no grammar can parse,
+    neither the JavaScript nor the flow reading. The lines the parser lost mention `make`, so an
+    import of it through the barrel is unknown, as an import from that module itself is. A
+    re-exported module whose lost lines never mention `make` hides nothing."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "lost.js": "function build() {\n  return 1;\n}\nexports.make = 1 +* build;\n",
+            "listed.js": "export { make } from './lost';\n",
+            "starred.js": "export * from './lost';\n",
+            "clean.js": "export function make() {\n  return 2;\n}\n",
+            "noisy.js": "const other = 1 +* x;\n",
+            "mixed.js": "export * from './clean';\nexport * from './noisy';\n",
+            **{
+                f"from_{module}.js": f"import {{ make }} from './{module}';\nmake();\n"
+                for module in ("lost", "listed", "starred", "mixed")
+            },
+        },
+    )
+
+    # Act
+    bindings = {
+        module: index.binding_of(f"from_{module}.js", 2, "make", None)
+        for module in ("lost", "listed", "starred", "mixed")
+    }
+
+    # Assert
+    assert {
+        module: (binding.status.value, binding.target and binding.target.key)
+        for module, binding in bindings.items()
+    } == {
+        "lost": ("unknown", None),
+        "listed": ("unknown", None),
+        "starred": ("unknown", None),
+        "mixed": ("resolved", "clean.js:1-3"),
+    }
+
+
+def test_a_commonjs_default_export_the_parser_lost_stays_unknown(tmp_path: Path) -> None:
+    """A syntax error no grammar can parse, neither the JavaScript nor the flow reading, hides
+    `module.exports = 1 +* build`, which never says `default`. A default import of the module, or
+    of a barrel passing its default on, is unknown, never a module with no definition exported as
+    the default."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "lib.js": "function build() { return 1; }\nmodule.exports = 1 +* build;\n",
+            "barrel.js": "export { default } from './lib';\n",
+            "use.js": "import make from './lib';\nmake();\n",
+            "through.js": "import make from './barrel';\nmake();\n",
+        },
+    )
+
+    # Act
+    bindings = {file: index.binding_of(file, 2, "make", None) for file in ("use.js", "through.js")}
+
+    # Assert
+    assert {file: binding.status.value for file, binding in bindings.items()} == {
+        "use.js": "unknown",
+        "through.js": "unknown",
+    }
 
 
 def test_only_what_a_script_module_exports_is_importable(tmp_path: Path) -> None:

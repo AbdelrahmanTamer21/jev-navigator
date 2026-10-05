@@ -123,20 +123,28 @@ def masked_values(value: object, masker: Masker) -> frozenset[str]:
 
 
 def mask_everywhere(value: object, masker: Masker, values: frozenset[str], questions: bool = False) -> object:
-    """Masks every string by the masker's rules, then hides each of ``values`` wherever it still
-    appears. Keys are left as they are. In ``questions``, JVN's own wording hides no copies."""
+    """Masks every string by the masker's rules and hides each of ``values`` wherever it still appears.
+    A string a copy changed is masked once more, because a hidden copy can turn a kept value into one
+    the rules hide (``sessionToken: "[MASKED]-token"`` no longer repeats its key), and the request sent
+    must be one the rules leave as it is. Keys are left as they are. In ``questions``, JVN's own wording
+    hides no copies."""
     copies = [copy_pattern(secret) for secret in sorted(values - {MASK}, key=len, reverse=True)]
 
     @cache
     def hide(text: str, path: str | None, role: str) -> str:
-        text = masker.mask(text, path)
+        masked = masker.mask(text, path)
         if role == "wording":
-            return text
-        for copy in copies:
-            text = copy.sub(MASK, text)
-        return text
+            return masked
+        copied = _hide_copies(masked, copies)
+        return masked if copied == masked else masker.mask(copied, path)
 
     return _each_string(value, hide, questions=questions)
+
+
+def _hide_copies(text: str, copies: list[re.Pattern[str]]) -> str:
+    for copy in copies:
+        text = copy.sub(MASK, text)
+    return text
 
 
 def safe_options(options: Mapping[str, str], masker: Masker | None) -> dict[str, str]:
