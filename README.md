@@ -561,7 +561,8 @@ on its own scope, so searches sharing one judge never use up each other's budget
   secret key is masked too (`POSTGRES_PASSWORD: example`), unless it is empty, a boolean or a whole
   `${VAR}`, `$VAR` or `${{ ... }}` reference; in code it stays (`token: str`). A request mapping's
   `file` names the file of the strings inside it, and a candidate's signature names its file the same
-  way (`located_line` writes it, `located_file` reads it); a signature that names no file reads as config. An upper-case environment assignment is a value
+  way (`located_line` in `directives/places.py` writes it, and `located_file` beside it parses exactly that
+  grammar); a signature that names no file, or whose file is ambiguous, reads as config. An upper-case environment assignment is a value
   wherever it stands on a shell, Makefile or CI line (`run: API_TOKEN=... npm test`), unless it is a
   usage placeholder (`KEY=...`, `KEY=<credential>`). A secret flag on a command line
   (`psql --password=...`, `deploy --api-token ...`) and a Stripe secret key anywhere are values too.

@@ -14,12 +14,16 @@ from jev_navigator.directives.places import (
     MOVES,
     Move,
     Place,
+    function_place,
+    located_file,
+    located_line,
     neighbours,
     neighbours_and_omissions,
     place_for_line,
     range_place,
     window_place,
 )
+from jev_navigator.directives.shown import cut_long_line
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
 from jev_navigator.judgments.relations import key_mention
@@ -793,3 +797,90 @@ def test_document_window_navigation_retains_text_edges_without_syntax_scanning(t
     assert index.callee_edges(opened.span) == ()
     assert index.functions_in("README.md") == ()
     assert index.read_window("README.md", 1).text == 'The setting is "policy.limit".'
+
+
+AWKWARD_PATHS = [
+    "deploy/k8s:prod/values.yml",
+    "deploy/v:1 2/values.yml",
+    "my dir/sub dir/app config.yml",
+    "src/v1.2.3/handlers.v2.py",
+    "café/ünïcode/naïve.py",
+]
+PLACE_BUILDERS = {
+    "function": lambda index, file: function_place(index, Span(file, 1, 2), "calls"),
+    "window": lambda index, file: window_place(index, file, 1, "mentions"),
+    "range": lambda index, file: range_place(index, file, 1, 2, "start of file"),
+}
+
+
+@pytest.mark.parametrize("builder", PLACE_BUILDERS)
+@pytest.mark.parametrize("file", AWKWARD_PATHS)
+def test_a_place_signature_names_its_file_back_for_every_shape_and_awkward_path(
+    tmp_path: Path, file: str, builder: str
+) -> None:
+    # Arrange
+    index = committed_index(tmp_path, {file: "key: value\nother: 1\n"})
+    signature = PLACE_BUILDERS[builder](index, file).signature
+
+    # Act
+    named = located_file(signature)
+
+    # Assert
+    assert named == file
+
+
+@pytest.mark.parametrize("builder", PLACE_BUILDERS)
+def test_a_config_path_holding_a_place_separator_never_names_a_code_file(
+    tmp_path: Path, builder: str
+) -> None:
+    # Arrange
+    file = "ops/run.py:3 `x`/values.yml"
+    index = committed_index(tmp_path, {file: "password: hunter2\nother: 1\n"})
+    signature = PLACE_BUILDERS[builder](index, file).signature
+
+    # Act
+    named = located_file(signature)
+
+    # Assert
+    assert named is None
+
+
+def test_a_code_line_holding_a_place_separator_names_no_file(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(tmp_path, {"app/a.py": "x = {k:1 `v`}\ny = 2\n"})
+    signature = function_place(index, Span("app/a.py", 1, 2)).signature
+
+    # Act
+    named = located_file(signature)
+
+    # Assert
+    assert named is None
+
+
+def test_a_signature_cut_at_the_line_limit_still_names_its_file(tmp_path: Path) -> None:
+    # Arrange
+    index = committed_index(tmp_path, {"deploy/a b.yml": "key: " + "v" * 400 + "\n"})
+    signature = cut_long_line(window_place(index, "deploy/a b.yml", 1, "mentions").signature)
+
+    # Act
+    named = located_file(signature)
+
+    # Assert
+    assert named == "deploy/a b.yml"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "a sentence: with a colon",
+        "app/a.py:3 plain words",
+        ":3 `x`",
+        located_line("app/a.py", "3", "line two `x` (calls)"),
+    ],
+)
+def test_a_line_outside_the_place_grammar_names_no_file(line: str) -> None:
+    # Act
+    named = located_file(line)
+
+    # Assert
+    assert named is None

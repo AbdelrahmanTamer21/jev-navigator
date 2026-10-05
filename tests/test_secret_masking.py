@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from jev_navigator.index.spans import located_file, located_line
 from jev_navigator.judgments.questions import Check, Criterion
 from jev_navigator.judgments.secrets import (
     HIGH_ENTROPY_MIN_CHARS,
@@ -774,29 +773,13 @@ def test_a_candidate_from_a_config_file_is_read_as_config() -> None:
 
 def test_a_candidate_whose_location_does_not_parse_is_read_as_config() -> None:
     # Arrange
-    state = _candidate_request("my dir/form.ts:3 `token: abc123`", "token: abc123\n")
+    state = _candidate_request("form.ts, line 3: `token: abc123`", "token: abc123\n")
 
     # Act
     masked_state, _, _ = mask_request(state, {}, SecretMasker())
 
     # Assert
     assert "abc123" not in json.dumps(masked_state)
-
-
-def test_a_signature_names_its_file_for_every_place_shape() -> None:
-    # Arrange
-    lines = [
-        located_line("app/a.py", "7", "`def f():`"),
-        located_line("app/a.py", "1-40", "line 7 `x = 1` (calls)"),
-        located_line("deploy/b.yml", "3-12", "`key: value` (start of file)"),
-    ]
-
-    # Act
-    files = [located_file(line) for line in lines]
-
-    # Assert
-    assert files == ["app/a.py", "app/a.py", "deploy/b.yml"]
-    assert located_file("a sentence: with a colon") is None
 
 
 def _check_request(code: str, path: str) -> tuple[dict, dict, frozenset]:

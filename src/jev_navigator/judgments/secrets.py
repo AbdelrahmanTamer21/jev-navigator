@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from functools import cache
 from typing import Protocol
 
-from ..index.spans import located_file
+from ..directives.places import located_file
 from .secret_shapes import (
     BY_CONTENT_MIN_CHARS,
     HIGH_ENTROPY_MIN_CHARS,
