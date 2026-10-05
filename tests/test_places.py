@@ -972,6 +972,8 @@ def test_a_signature_cut_at_the_line_limit_still_names_its_file(tmp_path: Path) 
     [
         "a sentence: with a colon",
         "app/a.py:3 plain words",
+        "app/a.py:3 `x` and then plain words",
+        "app/a.py:3 line 4 `x` (calls) and more",
         ":3 `x`",
         "app/a.py:3 line two `x` (calls)",
     ],
