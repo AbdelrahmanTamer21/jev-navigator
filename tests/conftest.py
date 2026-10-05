@@ -124,10 +124,11 @@ API_TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 """
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def python_sigint_handler():
-    """Python's own Ctrl-C handler for a test that sends SIGINT. A suite started as a background job
-    (``cmd &``) inherits SIGINT as ignored, so without this the signal never arrives."""
+    """Python's own Ctrl-C handler for every test, as a terminal gives it. A suite started as a
+    background job (``cmd &``) inherits SIGINT as ignored, so without this a test that sends SIGINT
+    would never receive it."""
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
     yield
     signal.signal(signal.SIGINT, previous)

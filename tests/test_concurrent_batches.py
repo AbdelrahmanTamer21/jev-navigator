@@ -237,7 +237,6 @@ class HangingClient:
         self.released.set()
 
 
-@pytest.mark.usefixtures("python_sigint_handler")
 def test_an_interrupt_with_requests_in_flight_cancels_them_and_sends_nothing_new() -> None:
     # Arrange
     client = HangingClient(in_flight_before_interrupt=2)
@@ -256,7 +255,6 @@ class ProviderError(RuntimeError):
     """A failure the provider reports, such as a 503, as opposed to a send the caller aborted."""
 
 
-@pytest.mark.usefixtures("python_sigint_handler")
 def test_a_provider_error_during_an_interrupt_comes_out_as_that_error() -> None:
     # Arrange
     cause = ConnectionResetError("connection reset by peer")

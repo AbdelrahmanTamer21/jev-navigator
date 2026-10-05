@@ -1035,7 +1035,6 @@ def test_interrupt_while_filtering_a_candidate_resumes_and_processes_it(tmp_path
     assert resumed.found[0].place_key == candidate.key
 
 
-@pytest.mark.usefixtures("python_sigint_handler")
 def test_interrupt_while_popping_a_beam_restores_it_for_resume(
     sample_index: CodeIndex, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1841,7 +1840,6 @@ def test_an_interrupt_after_a_beam_is_asked_and_before_it_is_merged_keeps_its_pl
     assert resumed.found[0].place_key == target.key
 
 
-@pytest.mark.usefixtures("python_sigint_handler")
 def test_a_real_error_that_settled_before_the_interrupt_ends_the_search_failed_not_cancelled(
     sample_index: CodeIndex,
 ) -> None:
