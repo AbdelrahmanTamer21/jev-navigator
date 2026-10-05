@@ -666,6 +666,13 @@ DEFAULT_EXPORTS = {
 }
 
 
+def export_words(name: str) -> frozenset[str]:
+    """The words an export of ``name`` is written with, so lines the parser lost that say none of
+    them cannot export it: the name itself, and for the default export also ``exports``, since
+    `module.exports = build` (see ``DEFAULT_EXPORTS``) never says ``default``."""
+    return frozenset((name, "exports")) if name == "default" else frozenset((name,))
+
+
 # The entries of a module's own `export { ... }` lists, quietly (see the double negation above):
 # `export { inner as outer }` exports the module's definition `inner` as `outer`. A re-export's,
 # `export { a as b } from './m'`, are another module's names (see ``reexported_names``).

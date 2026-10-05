@@ -36,9 +36,7 @@ from .imports import (
     reexported_names,
     resolve_import,
 )
-from .languages import (
-    language_of,
-)
+from .languages import export_words, language_of
 from .memo import memoized
 from .name_table import CALL, DEFINITION_KINDS, REFERENCE, FileEntry, NameRow, NameTable, git_blob_id
 from .packages import Packages
@@ -868,11 +866,12 @@ class CodeIndex:
 
     def _hides(self, exporter: str, name: str) -> bool:
         """Whether ``exporter`` may export ``name`` where the index cannot see it: the parser refused
-        the file, so nothing it exports was read, or its unparsed lines mention ``name`` or the name
-        of a definition it exports as ``name`` (see ``_own_names``), or it vanished."""
+        the file, so nothing it exports was read, or its unparsed lines say a word the export of
+        ``name`` is written with (see ``export_words``) or the name of a definition it exports as
+        ``name`` (see ``_own_names``), or it vanished."""
         if self._refused_parse(exporter):
             return True
-        looked_up = {name, *self._own_names(exporter, name)}
+        looked_up = {*export_words(name), *self._own_names(exporter, name)}
         return any(exporter in self._files_hiding(each) for each in looked_up)
 
     def _refused_parse(self, file: str) -> bool:
@@ -929,7 +928,7 @@ class CodeIndex:
     @memoized
     def _read_exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
         """The module ``file``'s import of ``specifier`` resolves to, then each module it re-exports
-        ``name`` from, with the evidence for each."""
+        ``name`` from that exports it or may hide it (see ``_hides``), with the evidence for each."""
         resolved = resolve_import(
             specifier, file, self._scope, self._script_paths(file), self._read_packages()
         )
@@ -961,7 +960,7 @@ class CodeIndex:
                 if identity in seen:
                     continue
                 seen.add(identity)
-                if self._refused_parse(inherited.path) or name in self._read_export_names(inherited.path):
+                if self._hides(inherited.path, name) or name in self._read_export_names(inherited.path):
                     prior = found.get(inherited.path)
                     if prior is None or inherited.proven:
                         found[inherited.path] = inherited
