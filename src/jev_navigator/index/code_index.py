@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
-from . import tools
+from . import listing, tools
 from .bindings import Binding, BindingResolver, CallFacts, binding_from_facts
 from .fact_cache import FactCache
 from .imports import (
@@ -41,6 +41,8 @@ from .tsconfig import ScriptPaths, nearest_script_paths
 
 DEFAULT_WINDOW_RADIUS = 10
 MAX_TEXT_HITS = 20
+# The bytes kept on either side of a text hit, so a hit in a one-line bundle never holds the line.
+TEXT_HIT_CONTEXT_BYTES = 200
 CO_CHANGE_COMMITS = 200
 LINE_CACHE_FILES = 512
 _COMMIT_MARK = "@@commit@@"
@@ -82,6 +84,7 @@ class CodeIndex:
         scan_observer: ScanObserver | None = None,
         fact_cache_dir: Path | None = None,
         blob_ids: Mapping[str, str] | None = None,
+        not_indexed: Mapping[str, str] | None = None,
     ) -> None:
         self.root = Path(root)
         self.git_root = Path(git_root) if git_root is not None else self.root
@@ -100,6 +103,7 @@ class CodeIndex:
         self._code_files = tuple(path for path in self.files if language_of(path))
         self._unavailable: dict[str, str] = {}
         self._refused: dict[str, str] = {}
+        self._not_indexed = dict(not_indexed or {})
         self._sources = SourceFiles(
             self.root, self._unavailable, LINE_CACHE_FILES, _held_weakly(self._standing_first_read)
         )
@@ -130,22 +134,25 @@ class CodeIndex:
         scan_observer: ScanObserver | None = None,
         fact_cache_dir: Path | None = None,
     ) -> CodeIndex:
-        """The tracked regular files under ``prefixes`` (every one when none are given). Symbolic links
-        and submodules are left out: a link can point outside the scope, or at a directory."""
+        """The regular files git tracks under ``prefixes`` (every one when none are given), read from the
+        checkout at its commit; for a repository root with an explicit path list. Symbolic links and
+        submodules are left out: a link can point outside the scope, or at a directory. Every file under
+        the root that is not tracked, and a requested path with no file, is named in
+        ``not_indexed_files``; ``from_directory`` indexes untracked files too."""
         root = Path(root)
         blobs = _regular_blobs(tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root))
         commit = tools.git(["rev-parse", "HEAD"], root).strip()
-        changed = _changed_paths(tools.git(["status", "--porcelain", "-z", "--", *prefixes], root))
         return cls(
             root,
             list(blobs),
             max_files=max_files,
             commit=commit,
-            changed_files=changed,
+            changed_files=_changed_under(root, prefixes),
             binding_resolver=binding_resolver,
             scan_observer=scan_observer,
             fact_cache_dir=fact_cache_dir,
             blob_ids=blobs,
+            not_indexed=listing.left_out_of_tracked(root, prefixes, blobs),
         )
 
     @classmethod
@@ -160,17 +167,20 @@ class CodeIndex:
         scan_observer: ScanObserver | None = None,
         fact_cache_dir: Path | None = None,
     ) -> CodeIndex:
-        """Index current files using ripgrep's ignore policy, with Git metadata when available.
+        """Index current files, tracked by git or not, minus ignored ones (see ``listing.working_files``),
+        with Git metadata when available.
 
-        Modified and untracked files are included. In a Git worktree, slices carry the current HEAD
-        plus ``+worktree`` when their file differs; outside Git they carry no commit. Every slice
-        also carries its current file SHA-256, so either case identifies the inspected bytes.
+        Modified and untracked files are included; ignored ones are named in ``not_indexed_files``. In a
+        Git worktree, slices carry the current HEAD plus ``+worktree`` when their file differs; outside
+        Git they carry no commit. Every slice also carries its current file SHA-256, so either case
+        identifies the inspected bytes.
         """
         root = Path(root)
         excluded = tuple(path.resolve() for path in exclude_paths)
+        listed = listing.working_files(root, prefixes)
         files = tuple(
             file
-            for file in tools.listed_files(root, prefixes)
+            for file in listed.files
             if not any((root / file).resolve().is_relative_to(path) for path in excluded)
         )
         commit, changed, blobs = _working_git_metadata(root, prefixes)
@@ -184,6 +194,7 @@ class CodeIndex:
             scan_observer=scan_observer,
             fact_cache_dir=fact_cache_dir,
             blob_ids=blobs,
+            not_indexed=listed.not_indexed,
         )
 
     @classmethod
@@ -280,6 +291,12 @@ class CodeIndex:
         return dict(self._refused)
 
     @property
+    def not_indexed_files(self) -> dict[str, str]:
+        """Files and folders under the root that were never part of the scope, each with the reason, such
+        as ignored; a folder ends in ``/``."""
+        return dict(self._not_indexed)
+
+    @property
     def available_files(self) -> tuple[str, ...]:
         return self._available_files(self.files)
 
@@ -321,6 +338,12 @@ class CodeIndex:
         self._ensure_facts(files)
         self._reached.update(files)
         return {file: self._facts[file] for file in files if file in self._facts}
+
+    def read_language(self, file: str) -> str | None:
+        """The language ``file``'s facts were read as, so every later scan of the file reads it with
+        the same grammar; None when no grammar read it."""
+        facts = self.facts_in_files([file]).get(file)
+        return facts.language if facts is not None else None
 
     def definitions_in(self, file: str) -> tuple[Span, ...]:
         """The named functions, classes and declarations in ``file``, from the name table, so a
@@ -616,8 +639,7 @@ class CodeIndex:
 
     def _parse(self, contents: Mapping[str, bytes]) -> None:
         """Parses the files whose bytes are ``contents``; the caller holds the facts lock."""
-        to_scan = tuple(contents)
-        scanned = self._run_scan("facts", lambda: self._scan_available_facts(to_scan), len(to_scan))
+        scanned = self._run_scan("facts", lambda: self._scan_available_facts(contents), len(contents))
         for file, facts in scanned.items():
             if self._read_bytes(file) is None:
                 continue
@@ -647,9 +669,12 @@ class CodeIndex:
                 self._unparsed.add("facts", (file,))
         return to_parse
 
-    def _scan_available_facts(self, files: Sequence[str]) -> dict[str, FileFacts]:
+    def _scan_available_facts(self, contents: Mapping[str, bytes]) -> dict[str, FileFacts]:
         return self._on_available(
-            tuple(files), lambda remaining: scan_facts(remaining, self.root, self._unparsed)
+            tuple(contents),
+            lambda remaining: scan_facts(
+                {file: contents[file] for file in remaining}, self.root, self._unparsed
+            ),
         )
 
     def _on_available(self, files: tuple[str, ...], run: Callable[[tuple[str, ...]], _Result]) -> _Result:
@@ -741,15 +766,21 @@ class CodeIndex:
         span = Span(file, max(1, line - radius), min(len(self._lines_of(file)), line + radius))
         return self.read_slice(span, origin)
 
-    def search_text(self, text: str, max_hits: int = MAX_TEXT_HITS) -> tuple[TextHit, ...]:
-        """Lines holding ``text``, searched once per text for the life of the index."""
-        return self._search_text(text, max_hits)
+    def search_text(
+        self, text: str, max_hits: int = MAX_TEXT_HITS, *, whole_word: bool = False
+    ) -> tuple[TextHit, ...]:
+        """Lines holding ``text``, searched once per text for the life of the index. A hit's text is
+        the line up to ``TEXT_HIT_CONTEXT_BYTES`` around its first match; ``whole_word`` keeps only
+        matches no word character touches."""
+        return self._search_text(text, max_hits, whole_word)
 
     @memoized
-    def _search_text(self, text: str, max_hits: int) -> tuple[TextHit, ...]:
+    def _search_text(self, text: str, max_hits: int, whole_word: bool) -> tuple[TextHit, ...]:
         found = self._on_available(
             self._available_files(self.files),
-            lambda files: tools.ripgrep_fixed(text, files, self.root, max_hits),
+            lambda files: tools.ripgrep_fixed(
+                text, files, self.root, max_hits, TEXT_HIT_CONTEXT_BYTES, whole_word=whole_word
+            ),
         )
         hits = sorted(hit for hit in found if hit.file in self._scope)
         return tuple(hits[:max_hits])
@@ -949,9 +980,16 @@ def _working_git_metadata(root: Path, prefixes: Sequence[str]) -> tuple[str, lis
     if not tools.inside_git_worktree(root):
         return "", [], {}
     commit = tools.head_commit(root)
+    staged = tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root)
+    return commit, _changed_under(root, prefixes), _regular_blobs(staged)
+
+
+def _changed_under(root: Path, prefixes: Sequence[str]) -> list[str]:
+    """The changed and untracked paths under ``root``, relative to it. git status names paths from the
+    top of the repository, which is not ``root`` for a folder inside it."""
     status = tools.git(["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root)
-    listing = tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root)
-    return commit, _changed_paths(status), _regular_blobs(listing)
+    prefix = tools.git(["rev-parse", "--show-prefix"], root).rstrip("\n")
+    return [path.removeprefix(prefix) for path in _changed_paths(status) if path.startswith(prefix)]
 
 
 def _regular_blobs(listing: str) -> dict[str, str]:

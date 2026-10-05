@@ -24,7 +24,7 @@ RIPGREP = "rg"
 # `--no-config` keeps ripgrep from reading `RIPGREP_CONFIG_PATH`: over an untrusted repository, a
 # config file could otherwise inject flags such as `--pre=<program>`, which runs an arbitrary
 # program. It also keeps a personal rg config from changing what the index sees.
-_RIPGREP_SAFE = (RIPGREP, "--no-config")
+RIPGREP_SAFE = (RIPGREP, "--no-config")
 _NO_MATCHES_EXIT = 1
 _SCANNED_FILE_PREFIX = "sg: entity|file|"
 NEUTRAL_AST_GREP_CONFIG = "ruleDirs: []\n"
@@ -55,9 +55,18 @@ def run_command(
 ) -> str:
     """The command's output; ``no_match_exit`` is the exit code a search tool uses for "nothing found";
     ``stdin``, when given, is written to the command's standard input."""
-    completed = subprocess.run(list(arguments), cwd=cwd, input=stdin, capture_output=True, text=True)
+    return command_output(arguments, cwd, no_match_exit=no_match_exit, stdin=stdin).decode()
+
+
+def command_output(
+    arguments: Sequence[str], cwd: Path, *, no_match_exit: int | None = None, stdin: str | None = None
+) -> bytes:
+    """``run_command``'s output as the bytes the command wrote, for output that quotes file content."""
+    completed = subprocess.run(
+        list(arguments), cwd=cwd, input=None if stdin is None else stdin.encode(), capture_output=True
+    )
     if completed.returncode not in (0, no_match_exit):
-        raise _tool_failure(arguments[0], completed.returncode, completed.stderr)
+        raise _tool_failure(arguments[0], completed.returncode, completed.stderr.decode(errors="replace"))
     return completed.stdout
 
 
@@ -257,13 +266,50 @@ def _stderr_text(errors: IO[bytes]) -> str:
     return errors.read().decode(errors="replace")
 
 
-def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:
-    """The lines holding ``text``, at most ``max_hits`` per file."""
-    command = [*_RIPGREP_SAFE, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
-    hits = []
+def ripgrep_fixed(
+    text: str, files: Sequence[str], cwd: Path, max_hits: int, context_bytes: int, *, whole_word: bool = False
+) -> list[TextHit]:
+    """The lines holding ``text``, at most ``max_hits`` per file, each as the bytes around one hit:
+    up to ``context_bytes`` before and after, so a one-line bundle costs no more than a short line.
+    ``whole_word`` keeps only hits no word character touches. The match runs on to the end of the
+    line, so each line matches once, and ``--replace`` prints only its window; ripgrep's JSON would
+    carry the whole line."""
+    pattern = _hit_window(text, context_bytes, whole_word)
+    command = [*RIPGREP_SAFE, "--only-matching", "--line-number", "--with-filename", "--null"]
+    command += ["--max-count", str(max_hits), "--replace", "$window", "--regexp", pattern, "--"]
+    hits: dict[tuple[str, int], TextHit] = {}
     for chunk in file_chunks(files, bytes_only=True):
-        hits += _match_lines(run_command([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT))
-    return hits
+        for hit in _windows(command_output([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)):
+            hits.setdefault((hit.file, hit.line), hit)
+    return list(hits.values())
+
+
+def _hit_window(text: str, context_bytes: int, whole_word: bool) -> str:
+    """A regular expression capturing, as ``window``, ``text`` with up to ``context_bytes`` of any
+    bytes on either side, then matching the rest of the line. The text's characters other than
+    letters, digits and underscores are written as code points, so no character of it is read as
+    syntax."""
+    context = f"(?-u:.){{0,{context_bytes}}}"
+    literal = "".join(char if char.isalnum() or char == "_" else f"\\x{{{ord(char):x}}}" for char in text)
+    if whole_word:
+        literal = rf"(?:^|\W){literal}(?:\W|$)"
+    return f"(?P<window>{context}{literal}{context})(?-u:.)*"
+
+
+def _windows(output: bytes) -> Iterator[TextHit]:
+    """The hits of ripgrep's ``--null`` printer, ``path NUL line:window`` per line of output. A window
+    holds no newline, and a path ends at its NUL, so a newline in a path cannot split a record.
+    Bytes that are not UTF-8 are decoded the way the index reads files, with invalid bytes replaced."""
+    position = 0
+    while position < len(output):
+        path_end = output.index(b"\0", position)
+        number_end = output.index(b":", path_end)
+        window_end = output.find(b"\n", number_end)
+        window_end = len(output) if window_end < 0 else window_end
+        path = output[position:path_end].decode(errors="replace").removeprefix("./")
+        window = output[number_end + 1 : window_end].decode(errors="replace").rstrip("\r")
+        yield TextHit(path, int(output[path_end + 1 : number_end]), window)
+        position = window_end + 1
 
 
 def ripgrep_lines(texts: Sequence[str], files: Sequence[str], cwd: Path) -> list[TextHit]:
@@ -273,7 +319,7 @@ def ripgrep_lines(texts: Sequence[str], files: Sequence[str], cwd: Path) -> list
         return []
     hits = []
     with _pattern_file(texts) as patterns:
-        command = [*_RIPGREP_SAFE, "--json", "--fixed-strings", "-f", patterns]
+        command = [*RIPGREP_SAFE, "--json", "--fixed-strings", "-f", patterns]
         for chunk in file_chunks(files, bytes_only=True):
             hits += _match_lines(run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT))
     return hits
@@ -288,7 +334,7 @@ def ripgrep_files(texts: str | Sequence[str], files: Sequence[str], cwd: Path) -
         return ()
     found: list[str] = []
     with _pattern_file(patterns) as pattern_path:
-        command = [*_RIPGREP_SAFE, "--files-with-matches", "--null", "--fixed-strings", "-f", pattern_path]
+        command = [*RIPGREP_SAFE, "--files-with-matches", "--null", "--fixed-strings", "-f", pattern_path]
         for chunk in file_chunks(files, bytes_only=True):
             output = run_command([*command, "--", *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)
             found += [path.removeprefix("./") for path in output.split("\0") if path]
@@ -312,38 +358,6 @@ def _match_lines(output: str) -> list[TextHit]:
     code may hold a Unicode line separator that ``str.splitlines`` would split."""
     events = (json.loads(line) for line in output.split("\n") if line.strip())
     return [_text_hit(event["data"]) for event in events if event.get("type") == "match"]
-
-
-def listed_files(cwd: Path, prefixes: Sequence[str] = ()) -> tuple[str, ...]:
-    """Regular, non-symlink files owned by this working directory, including hidden paths.
-
-    A Git worktree uses its tracked and untracked, non-ignored inventory, which naturally excludes
-    nested repositories and managed worktrees. A non-Git directory uses ripgrep's ignore policy.
-    """
-    if inside_git_worktree(cwd):
-        output = git(["ls-files", "-z", "-c", "-o", "--exclude-standard", "--", *prefixes], cwd)
-    else:
-        output = run_command(
-            [
-                *_RIPGREP_SAFE,
-                "--files",
-                "--hidden",
-                "--null",
-                "--glob",
-                "!.git",
-                "--glob",
-                "!.git/**",
-                *prefixes,
-            ],
-            cwd,
-        )
-    files = []
-    for raw in output.split("\0"):
-        path = raw.removeprefix("./")
-        candidate = cwd / path
-        if path and candidate.is_file() and not candidate.is_symlink():
-            files.append(path)
-    return tuple(sorted(dict.fromkeys(files)))
 
 
 def inside_git_worktree(cwd: Path) -> bool:
