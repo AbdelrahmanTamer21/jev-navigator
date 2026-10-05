@@ -294,3 +294,43 @@ def test_a_neighbour_that_fits_only_unmasked_does_not_fit_alone(tmp_path: Path) 
 
     # Assert
     assert not fits_masked
+
+
+def _many_neighbours_with_short_secrets(tmp_path: Path) -> CodeIndex:
+    """``place`` calls 60 helpers, each of 12 lines giving secret-named keys short values, so the
+    opening's whole request lies near Drex's box at some neighbour cap."""
+    helpers = "".join(
+        f"def h{number}(order):\n"
+        + "".join(
+            f'    DB_PASSWORD_{number:02d}_{line:02d} = "k{number:02d}{line:02d}"\n' for line in range(12)
+        )
+        + "    return order\n\n\n"
+        for number in range(60)
+    )
+    calls = "".join(f"    h{number}(order)\n" for number in range(60))
+    names = ", ".join(f"h{number}" for number in range(60))
+    place = f"from app.helpers import {names}\n\n\ndef place(order):\n{calls}    return order\n"
+    commit_files(tmp_path / "repository", {"app/helpers.py": helpers, "app/orders.py": place})
+    return CodeIndex(
+        tmp_path / "repository", ["app/helpers.py", "app/orders.py"], fact_cache_dir=tmp_path / "facts"
+    )
+
+
+def test_an_opening_whose_whole_request_fits_only_unmasked_is_split_before_anything_is_refused(
+    tmp_path: Path,
+) -> None:
+    # Arrange: the whole request and the priority hint each fit unmasked at some caps and not masked
+    index = _many_neighbours_with_short_secrets(tmp_path)
+    start = place_for_line(index, "app/orders.py", 4, "start")
+
+    # Act
+    refused = {}
+    for cap in range(14, 46):
+        client = _drex_client()
+        budget = SearchBudget(max_steps=1, beam_width=1, neighbours_per_kind=cap)
+        judge = Judge(client, masker=ShortSecretMasker())
+        find_code(index, judge, "the order total", [start], moves=CALLEES, budget=budget)
+        refused[cap] = client.refusals
+
+    # Assert
+    assert {cap: count for cap, count in refused.items() if count} == {}
