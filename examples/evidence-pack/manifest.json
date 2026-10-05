@@ -20,6 +20,7 @@
   "provider": {
     "input_tokens": 200,
     "input_tokens_complete": true,
+    "replayed_answers": 0,
     "requested_model": "jev-scripted",
     "responses_without_usage": 0,
     "served_model": "jev-scripted",

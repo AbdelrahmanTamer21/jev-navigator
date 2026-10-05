@@ -187,9 +187,8 @@ def _manifest(
             "requested_model": getattr(judge.client, "model", "unknown"),
             "served_model": judge.served_model,
             "calls": judge.calls,
-            "replayed_answers": judge.replayed_answers,
             "input_tokens": judge.input_total.reported,
-            **usage_receipt(None, judge.input_total, judge.unanswered_requests),
+            **usage_receipt(None, judge),
         },
         "trace": {
             "outcome": _outcome(result),

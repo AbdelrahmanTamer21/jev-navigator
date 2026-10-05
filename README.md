@@ -228,7 +228,7 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   same questions replays from it after the live requests that learn the served model (one for Find
   All and Trace, one per place a Find's first round opens, up to `--beam-width`; Find All and
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
-  `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
+  `answers.jsonl`. Every pack reports those answers as `provider.replayed_answers` beside its live calls.
   `--answer-store PATH` points a run at another store file; each run prints the store it uses.
 - `resume.json` (budget-stopped, cancelled or failed runs): the frontier as locations; Resume re-reads the
   code from the unchanged repository.
