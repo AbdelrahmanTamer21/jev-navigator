@@ -257,9 +257,10 @@ def _stderr_text(errors: IO[bytes]) -> str:
     return errors.read().decode(errors="replace")
 
 
-def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int) -> list[TextHit]:
-    """The lines holding ``text``, at most ``max_hits`` per file."""
-    command = [*RIPGREP_SAFE, "--json", "--fixed-strings", "--max-count", str(max_hits), "--", text]
+def ripgrep_fixed(text: str, files: Sequence[str], cwd: Path, max_hits: int | None) -> list[TextHit]:
+    """The lines holding ``text``, at most ``max_hits`` per file, or every one when it is None."""
+    per_file = [] if max_hits is None else ["--max-count", str(max_hits)]
+    command = [*RIPGREP_SAFE, "--json", "--fixed-strings", *per_file, "--", text]
     hits = []
     for chunk in file_chunks(files, bytes_only=True):
         hits += _match_lines(run_command([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT))

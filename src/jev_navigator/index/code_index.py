@@ -774,18 +774,19 @@ class CodeIndex:
         span = Span(file, max(1, line - radius), min(len(self._lines_of(file)), line + radius))
         return self.read_slice(span, origin)
 
-    def search_text(self, text: str, max_hits: int = MAX_TEXT_HITS) -> tuple[TextHit, ...]:
-        """Lines holding ``text``, searched once per text for the life of the index."""
+    def search_text(self, text: str, max_hits: int | None = MAX_TEXT_HITS) -> tuple[TextHit, ...]:
+        """Lines holding ``text`` in file and line order, the first ``max_hits`` or every one when it is
+        None, searched once per text and cap for the life of the index."""
         return self._search_text(text, max_hits)
 
     @memoized
-    def _search_text(self, text: str, max_hits: int) -> tuple[TextHit, ...]:
+    def _search_text(self, text: str, max_hits: int | None) -> tuple[TextHit, ...]:
         found = self._on_available(
             self._available_files(self.files),
             lambda files: tools.ripgrep_fixed(text, files, self.root, max_hits),
         )
         hits = sorted(hit for hit in found if hit.file in self._scope)
-        return tuple(hits[:max_hits])
+        return tuple(hits if max_hits is None else hits[:max_hits])
 
     def imports(self, file: str) -> tuple[str, ...]:
         source = "\n".join(self._lines_of(file))

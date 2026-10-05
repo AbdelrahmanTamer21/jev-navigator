@@ -293,7 +293,8 @@ index.decorator_starts_in(file)  # each decorated function's span and its first 
 index.stubs_in(file)  # functions whose body is only ..., pass, a docstring or raise NotImplementedError
 index.read_slice(span)
 index.read_window(file, line, radius=10)
-index.search_text("orders.max_items")  # ripgrep over the narrowed files only
+index.search_text("orders.max_items")  # ripgrep over the narrowed files only, first 20 hits
+index.search_text("orders.max_items", max_hits=None)  # every hit, in file and line order
 index.imports(file)
 index.dependents(file)
 index.co_changed_files(file)

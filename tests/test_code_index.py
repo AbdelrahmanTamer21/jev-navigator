@@ -8,6 +8,7 @@ from git_repos import commit_all, git, write_files
 
 from jev_navigator.index import tools
 from jev_navigator.index.code_index import (
+    MAX_TEXT_HITS,
     CodeIndex,
     ScopeTooWideError,
     UnsafePathError,
@@ -814,6 +815,22 @@ def test_an_index_at_a_commit_reads_a_file_whose_name_holds_a_newline(tmp_path: 
     assert historical.files == ("app/line\nbreak.py", "app/plain.py")
     assert (historical.root / "app/line\nbreak.py").read_text().endswith("return 1\n")
     assert (historical.root / "app/plain.py").read_text().endswith("return 2\n")
+
+
+def test_search_text_without_a_hit_cap_returns_every_hit_in_file_and_line_order(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "a.py").write_text("".join(f"x{n} = TOKEN\n" for n in range(25)))
+    (tmp_path / "b.py").write_text("y = TOKEN\nz = 1\nw = TOKEN\n")
+    index = CodeIndex(tmp_path, ["a.py", "b.py"])
+
+    # Act
+    capped = index.search_text("TOKEN")
+    every = index.search_text("TOKEN", max_hits=None)
+
+    # Assert
+    assert len(capped) == MAX_TEXT_HITS
+    expected = [("a.py", n) for n in range(1, 26)] + [("b.py", 1), ("b.py", 3)]
+    assert [(hit.file, hit.line) for hit in every] == expected
 
 
 def test_search_text_reads_a_line_that_is_not_utf8_as_the_index_does(tmp_path: Path) -> None:
