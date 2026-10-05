@@ -19,7 +19,7 @@ from jev_navigator.judgments.journal import (
 )
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion
-from jev_navigator.judgments.store import JsonlAnswerStore
+from jev_navigator.judgments.store import AnswerRecord, JsonlAnswerStore
 from jev_navigator.judgments.thresholds import Thresholds
 from jev_navigator.testing import ScriptedJevClient
 
@@ -450,6 +450,32 @@ def test_a_journal_says_whether_any_record_kept_a_requests_text(
 
     # Assert
     assert kept is keep_request_text
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"request": {"state": STATE, "questions": QUESTIONS}},
+        {"sent_body_base64": base64.b64encode(SENT).decode()},
+    ],
+    ids=["request", "sent body"],
+)
+@pytest.mark.parametrize("keep_requests", [False, True])
+def test_an_answer_store_says_whether_any_record_kept_a_requests_text(
+    tmp_path: Path, record: dict, keep_requests: bool
+) -> None:
+    # Arrange: the store keeps a record's request text only with keep_requests
+    path = tmp_path / "answers.jsonl"
+    answer = AnswerRecord(
+        "h", ("adds_one",), {"adds_one": {"type": "noul", "p": 0.9}}, "jev", 10, {}, **record
+    )
+    JsonlAnswerStore(path, keep_requests=keep_requests).put(answer)
+
+    # Act
+    kept = keeps_request_text(path)
+
+    # Assert
+    assert kept is keep_requests
 
 
 def test_a_line_a_crash_cut_off_tells_nothing_about_request_text(tmp_path: Path) -> None:
