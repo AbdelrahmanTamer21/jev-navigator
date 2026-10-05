@@ -351,6 +351,19 @@ def test_a_cut_function_scores_by_its_best_piece_and_keeps_piece_ranges(shop: Co
     assert unit_score(big, {}) is None
 
 
+def test_on_a_tie_the_earliest_piece_is_the_place_to_read(shop: CodeIndex) -> None:
+    # Arrange: the second and third pieces share the best score
+    big = _units_by_id(shop, ("app/big.py",), SMALL_BOX)["app/big.py:1-149"]
+    first, second, third = big.pieces
+    scores = {big.piece_id(first): 0.2, big.piece_id(second): 0.8, big.piece_id(third): 0.8}
+
+    # Act
+    best = best_piece(big, scores)
+
+    # Assert
+    assert (best.start, best.end) == (61, 120)
+
+
 def test_round_zero_lists_outermost_units_and_every_line_of_code_is_in_one(shop: CodeIndex) -> None:
     source_files = tuple(file for file in shop.files if file.endswith((".py", ".ts", ".tsx", ".js")))
 
