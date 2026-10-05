@@ -10,9 +10,9 @@ import pytest
 from conftest import BudgetedClient
 
 from jev_navigator.directives.find_all import (
+    DELIVERED,
     ITEMS,
     NOT_REACHED,
-    SKIPPED,
     TARGETS,
     TOO_LARGE,
     NameHits,
@@ -21,7 +21,7 @@ from jev_navigator.directives.find_all import (
     match_check,
 )
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.index.units import UNSUPPORTED_LANGUAGE, RangeAnchor
+from jev_navigator.index.units import UNSUPPORTED_LANGUAGE, RangeAnchor, UnitKind
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputBudgetExceededError, InputLimits
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
@@ -201,20 +201,50 @@ def test_a_hit_inside_a_nested_function_names_the_listed_function_holding_it(tmp
     assert [score.unit.symbol for score in result.scores("limit")] == ["outer"]
 
 
-def test_a_unit_the_caller_skips_is_named_and_never_sent(tmp_path: Path) -> None:
-    # Arrange
-    index = repository(tmp_path)
+TWO_RUNS = (
+    "LIMIT = 3\n\n\ndef admit(items):\n    return len(items) <= LIMIT\n\n\n"
+    "STRICT = True\nLOOSE = False\nDEFAULT = 1\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("delivered", "judged"),
+    [
+        ([RangeAnchor("orders.py", 1, 1), RangeAnchor("orders.py", 8, 10)], False),
+        ([RangeAnchor("orders.py", 1, 10)], False),
+        ([RangeAnchor("orders.py", 1, 1)], True),
+        (
+            [
+                RangeAnchor("orders.py", 1, 1),
+                RangeAnchor("orders.py", 8, 8),
+                RangeAnchor("orders.py", 10, 10),
+            ],
+            True,
+        ),
+        ([RangeAnchor("other.py", 1, 10)], True),
+    ],
+    ids=[
+        "every run delivered",
+        "one region over both runs",
+        "one run delivered",
+        "a middle line missing",
+        "another file",
+    ],
+)
+def test_a_place_is_left_out_only_when_every_line_of_it_is_already_delivered(
+    tmp_path: Path, delivered: list[RangeAnchor], judged: bool
+) -> None:
+    # Arrange: the top-level code is two runs of lines, 1 and 8 to 10, around the function admit
+    index = repository(tmp_path, {"orders.py": TWO_RUNS})
     provider = labelled({})
 
     # Act
-    result = find_all(
-        index, Judge(provider), LIMIT, files=index.files, skip=lambda unit: unit.symbol == "accept"
-    )
+    result = find_all(index, Judge(provider), LIMIT, files=index.files, delivered=delivered)
 
     # Assert
-    [accept] = [unit for unit in result.units if unit.symbol == "accept"]
-    assert result.not_judged == {accept.id: SKIPPED}
-    assert not any("<= LIMIT" in code for code in sent_code(provider))
+    [top_level] = [unit for unit in result.units if unit.kind == UnitKind.TOP_LEVEL]
+    assert any("STRICT = True" in code for code in sent_code(provider)) is judged
+    assert result.not_judged.get(top_level.id) == (None if judged else DELIVERED)
 
 
 @dataclass

@@ -23,6 +23,7 @@ from ..index.units import (
     Item,
     LineAnchor,
     Piece,
+    RangeAnchor,
     Unit,
     UnresolvedAnchor,
     best_piece,
@@ -37,7 +38,7 @@ from .find_code import search_failure
 
 ITEMS = "items"
 TARGETS = "targets"
-SKIPPED = "skipped by the caller"
+DELIVERED = "already delivered by the caller"
 TOO_LARGE = "too large to judge"
 NOT_REACHED = "not reached: the search stopped first"
 BATCHES_PER_WAVE = 16
@@ -149,7 +150,7 @@ def find_all(
     files: Sequence[str] = (),
     anchors: Sequence[Anchor] = (),
     names: Sequence[str] = (),
-    skip: Callable[[Unit], bool] | None = None,
+    delivered: Sequence[RangeAnchor] = (),
     completed: Mapping[str, Sequence[CheckResult]] | None = None,
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
@@ -159,13 +160,14 @@ def find_all(
     judge's call cap stops it.
 
     ``targets`` maps a name (an identifier) to a description; each unit is asked one question per
-    target, all in the same request. ``skip`` leaves out units the caller already has. ``completed``
+    target, all in the same request. ``delivered`` names the lines the caller already shows: a unit
+    or piece whose every line lies in them is not judged, one with a line outside them is. ``completed``
     holds each target's answers from an earlier run over the same code; a place answered for every
     target is not asked again. A failed request ends the search ``failed`` with ``failure`` holding
     the error (see ``search_failure``), Ctrl-C ends it ``cancelled``, and either way ``judged`` keeps
     every answer that arrived.
     """
-    search = _begin(index, judge, targets, skip, completed, cancelled, batches_per_wave)
+    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave)
     try:
         search.run(anchors, files, names)
     except (KeyboardInterrupt, Exception) as error:  # noqa: BLE001 - _stop_by owns how an error ends a search
@@ -181,7 +183,7 @@ async def find_all_async(
     files: Sequence[str] = (),
     anchors: Sequence[Anchor] = (),
     names: Sequence[str] = (),
-    skip: Callable[[Unit], bool] | None = None,
+    delivered: Sequence[RangeAnchor] = (),
     completed: Mapping[str, Sequence[CheckResult]] | None = None,
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
@@ -190,7 +192,7 @@ async def find_all_async(
     async client. Listing, resolving and reading code run in a worker thread, so the event loop stays
     free. ``cancelled`` is read before each parse and between waves, since the Judge's async form
     reads none; a cancelled task's ``CancelledError`` is never caught."""
-    search = _begin(index, judge, targets, skip, completed, cancelled, batches_per_wave)
+    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave)
     try:
         await search.run_async(anchors, files, names)
     except (KeyboardInterrupt, Exception) as error:  # noqa: BLE001 - _stop_by owns how an error ends a search
@@ -202,7 +204,7 @@ def _begin(
     index: CodeIndex,
     judge: Judge,
     targets: Mapping[str, str],
-    skip: Callable[[Unit], bool] | None,
+    delivered: Sequence[RangeAnchor],
     completed: Mapping[str, Sequence[CheckResult]] | None,
     cancelled: Callable[[], bool] | None,
     batches_per_wave: int,
@@ -210,7 +212,7 @@ def _begin(
     _require_identifiers(targets)
     if batches_per_wave < 1:
         raise ValueError("batches_per_wave must be at least 1")
-    search = _Search(index, judge.scope(), targets, skip, cancelled, batches_per_wave)
+    search = _Search(index, judge.scope(), targets, delivered, cancelled, batches_per_wave)
     search.resume(completed or {})
     return search
 
@@ -240,7 +242,7 @@ class _Search:
         index: CodeIndex,
         judge: Judge,
         targets: Mapping[str, str],
-        skip: Callable[[Unit], bool] | None,
+        delivered: Sequence[RangeAnchor],
         cancelled: Callable[[], bool] | None,
         batches_per_wave: int,
     ) -> None:
@@ -252,7 +254,7 @@ class _Search:
         self.target_of = {check.name: target for check, target in zip(self.checks, targets, strict=True)}
         self.shared = {TARGETS: self.targets}
         self.room = _room(judge, index, self.checks, self.shared)
-        self.skip = skip
+        self.delivered = _lines_by_file(delivered)
         self.cancelled = cancelled
         self.answered: set[tuple[str, str]] = set()
         self.judged: dict[str, list[CheckResult]] = {target: [] for target in targets}
@@ -361,15 +363,20 @@ class _Search:
         return places
 
     def _pending_places(self, unit: Unit) -> list[Item]:
-        if self.skip is not None and self.skip(unit):
-            self.not_judged[unit.id] = SKIPPED
-            return []
         for piece in unit.too_large_pieces:
             self.not_judged[unit.piece_id(piece)] = TOO_LARGE
-        pending = [place for place in items_to_judge(unit) if not self._answered(place)]
-        for place in pending:
-            self.not_judged[place.id] = NOT_REACHED
+        pending = []
+        for place in items_to_judge(unit):
+            if self._already_delivered(place):
+                self.not_judged[place.id] = DELIVERED
+            elif not self._answered(place):
+                self.not_judged[place.id] = NOT_REACHED
+                pending.append(place)
         return pending
+
+    def _already_delivered(self, place: Item) -> bool:
+        lines = self.delivered.get(place.file, frozenset())
+        return all(line in lines for first, last in place.ranges for line in range(first, last + 1))
 
     def _judge(self, places: Sequence[Item]) -> None:
         if not places or self.stopped():
@@ -426,6 +433,13 @@ def _room(judge: Judge, index: CodeIndex, checks: Sequence[Check], shared: Mappi
     beside = {**shared, ITEMS: [{"file": longest_path, "code": ""}]}
     longest_question = max(serialized_chars(check.to_question(item_path(ITEMS, 0))) for check in checks)
     return judge.input_limits.box_chars - serialized_chars(beside) - longest_question + serialized_chars("")
+
+
+def _lines_by_file(regions: Sequence[RangeAnchor]) -> dict[str, frozenset[int]]:
+    lines: dict[str, set[int]] = {}
+    for region in regions:
+        lines.setdefault(region.file, set()).update(range(region.start, region.end + 1))
+    return {file: frozenset(numbers) for file, numbers in lines.items()}
 
 
 def _rarest_first(hits: Mapping[str, Sequence[TextHit]]) -> Iterator[tuple[str, TextHit]]:
