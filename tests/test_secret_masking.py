@@ -211,7 +211,6 @@ CODE_REFERENCES = [
     "const gitSecretName = `inv-${input.inventoryId}-${input.generation}-git`;",
     'need = isCredential(name) ? "must use valueFrom.secretKeyRef" : "is not an approved literal";',
     "return `read -rsp 'GitLab token: ' GITLAB_TOKEN && printf '\\n' && export GITLAB_TOKEN && ` +",
-    'PASSWORD_TOO_SHORT_MESSAGE = "Password must be at least 8 characters."',
     'CREDENTIAL_PATTERNS = [\n  { label: "github-token", pattern: /gh_x/g },\n];',
     "secret-scan:\n  runs-on: ubuntu-latest\n  steps:\n    - name: Install pinned Gitleaks\n",
     'credentialsSourcePath: "/var/run/secrets/google/credentials.json",',
@@ -220,6 +219,8 @@ CODE_REFERENCES = [
     'export GOOGLE_APPLICATION_CREDENTIALS="$CI_TMP/google-adc.json"',
     "print(f\"GATE pass={c['gate_pass']} confidence={c.get('confidence')}\")",
     '"rawCredentialInherited": "GOOGLE_VERTEX_CREDENTIALS_JSON" in os.environ,',
+    "clientSecret: `[MASKED]_${slug}`,",
+    "secret-scan: run the scan nightly",
 ]
 
 
@@ -320,6 +321,31 @@ def test_masking_a_long_line_takes_time_linear_in_its_length(text: str) -> None:
     assert time.perf_counter() - started < 1.0
 
 
+REPEATED_PAIRS = {"assignment pairs": "a=b ", "SVG attributes": 'x="1" '}
+
+
+@pytest.mark.parametrize("pair", REPEATED_PAIRS.values(), ids=REPEATED_PAIRS.keys())
+def test_masking_time_grows_linearly_as_a_line_of_pairs_doubles(pair: str) -> None:
+    # Arrange
+    lengths = [8_000, 16_000, 32_000, 64_000]
+
+    # Act
+    seconds = [_fastest_mask_seconds(pair * (length // len(pair))) for length in lengths]
+
+    # Assert
+    assert seconds[-1] < 24 * max(seconds[0], 0.001), seconds
+    assert seconds[-1] < 0.5, seconds
+
+
+def _fastest_mask_seconds(text: str) -> float:
+    timings = []
+    for _ in range(3):
+        started = time.perf_counter()
+        SecretMasker().mask(text)
+        timings.append(time.perf_counter() - started)
+    return min(timings)
+
+
 SUFFIXED_SECRET_KEYS = [
     "SECRET_KEY_BASE", "API_KEY_2", "api_key_v2", "apiKey2", "TOKEN_GITHUB", "DB_PASSWORD_PROD",
     "dbPasswordProd", "STRIPE_SECRET_LIVE", "password1", "PASSWORD_CONFIRMATION", "access_token_secret",
@@ -360,3 +386,54 @@ def test_a_secret_word_inside_another_word_is_not_a_secret_key(code: str) -> Non
 
     # Assert
     assert masked == code
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'DB_PASSWORD_PROD = "hunter2"',
+        'GH_TOKEN_RO: "s3cr3t"',
+        "SECRET_KEY_BASE=abc",
+        '"credentials_json": "{}x",',
+        'password_hash = "pw"',
+        'GH_TOKEN_RO = process.env.GH_TOKEN ?? "dev"',
+    ],
+)
+def test_a_short_value_under_a_suffixed_secret_key_is_masked(line: str) -> None:
+    # Act
+    masked = SecretMasker().mask(line)
+
+    # Assert
+    assert "[MASKED]" in masked
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        'INSPECTION_STATUS = Object.freeze({ PASS: "PASS", FAIL: "FAIL" });',
+        'FAIL = "fail"',
+        'Token: "token"',
+        'TOKEN_TYPE = "type"',
+        'DB_PASSWORD_PROD: "DB_PASSWORD"',
+        'GH_TOKEN_RO = "/run/secrets/gh-token"',
+        'SECRET_KEY_BASE = "https://vault.example.com/base"',
+        'SECRET_FILE_RULE = "secret-file"',
+        'password_prefix = "pw_"',
+        'token_count = "12"',
+        "CREDENTIAL_PATTERNS = [/gh_x/g]",
+    ],
+)
+def test_a_value_its_key_already_shows_or_a_reference_under_a_suffixed_key_is_kept(code: str) -> None:
+    # Act
+    masked = SecretMasker().mask(code)
+
+    # Assert
+    assert masked == code
+
+
+def test_a_credential_under_a_naming_key_is_masked() -> None:
+    # Act
+    masked = SecretMasker().mask('secretAccessKeyId = "a8f9e0d1c2b3a4f5"')
+
+    # Assert
+    assert "a8f9e0d1c2b3a4f5" not in masked

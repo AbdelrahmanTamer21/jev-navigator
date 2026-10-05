@@ -2,9 +2,10 @@
 
 A key holds a secret when a secret word is one of its parts at a snake, kebab or camel boundary.
 It is secret when the secret word ends it (``DB_PASSWORD``, ``authToken``, ``db_pass``,
-``credentials``), suffixed when other words follow (``SECRET_KEY_BASE``, ``GH_TOKEN_RO``), and naming
-when a naming word ends it (``SECRET_ENV``, ``token_url``, ``credentialsMountPath``); ``max_tokens``,
-``tokenizer`` and ``bypass`` are none of these. A value is code when it refers to
+``credentials``), naming when a naming word ends it (``SECRET_ENV``, ``token_url``,
+``CREDENTIAL_PATTERNS``), and suffixed when any other word does (``SECRET_KEY_BASE``, ``GH_TOKEN_RO``);
+``max_tokens``, ``tokenizer`` and ``bypass`` are none of these. ``hides_under`` says which literals each
+kind hides. A value is code when it refers to
 something: an identifier, dotted path, call, a whole ``${...}``, a command substitution ``$(...)``,
 or ``$NAME`` outside single quotes. Every pattern here matches a possessive run that starts only at
 a run boundary, so matching is linear in the line length.
@@ -44,10 +45,15 @@ _SECRET_WORDS = (
 )
 _NAMING_SUFFIXES = frozenset(
     {
-        "name", "path", "dir", "directory", "file", "header", "ref", "url", "uri", "type", "kind",
-        "field", "label", "annotation", "mount", "env", "endpoint", "host",
+        "name", "id", "ref", "path", "dir", "directory", "file", "url", "uri", "endpoint", "host", "header",
+        "label", "annotation", "mount", "env", "type", "kind", "field", "count", "length", "size", "prefix",
+        "pattern", "patterns", "rule", "rules", "regex",
     }
 )  # fmt: skip
+_DEFAULT_PASSWORDS = frozenset({"password", "passwd", "pwd", "secret", "admin", "root"})
+_KEY_SEPARATORS = re.compile(r"[._\-$\s]+")
+MASK = "[MASKED]"
+CREDENTIAL_WORD_MIN_CHARS = 8
 RANDOM_VALUE_MIN_CHARS = 16
 ENVIRONMENT_NAME = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+")
 _INTERPOLATION = re.compile(r"\$\{[^{}]*\}|\$\([^()]*\)")
@@ -59,14 +65,48 @@ _URL_SHAPED = re.compile(r"[a-z][a-z0-9+.-]*://\S+")
 
 def key_kind(key: str) -> str | None:
     """The key's kind: "secret", "suffixed", "naming" or None, as the module docstring describes."""
-    parts = [part.lower() for piece in re.split(r"[._\-$]+", key) for part in _KEY_PART.findall(piece)]
+    parts = _key_parts(key)
     end = _last_secret_word_end(parts)
     if end is None:
         return None
-    tail = parts[end:]
-    if not tail:
+    if end == len(parts):
         return "secret"
-    return "naming" if tail[-1] in _NAMING_SUFFIXES else "suffixed"
+    return "naming" if parts[-1] in _NAMING_SUFFIXES else "suffixed"
+
+
+def _key_parts(key: str) -> list[str]:
+    return [part.lower() for piece in re.split(r"[._\-$]+", key) for part in _KEY_PART.findall(piece)]
+
+
+def hides_under(kind: str, key: str, value: str) -> bool:
+    """Whether a literal under a key of this kind is hidden. A value that repeats its key (``PASS: "PASS"``)
+    shows nothing the key does not. Otherwise a secret key hides every literal; a suffixed key every
+    literal but an environment variable's name, a path or a URL; a naming key only a credential-looking
+    word, one word of eight or more characters that names nothing."""
+    if _repeats_its_key(key, value):
+        return False
+    if kind == "secret":
+        return True
+    if kind == "suffixed":
+        return not (
+            ENVIRONMENT_NAME.fullmatch(value) or _PATH_SHAPED.fullmatch(value) or _URL_SHAPED.fullmatch(value)
+        )
+    return (
+        len(value) >= CREDENTIAL_WORD_MIN_CHARS
+        and not any(character.isspace() for character in value)
+        and not names_something(value)
+    )
+
+
+def _repeats_its_key(key: str, value: str) -> bool:
+    """Whether the value is its key's name or last word (``FAIL = "fail"``), unless that word is a common
+    default password (``password = "password"`` is a credential)."""
+    written = _KEY_SEPARATORS.sub("", value).lower()
+    return (
+        bool(written)
+        and written not in _DEFAULT_PASSWORDS
+        and written in (_KEY_SEPARATORS.sub("", key).lower(), _key_parts(key)[-1])
+    )
 
 
 def _last_secret_word_end(parts: list[str]) -> int | None:
@@ -95,7 +135,8 @@ def is_literal(value: str, quote: str = '"') -> bool:
 
 
 def _builds_a_name_or_path(rest: str) -> bool:
-    rest = rest or "_"
+    """A masked part counts as a name, so masking an already masked request changes nothing."""
+    rest = rest.replace(MASK, "_") or "_"
     return bool(_NAME_SHAPED.fullmatch(rest) or _PATH_SHAPED.fullmatch(rest))
 
 

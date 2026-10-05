@@ -20,18 +20,17 @@ from .secret_values import (
     CALL_OR_INDEX,
     CODE_REFERENCE,
     DOTTED_PATH,
-    ENVIRONMENT_NAME,
     KEY,
+    MASK,
     NAME_LITERAL,
     SEPARATOR,
+    hides_under,
     is_literal,
     is_plain_words,
     key_kind,
     looks_generated,
-    names_something,
 )
 
-MASK = "[MASKED]"
 BY_CONTENT_MIN_CHARS = 8
 HIGH_ENTROPY_BITS_PER_CHAR = 4.0
 
@@ -138,21 +137,13 @@ def _keyed(holds: Callable[[re.Match[str]], bool], scalar: bool = True) -> Calla
 
 
 def _keyed_value(match: re.Match[str], literal: bool, scalar: bool = True) -> bool:
-    """Under a secret key every literal is hidden. A scalar rule also hides a one-word literal under a
-    suffixed key (``SECRET_KEY_BASE``, ``GH_TOKEN_RO``), unless it is a sentence (a message) or an
-    environment variable's name, and a literal
-    that is not a name, path or URL under a naming key (``SECRET_ENV``, ``token_url``)."""
+    """Whether a literal under the match's key is hidden, as ``hides_under`` decides. Unquoted plain words
+    (``scalar`` off) are read only under keys a secret word ends: ``secret-scan: run nightly`` is prose,
+    while every string literal under a suffixed key is still hidden."""
     kind = key_kind(match["key"])
-    if not literal or kind is None:
+    if not literal or kind is None or (kind != "secret" and not scalar):
         return False
-    if kind == "secret":
-        return True
-    value = match["value"]
-    if not scalar:
-        return False
-    if kind == "suffixed":
-        return not any(character.isspace() for character in value) and not ENVIRONMENT_NAME.fullmatch(value)
-    return not names_something(value)
+    return hides_under(kind, match["key"], match["value"])
 
 
 def _call_literal_spans(text: str) -> list[Span]:
@@ -251,7 +242,7 @@ _RULES: tuple[Callable[[str], list[Span]], ...] = (
     yaml_block_spans,
     _matches(_PLAIN_VALUE, _keyed(_plain_literal, scalar=False)),
     _matches(_BARE_VALUE, _keyed(_bare_literal)),
-    _matches(_LITERAL_FALLBACK, _keyed(_quoted_literal, scalar=False)),
+    _matches(_LITERAL_FALLBACK, _keyed(_quoted_literal)),
     _call_literal_spans,
     _matches(_QUOTED_ASSIGNMENT, _high_entropy_value),
 )
