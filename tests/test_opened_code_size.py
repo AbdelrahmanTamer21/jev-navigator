@@ -11,7 +11,7 @@ import pytest
 from conftest import BudgetedClient
 from git_repos import commit_files
 from neighbour_cap_search import PLACE
-from search_deadline import searched_in_child
+from search_deadline import SEARCH_DEADLINE_SECONDS, searched_in_child
 from short_secrets import ShortSecretMasker, hunter2, numbered_secret
 from test_find_code import find_with
 
@@ -35,6 +35,9 @@ from jev_navigator.judgments.secrets import DEFAULT_MASKER
 from jev_navigator.testing import ScriptedJevClient
 
 NEIGHBOUR_CAP_SEARCH = Path(__file__).with_name("neighbour_cap_search.py")
+# A search that never settles fails its test at this deadline instead of hanging the suite. It is longer
+# than the shared search deadline, so a search run in its own process reports that deadline first.
+pytestmark = pytest.mark.timeout(2 * SEARCH_DEADLINE_SECONDS)
 ONE_OPENING = SearchBudget(max_steps=1, beam_width=1)
 CALLEES = {"callees": MOVES["callees"]}
 LINE_IN_A_REQUEST = 40
