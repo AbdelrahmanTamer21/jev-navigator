@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from .index.code_index import CodeIndex
-from .judgments.journal import message_fields
+from .judgments.journal import error_text_digested, message_fields
 from .judgments.relations import without_quoted_code
 
 _LINE_RANGE = re.compile(r"[-~]")
@@ -48,24 +48,38 @@ def is_place_label(place_key: str, text: str) -> bool:
     return text.startswith(location) and _LABEL_NAME.fullmatch(text, len(location)) is not None
 
 
-def carried_over_journal_line(line: str) -> str:
+def carried_over_journal_line(line: str, *, keep_error_text: bool) -> str:
     """A line of an earlier pack's journal as this pack keeps it. A history step neighbour whose
-    signature is not a label, the code signature an older pack wrote, shows its location instead; a
-    line that is not a JSON record stays as written."""
+    signature is not a label, the code signature an older pack wrote, shows its location instead.
+    Without ``keep_error_text`` every error message and error body reads as this pack writes them,
+    however the earlier pack kept them. A line that is not a JSON record stays as written."""
     try:
         record = json.loads(line)
     except ValueError:
         return line
+    carried = _carried_record(record, keep_error_text)
+    return line if carried == record else json.dumps(carried, sort_keys=True) + "\n"
+
+
+def _carried_record(record: dict, keep_error_text: bool) -> dict:
     if record["kind"] != "history_step":
-        return line
-    coded = [
-        offered
-        for offered in record["step"].get("judgments", {}).get("could_contain", [])
-        if not is_place_label(offered["place"], offered["signature"])
+        return record if keep_error_text else error_text_digested(record)
+    step = _with_labelled_neighbours(record["step"])
+    return {**record, "step": step if keep_error_text else failure_digested(step)}
+
+
+def _with_labelled_neighbours(step: Mapping) -> Mapping:
+    judgments = step.get("judgments", {})
+    offered = judgments.get("could_contain", [])
+    if all(is_place_label(entry["place"], entry["signature"]) for entry in offered):
+        return step
+    labelled = [
+        entry
+        if is_place_label(entry["place"], entry["signature"])
+        else {**entry, "signature": place_location(entry["place"])}
+        for entry in offered
     ]
-    for offered in coded:
-        offered["signature"] = place_location(offered["place"])
-    return json.dumps(record, sort_keys=True) + "\n" if coded else line
+    return {**step, "judgments": {**judgments, "could_contain": labelled}}
 
 
 @dataclass(frozen=True)

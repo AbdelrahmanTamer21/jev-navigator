@@ -304,7 +304,7 @@ def create_evidence_pack(
     previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client, workflow)
     _prepare_output(output)
     if resume_from is not None:
-        _carry_over_run_logs(resume_from.resolve(), output, keep_requests)
+        _carry_over_run_logs(resume_from.resolve(), output, keep_requests, keep_error_text)
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
@@ -987,9 +987,10 @@ def _previous_pack(
     return previous
 
 
-def _carry_over_run_logs(source: Path, output: Path, keep_requests: bool) -> None:
+def _carry_over_run_logs(source: Path, output: Path, keep_requests: bool, keep_error_text: bool) -> None:
     """The earlier pack's answers and journal continue in this pack. With ``keep_requests`` the journal
-    is copied whole; otherwise each line goes through ``run_files.carried_over_journal_line``."""
+    is copied whole; otherwise each line goes through ``run_files.carried_over_journal_line``, which
+    also applies this pack's error-text setting."""
     answers = source / "answers.jsonl"
     if answers.is_file():
         shutil.copyfile(answers, output / "answers.jsonl")
@@ -1000,7 +1001,7 @@ def _carry_over_run_logs(source: Path, output: Path, keep_requests: bool) -> Non
         shutil.copyfile(journal, output / "journal.jsonl")
         return
     with journal.open() as lines, (output / "journal.jsonl").open("w") as kept:
-        kept.writelines(carried_over_journal_line(line) for line in lines)
+        kept.writelines(carried_over_journal_line(line, keep_error_text=keep_error_text) for line in lines)
 
 
 def _default_output(repository: Path) -> Path:
