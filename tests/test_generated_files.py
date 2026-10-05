@@ -264,7 +264,7 @@ def test_nothing_is_sent_when_no_file_awaits_a_judgment(tmp_path: Path) -> None:
 class _MarkScanner:
     """A host's stronger scanner, which the judge accepts by design: it finds one marked string."""
 
-    def findings(self, text: str) -> list[str]:
+    def findings(self, text: str, path: str | None = None) -> list[str]:
         return [SECRET_MARK] if SECRET_MARK in text else []
 
 
