@@ -28,7 +28,7 @@ from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
-from jev_navigator.judgments.secrets import MASK
+from jev_navigator.judgments.secrets import DEFAULT_MASKER, MASK
 from jev_navigator.testing import ScriptedJevClient
 
 NEIGHBOUR_CAP_SEARCH = Path(__file__).with_name("neighbour_cap_search.py")
@@ -204,10 +204,20 @@ class ShortSecretMasker:
         return [match[1] for match in self._VALUE.finditer(text)]
 
 
-def _holding_short_secrets(characters: int, calls_audit: bool) -> str:
-    """A function of more than ``characters`` characters whose lines give secret-named keys values of
-    6 characters, each 2 characters longer once masked."""
-    lines = [f'    DB_PASSWORD_{line:05d} = "k{line:05d}"\n' for line in range(characters)]
+def _numbered_secret(line: int) -> str:
+    """A 6-character value under a secret-named key, 2 characters longer once masked."""
+    return f'    DB_PASSWORD_{line:05d} = "k{line:05d}"\n'
+
+
+def _hunter2(_line: int) -> str:
+    """jvn-verifier's measured case: 7 characters under a suffixed secret key, 1 longer once masked."""
+    return '    DB_PASSWORD_PROD = "hunter2"\n'
+
+
+def _holding_short_secrets(characters: int, calls_audit: bool, secret_line=_numbered_secret) -> str:
+    """A function of more than ``characters`` characters whose lines give secret-named keys short
+    values."""
+    lines = [secret_line(line) for line in range(characters)]
     body = "".join(lines[: characters // len(lines[0]) + 1])
     return "def place(order):\n" + ("    audit(order)\n" if calls_audit else "") + body + "    return order\n"
 
@@ -256,16 +266,23 @@ def test_a_function_whose_masked_request_is_over_the_box_is_cut_shorter_than_its
     assert masked.span.end < code.span.end
 
 
+@pytest.mark.parametrize(
+    ("masker", "secret_line"),
+    [(ShortSecretMasker(), _numbered_secret), (DEFAULT_MASKER, _hunter2)],
+    ids=["#99's rule", "the judge's default masker"],
+)
 @pytest.mark.parametrize("calls_audit", [False, True], ids=["no neighbour", "a neighbour"])
 @pytest.mark.parametrize("characters", range(16_000, 19_600, 600))
 def test_every_request_of_an_opening_with_short_secrets_fits_once_masked(
-    tmp_path: Path, characters: int, calls_audit: bool
+    tmp_path: Path, characters: int, calls_audit: bool, masker, secret_line
 ) -> None:
-    # Arrange: with `audit` called, the opening asks about a neighbour as well
-    index = _index(tmp_path, {"app/orders.py": _holding_short_secrets(characters, calls_audit=calls_audit)})
+    # Arrange: with `audit` called, the opening asks about a neighbour as well. The default masker
+    # leaves "hunter2" alone until #99 lands; from then on this case measures the real masker.
+    source = _holding_short_secrets(characters, calls_audit=calls_audit, secret_line=secret_line)
+    index = _index(tmp_path, {"app/orders.py": source})
     client = _drex_client()
     start = place_for_line(index, "app/orders.py", 1, "start")
-    judge = Judge(client, masker=ShortSecretMasker())
+    judge = Judge(client, masker=masker)
 
     # Act
     result = find_code(index, judge, "the order total", [start], moves=CALLEES, budget=ONE_OPENING)
