@@ -394,6 +394,56 @@ def test_unit_ids_are_unique_when_two_functions_share_their_lines(shop: CodeInde
     assert [unit.symbol for unit in listed if unit.path == "web/pick.ts"] == ["pick"]
 
 
+LIVE = """\
+export const run = Effect.fn("run")(function* (ids: string[]) {
+  return yield* Effect.forEach(ids, (id) => {
+    return load(id);
+  });
+});
+export const userRouter = router({
+  list: procedure.query(({ ctx }) => {
+    return ctx.users;
+  }),
+  remove: procedure.mutation(({ input }) => {
+    return input;
+  }),
+});
+export const StoreLive = Layer.effect(
+  Store,
+  Effect.gen(function* () {
+    return {};
+  }),
+);
+"""
+
+
+def test_a_function_a_module_level_constant_builds_is_named_as_the_entry_names_it(tmp_path: Path) -> None:
+    """A unit and the entry text read one naming owner, so they never disagree about a function a
+    module-level constant's call builds: `run` for an Effect.fn, `userRouter.list` for a router's
+    procedure, `StoreLive` for a layer, while the entry lists each constant once. A callback inside
+    one goes by it and its first line, `run.<anonymous:2>`."""
+    # Arrange
+    root = tmp_path / "repo"
+    write_files(root, {"src/live.ts": LIVE})
+    commit_all(root)
+    index = CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    listed = list_units(index, ("src/live.ts",), box_chars=JEV_BOX).units
+    callback = resolve_anchors(index, [LineAnchor("src/live.ts", 3)], box_chars=JEV_BOX).units
+
+    # Assert
+    functions = [(unit.start, unit.symbol) for unit in listed if unit.kind == UnitKind.FUNCTION]
+    owned = sorted((span.start, name) for span, name in index.constant_function_names("src/live.ts").items())
+    assert (
+        functions
+        == owned
+        == [(1, "run"), (7, "userRouter.list"), (10, "userRouter.remove"), (16, "StoreLive")]
+    )
+    assert index.module_names("src/live.ts") == ("run", "userRouter", "StoreLive")
+    assert [(unit.symbol, unit.nested_in) for unit in callback] == [("run.<anonymous:2>", "src/live.ts:1-5")]
+
+
 def test_a_test_file_marks_its_units_as_tests(shop: CodeIndex) -> None:
     # Act
     units = _units_by_id(shop, ("tests/test_routes.py", "app/routes.py"))

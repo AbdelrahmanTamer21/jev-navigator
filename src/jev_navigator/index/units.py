@@ -231,6 +231,7 @@ class _SourceFile:
         self._box_chars = box_chars
         self._lines = index.lines(file)
         self._symbols = index.symbols_in(file)
+        self._constant_names = index.constant_function_names(file)
         self._all_functions = frozenset(index.functions_in(file))
         self._decorator_starts = index.decorator_starts_in(file)
         stubs = frozenset(index.stubs_in(file))
@@ -260,13 +261,21 @@ class _SourceFile:
         return {function.id: function for function in self.functions}
 
     def qualified(self, span: Span) -> str:
-        """``span``'s name after every holder's: ``OrderService.place``, ``registerRoutes.<anonymous:4>``."""
+        """``span``'s name after every holder's: ``OrderService.place``, ``registerRoutes.<anonymous:4>``,
+        ``run.<anonymous:2>`` inside a function a module-level constant's call builds."""
         names = []
         current: Span | None = span
         while current is not None:
-            names.append(current.name if current.is_named else f"<anonymous:{current.start}>")
+            names.append(self._own_name(current))
             current = holder_of(self._symbols, current)
         return ".".join(reversed(names))
+
+    def _own_name(self, span: Span) -> str:
+        """The index's name for a function a module-level constant's call builds, ``userRouter.list``
+        (``CodeIndex.constant_function_names``), else the syntax's, else the line it starts on."""
+        if span in self._constant_names:
+            return self._constant_names[span]
+        return span.name if span.is_named else f"<anonymous:{span.start}>"
 
     def _function_unit(self, span: Span, functions: Sequence[Span]) -> Unit:
         holder = holder_of(self._symbols, span)
