@@ -26,7 +26,7 @@ jobs:
           - typesafe: with
             run: pytest -q -rs
           - typesafe: without
-            run: --no-dev --with pytest pytest -q -rs --without-typesafe
+            run: --no-dev --with pytest --with pytest-timeout pytest -q -rs --without-typesafe
     name: test (Python ${{ matrix.python }}, ${{ matrix.typesafe }} TypeSafe)
     steps:
       - uses: actions/checkout@v7
