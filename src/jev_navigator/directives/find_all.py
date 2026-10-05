@@ -6,6 +6,11 @@ the named texts, names with fewer hits first, so a common word never decides whi
 name are seen. Code finds the units; Jev judges each one whole, or a unit larger than its room in a
 request by its pieces. The Judge's call cap is the only budget: no code step is capped. The result
 keeps every raw answer with its place; ranking and any bar belong to the caller.
+
+``find_all`` judges code units only. ``find_all_text`` judges the text units of the files JVN does
+not parse, the same way and with the same question, and never a code unit; ``find_text`` is the text
+search that stops once a unit is found. A caller gives a text search its own Judge, so it never
+spends code search's budget.
 """
 
 from __future__ import annotations
@@ -17,13 +22,17 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from ..index.code_index import CodeIndex
+from ..index.languages import language_read
+from ..index.scope import is_lockfile
 from ..index.spans import TextHit
 from ..index.units import (
     Anchor,
+    AnchorResolution,
     Item,
     LineAnchor,
     Piece,
     RangeAnchor,
+    Reading,
     Unit,
     UnresolvedAnchor,
     best_piece,
@@ -34,6 +43,7 @@ from ..index.units import (
 )
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge
 from ..judgments.questions import Check, item_path, serialized_chars
+from ..judgments.thresholds import NoulVerdict
 from .find_code import search_failure
 
 ITEMS = "items"
@@ -41,6 +51,8 @@ TARGETS = "targets"
 DELIVERED = "already delivered by the caller"
 TOO_LARGE = "too large to judge"
 NOT_REACHED = "not reached: the search stopped first"
+FOUND = "found"
+FIND_TEXT_TARGET = "target"
 BATCHES_PER_WAVE = 16
 """How many requests' worth of places one wave hands the Judge, in the population's order. The Judge
 sends a wave's batches together and orders them by place, so the population's order holds between
@@ -62,9 +74,9 @@ def match_check(target: str) -> Check:
 
 @dataclass(frozen=True)
 class NameHits:
-    """A name's hits: how many the text search found, how many the search reached before it stopped,
-    and how many of those named no listed unit (a line of a file JVN does not parse, or of top-level
-    code a listing leaves out, such as imports)."""
+    """A name's hits: how many the text search found in the files the search reads, how many the search
+    reached before it stopped, and how many of those named no listed unit (a line of a file the
+    reading leaves out, or of top-level code a listing leaves out, such as imports)."""
 
     found: int
     reached: int
@@ -167,7 +179,54 @@ def find_all(
     the error (see ``search_failure``), Ctrl-C ends it ``cancelled``, and either way ``judged`` keeps
     every answer that arrived.
     """
-    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave)
+    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE)
+    return _finished(search, anchors, files, names)
+
+
+def find_all_text(
+    index: CodeIndex,
+    judge: Judge,
+    targets: Mapping[str, str],
+    *,
+    files: Sequence[str] = (),
+    anchors: Sequence[Anchor] = (),
+    names: Sequence[str] = (),
+    delivered: Sequence[RangeAnchor] = (),
+    completed: Mapping[str, Sequence[CheckResult]] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    batches_per_wave: int = BATCHES_PER_WAVE,
+) -> FindAllResult:
+    """``find_all`` over text units (``Reading.TEXT``): the files JVN does not parse, each in the blocks
+    its format gives, a code file named ``unlisted``. A name's hits in code and in lockfiles are left
+    out, so a common word never floods the search with a lockfile's pieces; a lockfile ``files`` or
+    ``anchors`` name is judged."""
+    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT)
+    return _finished(search, anchors, files, names)
+
+
+def find_text(
+    index: CodeIndex,
+    judge: Judge,
+    description: str,
+    *,
+    files: Sequence[str] = (),
+    anchors: Sequence[Anchor] = (),
+    names: Sequence[str] = (),
+    delivered: Sequence[RangeAnchor] = (),
+    cancelled: Callable[[], bool] | None = None,
+    batches_per_wave: int = BATCHES_PER_WAVE,
+) -> FindAllResult:
+    """``find_all_text`` for the one target ``description``, named ``FIND_TEXT_TARGET``, ending
+    ``found`` after the first wave in which a unit's answer is yes by the judge's thresholds."""
+    targets = {FIND_TEXT_TARGET: description}
+    search = _begin(index, judge, targets, delivered, None, cancelled, batches_per_wave, Reading.TEXT)
+    search.stops_when_found = True
+    return _finished(search, anchors, files, names)
+
+
+def _finished(
+    search: _Search, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
+) -> FindAllResult:
     try:
         search.run(anchors, files, names)
     except (KeyboardInterrupt, Exception) as error:  # noqa: BLE001 - _stop_by owns how an error ends a search
@@ -192,7 +251,31 @@ async def find_all_async(
     async client. Listing, resolving and reading code run in a worker thread, so the event loop stays
     free. ``cancelled`` is read before each parse and between waves, since the Judge's async form
     reads none; a cancelled task's ``CancelledError`` is never caught."""
-    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave)
+    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE)
+    return await _finished_async(search, anchors, files, names)
+
+
+async def find_all_text_async(
+    index: CodeIndex,
+    judge: Judge,
+    targets: Mapping[str, str],
+    *,
+    files: Sequence[str] = (),
+    anchors: Sequence[Anchor] = (),
+    names: Sequence[str] = (),
+    delivered: Sequence[RangeAnchor] = (),
+    completed: Mapping[str, Sequence[CheckResult]] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    batches_per_wave: int = BATCHES_PER_WAVE,
+) -> FindAllResult:
+    """``find_all_text`` the way ``find_all_async`` runs ``find_all``."""
+    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT)
+    return await _finished_async(search, anchors, files, names)
+
+
+async def _finished_async(
+    search: _Search, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
+) -> FindAllResult:
     try:
         await search.run_async(anchors, files, names)
     except (KeyboardInterrupt, Exception) as error:  # noqa: BLE001 - _stop_by owns how an error ends a search
@@ -208,18 +291,20 @@ def _begin(
     completed: Mapping[str, Sequence[CheckResult]] | None,
     cancelled: Callable[[], bool] | None,
     batches_per_wave: int,
+    reading: Reading,
 ) -> _Search:
     _require_identifiers(targets)
     if batches_per_wave < 1:
         raise ValueError("batches_per_wave must be at least 1")
-    search = _Search(index, judge.scope(), targets, delivered, cancelled, batches_per_wave)
+    search = _Search(index, judge.scope(), targets, delivered, cancelled, batches_per_wave, reading)
     search.resume(completed or {})
     return search
 
 
 def _stop_by(error: KeyboardInterrupt | Exception | None) -> tuple[str, Exception | None]:
     """How an error ends a search: a call cap ``budget``, Ctrl-C ``cancelled``, any other error
-    ``failed`` holding it (``search_failure`` decides), and no error ``scope_examined``."""
+    ``failed`` holding it (``search_failure`` decides), and no error ``scope_examined``, or ``found``
+    for a search that stops once found (``_Search.ended``)."""
     if error is None:
         return "scope_examined", None
     if isinstance(error, CallCapReachedError):
@@ -245,8 +330,12 @@ class _Search:
         delivered: Sequence[RangeAnchor],
         cancelled: Callable[[], bool] | None,
         batches_per_wave: int,
+        reading: Reading,
     ) -> None:
         self.index = index
+        self.reading = reading
+        self.stops_when_found = False
+        self.found_one = False
         self.batches_per_wave = batches_per_wave
         self.judge = judge
         self.targets = dict(targets)
@@ -277,6 +366,8 @@ class _Search:
     def run(self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]) -> None:
         for places in self._waves(anchors, files, names):
             self._judge(places)
+            if self.found_one:
+                return
 
     async def run_async(self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]) -> None:
         waves = self._waves(anchors, files, names)
@@ -288,11 +379,15 @@ class _Search:
                 self.checks, entries, self.shared, list_name=ITEMS, places=places
             ):
                 self._record(self.target_of[name], answer)
+            if self.found_one:
+                return
 
     def ended(self, error: KeyboardInterrupt | Exception | None) -> FindAllResult:
         stop, failure = _stop_by(error)
         if self.stopped() and failure is None:
             stop = "cancelled"
+        elif error is None and self.found_one:
+            stop = FOUND
         return self.result(stop, failure)
 
     def _waves(
@@ -327,26 +422,37 @@ class _Search:
         yield from self._admitted(self._listed(files))
         if not names or self.stopped():
             return
-        hits = {name: self.index.search_text(name) for name in dict.fromkeys(names)}
+        hits = {name: self._hits(name) for name in dict.fromkeys(names)}
         self.found = {name: len(found) for name, found in hits.items()}
         for chunk in _chunks(_rarest_first(hits), self.judge.items_per_request):
             if self.stopped():
                 return
             yield from self._admitted(self._units_of(chunk))
 
+    def _hits(self, name: str) -> tuple[TextHit, ...]:
+        hits = self.index.search_text(name)
+        if self.reading is Reading.CODE:
+            return hits
+        return tuple(hit for hit in hits if _read_by_name_in_text(hit.file))
+
     def _anchored(self, anchors: Sequence[Anchor]) -> tuple[Unit, ...]:
-        resolution = resolve_anchors(self.index, anchors, box_chars=self.room, listed_only=True)
+        resolution = self._resolved(anchors)
         self.unresolved.extend(resolution.unresolved)
         return resolution.units
 
     def _listed(self, files: Sequence[str]) -> tuple[Unit, ...]:
-        listing = list_units(self.index, files, box_chars=self.room)
+        listing = list_units(self.index, files, box_chars=self.room, reading=self.reading)
         self.unlisted.update(listing.unlisted)
         return listing.units
 
+    def _resolved(self, anchors: Sequence[Anchor]) -> AnchorResolution:
+        return resolve_anchors(
+            self.index, anchors, box_chars=self.room, listed_only=True, reading=self.reading
+        )
+
     def _units_of(self, chunk: Sequence[tuple[str, TextHit]]) -> tuple[Unit, ...]:
         anchors = [LineAnchor(hit.file, hit.line) for _, hit in chunk]
-        resolution = resolve_anchors(self.index, anchors, box_chars=self.room, listed_only=True)
+        resolution = self._resolved(anchors)
         missed = {problem.anchor for problem in resolution.unresolved}
         for (name, _), anchor in zip(chunk, anchors, strict=True):
             self.reached[name] += 1
@@ -408,6 +514,7 @@ class _Search:
             return
         self.answered.add((target, answer.place.id))
         self.judged[target].append(answer)
+        self.found_one |= self.stops_when_found and answer.verdict is NoulVerdict.YES
         if self._answered(answer.place):
             self.not_judged.pop(answer.place.id, None)
 
@@ -443,6 +550,11 @@ def _room(judge: Judge, index: CodeIndex, checks: Sequence[Check], shared: Mappi
     beside = {**shared, ITEMS: [{"file": longest_path, "code": ""}]}
     longest_question = max(serialized_chars(check.to_question(item_path(ITEMS, 0))) for check in checks)
     return judge.input_limits.box_chars - serialized_chars(beside) - longest_question + serialized_chars("")
+
+
+def _read_by_name_in_text(file: str) -> bool:
+    """A text search reaches by a name's hits only text files, never a lockfile."""
+    return not language_read(file) and not is_lockfile(file)
 
 
 def _lines_by_file(regions: Sequence[RangeAnchor]) -> dict[str, frozenset[int]]:
