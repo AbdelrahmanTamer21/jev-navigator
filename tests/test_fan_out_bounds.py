@@ -24,6 +24,7 @@ from jev_navigator.testing import ScriptedJevClient
 
 BOUND = 4
 HOLD_SECONDS = 0.05
+ARRIVAL_SECONDS = 5
 
 
 class OutstandingJournal(JsonlJournal):
@@ -56,26 +57,41 @@ class OutstandingJournal(JsonlJournal):
             self.outstanding -= 1
 
 
-class InterruptedOnTheFirstRequest:
-    """Answers like ``ScriptedJevClient`` and records every request it receives. The first request
-    raises ``KeyboardInterrupt``, as a Ctrl-C would, and every other one is held ``HOLD_SECONDS``, so
+class InterruptedAtOnePlace:
+    """Answers like ``ScriptedJevClient`` and records every request it receives. The request that shows
+    ``interrupted`` (a slice's file and lines) raises ``KeyboardInterrupt``, as a Ctrl-C would. Every
+    other request first waits up to ``ARRIVAL_SECONDS`` for that one to arrive, then is held
+    ``HOLD_SECONDS``, so which request is interrupted never depends on which thread sends first, and
     the places queued behind the bound have not started when the interrupt lands."""
 
     model = "jev-scripted"
 
-    def __init__(self) -> None:
+    def __init__(self, interrupted: tuple[str, str]) -> None:
         self.script = ScriptedJevClient(default_noul=0.05)
-        self.received: list[tuple[Mapping, Mapping]] = []
+        self.interrupted_place = interrupted
+        self.interrupted: tuple[Mapping, Mapping] | None = None
+        self.answered: list[tuple[Mapping, Mapping]] = []
+        self._arrived = threading.Event()
         self._lock = threading.Lock()
 
     def ask(self, state: Mapping, questions: Mapping):
-        with self._lock:
-            self.received.append((state, questions))
-            first = len(self.received) == 1
-        if first:
+        if _slice_of(state) == self.interrupted_place and not self._arrived.is_set():
+            self.interrupted = (state, questions)
+            self._arrived.set()
             raise KeyboardInterrupt
+        self._arrived.wait(timeout=ARRIVAL_SECONDS)
+        with self._lock:
+            self.answered.append((state, questions))
         time.sleep(HOLD_SECONDS)
         return self.script.ask(state, questions)
+
+    @property
+    def received(self) -> list[tuple[Mapping, Mapping]]:
+        return [self.interrupted, *self.answered] if self.interrupted is not None else self.answered
+
+
+def _slice_of(state: Mapping) -> tuple[str, str]:
+    return state["slice"]["file"], state["slice"]["lines"]
 
 
 def _bounded_judge(mode: str, journal: OutstandingJournal) -> Judge:
@@ -147,15 +163,22 @@ def test_forty_history_section_groups_record_at_most_the_bound_of_requests_as_st
     assert journal.peak == BOUND
 
 
-def test_ctrl_c_in_a_round_wider_than_the_bound_resumes_to_the_uninterrupted_result(tmp_path: Path) -> None:
-    # Arrange: six starts asked two at a time, so four wait in the pool when the first request is
-    # interrupted. No step limit: steps are a fresh allowance per run, so every run goes to its end.
+@pytest.mark.parametrize(
+    "interrupted_start", [0, 1], ids=["first start interrupted", "second start interrupted"]
+)
+def test_ctrl_c_in_a_round_wider_than_the_bound_resumes_to_the_uninterrupted_result(
+    tmp_path: Path, interrupted_start: int
+) -> None:
+    # Arrange: six starts asked two at a time, so four wait in the pool when one of the two requests
+    # in flight is interrupted. No step limit: steps are a fresh allowance per run, so every run goes
+    # to its end.
     index = many_functions_index(tmp_path, 6)
     starts = function_starts(index, 6)
     budget = SearchBudget(beam_width=6, neighbours_per_kind=2)
     whole = ScriptedJevClient(default_noul=0.05)
     uninterrupted = find_code(index, Judge(whole, max_concurrency=2), TARGET, starts, budget=budget)
-    stopping = InterruptedOnTheFirstRequest()
+    opened = starts[interrupted_start].open()
+    stopping = InterruptedAtOnePlace((opened.span.file, f"{opened.span.start}-{opened.span.end}"))
     resuming = ScriptedJevClient(default_noul=0.05)
 
     # Act
@@ -166,6 +189,8 @@ def test_ctrl_c_in_a_round_wider_than_the_bound_resumes_to_the_uninterrupted_res
 
     # Assert: a round fills its beam with low-scored neighbours too, and an interrupt changes which ones
     # share a round, so the resume may open other low-scored ones; each it leaves is listed as such.
+    # The interrupted place is asked again, though not always in the same bytes: a neighbour an
+    # answered request already queued is not offered beside it twice.
     starts_left = {start.key for start in starts} - stopped.visited
     assert stopped.outcome == Outcome.CANCELLED
     assert len(stopping.received) < 6
@@ -174,6 +199,6 @@ def test_ctrl_c_in_a_round_wider_than_the_bound_resumes_to_the_uninterrupted_res
     assert {start.key for start in starts} <= resumed.visited
     left_unopened = {entry.place_key for entry in resumed.not_inspected if entry.reason == "deprioritized"}
     assert uninterrupted.visited - resumed.visited <= left_unopened
-    interrupted, *answered = stopping.received
-    assert not set(_hashes(answered)) & set(_hashes(resuming.requests))
-    assert request_sha256(*interrupted) in _hashes(resuming.requests)
+    assert stopping.interrupted is not None
+    assert not set(_hashes(stopping.answered)) & set(_hashes(resuming.requests))
+    assert stopping.interrupted_place in [_slice_of(state) for state, _questions in resuming.requests]
