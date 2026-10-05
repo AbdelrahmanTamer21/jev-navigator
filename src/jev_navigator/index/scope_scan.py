@@ -1,21 +1,25 @@
 """Syntax facts extracted together in one ast-grep pass over each requested file set.
 
 Each requested file set is handed to ast-grep scans of a few hundred files each, which schedule
-parsing across ast-grep's own worker pool; every match becomes its fact as it is printed. The
-structure rules also match the grammar's ERROR nodes: a file the parser could only recover
-partially (Flow types in a JavaScript file, say) is reported as unparsed too. Its matched symbols and
-calls still count — recovery keeps what it could — but whatever the ERROR nodes swallowed is unknown,
-not absent. ``FileFacts.unparsed_lines`` keeps the lines those nodes span, so a lookup can tell which
-names they may hide.
+parsing across ast-grep's own worker pool; every match becomes its fact as it is printed, decoded
+into only the fields its fact is built from (``ParserMatch``). The structure rules also match the
+grammar's ERROR nodes: a file the parser could only recover partially is reported as unparsed too.
+A JavaScript file the JavaScript grammar only partly reads is read once more as flow, which reads
+Flow types written without the ``@flow`` pragma. Its matched symbols and calls still count —
+recovery keeps what it could — but whatever the ERROR nodes swallowed is unknown, not absent.
+``FileFacts.unparsed_lines`` keeps the lines those nodes span, so a lookup can tell which names they
+may hide.
 """
 
 from __future__ import annotations
 
 from bisect import bisect_right
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import NamedTuple, Protocol, TypeVar
+from typing import NamedTuple, NotRequired, Protocol, TypedDict, TypeVar
+
+import msgspec
 
 from . import tools
 from .imports import _exported, _local
@@ -27,7 +31,6 @@ from .languages import (
     DECLARED_NAME_RULES,
     EXPRESSION_KINDS,
     FLOW_LANGUAGE,
-    FLOW_SGCONFIG,
     FUNCTION_KINDS,
     LOCAL_NAME_RULES,
     MODULE_ALIAS_RULES,
@@ -45,8 +48,12 @@ from .languages import (
     language_of,
     parse_language,
     reference_rules,
+    sgconfig_of,
 )
 from .spans import Span
+
+# The language whose files the JavaScript grammar only partly reads are read once more as flow.
+READ_AGAIN_AS_FLOW = "javascript"
 
 
 @dataclass
@@ -114,13 +121,13 @@ class FileStructure:
     variables hold (see ``ObjectMember``), and ``outer_symbols`` the symbols no function, class or
     namespace holds, whatever value or property holds them."""
 
-    functions: tuple[Span, ...]
-    symbols: tuple[Span, ...]
-    declarations: tuple[Span, ...]
-    module_symbols: tuple[Span, ...]
-    commonjs_exports: tuple[Span, ...]
-    type_declarations: tuple[Span, ...]
-    value_declarations: tuple[Span, ...]
+    functions: tuple[Span, ...] = ()
+    symbols: tuple[Span, ...] = ()
+    declarations: tuple[Span, ...] = ()
+    module_symbols: tuple[Span, ...] = ()
+    commonjs_exports: tuple[Span, ...] = ()
+    type_declarations: tuple[Span, ...] = ()
+    value_declarations: tuple[Span, ...] = ()
     local_names: tuple[LocalName, ...] = ()
     namespace_members: tuple[NamespaceMember, ...] = ()
     object_members: tuple[ObjectMember, ...] = ()
@@ -168,22 +175,71 @@ class FileFacts:
     renamed_exports: tuple[tuple[str, str], ...] = ()
     # Why the guard kept the file from the parser; such facts are empty and are never cached.
     refusal: str | None = None
+    # The language the facts were read as: ``flow`` for JavaScript read with the tsx grammar. None
+    # when no grammar read the file.
+    language: str | None = None
 
 
-def scan_facts(files: Sequence[str], root: Path, unparsed: Unparsed) -> dict[str, FileFacts]:
-    """Parse supported source files once; return empty facts for unsupported paths. Each match is
-    turned into its fact as the parser prints it, so memory holds facts, never the parser's output."""
-    found = {file: _FileFound(file) for file in files}
+class _Text(TypedDict):
+    text: str
+
+
+class _Captured(TypedDict, total=False):
+    CALLEE: _Text
+    NAME: _Text
+    OWN: _Text
+    SPEC: _Text
+
+
+class _MetaVariables(TypedDict, total=False):
+    single: _Captured
+
+
+class _Start(TypedDict):
+    line: int
+
+
+class _End(TypedDict):
+    line: int
+
+
+class _ByteOffset(TypedDict):
+    start: int
+    end: int
+
+
+class _Range(TypedDict):
+    start: _Start
+    end: _End
+    byteOffset: _ByteOffset
+
+
+class ParserMatch(TypedDict):
+    """The fields of one printed ast-grep match that ``_FileFound`` reads. Every other field (the
+    labels of related nodes, the other metavariables) is skipped while decoding instead of becoming
+    Python objects, which makes decoding a large scan's output several times faster."""
+
+    ruleId: str
+    file: str
+    text: str
+    lines: str
+    range: _Range
+    metaVariables: NotRequired[_MetaVariables]
+
+
+decode_match = msgspec.json.Decoder(ParserMatch).decode
+
+
+def scan_facts(contents: Mapping[str, bytes], root: Path, unparsed: Unparsed) -> dict[str, FileFacts]:
+    """Parse supported source files once; return empty facts for unsupported paths. ``contents`` holds
+    each file's first-read bytes, which decide the language it is read as. Each match is turned
+    into its fact as the parser prints it, so memory holds facts, never the parser's output."""
+    found = {file: _FileFound(file) for file in contents}
     refused: dict[str, str] = {}
-    supported_files = tuple(file for file in files if language_of(file) is not None)
-    for config, group, languages in _scan_groups(supported_files, root):
-        rules = fact_rules(languages)
-        if config is None:
-            matches = tools.ast_grep_rules(rules, group, root, refused=refused)
-        else:
-            matches = tools.ast_grep_rules(rules, group, root, config=config, refused=refused)
-        for match in matches:
-            found[match["file"]].add(match)
+    plain, flow = _split_by_pragma(contents)
+    found.update(_scanned(plain, root, refused))
+    found.update(_scanned(flow, root, refused, as_flow=True))
+    found.update(_read_as_flow_where_fewer_lines_fail(found, root, refused))
     unparsed.add("facts", [file for file, facts in found.items() if facts.error_lines])
     incomplete = unparsed.files
     return {
@@ -191,6 +247,45 @@ def scan_facts(files: Sequence[str], root: Path, unparsed: Unparsed) -> dict[str
         if file in refused
         else facts.finished(file in incomplete)
         for file, facts in found.items()
+    }
+
+
+def _scanned(
+    files: Sequence[str], root: Path, refused: dict[str, str], *, as_flow: bool = False
+) -> dict[str, _FileFound]:
+    """The facts of ``files`` from one ast-grep scan, each file read as its own language, or all of
+    them as flow."""
+    if not files:
+        return {}
+    found = {file: _FileFound(file, FLOW_LANGUAGE if as_flow else language_of(file)) for file in files}
+    languages = [FLOW_LANGUAGE] if as_flow else sorted({found[file].language for file in files})
+    config = sgconfig_of(FLOW_LANGUAGE) if as_flow else None
+    matches = tools.ast_grep_rules(
+        fact_rules(languages), files, root, config=config, refused=refused, decode=decode_match
+    )
+    for match in matches:
+        found[match["file"]].add(match)
+    return found
+
+
+def _read_as_flow_where_fewer_lines_fail(
+    found: dict[str, _FileFound], root: Path, refused: dict[str, str]
+) -> dict[str, _FileFound]:
+    """Babel strips Flow types from every file it builds, so Flow-typed JavaScript often carries no
+    ``@flow`` pragma. Each JavaScript file the JavaScript grammar only partly read is read again as
+    flow, and that reading replaces the first one when its ERROR nodes span fewer lines."""
+    partly_read = [
+        file
+        for file, facts in found.items()
+        if facts.error_lines and language_of(file) == READ_AGAIN_AS_FLOW and file not in refused
+    ]
+    if not partly_read:
+        return {}
+    as_flow = _scanned(partly_read, root, refused, as_flow=True)
+    return {
+        file: facts
+        for file, facts in as_flow.items()
+        if file not in refused and facts.unread_line_count() < found[file].unread_line_count()
     }
 
 
@@ -211,9 +306,10 @@ def fact_rules(languages: Sequence[str]) -> str:
 
 @dataclass
 class _FileFound:
-    """One file's facts, collected match by match."""
+    """One file's facts, collected match by match, read as ``language``."""
 
     file: str
+    language: str | None = None
     functions: set[Span] = field(default_factory=set)
     classes: set[Span] = field(default_factory=set)
     # Each function's and class's byte range, end exclusive, with its span.
@@ -257,6 +353,9 @@ class _FileFound:
         else:
             self._add_reference(match)
 
+    def unread_line_count(self) -> int:
+        return sum(end - start + 1 for start, end in _merged_stretches(self.error_lines))
+
     def finished(self, incomplete: bool) -> FileFacts:
         return FileFacts(
             self._structure(),
@@ -268,6 +367,7 @@ class _FileFound:
             tuple(alias for _, alias in sorted(self.module_aliases)),
             tuple(sorted(self.exported_values)),
             tuple(sorted(self.renamed_exports)),
+            language=self.language,
         )
 
     def _structure(self) -> FileStructure:
@@ -434,10 +534,10 @@ class _ByteRange(Protocol):
     def end(self) -> int: ...
 
 
-_Range = TypeVar("_Range", bound=_ByteRange)
+_Nested = TypeVar("_Nested", bound=_ByteRange)
 
 
-def _innermost(ordered: Sequence[_Range], starts: list[int], offset: int) -> _Range | None:
+def _innermost(ordered: Sequence[_Nested], starts: list[int], offset: int) -> _Nested | None:
     """Nodes nest or are disjoint, so the latest-starting node that reaches past ``offset`` holds it
     most closely."""
     for node in reversed(ordered[: bisect_right(starts, offset)]):
@@ -847,35 +947,16 @@ def _named_by(field: str) -> str:
     return f"{{field: {field}, pattern: $NAME}}"
 
 
-def _scan_groups(files: Sequence[str], root: Path) -> list[tuple[str | None, list[str], list[str]]]:
-    """(sgconfig, files, languages) per invocation: every non-flow file scanned together exactly as
-    before, and the ``@flow`` files in their own invocation, where the config's ``languageGlobs``
-    parses the JavaScript suffixes with the tsx grammar. The globs are global per invocation, so
-    mixing the two would re-parse plain JavaScript files too."""
+def _split_by_pragma(contents: Mapping[str, bytes]) -> tuple[list[str], list[str]]:
+    """The supported files read as their own language, and the ``@flow`` files, judged by their
+    first-read bytes. The flow files take their own scan, since its config's ``languageGlobs`` would
+    parse plain JavaScript with the tsx grammar too."""
     plain: list[str] = []
     flow: list[str] = []
-    for file in files:
-        (flow if _is_flow(root, file) else plain).append(file)
-    groups: list[tuple[str | None, list[str], list[str]]] = []
-    if plain:
-        groups.append((None, plain, _languages(plain)))
-    if flow:
-        groups.append((FLOW_SGCONFIG, flow, [FLOW_LANGUAGE]))
-    return groups
-
-
-def _is_flow(root: Path, file: str) -> bool:
-    if language_of(file) != "javascript":
-        return False
-    try:
-        content = (root / file).read_bytes()
-    except FileNotFoundError:
-        return False
-    return parse_language(file, content) == FLOW_LANGUAGE
-
-
-def _languages(files: Sequence[str]) -> list[str]:
-    return sorted({language for file in files if (language := language_of(file))})
+    for file, content in contents.items():
+        if language_of(file) is not None:
+            (flow if parse_language(file, content) == FLOW_LANGUAGE else plain).append(file)
+    return plain, flow
 
 
 def _ordered(spans: set[Span], positions: dict[Span, int]) -> tuple[Span, ...]:
