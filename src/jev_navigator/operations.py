@@ -7,13 +7,14 @@ their own: in a script, a test, or a pipeline that never calls a model.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from .index.bindings import Binding, BindingStatus, names_exactly
 from .index.code_index import CodeIndex
-from .index.languages import language_of
+from .index.languages import language_of, language_read
 from .index.spans import CallSite, CodeSlice, Span
+from .mentions import paths_in
 
 MAX_FUNCTION_LINES = 120
 _DOC_IDENTIFIER = re.compile(
@@ -59,6 +60,16 @@ class TraceGraph:
     functions: tuple[Span, ...]
     links: tuple[TraceLink, ...]
     stop: str
+
+
+@dataclass(frozen=True)
+class NamedFiles:
+    """The scope files a text names by path, in order of first mention: ``code`` in a language JVN
+    reads, ``text`` the rest. ``named_by`` gives the path token that named each file."""
+
+    code: tuple[str, ...]
+    text: tuple[str, ...]
+    named_by: Mapping[str, str]
 
 
 def slice_around(index: CodeIndex, file: str, line: int, radius: int = 10) -> CodeSlice:
@@ -164,6 +175,38 @@ def code_named_in_doc(index: CodeIndex, doc_text: str) -> tuple[Span, ...]:
     """Function definitions in scope whose names the text mentions, in order of first mention."""
     mentioned = dict.fromkeys(_doc_identifiers(doc_text))
     return tuple(span for name in mentioned for span in index.find_definition(name))
+
+
+def files_named_by(index: CodeIndex, texts: Sequence[str], anchor_files: Sequence[str]) -> NamedFiles:
+    """The scope files that ``texts``, or the whole text of ``anchor_files``, name by path. A path
+    token names a file whose path is the token or ends with ``/`` and the token, so ``jobs/sweep.py``
+    names ``web/jobs/sweep.py`` but never ``xjobs/sweep.py``, and a bare ``ci.yml`` names every
+    ``ci.yml``. An anchor file is never among them, an anchor file outside the scope is never read,
+    and a named file is not read for further names."""
+    scope = frozenset(index.files)
+    anchors = [file for file in dict.fromkeys(anchor_files) if file in scope]
+    sources = [*texts, *("\n".join(index.lines(file)) for file in anchors)]
+    by_name = _files_by_name(index.files)
+    named_by: dict[str, str] = {}
+    for token in (token for source in sources for token in paths_in(source)):
+        for file in _files_ending_with(by_name, token):
+            if file not in anchors:
+                named_by.setdefault(file, token)
+    code = tuple(file for file in named_by if language_read(file))
+    text = tuple(file for file in named_by if not language_read(file))
+    return NamedFiles(code, text, named_by)
+
+
+def _files_by_name(files: Iterable[str]) -> dict[str, list[str]]:
+    by_name: dict[str, list[str]] = {}
+    for file in files:
+        by_name.setdefault(file.rpartition("/")[2], []).append(file)
+    return by_name
+
+
+def _files_ending_with(by_name: Mapping[str, list[str]], token: str) -> list[str]:
+    candidates = by_name.get(token.rpartition("/")[2], [])
+    return [file for file in candidates if file == token or file.endswith(f"/{token}")]
 
 
 def _is_comment_line(text: str) -> bool:

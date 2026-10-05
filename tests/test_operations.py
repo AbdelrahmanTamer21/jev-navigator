@@ -120,6 +120,68 @@ def test_code_named_in_doc_finds_mentioned_functions(sample_index: CodeIndex) ->
     assert [span.name for span in spans] == ["validate_order", "check_limits"]
 
 
+NAMED_FILES = {
+    "service.py": "# loader.py reads the rules\nfrom loader import load_rules\n\nsend = load_rules\n",
+    "loader.py": "def load_rules():\n    return open('./rules/limits.json')\n",
+    "rules/limits.json": '{"max": 4}\n',
+    "jobs/sweep.py": "def sweep():\n    return 1\n",
+    "web/jobs/sweep.py": "def sweep():\n    return 2\n",
+    "xjobs/sweep.py": "def sweep():\n    return 3\n",
+    ".github/workflows/ci.yml": "on: push\n",
+    "secret.py": "TOKEN = 1\n",
+}
+WITHHELD = "secret.py"
+
+
+def named_files_repository(root: Path) -> CodeIndex:
+    for name, source in NAMED_FILES.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(source)
+    return CodeIndex(root, [name for name in NAMED_FILES if name != WITHHELD])
+
+
+def test_files_named_by_a_text_or_an_anchor_file_come_back_split_into_code_and_text(tmp_path: Path) -> None:
+    # Arrange
+    index = named_files_repository(tmp_path)
+    statement = "jobs/sweep.py and secret.py skip `send`; ci.yml never runs it"
+
+    # Act
+    named = operations.files_named_by(index, [statement], ["service.py", "loader.py"])
+
+    # Assert
+    assert named.code == ("jobs/sweep.py", "web/jobs/sweep.py")
+    assert named.text == (".github/workflows/ci.yml", "rules/limits.json")
+    assert named.named_by == {
+        "jobs/sweep.py": "jobs/sweep.py",
+        "web/jobs/sweep.py": "jobs/sweep.py",
+        ".github/workflows/ci.yml": "ci.yml",
+        "rules/limits.json": "rules/limits.json",
+    }
+
+
+def test_a_file_an_anchor_file_names_is_not_read_in_turn(tmp_path: Path) -> None:
+    # Arrange
+    index = named_files_repository(tmp_path)
+
+    # Act
+    named = operations.files_named_by(index, [], ["service.py"])
+
+    # Assert
+    assert (named.code, named.text) == (("loader.py",), ())
+
+
+def test_an_anchor_outside_the_scope_is_never_read(tmp_path: Path) -> None:
+    # Arrange
+    index = named_files_repository(tmp_path)
+    (tmp_path / WITHHELD).write_text("# reads jobs/sweep.py\n")
+
+    # Act
+    named = operations.files_named_by(index, [], [WITHHELD])
+
+    # Assert
+    assert (named.code, named.text) == ((), ())
+
+
 def test_comment_above_a_function_describes_the_whole_function(sample_index: CodeIndex) -> None:
     # Act
     code = operations.code_described_by_comment(sample_index, "app/comments.py", 24)
