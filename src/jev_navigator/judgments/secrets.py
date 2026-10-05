@@ -80,26 +80,11 @@ _SECRET_WORDS = (
 )
 _NAMING_SUFFIXES = frozenset(
     {
-        "name",
-        "path",
-        "dir",
-        "directory",
-        "file",
-        "header",
-        "ref",
-        "url",
-        "uri",
-        "type",
-        "kind",
-        "field",
-        "label",
-        "annotation",
-        "mount",
-        "env",
-        "endpoint",
-        "host",
+        "name", "id", "ref", "path", "dir", "directory", "file", "url", "uri", "endpoint", "host", "header",
+        "label", "annotation", "mount", "env", "type", "kind", "field", "count", "length", "size", "prefix",
+        "pattern", "patterns", "rule", "rules", "regex",
     }
-)
+)  # fmt: skip
 _CODE_REFERENCE = re.compile(
     r"\$?[A-Za-z_]\w*(?:\.\$?[A-Za-z_]\w*)*|\d+(?:-\d+)+|-?(?:0x[\da-fA-F]+|\d[\d_]*(?:\.\d+)*[A-Za-z%]{0,4})"
 )
@@ -109,6 +94,9 @@ _DOTTED_PATH = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
 _NAME_SHAPED = re.compile(r"[A-Za-z_][A-Za-z_.\-]*")
 _PATH_SHAPED = re.compile(r"(?:~|\.{1,2})?/?[\w.@-]+(?:/[\w.@\[\]-]+)+/?|/[\w.@-]*")
 _URL_SHAPED = re.compile(r"[a-z][a-z0-9+.-]*://\S+")
+_ENVIRONMENT_NAME = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+")
+_DEFAULT_PASSWORDS = frozenset({"password", "passwd", "pwd", "secret", "admin", "root"})
+_KEY_SEPARATORS = re.compile(r"[._\-$\s]+")
 _NAME_LITERAL = re.compile(r"[A-Z][A-Z0-9_]*|[a-z]+(?:[-_./][a-z]+)*")
 _ALGORITHM_NAME = re.compile(r"(?i)(?:sha|md|blake2[bs]?|hs|rs|es|ps)-?\d+")
 
@@ -281,15 +269,21 @@ def _is_key_material(value: str, quote: str) -> bool:
 
 
 def _key_kind(key: str) -> str | None:
-    """The key's kind: "secret" when a secret word is one of its parts (``DB_PASSWORD``, ``authToken``,
-    ``SECRET_KEY_BASE``, ``GH_TOKEN_RO``), "naming" when only naming words follow the last one
-    (``SECRET_ENV``, ``token_url``, ``secretName``), else None (``max_tokens``, ``tokenizer``, ``bypass``)."""
-    parts = [part.lower() for piece in re.split(r"[._\-$]+", key) for part in _KEY_PART.findall(piece)]
+    """The key's kind when a secret word is one of its parts: "secret" when the secret word ends the key
+    (``DB_PASSWORD``, ``authToken``, ``credentials``), "naming" when a naming word ends it (``SECRET_ENV``,
+    ``token_url``, ``secretAccessKeyId``), else "suffixed" (``SECRET_KEY_BASE``, ``GH_TOKEN_RO``). None when
+    no part is a secret word (``max_tokens``, ``tokenizer``, ``bypass``)."""
+    parts = _key_parts(key)
     end = _last_secret_word_end(parts)
     if end is None:
         return None
-    tail = parts[end:]
-    return "naming" if tail and all(part in _NAMING_SUFFIXES for part in tail) else "secret"
+    if end == len(parts):
+        return "secret"
+    return "naming" if parts[-1] in _NAMING_SUFFIXES else "suffixed"
+
+
+def _key_parts(key: str) -> list[str]:
+    return [part.lower() for piece in re.split(r"[._\-$]+", key) for part in _KEY_PART.findall(piece)]
 
 
 def _last_secret_word_end(parts: list[str]) -> int | None:
@@ -302,16 +296,46 @@ def _last_secret_word_end(parts: list[str]) -> int | None:
 
 
 def _keyed_value_hides(kind_holds: Callable[[str], bool]) -> Callable[[re.Match[str]], bool]:
-    """A value under a secret key is hidden when ``kind_holds`` calls it a literal; under a naming key only
-    when it is also not a name, a path or a URL."""
+    """A literal under a key that holds a secret is hidden as ``_hides_under`` decides."""
 
     def hides(match: re.Match[str]) -> bool:
         kind = _key_kind(match["key"])
-        if kind is None or not kind_holds(match):
-            return False
-        return kind == "secret" or not _names_something(match["value"])
+        return kind is not None and kind_holds(match) and _hides_under(kind, match["key"], match["value"])
 
     return hides
+
+
+def _hides_under(kind: str, key: str, value: str) -> bool:
+    """A value that repeats its key (``PASS: "PASS"``) shows nothing the key does not. Otherwise a secret
+    key hides every literal; a suffixed key every literal but an environment variable's name, a path or a
+    URL; a naming key only a credential-looking word, one word of eight or more characters that names
+    nothing."""
+    if _repeats_its_key(key, value):
+        return False
+    if kind == "secret":
+        return True
+    if kind == "suffixed":
+        return not (
+            _ENVIRONMENT_NAME.fullmatch(value)
+            or _PATH_SHAPED.fullmatch(value)
+            or _URL_SHAPED.fullmatch(value)
+        )
+    return (
+        len(value) >= BY_CONTENT_MIN_CHARS
+        and not any(character.isspace() for character in value)
+        and not _names_something(value)
+    )
+
+
+def _repeats_its_key(key: str, value: str) -> bool:
+    """Whether the value is its key's name or last word (``FAIL = "fail"``), unless that word is a common
+    default password (``password = "password"`` is a credential)."""
+    written = _KEY_SEPARATORS.sub("", value).lower()
+    return (
+        bool(written)
+        and written not in _DEFAULT_PASSWORDS
+        and written in (_KEY_SEPARATORS.sub("", key).lower(), _key_parts(key)[-1])
+    )
 
 
 def _names_something(value: str) -> bool:
