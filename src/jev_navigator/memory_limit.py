@@ -1,8 +1,8 @@
 """JVN's memory limit: an allowance for each JVN process, and one ceiling for all of them on a machine.
 
-Every process the index starts (ast-grep, ripgrep, git) is started through ``started``; the git call
-that records a pack's source revision (``cli``) and a model step's command-line connector
-(``connectors``) are not. The first started process takes one of the machine's memory slots, waiting up
+Every process JVN starts is started through ``started`` (the index's ast-grep, ripgrep and git, and a
+model step's command-line connector in ``connectors``), except the git call that records a pack's
+source revision (``cli``). The first started process takes one of the machine's memory slots, waiting up
 to ``wait_seconds`` for room. The process keeps the slot until it exits, and the operating system
 releases the lock then, however the process ends, so no slot outlives its holder. The ceiling holds
 ``ceiling_mb // allowance_mb`` slots, one ``flock``-ed file each, in a folder that no HOME setting
