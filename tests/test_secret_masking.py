@@ -149,6 +149,11 @@ SECRET_VALUES = {
     "dollar sign inside a password": ('password = "my$ecret"', "ecret"),
     "dollar sign inside a token": ('token: "a$b1234567"', "b1234567"),
     "unquoted generated value": ("webhook_secret_v1=whsec_" + "a1B2" * 8, "a1B2" * 8),
+    "nested quoted words under a key that describes nothing": (
+        "password: {\n  value: 'correct horse battery staple',\n}",
+        "correct horse battery staple",
+    ),
+    "nested single word under a key that describes": ("password: {\n  hint: 'hunter22x',\n}", "hunter22x"),
     "high-entropy value under an ordinary name": (
         'const signingKey = "Zq8vT2mN4xR7pL1wK9sD3fH6";',
         "Zq8vT2mN4xR7pL1wK9sD3fH6",
@@ -235,6 +240,12 @@ CODE_REFERENCES = [
     "` -e HEEDVANE_ENROLLMENT_TOKEN=${shellQuote(input.enrollmentToken)}` +",
     "  ? `never cached (${row.prefixTokens ?? '?'}-token prefix, likely below)`",
     'lines = [line for line in values if line.startswith("DB_PASSWORD: ")]',
+    "  restAPIKey: {\n    env: 'PARSE_SERVER_REST_API_KEY',\n    help: 'Key for REST calls',\n  },",
+    "  proxyPassword: {\n    env: 'PARSE_SERVER_DATABASE_PROXY_PASSWORD',\n    help:\n"
+    "      'The MongoDB driver option to configure a Socks5 proxy password when the proxy requires "
+    "username/password authentication.',\n  },",
+    "      password: {\n        descriptions: 'New password of the user',\n"
+    "        type: new GraphQLNonNull(GraphQLString),\n      },",
 ]
 
 
