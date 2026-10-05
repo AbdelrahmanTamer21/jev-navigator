@@ -80,6 +80,10 @@ class SecretMasker:
         return [value for value in found if value != MASK]
 
 
+DEFAULT_MASKER = SecretMasker()
+"""What every request is masked with unless its caller names another masker."""
+
+
 @dataclass(frozen=True)
 class SecretScanner:
     """Reports what the built-in masker would have masked; used as the final check before sending."""
