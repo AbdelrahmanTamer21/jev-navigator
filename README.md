@@ -465,9 +465,12 @@ no module-level definition. Lines are the unit, so a use on the namespace's firs
 candidate, and one namespace split over two blocks is not merged. Lines the parser lost inside the
 namespace that mention the name leave the use `unknown`; lost lines elsewhere never pass the member over. A call `jwt.verify()` where module-level
 code binds `jwt` to a whole module of the scope (`import * as jwt`, `const jwt = require('./jwt')`,
-in Python `import app.jwt as jwt`, and `app.jwt.verify()` after `import app.jwt`, all read from the
-syntax tree) binds to the `verify` that module, or one it re-exports from, defines; only that module's
-facts are read. A name a function binds for its own body (a parameter, a local
+in Python `import app.jwt as jwt`, `from app import jwt` and `from . import jwt as tokens`, and
+`app.jwt.verify()` after `import app.jwt`, all read from the syntax tree) binds to the `verify` that
+module, or one it re-exports from, defines; only that module's facts are read. Python's `from app
+import jwt` takes the package's own `jwt` before it imports the module `app.jwt`, so it holds the
+module only when `app/__init__.py` defines nothing named `jwt`, imports nothing else under that name,
+has no star import and no lost line that mentions it; otherwise `jwt.verify()` stays a `candidate`. A name a function binds for its own body (a parameter, a local
 variable, a caught error or a loop variable) replaces any module-level definition or import of that
 name inside the function: `db.query()` with a parameter `db`, or `stop()` with a parameter `stop`,
 binds to no import; it is a `candidate` whose local value is not resolved. A function counts from its

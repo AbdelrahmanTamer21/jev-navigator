@@ -375,15 +375,18 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
         ),
         (
             "module.py",
-            _many("first{n}, second{n} = {n}, {n}\napp.debug{n} = True\n")
+            "from app.models import (\n"
+            + _many("    m{n},\n    n{n} as k{n},\n")
+            + ")\n"
+            + _many("first{n}, second{n} = {n}, {n}\napp.debug{n} = True\n")
             + "def wide(\n"
             + _many("    p{n},\n")
             + "):\n    for item in items:\n"
             + _many("        l{n} = p{n}\n"),
-            (600, 1, 0, 601),
+            (600, 1, 600, 601),
         ),
     ],
-    ids=["typescript", "javascript", "python", "router and config"],
+    ids=["typescript", "javascript", "router and config", "python"],
 )
 def test_no_fact_rule_prints_more_than_the_node_it_matched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str, source: str, counts: tuple[int, ...]
@@ -1279,23 +1282,32 @@ def test_a_module_alias_is_read_from_module_level_code_only(tmp_path: Path) -> N
     aliases = index._facts_in("src/main.ts").module_aliases
 
     # Assert
-    assert dict(aliases) == {"jwt": "./jwt", "db": "./db", "legacy": "./legacy"}
+    assert {alias.name: alias.specifier for alias in aliases} == {
+        "jwt": "./jwt",
+        "db": "./db",
+        "legacy": "./legacy",
+    }
+    assert not any(alias.from_import for alias in aliases)
 
 
 def test_a_python_module_alias_is_read_from_module_level_imports_only(tmp_path: Path) -> None:
     """`import a.b as n` binds `n` to `a.b`, and `import a.b` makes `a` and `a.b` reach the modules
-    of those names; one statement may import several modules, and a module-level `try` counts. A
-    name imported from a module, an import inside a function or class, and a comment hold none."""
+    of those names; one statement may import several modules, and a module-level `try` counts.
+    `from a import b as n` binds `n` to the attribute `b` of `a`, which may be the module `a.b`, also
+    relative and over several lines. An import inside a function or class, the module a from-import
+    names, and a comment hold none."""
     # Arrange
     index = committed(
         tmp_path,
         {
             "app/main.py": (
                 "import app.jobs as jobs\nimport app.mail  # sends receipts\n"
-                "import json, app.billing as billing\nfrom app import tools\n# import app.old as old\n"
+                "import json, app.billing as billing\nimport os, app.tasks\nfrom app import tools\n"
+                "# import app.old as old\n"
+                "from . import mail as post\nfrom ..lib.text import (\n    slug,\n    words as split,\n)\n"
                 "try:\n    import ujson as fast\nexcept ImportError:\n    pass\n\n\n"
-                "def f():\n    import app.local as local\n    return local\n\n\n"
-                "class K:\n    import app.inner as inner\n"
+                "def f():\n    import app.local as local\n    from app import nearby\n    return local\n\n\n"
+                "class K:\n    import app.inner as inner\n    from app import held\n"
             ),
         },
     )
@@ -1304,13 +1316,19 @@ def test_a_python_module_alias_is_read_from_module_level_imports_only(tmp_path: 
     aliases = index._facts_in("app/main.py").module_aliases
 
     # Assert
-    assert dict(aliases) == {
-        "jobs": "app.jobs",
-        "app": "app",
-        "app.mail": "app.mail",
-        "json": "json",
-        "billing": "app.billing",
-        "fast": "ujson",
+    assert {alias.name: (alias.specifier, alias.from_import) for alias in aliases} == {
+        "jobs": ("app.jobs", False),
+        "app": ("app", False),
+        "app.mail": ("app.mail", False),
+        "json": ("json", False),
+        "billing": ("app.billing", False),
+        "os": ("os", False),
+        "app.tasks": ("app.tasks", False),
+        "tools": ("app.tools", True),
+        "post": (".mail", True),
+        "slug": ("..lib.text.slug", True),
+        "split": ("..lib.text.words", True),
+        "fast": ("ujson", False),
     }
 
 
@@ -1356,6 +1374,143 @@ def test_a_call_through_a_python_module_import_reads_only_that_module(tmp_path: 
     assert "app/unrelated.py" not in scanned
     assert (injected.status.value, injected.target) == ("candidate", None)
     assert (either.status.value, either.target) == ("candidate", None)
+
+
+def test_a_call_through_a_module_a_from_import_names_reads_that_module(tmp_path: Path) -> None:
+    """`jobs.run()` after `from app import jobs`, `from . import jobs as queue` or `from .sub import
+    mail as post` calls what that module defines, as after `import app.jobs as jobs`. A parameter
+    named like the import replaces it inside its function, and a from-import of a function names no
+    module."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "app/__init__.py": "",
+            "app/jobs.py": "def run(task):\n    return task\n",
+            "app/unrelated.py": "def run():\n    return 0\n\n\ndef send():\n    return 0\n",
+            "app/sub/__init__.py": "",
+            "app/sub/mail.py": "def send():\n    return 1\n",
+            "app/tools.py": "def helper():\n    return 2\n",
+            "app/worker.py": (
+                "from app import jobs\nfrom . import jobs as queue\nfrom .sub import mail as post\n"
+                "from app.tools import helper\n\n\n"
+                "def absolute(task):\n    return jobs.run(task)\n\n\n"
+                "def relative(task):\n    return queue.run(task)\n\n\n"
+                "def nested():\n    return post.send()\n\n\n"
+                "def injected(jobs, task):\n    return jobs.run(task)\n\n\n"
+                "def function():\n    return helper.run()\n"
+            ),
+        },
+    )
+    caller = {span.name: span for span in index.functions_in("app/worker.py")}
+
+    # Act
+    bindings = {name: index.callee_edges(caller[name])[0].binding for name in caller}
+
+    # Assert
+    assert {name: (binding.status.value, binding.target) for name, binding in bindings.items()} == {
+        "absolute": ("resolved", Span("app/jobs.py", 1, 2, "run")),
+        "relative": ("resolved", Span("app/jobs.py", 1, 2, "run")),
+        "nested": ("resolved", Span("app/sub/mail.py", 1, 2, "send")),
+        "injected": ("candidate", None),
+        "function": ("candidate", None),
+    }
+
+
+@pytest.mark.parametrize(
+    ("package", "status"),
+    [
+        ("from .config import config\n", "candidate"),
+        ("def config():\n    return 0\n", "candidate"),
+        ("config = None\n", "candidate"),
+        ("from .config import *\n", "candidate"),
+        ("config = Config(:\n", "candidate"),
+        ("from . import config\n", "resolved"),
+        ("from pkg import config\n", "resolved"),
+        ("", "resolved"),
+    ],
+    ids=[
+        "imports a value",
+        "defines a function",
+        "assigns",
+        "star-imports its module",
+        "loses a line that names it",
+        "imports itself",
+        "imports itself by path",
+        "empty",
+    ],
+)
+def test_a_from_import_takes_the_packages_own_name_before_its_module(
+    tmp_path: Path, package: str, status: str
+) -> None:
+    """`from pkg import config` takes `pkg`'s attribute `config` when the package's `__init__` binds
+    one, and imports the module `pkg.config` only otherwise. So `config.get()` is proven to the
+    module's `get` only where `__init__` binds no other `config`: here the module also holds an
+    instance named `config`, whose method the call may reach, and a star import of the module
+    copies that instance over the module's name. A line the parser lost may bind it too."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "pkg/__init__.py": package,
+            "pkg/config.py": (
+                "class Config:\n    def get(self):\n        return 1\n\n\n"
+                "config = Config()\n\n\ndef get():\n    return 0\n"
+            ),
+            "use.py": "from pkg import config\n\n\ndef read():\n    return config.get()\n",
+        },
+    )
+
+    # Act
+    binding = index.binding_of("use.py", 5, "get", "config")
+
+    # Assert
+    assert binding.status.value == status, binding
+    if status == "resolved":
+        assert binding.target == Span("pkg/config.py", 9, 10, "get")
+
+
+@pytest.mark.parametrize(
+    ("statement", "alias"),
+    [
+        ("from pkg import mod, other\n", "mod"),
+        ("from pkg import other, mod\n", "mod"),
+        ("from pkg import (\n    other,\n    mod,\n)\n", "mod"),
+        ("from pkg import other as o, mod\n", "mod"),
+        ("from pkg import other, mod as m\n", "m"),
+        (
+            "from pkg import (\n"
+            + "".join(f"    n{n},\n    n{n} as k{n},\n" for n in range(300))
+            + "    mod,\n)\n",
+            "mod",
+        ),
+    ],
+    ids=[
+        "first",
+        "second",
+        "second over several lines",
+        "after an as-name",
+        "second as a name",
+        "last of 601",
+    ],
+)
+def test_a_from_import_names_a_module_wherever_its_list_holds_it(
+    tmp_path: Path, statement: str, alias: str
+) -> None:
+    """Each name a from-import lists may name a module, not only the first: `mod.run()` calls the
+    `run` of `pkg/mod.py` wherever the statement lists `mod`."""
+    # Arrange
+    module = "def run():\n    return 1\n"
+    use = statement + f"{alias}.run()\n"
+    index = committed(
+        tmp_path, {"pkg/__init__.py": "", "pkg/mod.py": module, "pkg/other.py": module, "use.py": use}
+    )
+
+    # Act
+    binding = index.binding_of("use.py", use.count("\n"), "run", alias)
+
+    # Assert
+    assert (binding.status.value, binding.target) == ("resolved", Span("pkg/mod.py", 1, 2, "run"))
 
 
 def test_a_call_through_a_module_alias_binds_only_where_no_local_name_replaces_it(tmp_path: Path) -> None:
