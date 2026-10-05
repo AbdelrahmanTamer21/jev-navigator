@@ -388,12 +388,10 @@ def _keys_in(code: str) -> list[str]:
 
 
 def _lines_mentioning(index: CodeIndex, opened: CodeSlice, key: str) -> list[TextHit]:
-    whole_key = re.compile(rf"(?<!\w){re.escape(key)}(?!\w)")
     return [
         hit
-        for hit in index.search_text(key, MAX_KEY_HITS + 1)
-        if whole_key.search(hit.text)
-        and not (hit.file == opened.span.file and opened.span.contains(hit.line))
+        for hit in index.search_text(key, MAX_KEY_HITS + 1, whole_word=True)
+        if not (hit.file == opened.span.file and opened.span.contains(hit.line))
     ]
 
 
