@@ -12,6 +12,7 @@ import pytest
 from conftest import BudgetedClient
 from git_repos import commit_files
 from search_deadline import searched_in_child
+from test_find_code import find_with
 
 from jev_navigator.adapters.routes import DREX_INPUT_LIMITS
 from jev_navigator.directives.find_code import (
@@ -316,8 +317,9 @@ def _many_neighbours_with_short_secrets(tmp_path: Path) -> CodeIndex:
     )
 
 
+@pytest.mark.parametrize("entry", ["sync", "async"])
 def test_an_opening_whose_whole_request_fits_only_unmasked_is_split_before_anything_is_refused(
-    tmp_path: Path,
+    tmp_path: Path, entry: str
 ) -> None:
     # Arrange: the whole request and the priority hint each fit unmasked at some caps and not masked
     index = _many_neighbours_with_short_secrets(tmp_path)
@@ -329,7 +331,7 @@ def test_an_opening_whose_whole_request_fits_only_unmasked_is_split_before_anyth
         client = _drex_client()
         budget = SearchBudget(max_steps=1, beam_width=1, neighbours_per_kind=cap)
         judge = Judge(client, masker=ShortSecretMasker())
-        find_code(index, judge, "the order total", [start], moves=CALLEES, budget=budget)
+        find_with(entry)(index, judge, "the order total", [start], moves=CALLEES, budget=budget)
         refused[cap] = client.refusals
 
     # Assert
