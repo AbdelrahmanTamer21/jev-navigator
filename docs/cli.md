@@ -209,8 +209,8 @@ hashes, so a run on a new commit asks again.
 Budget-stopped, cancelled and failed packs also contain `resume.json`.
 The manifest retains the full record even if a pipeline selects only a few output fields. By default
 the manifest, report, journal and resume state hold no source code: places appear as
-`path:start-end` with file hashes, neighbours as `path:line name`, a key mention as `mentions a key
-(path:line)`, and journal requests as hashes. Error messages and the bodies of responses with an error
+`path:start-end` with file hashes, neighbours as `path:line name` (the name of the enclosing symbol
+when navigation parsed that file; a resumed search keeps each name its earlier save wrote, and shows by location a neighbour that an older pack stored with its code, in the manifest, the resume state and the journal it continues), a key mention as `mentions a key (path:line)`, and journal requests as hashes. Error messages and the bodies of responses with an error
 status are kept as they came; an error can quote its request (a 422 validation body often does), so
 `--no-error-text` (or `JEV_NAVIGATOR_ERROR_TEXT=off`) keeps them only as their length and SHA-256, while
 stderr still shows the message. With `--keep-requests` the manifest and report also carry the code, the
@@ -290,7 +290,7 @@ JSON stdout contains `output_directory`, `manifest`, `report`, `trace`, `provide
 (`null` for trace). Progress and requests stay on stderr. See `trace.outcome`, its obligations and
 `unresolved_links` before interpreting coverage; `trace.unavailable_files` names, with the reason, each
 file the index has no facts for (gone or changed on disk, or refused by the parser), and report.md lists
-them. Ctrl-C stops the command with exit 130; an abrupt
+them. `trace.not_indexed_files` names each file or folder the listing left out, such as an ignored one, and report.md counts them by reason and top folder. Ctrl-C stops the command with exit 130; an abrupt
 interruption can leave the journal and answer store without a final manifest. The library also
 offers cooperative cancellation between traversal steps and model batches that writes a partial
 pack.

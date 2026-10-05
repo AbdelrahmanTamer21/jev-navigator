@@ -13,7 +13,6 @@ import sys
 from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
-from functools import partial
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING
@@ -23,7 +22,7 @@ from .cache_root import cache_root
 from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
-from .cli_trace import create_trace_evidence_pack, unavailable_file_lines
+from .cli_trace import create_trace_evidence_pack, not_indexed_lines, unavailable_file_lines
 from .data_root import default_run_folder
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
@@ -52,7 +51,14 @@ from .judgments.store import (
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
-from .run_files import failure_digested, place_label, require_kept_request_text, source_shown, step_shown
+from .run_files import (
+    PlaceLabels,
+    carried_over_journal_line,
+    failure_digested,
+    require_kept_request_text,
+    source_shown,
+    step_shown,
+)
 from .usage_receipt import usage_receipt, usage_report_lines
 
 if TYPE_CHECKING:
@@ -312,10 +318,7 @@ def create_evidence_pack(
         require_kept_request_text(resume_from.resolve() / "journal.jsonl", keep_requests)
     _prepare_output(output)
     if resume_from is not None:
-        for name in ("answers.jsonl", "journal.jsonl"):
-            source = resume_from.resolve() / name
-            if source.is_file():
-                shutil.copyfile(source, output / name)
+        _carry_over_run_logs(resume_from.resolve(), output, keep_requests)
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
@@ -336,7 +339,6 @@ def create_evidence_pack(
             scan_observer=progress.scan,
             fact_cache_dir=fact_cache_dir,
         )
-        journal.place_label = partial(place_label, index)
         if warning := _scope_warning(len(index.files)):
             print(warning, file=sys.stderr)
         checkpoint = SavedSearch(None)
@@ -344,6 +346,8 @@ def create_evidence_pack(
             if previous["source"]["revision"] != index.commit:
                 raise ValueError("repository revision changed since the evidence pack")
             checkpoint = load_resume(resume_from.resolve() / "resume.json", index)
+        labels = PlaceLabels(index, checkpoint.frontier_labels)
+        journal.place_label = labels
         resume = checkpoint.result
         resuming_enumeration = checkpoint.completed is not None
         if resuming_enumeration and checkpoint.check_id != CONTAINS_IMPLEMENTATION.question_id:
@@ -426,6 +430,7 @@ def create_evidence_pack(
                 output / "resume.json",
                 index,
                 result,
+                labels=labels,
                 entry_pending=entry_stop is not None,
                 completed=enumeration.judged if enumeration is not None else None,
                 check_id=CONTAINS_IMPLEMENTATION.question_id if enumeration is not None else None,
@@ -466,12 +471,14 @@ def create_evidence_pack(
             )
         if enumeration is not None:
             manifest["seed_search"] = previous["seed_search"] if resuming_enumeration else manifest["search"]
-            manifest["search"] = _find_all_summary(enumeration, judge.calls, duration_seconds, previous)
+            manifest["search"] = _find_all_summary(
+                enumeration, judge.calls, duration_seconds, previous, index.not_indexed_files
+            )
         failure = enumeration.failure if enumeration is not None and enumeration.failure else result.failure
         if failure is not None:
             manifest["search"]["failure"] = _failure_record(failure, judge, journal)
         if not keep_requests:
-            _drop_code(manifest, index)
+            _drop_code(manifest, labels)
         if not journal.keeps_error_text:
             _digest_history_failures(manifest)
         _write_json(output / "manifest.json", manifest)
@@ -994,6 +1001,22 @@ def _previous_pack(
     return previous
 
 
+def _carry_over_run_logs(source: Path, output: Path, keep_requests: bool) -> None:
+    """The earlier pack's answers and journal continue in this pack. With ``keep_requests`` the journal
+    is copied whole; otherwise each line goes through ``run_files.carried_over_journal_line``."""
+    answers = source / "answers.jsonl"
+    if answers.is_file():
+        shutil.copyfile(answers, output / "answers.jsonl")
+    journal = source / "journal.jsonl"
+    if not journal.is_file():
+        return
+    if keep_requests:
+        shutil.copyfile(journal, output / "journal.jsonl")
+        return
+    with journal.open() as lines, (output / "journal.jsonl").open("w") as kept:
+        kept.writelines(carried_over_journal_line(line) for line in lines)
+
+
 def _default_output(repository: Path) -> Path:
     return default_run_folder(repository, datetime.now(UTC))
 
@@ -1051,7 +1074,7 @@ def _manifest(
             "repository": str(repository),
             "revision": index.commit,
             "prefixes": list(prefixes),
-            "tracked_files": len(index.files),
+            "indexed_files": len(index.files),
         },
         "target": target,
         "requested_starts": list(starts),
@@ -1101,6 +1124,7 @@ def _manifest(
                 "pending": list(result.parser_scans_pending),
             },
             "unavailable_files": {**result.unavailable_files, **(scope_unavailable or {})},
+            "not_indexed_files": index.not_indexed_files,
             "history": [
                 *old_search.get("history", []),
                 *([step.to_json() for step in result.history.steps] if result.history else []),
@@ -1115,42 +1139,44 @@ def _digest_history_failures(manifest: dict) -> None:
         search["history"] = [failure_digested(step) for step in search.get("history", [])]
 
 
-def _drop_code(manifest: dict, index: CodeIndex) -> None:
+def _drop_code(manifest: dict, labels: PlaceLabels) -> None:
     """Leave each place as its location: the code it held stays in the repository."""
-    _drop_entry_code(manifest.get("entry_selection") or {}, index)
+    _drop_entry_code(manifest.get("entry_selection") or {}, labels)
     for name in ("search", "seed_search"):
-        _drop_search_code(manifest.get(name) or {}, index)
+        _drop_search_code(manifest.get(name) or {}, labels)
 
 
-def _drop_entry_code(entry_selection: dict, index: CodeIndex) -> None:
+def _drop_entry_code(entry_selection: dict, labels: PlaceLabels) -> None:
     for decision in entry_selection.get("decisions", []):
         for option in decision.get("options", []):
             option.pop("description", None)
     for candidate in entry_selection.get("candidates", []):
-        candidate["signature"] = place_label(index, candidate["place"])
+        candidate["signature"] = labels(candidate["place"])
 
 
-def _drop_search_code(search: dict, index: CodeIndex) -> None:
+def _drop_search_code(search: dict, labels: PlaceLabels) -> None:
     visits = [visit for group in ("found", "starts", "searched", "unsure") for visit in search.get(group, [])]
     for visit in visits:
         visit.pop("code", None)
         if "place" in visit:
             visit["source"] = source_shown(visit["source"], visit["place"])
     for entry in search.get("not_inspected", []):
-        entry["signature"] = place_label(index, entry["place"])
-    search["history"] = [_step_without_code(step, index) for step in search.get("history", [])]
+        entry["signature"] = labels(entry["place"])
+    search["history"] = [_step_without_code(step, labels) for step in search.get("history", [])]
 
 
-def _step_without_code(step: dict, index: CodeIndex) -> dict:
+def _step_without_code(step: dict, labels: PlaceLabels) -> dict:
     shown = step_shown(step)
     for fetched in shown["fetched"]:
         fetched.pop("code", None)
     for offered in shown["judgments"].get("could_contain", []):
-        offered["signature"] = place_label(index, offered["place"])
+        offered["signature"] = labels(offered["place"])
     return shown
 
 
-def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previous: dict | None) -> dict:
+def _find_all_summary(
+    result: FindAllResult, calls: int, elapsed: float, previous: dict | None, not_indexed: dict[str, str]
+) -> dict:
     old_search = previous["search"] if previous else {}
 
     def answer(value):
@@ -1180,8 +1206,16 @@ def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previou
         "unparsed_files": sorted(result.unparsed_files),
         "unsupported_files": list(result.unsupported_files),
         "unavailable_files": dict(result.unavailable_files),
+        "not_indexed_files": dict(not_indexed),
         "graph": asdict(result.graph),
     }
+
+
+def _not_indexed_section(search: dict) -> list[str]:
+    if not search["not_indexed_files"]:
+        return []
+    listed_in = "`search.not_indexed_files` in `manifest.json`"
+    return ["", "## Files not indexed", "", *not_indexed_lines(search["not_indexed_files"], listed_in)]
 
 
 def _find_all_report(manifest: dict) -> str:
@@ -1214,6 +1248,7 @@ def _find_all_report(manifest: dict) -> str:
         lines.append(f"- {field}: {', '.join(search[field]) or 'none'}")
     lines.append("- unavailable_files:" if search["unavailable_files"] else "- unavailable_files: none")
     lines += unavailable_file_lines(search["unavailable_files"])
+    lines += _not_indexed_section(search)
     lines += ["", "## Matching bodies", ""]
     for value in search["found"]:
         source = value["source"]
@@ -1300,13 +1335,18 @@ def _outcome_summary(search: dict) -> str:
     judged, read, total = search["files_judged"], search["files_read"], search["code_files"]
     seen = f"Jev judged code in {judged} of {total} files"
     if outcome == "nothing_left":
-        return f"{outcome} (nothing left worth opening: {seen}; all {total} were read)"
-    parts = [f"not found: {seen}", f"{read - judged} more were read only to list links"]
-    parts.append(f"{total - read} never reached")
-    if search["unparsed_files"]:
-        parts.append(f"{len(search['unparsed_files'])} parsed only partly")
-    if search["unavailable_files"]:
-        parts.append(f"{len(search['unavailable_files'])} gone from disk")
+        parts = [f"nothing left worth opening: {seen}", f"all {total} were read"]
+    else:
+        parts = [f"not found: {seen}", f"{read - judged} more were read only to list links"]
+        parts.append(f"{total - read} never reached")
+        if search["unparsed_files"]:
+            parts.append(f"{len(search['unparsed_files'])} parsed only partly")
+        if search["unavailable_files"]:
+            parts.append(
+                f"{len(search['unavailable_files'])} unavailable (gone, changed or refused by the parser)"
+            )
+    if search.get("not_indexed_files"):
+        parts.append(f"{len(search['not_indexed_files'])} not indexed, such as ignored")
     return f"{outcome} ({'; '.join(parts)})"
 
 
@@ -1355,6 +1395,9 @@ def _report(manifest: dict) -> str:
         "- Files unavailable (disappeared or changed on disk, or refused by the parser): "
         f"{len(search['unavailable_files'])}.",
         *unavailable_file_lines(search["unavailable_files"]),
+        f"- Files and folders not indexed (ignored, or otherwise left out of the listing): "
+        f"{len(search['not_indexed_files'])}.",
+        *_not_indexed_section(search),
         "",
         "## Opened code",
         "",
