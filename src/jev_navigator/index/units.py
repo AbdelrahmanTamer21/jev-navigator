@@ -235,16 +235,18 @@ def _file_units(index: CodeIndex, file: str, box_chars: int) -> _FileUnits:
 
 
 class _FileUnits:
-    """The units of one file: its inner units, built by each kind of file, and its top-level code,
-    the lines outside every inner unit."""
+    """The units of one file: its inner units, built by each kind of file on first use, and its
+    top-level code, the lines outside every inner unit."""
 
     def __init__(self, index: CodeIndex, file: str, box_chars: int) -> None:
         self._index = index
         self._file = file
         self._box_chars = box_chars
         self._lines = index.lines(file)
-        self.inner = self._inner_units()
-        self.top_level = self._top_level_unit()
+
+    @cached_property
+    def inner(self) -> tuple[Unit, ...]:
+        return self._inner_units()
 
     def _inner_units(self) -> tuple[Unit, ...]:
         raise NotImplementedError
@@ -270,7 +272,8 @@ class _FileUnits:
     def _inner_by_id(self) -> dict[str, Unit]:
         return {unit.id: unit for unit in self.inner}
 
-    def _top_level_unit(self) -> Unit | None:
+    @cached_property
+    def top_level(self) -> Unit | None:
         inside = _lines_of(self.inner)
         outside = (line for line in range(1, len(self._lines) + 1) if line not in inside)
         ranges = tuple(trimmed for run in _runs(outside) if (trimmed := self._without_blank_edges(run)))
@@ -332,10 +335,10 @@ class _SourceFile(_FileUnits):
     """A source file's units: its functions and methods, from the index's spans."""
 
     def __init__(self, index: CodeIndex, file: str, box_chars: int) -> None:
+        super().__init__(index, file, box_chars)
         self._symbols = index.symbols_in(file)
         self._all_functions = frozenset(index.functions_in(file))
         self._decorator_starts = index.decorator_starts_in(file)
-        super().__init__(index, file, box_chars)
 
     def _inner_units(self) -> tuple[Unit, ...]:
         stubs = frozenset(self._index.stubs_in(self._file))
