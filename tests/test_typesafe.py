@@ -296,7 +296,7 @@ def test_split_seed_resumes_completed_neighbours_without_another_paid_request(
 
 
 @pytest.mark.parametrize("status", [400, 401])
-def test_optional_priority_keeps_size_failure_but_propagates_auth_failure(
+def test_optional_priority_keeps_size_failure_but_an_auth_failure_ends_the_search_failed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     status: int,
@@ -328,8 +328,10 @@ def test_optional_priority_keeps_size_failure_but_propagates_auth_failure(
             )
 
         if status == 401:
-            with pytest.raises(TypeSafeAuthenticationError, match="invalid_api_key"):
-                search()
+            result = search()
+            assert result.outcome == Outcome.FAILED
+            assert isinstance(result.failure, TypeSafeAuthenticationError)
+            assert "invalid_api_key" in str(result.failure)
         else:
             result = search()
             opened = next(step for step in result.history.steps if step.operation == "open")
@@ -341,8 +343,8 @@ def test_optional_priority_keeps_size_failure_but_propagates_auth_failure(
         _stop(server)
 
     records = [json.loads(line) for line in journal_path.read_text().splitlines()]
-    cause = "max_tokens_exceeded" if status == 400 else "invalid_api_key"
-    assert any(cause in record.get("error", "") for record in records if record["kind"] == "failure")
+    cause = "InputBudgetExceededError" if status == 400 else "TypeSafeAuthenticationError"
+    assert cause in [record["error_type"] for record in records if record["kind"] == "failure"]
 
 
 @pytest.mark.parametrize("async_checks", [False, True])
@@ -487,7 +489,9 @@ def test_cancel_aborts_an_active_official_sdk_request(monkeypatch: pytest.Monkey
 def test_sigint_returns_the_active_http_place_as_resumable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deliver: str
 ) -> None:
-    """The installed sync search and official SDK share one prompt cancellation boundary."""
+    """The installed sync search and official SDK share one prompt cancellation boundary. The local
+    server never answers until the test ends, so only the cancel can make the search return within
+    seconds of the interrupt; without it, the SDK's own timeout ends the requests after about 30."""
     pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
@@ -526,8 +530,11 @@ def test_sigint_returns_the_active_http_place_as_resumable(
 
     main_thread = threading.get_ident()
 
+    interrupted_at: list[float] = []
+
     def interrupt_when_sent() -> None:
         all_entered.wait()
+        interrupted_at.append(time.monotonic())
         if deliver == "main_thread":
             signal.pthread_kill(main_thread, signal.SIGINT)
         else:
@@ -536,7 +543,6 @@ def test_sigint_returns_the_active_http_place_as_resumable(
     interrupter = threading.Thread(target=interrupt_when_sent)
     interrupter.start()
     try:
-        started = time.monotonic()
         result = find_code(
             index,
             Judge(client),
@@ -546,8 +552,9 @@ def test_sigint_returns_the_active_http_place_as_resumable(
             moves={},
             initial_candidates=[(place, 1.0) for place in places],
         )
+        returned_after = time.monotonic() - interrupted_at[0]
 
-        assert time.monotonic() - started < 5, "the sent requests were left to the 30 s transport timeout"
+        assert returned_after < 5, "the sent requests were left to the 30 s transport timeout"
         assert result.outcome == Outcome.CANCELLED
         assert {entry.place_key for entry in result.not_inspected} == {place.key for place in places}
         assert {entry.reason for entry in result.not_inspected} == {"cancelled"}
@@ -700,7 +707,7 @@ def test_a_max_tokens_exceeded_response_is_typed_and_the_batch_splits_at_the_bou
     records = [json.loads(line) for line in journal_path.read_text().splitlines()]
     failures = [record for record in records if record["kind"] == "failure"]
     responses = [record for record in records if record["kind"] == "response"]
-    assert len(failures) == 1 and "max_tokens_exceeded" in failures[0]["error"]
+    assert len(failures) == 1 and failures[0]["error_type"] == "InputBudgetExceededError"
     assert len(responses) == 2 and all(record["status"] == 200 for record in responses)
     for record in responses:
         assert len(base64.b64decode(record["sent_body_base64"])) <= 40_000
@@ -845,4 +852,4 @@ def test_terminal_sdk_failure_keeps_all_attempt_responses_before_failure(
         served for _, _, _, served in exchanges
     ]
     assert failure["request_id"] == request["request_id"]
-    assert "TypeSafeInternalServerError" in failure["error"]
+    assert failure["error_type"] == "TypeSafeInternalServerError"
