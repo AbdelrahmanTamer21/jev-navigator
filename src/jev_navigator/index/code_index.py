@@ -867,7 +867,7 @@ class CodeIndex:
 
     def _own_names(self, file: str, name: str) -> frozenset[str]:
         """The names of the definitions ``file`` exports as ``name``: the same name in a Python
-        module, and in a script module the ones ``_export_names_in`` gives."""
+        module, and in a script module the ones ``_read_export_names`` gives."""
         return (
             frozenset((name,))
             if language_of(file) == "python"
