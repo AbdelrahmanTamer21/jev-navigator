@@ -14,7 +14,14 @@ from jev_navigator.index import listing, scope_scan, tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.languages import FLOW_LANGUAGE, FLOW_SGCONFIG, has_flow_pragma, language_of
-from jev_navigator.index.scope_scan import OPAQUE_RECEIVER, FileFacts, FileStructure, Unparsed, scan_facts
+from jev_navigator.index.scope_scan import (
+    OPAQUE_RECEIVER,
+    ConstantFunction,
+    FileFacts,
+    FileStructure,
+    Unparsed,
+    scan_facts,
+)
 from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
@@ -509,6 +516,25 @@ def test_the_pragma_scan_stops_at_real_code_even_when_the_head_is_long() -> None
     assert not has_flow_pragma([*long_head, "const a = 1; // @flow"])
     assert not has_flow_pragma([*long_head, "const a = 1;", "// @flow"])
     assert not has_flow_pragma([*long_head, "const a = 1; /* @flow */"])
+
+
+def test_the_functions_a_constant_builds_are_recorded_in_file_order_also_on_one_line(tmp_path: Path) -> None:
+    """Two functions on one line are one span; the scan records each with its own keys, in the order
+    the file holds them, so the facts are the same on every run."""
+    # Arrange
+    (tmp_path / "api.ts").write_text(
+        "export const api = router({ list: procedure.query(() => 1), remove: procedure.query(() => 2) });\n"
+    )
+
+    # Act
+    structure = scan_facts(read_files(tmp_path, ["api.ts"]), tmp_path, Unparsed())["api.ts"].structure
+
+    # Assert
+    (function,) = structure.functions
+    assert structure.constant_functions == (
+        ConstantFunction("api", ("list",), function),
+        ConstantFunction("api", ("remove",), function),
+    )
 
 
 def test_a_method_on_a_one_line_class_is_named_and_counted_itself(tmp_path: Path) -> None:

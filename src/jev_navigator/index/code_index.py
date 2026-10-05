@@ -419,14 +419,16 @@ class CodeIndex:
 
     def constant_function_names(self, file: str) -> dict[Span, str]:
         """The name each function a module-level constant's call holds goes by (see
-        ``ConstantFunction``): the constant's, then the keys around it, `userRouter.list`. Functions
-        that would share one name are told apart by their first line, `pair.<anonymous:4>`."""
-        functions = self._file_structure(file).constant_functions
-        names = [".".join((function.constant, *function.keys)) for function in functions]
-        shared = {name for name in names if names.count(name) > 1}
+        ``ConstantFunction``): the constant's, then the keys around it, `userRouter.list`. Functions on
+        one line share a span, which goes by the first one's name. Functions that would share one
+        name are told apart by their first line, `pair.<anonymous:4>`."""
+        names: dict[Span, str] = {}
+        for function in self._file_structure(file).constant_functions:
+            names.setdefault(function.span, ".".join((function.constant, *function.keys)))
+        counts = Counter(names.values())
         return {
-            function.span: f"{name}.<anonymous:{function.span.start}>" if name in shared else name
-            for function, name in zip(functions, names, strict=True)
+            span: f"{name}.<anonymous:{span.start}>" if counts[name] > 1 else name
+            for span, name in names.items()
         }
 
     def declarations_in(self, file: str) -> tuple[Span, ...]:

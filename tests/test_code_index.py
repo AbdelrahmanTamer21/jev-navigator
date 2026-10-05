@@ -1115,6 +1115,26 @@ def test_a_function_a_module_level_constant_builds_goes_by_the_constant_and_its_
     ]
 
 
+def test_functions_a_constant_builds_on_one_line_go_by_the_first_and_list_every_constant(
+    tmp_path: Path,
+) -> None:
+    """Spans are lines, so functions on one line are one span with one name, the first function's:
+    `api.list`, never `api.remove`. Each constant on such a line is still a name of the module."""
+    # Arrange
+    (tmp_path / "api.ts").write_text(
+        "export const api = router({ list: procedure.query(() => 1), remove: procedure.query(() => 2) });\n"
+        "export const first = wrap(() => 1), second = wrap(() => 2);\n"
+    )
+    index = CodeIndex(tmp_path, ("api.ts",), fact_cache_dir=tmp_path / "cache")
+
+    # Act
+    names = sorted((span.start, name) for span, name in index.constant_function_names("api.ts").items())
+
+    # Assert
+    assert names == [(1, "api.list"), (2, "first")]
+    assert index.module_names("api.ts") == ("api", "first", "second")
+
+
 def test_a_rendered_component_is_a_call_and_a_platform_element_is_not(tmp_path: Path) -> None:
     (tmp_path / "notices.tsx").write_text("export function LoadFailed() {\n  return <p>Not loaded</p>;\n}\n")
     (tmp_path / "basket.tsx").write_text(

@@ -615,14 +615,15 @@ def _constant_functions(
     keys: list[tuple[int, int, str]],
 ) -> tuple[ConstantFunction, ...]:
     """Each candidate with the constant built by a call whose module-level declaration holds it,
-    and the keys of the pairs around it, outer first."""
+    and the keys of the pairs around it, outer first, in file order: functions on one line share a
+    span, and each is recorded."""
     ordered_owners = sorted(owners)
-    found = set()
-    for start, end, span in ranges:
+    found: dict[ConstantFunction, None] = {}
+    for start, end, span in sorted(ranges, key=lambda entry: entry[:2]):
         constant = _constant_holding(start, declarations, ordered_owners) if span in candidates else None
         if constant is not None:
-            found.add(ConstantFunction(constant, _keys_around(start, end, keys), span))
-    return tuple(sorted(found, key=lambda function: function.span))
+            found[ConstantFunction(constant, _keys_around(start, end, keys), span)] = None
+    return tuple(found)
 
 
 def _constant_holding(
