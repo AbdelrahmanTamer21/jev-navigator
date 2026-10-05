@@ -32,8 +32,7 @@ from functools import cached_property
 from ..judgments.questions import serialized_chars
 from .code_index import CodeIndex
 from .imports import import_lines, without_comments
-from .languages import language_of
-from .prisma_schema import SCHEMA_LANGUAGE, is_schema_file, schema_blocks
+from .languages import is_schema_file, language_of, language_read
 from .scope import is_test_file
 from .spans import Span, holder_of
 
@@ -129,17 +128,12 @@ def list_units(index: CodeIndex, files: Sequence[str], *, box_chars: int) -> Uni
     in_scope = frozenset(index.files)
     not_indexed = index.not_indexed_files
     unlisted = {file: not_indexed.get(file, OUTSIDE_SCOPE) for file in files if file not in in_scope}
-    read_files = tuple(file for file in files if file in in_scope and _has_units(file))
+    read_files = tuple(file for file in files if file in in_scope and language_read(file))
     index.functions_in_files(tuple(file for file in read_files if language_of(file)))
     units = tuple(unit for file in read_files for unit in _file_units(index, file, box_chars).listed)
-    unlisted |= {file: UNSUPPORTED_LANGUAGE for file in files if file in in_scope and not _has_units(file)}
+    unlisted |= {file: UNSUPPORTED_LANGUAGE for file in files if file in in_scope and not language_read(file)}
     unlisted |= {file: reason for file, reason in index.unavailable_files.items() if file in files}
     return UnitListing(units, unlisted)
-
-
-def _has_units(file: str) -> bool:
-    """Whether JVN reads ``file``'s units: a source file its parser reads, or a Prisma schema."""
-    return language_of(file) is not None or is_schema_file(file)
 
 
 @dataclass(frozen=True)
@@ -242,9 +236,7 @@ def _file_units(index: CodeIndex, file: str, box_chars: int) -> _FileUnits:
 
 class _FileUnits:
     """The units of one file: its inner units, built by each kind of file, and its top-level code,
-    the lines outside every inner unit. ``_language`` is the language its units name."""
-
-    _language: str
+    the lines outside every inner unit."""
 
     def __init__(self, index: CodeIndex, file: str, box_chars: int) -> None:
         self._index = index
@@ -314,7 +306,7 @@ class _FileUnits:
             ranges,
             kind,
             symbol,
-            self._language,
+            language_read(self._file) or "",
             is_test_file(self._file),
             self._index.read_slice(Span(self._file, *ranges[0])).commit,
             _sha256(text),
@@ -343,7 +335,6 @@ class _SourceFile(_FileUnits):
         self._symbols = index.symbols_in(file)
         self._all_functions = frozenset(index.functions_in(file))
         self._decorator_starts = index.decorator_starts_in(file)
-        self._language = language_of(file) or ""
         super().__init__(index, file, box_chars)
 
     def _inner_units(self) -> tuple[Unit, ...]:
@@ -374,8 +365,6 @@ class _SchemaFile(_FileUnits):
     """A Prisma schema's units: one per model, view, enum and composite type block, named by its
     keyword and name (``model Website``)."""
 
-    _language = SCHEMA_LANGUAGE
-
     def _inner_units(self) -> tuple[Unit, ...]:
         return tuple(
             self._unit(
@@ -384,7 +373,7 @@ class _SchemaFile(_FileUnits):
                 UnitKind.SCHEMA_BLOCK,
                 f"{block.keyword} {block.name}",
             )
-            for block in schema_blocks(self._lines)
+            for block in self._index.schema_blocks_in(self._file)
         )
 
 
@@ -437,7 +426,7 @@ class _AnchorResolver:
     def _file_problem(self, file: str) -> str:
         if file not in self._index.files:
             return f"{file} is not in scope"
-        if not _has_units(file):
+        if not language_read(file):
             return UNSUPPORTED_LANGUAGE
         return ""
 

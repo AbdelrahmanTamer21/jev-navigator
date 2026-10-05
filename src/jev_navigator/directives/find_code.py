@@ -38,7 +38,7 @@ from ..history import (
     judge_history_async,
 )
 from ..index.code_index import CodeIndex
-from ..index.languages import language_of
+from ..index.languages import language_read
 from ..index.spans import CodeSlice
 from ..judgments.answers import AnswerSource, JevResponse, NoulAnswer, answered_by, scored_by
 from ..judgments.client import InputBudgetExceededError, InputLimits
@@ -1285,7 +1285,7 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
     completed_scans = index.parser_scans_completed
     pending_scans = index.parser_scans_pending
     unavailable = index.unavailable_files
-    code_files = {file for file in index.available_files if language_of(file)}
+    code_files = {file for file in index.available_files if language_read(file)}
     judged_files = code_files & _opened_files(search)
     read_files = judged_files | (code_files & index.parsed_files)
     search.history.append(

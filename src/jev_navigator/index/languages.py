@@ -380,6 +380,9 @@ STUB_RULES = {
                   - {kind: call, has: {field: function, kind: identifier, regex: ^NotImplementedError$}}""",
 }
 
+SCHEMA_SUFFIX = ".prisma"
+SCHEMA_LANGUAGE = "prisma"
+
 # The installed ast-grep supports tsx but not Flow. Route marked files through tsx;
 # unsupported Flow constructs remain visible through ERROR nodes.
 FLOW_LANGUAGE = "flow"
@@ -414,9 +417,24 @@ def sgconfig_of(language: str) -> str | None:
 def language_of(path: str) -> str | None:
     """The language of ``path``'s suffix, read from the string because the index asks for every
     file many times: a name's last dot after its first character starts the suffix."""
+    return LANGUAGE_BY_SUFFIX.get(_suffix(path))
+
+
+def is_schema_file(path: str) -> bool:
+    """A Prisma schema, which no parser grammar reads: ``index.prisma_schema`` scans its blocks."""
+    return _suffix(path) == SCHEMA_SUFFIX
+
+
+def language_read(path: str) -> str | None:
+    """The language JVN reads ``path`` in: its parser's (``language_of``), or ``prisma`` for a
+    Prisma schema; None for a file JVN does not read."""
+    return language_of(path) or (SCHEMA_LANGUAGE if is_schema_file(path) else None)
+
+
+def _suffix(path: str) -> str:
     name = path.rpartition("/")[2]
     dot = name.rfind(".")
-    return LANGUAGE_BY_SUFFIX.get(name[dot:]) if dot > 0 else None
+    return name[dot:] if dot > 0 else ""
 
 
 def parse_language(path: str, content: bytes) -> str | None:

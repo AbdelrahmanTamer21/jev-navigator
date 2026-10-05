@@ -13,10 +13,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 
-SCHEMA_SUFFIX = ".prisma"
-SCHEMA_LANGUAGE = "prisma"
 SHAPE_KEYWORDS = frozenset({"model", "view", "enum", "type"})
 QUERIED_KEYWORDS = frozenset({"model", "view"})
 
@@ -42,9 +39,12 @@ class SchemaBlock:
             return None
         return self.name[0].lower() + self.name[1:]
 
-
-def is_schema_file(path: str) -> bool:
-    return PurePosixPath(path).suffix == SCHEMA_SUFFIX
+    @property
+    def client_call_text(self) -> str | None:
+        """The text every Prisma Client call on this model holds, its accessor between dots:
+        ``.website.`` in ``prisma.client.website.update(...)``. None when it is never queried."""
+        accessor = self.client_accessor
+        return None if accessor is None else f".{accessor}."
 
 
 def schema_blocks(lines: Sequence[str]) -> tuple[SchemaBlock, ...]:

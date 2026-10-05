@@ -36,11 +36,13 @@ from .imports import (
     resolve_import,
 )
 from .languages import (
+    is_schema_file,
     language_of,
 )
 from .memo import memoized
 from .name_table import CALL, DEFINITION_KINDS, REFERENCE, FileEntry, NameRow, NameTable, git_blob_id
 from .packages import Packages
+from .prisma_schema import SchemaBlock, schema_blocks
 from .scope_scan import (
     CallMatch,
     FileFacts,
@@ -115,6 +117,7 @@ class CodeIndex:
         _require_inside(self.root, self.files)
         self._scope = frozenset(self.files)
         self._code_files = tuple(path for path in self.files if language_of(path))
+        self.schema_files = tuple(path for path in self.files if is_schema_file(path))
         self._unavailable: dict[str, str] = {}
         self._refused: dict[str, str] = {}
         self._not_indexed = dict(not_indexed or {})
@@ -398,6 +401,12 @@ class CodeIndex:
     def top_level_symbols(self, file: str) -> tuple[Span, ...]:
         """The functions and classes no other function or class of the file contains, in file order."""
         return tuple(sorted(_outermost(self.symbols_in(file)), key=lambda span: (span.start, -span.end)))
+
+    @memoized
+    def schema_blocks_in(self, file: str) -> tuple[SchemaBlock, ...]:
+        """The model, view, enum and type blocks of a Prisma schema in scope; none for any other file."""
+        self._require_in_scope(file)
+        return schema_blocks(self._lines_of(file)) if is_schema_file(file) else ()
 
     def declarations_in(self, file: str) -> tuple[Span, ...]:
         """Constants, assignments, types, interfaces and enums at module level or directly in a
