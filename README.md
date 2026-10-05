@@ -557,12 +557,14 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `file` names the file of the strings inside it. An upper-case environment assignment is a value wherever it stands on a
   shell, Makefile or CI line (`run: API_TOKEN=... npm test`), unless it is a usage placeholder
   (`KEY=...`, `KEY=<credential>`). `is_high_entropy`, `HIGH_ENTROPY_MIN_CHARS` and
-  `TOKEN_CHARACTER_CLASS` are public, for callers that judge a lone token. A reference stays code: an identifier, dotted
+  `TOKEN_CHARACTER_CLASS` are public, for callers that judge a lone token. A secret flag on a command line
+  (`psql --password=...`, `deploy --api-token ...`) and a Stripe secret key anywhere are values too. A reference stays code: an identifier, dotted
   path, call, a whole `${...}` or `$(...)`, or `$NAME` outside single quotes, so
   `secret: process.env.AUTH_SECRET` reaches Jev unchanged. Every rule scans in time linear in the line
-  length. Masking works by content: a value of at least 8 characters hidden in one place is hidden
-  everywhere in the request, for example where a relation text or another candidate quotes it; a
-  shorter value is masked only where it stands. In a code file a plain identifier under a secret-named key
+  length. Masking works by content: a value hidden in one place is hidden everywhere
+  in the request, for example where a relation text or another candidate quotes it; a value of 8 or
+  more characters wherever it appears, a shorter one as a whole word, and a short number only where it
+  stands. In a code file a plain identifier under a secret-named key
   (`{ password: changeme }`) reads as code; in YAML it is a value.
   The complete candidate set is masked once, before packing, so copied values stay hidden across
   batches; the final scan still runs on every request before it is sent.

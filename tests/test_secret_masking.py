@@ -179,6 +179,7 @@ CODE_REFERENCES = [
     "MAX_TOKENS_MARKER = 'max_tokens_exceeded'",
     " *   REQUESTY_API_KEY=... REQUESTY_RECEIPT=/absolute/path/receipt.json \\",
     "const USAGE = 'Usage: REQUESTY_API_KEY=<credential> '",
+    "  ? `never cached (${row.prefixTokens ?? '?'}-token prefix, likely below)`",
 ]
 
 
@@ -223,12 +224,12 @@ def test_only_the_value_is_masked_when_the_key_has_the_same_text() -> None:
     assert masked == 'password: "[MASKED]"\nexport const password = "[MASKED]"'
 
 
-def test_a_short_value_is_masked_where_it_stands_and_nowhere_else_in_the_request() -> None:
+def test_a_short_value_is_masked_wherever_it_stands_as_a_whole_word() -> None:
     # Arrange
     state = {
         "assignment": "password = 'test'",
         "path": "src/test/login_test.py",
-        "test": "a key that names the short value",
+        "note": "a test of the short value",
     }
 
     # Act
@@ -238,10 +239,10 @@ def test_a_short_value_is_masked_where_it_stands_and_nowhere_else_in_the_request
     # Assert
     assert masked == {
         "assignment": "password = '[MASKED]'",
-        "path": "src/test/login_test.py",
-        "test": "a key that names the short value",
+        "path": "src/[MASKED]/login_test.py",
+        "note": "a [MASKED] of the short value",
     }
-    assert values == frozenset()
+    assert values == frozenset({"test"})
 
 
 def test_a_long_bare_value_is_masked_everywhere_in_the_request() -> None:
@@ -502,3 +503,76 @@ def test_the_randomness_check_is_public_and_names_its_token_shape() -> None:
     assert random_enough and not is_high_entropy("a" * 24)
     assert len(token) >= HIGH_ENTROPY_MIN_CHARS
     assert re.fullmatch(f"{TOKEN_CHARACTER_CLASS}+", token)
+
+
+STRIPE_LIVE = "sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc"
+
+
+@pytest.mark.parametrize(
+    ("file", "code", "secret"),
+    [
+        (
+            "tests/test_x.py",
+            'items = [{"code": \'x = 1\\npassword = "hunter2hunter2"\'}]\n',
+            "hunter2hunter2",
+        ),
+        (
+            "scripts/env.mjs",
+            f'  const lines = [\n    "STRIPE_SECRET_KEY={STRIPE_LIVE}",\n  ];\n',
+            STRIPE_LIVE,
+        ),
+        ("app/pay.py", f"# live key {STRIPE_LIVE}\n", STRIPE_LIVE),
+        ("scripts/env.mjs", '  const lines = [\n    "DB_PASSWORD=hunter2hunter2",\n  ];\n', "hunter2hunter2"),
+        ("Makefile", "\tdocker run -e DB_PASSWORD=hunter2hunter2 app\n", "hunter2hunter2"),
+        ("scripts/run.sh", "psql --password=hunter2hunter2 -h db\n", "hunter2hunter2"),
+        ("scripts/run.sh", "deploy --api-token hunter2hunter2 --region eu\n", "hunter2hunter2"),
+        ("scripts/run.sh", "deploy \\\n--api-token hunter2hunter2\n", "hunter2hunter2"),
+    ],
+)
+def test_a_secret_the_base_masker_left_in_code_is_masked(file: str, code: str, secret: str) -> None:
+    # Act
+    masked_state, _, _ = mask_request({"slice": {"file": file, "code": code}}, {}, SecretMasker())
+
+    # Assert
+    assert secret not in masked_state["slice"]["code"]
+
+
+def test_a_short_value_masked_at_its_key_is_masked_wherever_it_stands_as_a_word() -> None:
+    # Arrange
+    state = {
+        "slice": {"file": "app/settings.py", "code": 'DB_PASSWORD_PROD = "hunter2"\n'},
+        "candidates": [{"file": "app/db.py", "code": 'connect(user, "hunter2")\nlabel = "hunter2x"\n'}],
+    }
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert masked_state["candidates"][0]["code"] == 'connect(user, "[MASKED]")\nlabel = "hunter2x"\n'
+
+
+def test_a_short_number_masked_at_its_key_stays_elsewhere() -> None:
+    # Arrange
+    state = {
+        "slice": {"file": "app/settings.ts", "code": 'CREDENTIAL_KEY_VERSION: "1.5",\n'},
+        "other": {"file": "app/math.ts", "code": "const ratio = 1.5;\n"},
+    }
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert masked_state["other"]["code"] == "const ratio = 1.5;\n"
+
+
+def test_a_short_masked_value_inside_a_longer_word_does_not_refuse_the_request() -> None:
+    # Arrange
+    state, questions, masked = mask_request(
+        {"slice": {"file": "app/a.py", "code": 'db_pass = "pw"\n'}, "pwd_hint": "x"}, {}, SecretMasker()
+    )
+
+    # Act
+    refuse_if_secret(state, questions, SecretScanner(), masked)
+
+    # Assert
+    assert "pw" in masked

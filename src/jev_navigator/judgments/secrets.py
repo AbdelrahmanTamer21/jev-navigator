@@ -23,7 +23,7 @@ HIGH_ENTROPY_BITS_PER_CHAR = 4.0
 HIGH_ENTROPY_MIN_CHARS = 20
 TOKEN_CHARACTER_CLASS = r"[A-Za-z0-9+/=_\-]"
 
-_KEY = r"(?<![\w$.-])(?P<key>[A-Za-z_$][\w$.-]*+)"
+_KEY = r"(?:(?<![\w$.\\-])|(?<=\\[nrt]))(?P<key>[A-Za-z_$][\w$.-]*+)"
 _SEPARATOR = r"[\"']?\s*[:=]\s*"
 _PRIVATE_KEY_BLOCK = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----|\Z)", re.S
@@ -38,6 +38,7 @@ _TOKEN_SHAPES = (
     re.compile(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_\-]{20,}\b"),
     re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"),
+    re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b"),
     re.compile(r"\$2[aby]?\$\d{2}\$[./A-Za-z0-9]{53}"),
     re.compile(r"\$argon2(?:id|i|d)\$v=\d+\$m=\d+,t=\d+,p=\d+\$[A-Za-z0-9+/]+\$[A-Za-z0-9+/]+"),
 )
@@ -47,9 +48,12 @@ _URL_PASSWORD = re.compile(
 )
 _QUERY_VALUE = re.compile(r"[?&](?P<key>[A-Za-z_][\w.-]*+)=(?P<value>[^&\s#'\"`]++)")
 _ENV_FILE_VALUE = re.compile(
-    r"(?:^|(?<=[ \t;&|]))(?:export[ \t]+)?(?P<key>[A-Z_][A-Z0-9_]*+)="
-    r"(?P<value>[^\s\"'`#$()\[\]{}][^\s\"'`#()\[\]{}]*+)(?=[ \t;&|]|$)",
+    r"(?:^|(?<=[ \t;&|\"'`])|(?<=\\[nrt]))(?:export[ \t]+)?(?P<key>[A-Z_][A-Z0-9_]*+)="
+    r"(?P<value>[^\s\"'`#$()\[\]{}\\][^\s\"'`#()\[\]{}\\]*+)(?=[ \t;&|\"'`\\]|$)",
     re.M,
+)
+_CLI_SECRET_FLAG = re.compile(
+    r"(?:^|(?<=\s))--?(?P<key>[A-Za-z][\w-]*+)(?:=|[ \t]++)(?P<value>[^\s\"'`=-][^\s\"'`]*+)"
 )
 _USAGE_PLACEHOLDER = re.compile(r"\.\.\.|…|<[^<>]*>|\*+|x+", re.I)
 _CONFIG_SCALAR = re.compile(
@@ -57,6 +61,7 @@ _CONFIG_SCALAR = re.compile(
     r"(?P<value>[^\s#\"'`{\[|>&*!](?:[^\n#]*[^\s#])?)[ \t]*+(?:#[^\n]*)?$",
     re.M,
 )
+_SHORT_NUMBER = re.compile(r"[\d.,:_+-]{1,7}")
 _CONFIG_SUFFIXES = (".yml", ".yaml", ".env", ".ini", ".cfg", ".conf", ".properties", ".toml", ".dockerfile")
 _CONFIG_NON_VALUES = frozenset({"null", "~", "true", "false", "yes", "no", "on", "off"})
 _CI_EXPRESSION = re.compile(r"\$\{\{[^{}]*\}\}")
@@ -153,8 +158,9 @@ class SecretMasker:
     secret-named calls, and high-entropy quoted values in assignments. A value that is a reference
     (an identifier, dotted path, call, env lookup or interpolation) is code and stays.
 
-    ``masked_values`` lists only values of at least ``BY_CONTENT_MIN_CHARS`` characters: a shorter
-    value is masked where it stands, because hiding a short word everywhere would blank ordinary code.
+    ``masked_values`` lists every masked value but a short number (``"1.5"``, ``"0"``), so request masking
+    hides each copy elsewhere too: anywhere for a value of ``BY_CONTENT_MIN_CHARS`` or more characters,
+    as a whole word for a shorter one (see ``_copy_pattern``).
 
     ``path`` is the file the text comes from. In a config file, or in text from no file, an unquoted value
     under a secret key is a value (``POSTGRES_PASSWORD: example``); in code it stays (``token: str``)."""
@@ -163,7 +169,7 @@ class SecretMasker:
         return _hide_secrets(text, path)[0]
 
     def masked_values(self, text: str, path: str | None = None) -> list[str]:
-        return [value for value in _hide_secrets(text, path)[1] if len(value) >= BY_CONTENT_MIN_CHARS]
+        return [value for value in _hide_secrets(text, path)[1] if not _SHORT_NUMBER.fullmatch(value)]
 
 
 @dataclass(frozen=True)
@@ -195,13 +201,13 @@ def masked_values(value: object, masker: Masker) -> frozenset[str]:
 def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> object:
     """Masks every string by the masker's rules, then hides each of ``values`` wherever it still
     appears. Keys are left as they are; ``refuse_if_secret`` refuses a request with one in a key."""
-    longest_first = sorted(values - {MASK}, key=len, reverse=True)
+    copies = [_copy_pattern(secret) for secret in sorted(values - {MASK}, key=len, reverse=True)]
 
     @cache
     def hide(text: str, path: str | None) -> str:
         text = masker.mask(text, path)
-        for secret in longest_first:
-            text = text.replace(secret, MASK)
+        for copy in copies:
+            text = copy.sub(MASK, text)
         return text
 
     return _each_string(value, hide)
@@ -220,13 +226,22 @@ def refuse_if_secret(
     """Refuses when a value masked elsewhere is still in the request (it can only sit in a key), or
     when the scanner finds a secret."""
     texts = _strings(state) + _strings(questions)
-    if any(value in text for text, _ in texts for value in masked):
+    copies = [_copy_pattern(value) for value in masked - {MASK}]
+    if any(copy.search(text) for text, _ in texts for copy in copies):
         raise SecretInRequestError("a masked value is still in the request, in a key; nothing was sent")
     if scanner is None:
         return
     for text, path in texts:
         if scanner.findings(text, path):
             raise SecretInRequestError("the final scan found a secret in the request; nothing was sent")
+
+
+def _copy_pattern(value: str) -> re.Pattern[str]:
+    """Where a masked value's copies stand: anywhere for a value of ``BY_CONTENT_MIN_CHARS`` or more
+    characters, and as a whole word for a shorter one, so ``hunter2`` is hidden but ``hunter2x`` stays."""
+    if len(value) >= BY_CONTENT_MIN_CHARS:
+        return re.compile(re.escape(value))
+    return re.compile(rf"(?<![\w$]){re.escape(value)}(?![\w$])")
 
 
 def _each_string(value: object, change: Callable[[str, str | None], str], path: str | None = None) -> object:
@@ -479,6 +494,7 @@ _RULES = (
     _matches(_URL_PASSWORD, _url_password),
     _matches(_QUERY_VALUE, _query_secret),
     _matches(_ENV_FILE_VALUE, _keyed_value_hides(_env_file_literal)),
+    _matches(_CLI_SECRET_FLAG, _keyed_value_hides(_env_file_literal)),
     _matches(_QUOTED_SECRET_VALUE, _keyed_value_hides(_quoted_literal)),
     _matches(_LITERAL_FALLBACK, _keyed_value_hides(_quoted_literal)),
     _call_literal_spans,
