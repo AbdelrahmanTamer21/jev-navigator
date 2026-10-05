@@ -348,7 +348,11 @@ the location `path:start-end`; top-level code is `path:top`. `list_units` lists 
 methods no other function holds, the blocks of each schema, and each file's top-level code, so every
 line of code sits in a listed unit once: a nested function or callback is inside its holder's text and is not listed. A unit's
 `symbol` names every holder, `OrderService.place`, and names an anonymous function by the line it
-starts on, `<anonymous:4>`. `content_sha256` hashes the unit's own text, so
+starts on, `<anonymous:4>`. A function a module-level constant's call builds goes by the name the
+entry text gives it, `CodeIndex.constant_function_names`: `run` for `export const run =
+Effect.fn("run")(function* ...)` and `userRouter.list` for a router's procedure, so a callback inside
+one is `run.<anonymous:2>`. A callback that builds data, as in `items.map((item) => item.id)` or
+`new Map(...)`, gets no constant's name. `content_sha256` hashes the unit's own text, so
 an unchanged function keeps its hash when other lines of its file change. The record holds locations
 and hashes, never code; its `ranges` are its (start, end) line pairs in file order, one for a
 function and one per run for top-level code. `read_ranges(index, file, ranges)` is the one reader of

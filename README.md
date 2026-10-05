@@ -201,6 +201,15 @@ file lives elsewhere. Use `--json` on its own; put any search options inside the
 Use `--prefix app/` to narrow the scope, `--start app/orders.py:42` to supply a known caller or entry
 point, and `--out /path/to/new-pack` to select the result directory. Prefixes and starts are repeatable.
 Without a start, `jvn` uses typed Jev judgments to select entry candidates from the source inventory.
+Each file option shows the file's first doc line and up to eight names: the functions and classes the
+module names or exports through CommonJS and each module-level constant whose call or `new` builds a
+function, as `run` in `export const run = Effect.fn("run")(function* ...)` or `userRouter` for a
+router, but not one that builds data through a callback, such as `items.map((item) => item.id)` or
+`new Map(...)`, then each function of an object a module-level variable holds,
+as `api.list`, each function of an object a module-level call or `new` is passed, as `errorFormatter` in
+`create({ errorFormatter() {} })`, and each member of a namespace, in file order within each group. A
+file holding none of these, such as one of types only or one whose functions are all callbacks, shows
+no names.
 
 Every live call is a paid request, so `--max-calls` defaults to 24 for the whole run, choosing an entry
 point included; a search that reaches it ends with outcome `budget` and a resumable `not_inspected`

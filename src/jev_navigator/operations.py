@@ -89,7 +89,7 @@ def code_described_by_comment(index: CodeIndex, file: str, line: int) -> CodeSli
 
 def callers_of_file(index: CodeIndex, path: str) -> tuple[CallSite, ...]:
     """Every call from another file to a named function defined in ``path``, deduplicated."""
-    names = {span.name for span in index.functions_in(path) if not span.name.startswith("<")}
+    names = {span.name for span in index.functions_in(path) if span.is_named}
     sites = {site for name in sorted(names) for site in index.find_callers(name) if site.file != path}
     return tuple(sorted(sites, key=lambda site: (site.file, site.line)))
 
@@ -405,7 +405,7 @@ def _named_functions(index: CodeIndex) -> Iterable[Span]:
     for file in index.files:
         if language_of(file) is None:
             continue
-        yield from (span for span in index.functions_in(file) if not span.name.startswith("<"))
+        yield from (span for span in index.functions_in(file) if span.is_named)
 
 
 def _similarity(subject: Span, subject_calls: set[str], candidate: Span, candidate_calls: set[str]) -> float:
