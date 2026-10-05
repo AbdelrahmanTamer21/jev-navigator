@@ -11,11 +11,12 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
 
-from ..index.bindings import Binding
+from ..index.bindings import Binding, falls_inside
 from ..index.code_index import CodeIndex
 from ..index.scope import is_test_file
 from ..index.spans import CallEdge, CodeSlice, Span, TextHit
 from ..judgments.relations import key_mention
+from .shown import LINE_CUT_MARK
 
 MAX_DEFINITION_LINES = 120
 REST_OF_FILE_LINES = 40
@@ -27,9 +28,11 @@ _ENVIRONMENT_READ = re.compile(
 _QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{5,79})["'`]""")
 _KEY_SHAPE = re.compile(r"[._:/-]")
 _WINDOW_KEY_LINES = re.compile(r"(\d+)~\d+")
+_PLACE_LINES = re.compile(r":\d+(?:-\d+)? ")
+_WINDOW_LINE = re.compile(r"line \d+ ")
 MAX_KEY_HITS = 30
 _PASSED_ON_ROLES = frozenset(
-    {"argument", "decorator", "collection", "assignment", "export", "return", "receiver", "type"}
+    {"argument", "decorator", "collection", "assignment", "export", "return", "receiver", "type", "base"}
 )
 
 
@@ -133,6 +136,31 @@ def _range_signature(index: CodeIndex, span: Span, relation: str) -> str:
         next((line.strip() for line in lines if line.strip()), "") if code_line is None else lines[code_line]
     )
     return f"{span.key} `{quoted.strip()}` ({relation})"
+
+
+def located_file(signature: str) -> str | None:
+    """The file a place's signature names, parsed by the grammar the signature builders write: the
+    file, ``:lines`` and a space at each separator, then the place's text (see ``_is_place_text``).
+    None when no split fits, and when more than one does (a path or a quoted code line that holds a
+    separator itself), so a caller that needs the file reads such a signature as config."""
+    files: list[str] = []
+    for separator in _PLACE_LINES.finditer(signature):
+        if separator.start() and _is_place_text(signature[separator.end() :]):
+            files.append(signature[: separator.start()])
+            if len(files) > 1:
+                return None
+    return files[0] if files else None
+
+
+def _is_place_text(text: str) -> bool:
+    """A place's text: an optional ``line N `` then quoted code, ending with the closing quote or a
+    parenthesised relation, or anywhere when ``cut_long_line`` cut it."""
+    body = text.removesuffix(LINE_CUT_MARK)
+    window_line = _WINDOW_LINE.match(body)
+    quoted = body[window_line.end() :] if window_line else body
+    if not quoted.startswith("`"):
+        return False
+    return body != text or quoted.endswith("`") or ("` (" in quoted and quoted.endswith(")"))
 
 
 def first_code_line(lines: Sequence[str], file: str) -> int | None:
@@ -269,7 +297,7 @@ def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     if not _is_named(opened.span):
         return []
     sites = sorted(
-        (site for site in index.find_callers(opened.span.name) if _may_reach(site.binding, opened.span)),
+        (site for site in index.find_callers(opened.span.name) if falls_inside(site.binding, opened.span)),
         key=lambda site: is_test_file(site.file),
     )
     return [
@@ -304,7 +332,7 @@ def _referenced_by(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     return [
         place_for_line(index, ref.file, ref.line, f"refers to {name} as {ref.role}", binding=ref.binding)
         for ref in index.find_references(name)
-        if _may_reach(ref.binding, opened.span)
+        if falls_inside(ref.binding, opened.span)
     ]
 
 
@@ -351,13 +379,6 @@ def _imported(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     return places
 
 
-def _may_reach(binding: Binding | None, span: Span) -> bool:
-    """False when ``binding`` names a definition other than ``span``. ``span`` may be a window inside
-    the class or declaration it is named after, so a target overlapping it still counts."""
-    target = None if binding is None else binding.target
-    return target is None or (target.file == span.file and _overlaps(target, span))
-
-
 def _with_binding(relation: str, binding: Binding | None) -> str:
     """A name-match link is marked, so neither Jev nor the result treats it as a proven call."""
     if binding is None or binding.proven:
@@ -381,14 +402,10 @@ def _same_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
         named = [span for span in containers if _is_named(span)]
         container = min(named or containers, key=Span.size, default=None)
     outermost = [span for span in functions if not any(_encloses(other, span) for other in functions)]
-    others = [span for span in outermost if not _overlaps(span, opened.span)]
+    others = [span for span in outermost if not span.overlaps(opened.span)]
     nearest_first = sorted(others, key=lambda span: (_distance(span, opened.span), span.start))
     ordered = ([container] if container is not None else []) + nearest_first
     return [function_place(index, span, relation) for span in ordered]
-
-
-def _overlaps(first: Span, second: Span) -> bool:
-    return first.start <= second.end and second.start <= first.end
 
 
 def _encloses(outer: Span, inner: Span) -> bool:
