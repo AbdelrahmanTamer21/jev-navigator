@@ -256,7 +256,8 @@ _SCRIPT_MODULE_ALIASES = (
 )
 # In Python, `import app.jobs as jobs` binds `jobs` to `app.jobs`, and `import app.jobs` makes the
 # dotted name `app.jobs` reach that module, outside any function or class. A plain import captures
-# no `$SPEC`: the name is the module.
+# no `$SPEC`: the name is the module. Every dotted name directly in the statement is one it imports;
+# a relation's `field` would reach only the first (see ``PYTHON_FROM_IMPORT``).
 _PYTHON_OUTSIDE_SCOPES = (
     "not: {inside: {stopBy: end, any: [{kind: function_definition}, {kind: class_definition}]}}"
 )
@@ -270,7 +271,7 @@ _PYTHON_MODULE_ALIASES = (
     f"""  kind: dotted_name
   pattern: $NAME
   all:
-    - not: {{not: {{inside: {{field: name, kind: import_statement}}}}}}
+    - not: {{not: {{inside: {{kind: import_statement}}}}}}
     - {_PYTHON_OUTSIDE_SCOPES}""",
 )
 MODULE_ALIAS_RULES = {
@@ -279,6 +280,32 @@ MODULE_ALIAS_RULES = {
     "tsx": _SCRIPT_MODULE_ALIASES,
     "javascript": _SCRIPT_MODULE_ALIASES,
 }
+
+# In Python, `from pkg import mod` outside any function or class binds `mod` to the attribute `mod`
+# of `pkg`, which is the module `pkg.mod` unless the package's `__init__` binds that name itself. The
+# statement is matched with its package captured as `$FROM`, and each name it takes is matched on
+# its own, quietly, with `$SPEC` as imported and `$NAME` as bound, so a list of a hundred names
+# prints the statement once, not a hundred times. A star import takes the name `*`. A relation's
+# `field` reaches only the first of the names the statement lists under one field, so a plain name is
+# any dotted name directly in the statement other than its module.
+PYTHON_FROM_IMPORT = f"""  kind: import_from_statement
+  has: {{field: module_name, pattern: $FROM}}
+  {_PYTHON_OUTSIDE_SCOPES}"""
+PYTHON_FROM_IMPORT_NAMES = (
+    """  kind: aliased_import
+  all:
+    - has: {field: name, pattern: $SPEC}
+    - has: {field: alias, pattern: $NAME}
+    - not: {not: {inside: {kind: import_from_statement}}}""",
+    """  kind: dotted_name
+  pattern: $NAME
+  all:
+    - not: {not: {inside: {kind: import_from_statement}}}
+    - not: {inside: {field: module_name, kind: import_from_statement}}""",
+    """  kind: wildcard_import
+  pattern: $NAME
+  not: {not: {inside: {kind: import_from_statement}}}""",
+)
 
 # The names a function binds for its own body, one match per name: its parameters, the names its
 # declarations and destructurings bind, a caught error, a loop variable, and in Python each

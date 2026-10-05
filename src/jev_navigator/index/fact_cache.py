@@ -226,7 +226,10 @@ def _decode(file: str, raw: dict) -> FileFacts:
         bool(raw["incomplete"]),
         tuple(raw.get("export_names", ())),
         tuple((int(start), int(end)) for start, end in raw["unparsed_lines"]),
-        tuple(ModuleAlias(name, specifier) for name, specifier in raw["module_aliases"]),
+        tuple(
+            ModuleAlias(name, specifier, bool(from_import))
+            for name, specifier, from_import in raw["module_aliases"]
+        ),
         tuple(raw["exported_values"]),
         tuple((exported, own) for exported, own in raw["renamed_exports"]),
         language=raw["language"],

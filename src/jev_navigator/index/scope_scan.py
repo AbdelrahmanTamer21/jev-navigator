@@ -22,7 +22,7 @@ from typing import NamedTuple, NotRequired, Protocol, TypedDict, TypeVar
 import msgspec
 
 from . import tools
-from .imports import _exported, _local
+from .imports import _exported, _local, python_submodule
 from .languages import (
     CLASS_KINDS,
     COMMONJS_EXPORT_PAIR,
@@ -41,6 +41,8 @@ from .languages import (
     NAME_WRAPPERS,
     NAMESPACE_KINDS,
     PROPERTY_TARGET,
+    PYTHON_FROM_IMPORT,
+    PYTHON_FROM_IMPORT_NAMES,
     STUB_RULES,
     TYPE_AND_VALUE_DECLARATIONS,
     TYPE_DECLARATIONS,
@@ -92,10 +94,13 @@ class LocalName(NamedTuple):
 
 
 class ModuleAlias(NamedTuple):
-    """``name`` holds the whole script module ``specifier`` names, bound by module-level code."""
+    """``name`` holds the whole module ``specifier`` names, bound by module-level code. A Python
+    ``from pkg import mod`` (``from_import``) binds the package's own ``mod`` instead when the
+    package's ``__init__`` binds one; ``from pkg import *`` binds the name ``*`` to ``pkg``."""
 
     name: str
     specifier: str
+    from_import: bool = False
 
 
 class NamespaceMember(NamedTuple):
@@ -192,6 +197,7 @@ class _Start(TypedDict):
 
 class _Captured(TypedDict, total=False):
     CALLEE: _Text
+    FROM: _Text
     NAME: _CapturedNode
     OWN: _Text
     SPEC: _Text
@@ -341,6 +347,9 @@ class _FileFound:
     exported_values: set[str] = field(default_factory=set)
     renamed_exports: set[tuple[str, str]] = field(default_factory=set)
     module_aliases: list[tuple[int, ModuleAlias]] = field(default_factory=list)
+    from_imports: list[_FromImport] = field(default_factory=list)
+    # Each name a from-import takes: its byte offset, the name it binds, and the name it imports.
+    from_names: list[tuple[int, str, str]] = field(default_factory=list)
     error_lines: list[tuple[int, int]] = field(default_factory=list)
 
     def add(self, match: dict) -> None:
@@ -366,6 +375,13 @@ class _FileFound:
         elif rule == _MODULE_ALIAS_RULE:
             offset = match["range"]["byteOffset"]["start"]
             self.module_aliases += [(offset, alias) for alias in _module_aliases_of(match)]
+        elif rule == _FROM_IMPORT_RULE:
+            offsets = match["range"]["byteOffset"]
+            self.from_imports.append(_FromImport(offsets["start"], offsets["end"], _captured(match, "FROM")))
+        elif rule == _FROM_NAME_RULE:
+            name = _captured_name(match)
+            imported = _captured(match, "SPEC") or name
+            self.from_names.append((match["range"]["byteOffset"]["start"], name, imported))
         else:
             self._add_reference(match)
 
@@ -380,7 +396,7 @@ class _FileFound:
             incomplete,
             tuple(sorted(self.export_names)),
             _merged_stretches(self.error_lines),
-            tuple(alias for _, alias in sorted(self.module_aliases)),
+            tuple(alias for _, alias in sorted([*self.module_aliases, *self._from_import_aliases()])),
             tuple(sorted(self.exported_values)),
             tuple(sorted(self.renamed_exports)),
             language=self.language,
@@ -410,6 +426,18 @@ class _FileFound:
             tuple(sorted(self.decorated)),
             tuple(sorted(self.stubs)),
         )
+
+    def _from_import_aliases(self) -> list[tuple[int, ModuleAlias]]:
+        """Each name a module-level from-import binds, with the module of that name in its package
+        (see ``PYTHON_FROM_IMPORT``); a name in a from-import inside a function or class has no
+        statement holding it here."""
+        ordered = sorted(self.from_imports, key=lambda statement: statement.start)
+        starts = [statement.start for statement in ordered]
+        return [
+            (offset, _from_import_alias(statement.package, name, imported))
+            for offset, name, imported in self.from_names
+            if (statement := _innermost(ordered, starts, offset)) is not None
+        ]
 
     def _references(self) -> tuple[ReferenceMatch, ...]:
         """When one line passes both ``x.name`` and ``name`` in the same role, the plain name stands
@@ -605,6 +633,22 @@ def _marked(ranges: list[tuple[int, int, Span]], marked: set[tuple[int, int]]) -
 
 
 @dataclass(frozen=True)
+class _FromImport:
+    """A module-level ``from package import ...`` statement's byte range, end exclusive, and its
+    package as written (``app.jobs``, ``.``, ``..lib``)."""
+
+    start: int
+    end: int
+    package: str
+
+
+def _from_import_alias(package: str, name: str, imported: str) -> ModuleAlias:
+    if imported == "*":
+        return ModuleAlias("*", package, from_import=True)
+    return ModuleAlias(name, python_submodule(package, imported), from_import=True)
+
+
+@dataclass(frozen=True)
 class _Namespace:
     """A namespace node's byte range, end exclusive, and its first and last line."""
 
@@ -767,6 +811,8 @@ _LOCAL_NAME_RULE = "local_name"
 _LOCAL_MODULE_RULE = "local_module"
 _LOCAL_MODULE_BLOCK_RULE = "local_module_block"
 _MODULE_ALIAS_RULE = "module_alias"
+_FROM_IMPORT_RULE = "from_import"
+_FROM_NAME_RULE = "from_name"
 _PROPERTY_VALUE_RULE = "property_value"
 _SELF_NAMED_RULE = "self_named"
 _MODULE_EXPORT_RULE = "module_export"
@@ -813,11 +859,15 @@ def _unquoted(module: str) -> str:
 
 
 def _module_alias_rules(languages: Sequence[str]) -> str:
-    return "\n---\n".join(
+    documents = [
         _rule_document(_MODULE_ALIAS_RULE, language, rule)
         for language in languages
         for rule in MODULE_ALIAS_RULES[language]
-    )
+    ]
+    if "python" in languages:
+        documents.append(_rule_document(_FROM_IMPORT_RULE, "python", PYTHON_FROM_IMPORT))
+        documents += [_rule_document(_FROM_NAME_RULE, "python", rule) for rule in PYTHON_FROM_IMPORT_NAMES]
+    return "\n---\n".join(documents)
 
 
 _DECORATED_RULE = "decorated"
