@@ -236,10 +236,10 @@ class ShortSecretMasker:
 
     _VALUE = re.compile(r'PASSWORD\w* = "([^"]+)"')
 
-    def mask(self, text: str) -> str:
+    def mask(self, text: str, path: str | None = None) -> str:
         return self._VALUE.sub(lambda match: match[0].replace(match[1], MASK), text)
 
-    def masked_values(self, text: str) -> list[str]:
+    def masked_values(self, text: str, path: str | None = None) -> list[str]:
         return [match[1] for match in self._VALUE.finditer(text)]
 
 
