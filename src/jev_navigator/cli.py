@@ -34,7 +34,12 @@ from .index.code_index import CodeIndex
 from .index.languages import language_of
 from .judgments.answers import TokenTotal, answered_by
 from .judgments.client import JevClient
-from .judgments.journal import ERROR_TEXT_VARIABLE, error_message, error_text_kept, message_fields
+from .judgments.journal import (
+    ERROR_TEXT_VARIABLE,
+    error_message,
+    error_text_kept,
+    message_fields,
+)
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import (
     SHARED_STORE_VARIABLE,
@@ -46,7 +51,14 @@ from .judgments.store import (
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
-from .run_files import PlaceLabels, carried_over_journal_line, failure_digested, source_shown, step_shown
+from .run_files import (
+    PlaceLabels,
+    carried_over_journal_line,
+    failure_digested,
+    require_kept_request_text,
+    source_shown,
+    step_shown,
+)
 from .usage_receipt import usage_receipt, usage_report_lines
 
 if TYPE_CHECKING:
@@ -302,6 +314,8 @@ def create_evidence_pack(
     _validate_budget(budget)
     thresholds = thresholds or Thresholds()
     previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client, workflow)
+    if resume_from is not None:
+        require_kept_request_text(resume_from.resolve() / "journal.jsonl", keep_requests)
     _prepare_output(output)
     if resume_from is not None:
         _carry_over_run_logs(resume_from.resolve(), output, keep_requests, keep_error_text)

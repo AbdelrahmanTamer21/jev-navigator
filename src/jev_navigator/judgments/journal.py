@@ -23,7 +23,7 @@ import json
 import os
 import threading
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import CancelledError
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -261,3 +261,26 @@ def _request_without_text(request: JournalRequest) -> dict:
         "question_ids": list(request.questions),
         "state_sha256": content_hash(request.state),
     }
+
+
+def keeps_request_text(path: Path) -> bool:
+    """Whether the run file at ``path`` holds the text of any request: a journal written with
+    ``keep_request_text`` (a request's state and body, or a body as sent) or an answer store written
+    with ``keep_requests`` (a record's request, or its body as sent). A line that is not a JSON
+    record, such as one a crash cut off, tells nothing."""
+    with path.open() as lines:
+        return any(_holds_request_text(record) for record in _records(lines))
+
+
+def _holds_request_text(record: Mapping) -> bool:
+    if record.get("sent_body_base64") is not None or record.get("request") is not None:
+        return True
+    return record.get("kind") == "request" and "body_base64" in record
+
+
+def _records(lines: Iterable[str]) -> Iterator[Mapping]:
+    for line in lines:
+        try:
+            yield json.loads(line)
+        except ValueError:
+            continue
