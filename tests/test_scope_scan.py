@@ -1408,6 +1408,8 @@ def test_a_call_through_a_module_a_from_import_names_reads_that_module(tmp_path:
         ("config = None\n", "candidate"),
         ("from .config import *\n", "candidate"),
         ("config = Config(:\n", "candidate"),
+        ("for config in sources:\n    pass\n", "candidate"),
+        ("with open('x') as config:\n    pass\n", "candidate"),
         ("from . import config\n", "resolved"),
         ("from pkg import config\n", "resolved"),
         ("", "resolved"),
@@ -1418,6 +1420,8 @@ def test_a_call_through_a_module_a_from_import_names_reads_that_module(tmp_path:
         "assigns",
         "star-imports its module",
         "loses a line that names it",
+        "loops over it",
+        "opens it",
         "imports itself",
         "imports itself by path",
         "empty",
@@ -1686,6 +1690,142 @@ def test_a_const_require_holds_its_module_from_its_line_to_the_end_of_its_block(
         "in the function body": ("resolved", query),
         "after a switch": ("candidate", None),
     }
+
+
+_PYTHON_REBINDINGS = {
+    "an assignment": "mod = make()\n",
+    "an augmented assignment": "mod += 1\n",
+    "a tuple target": "mod, other = make()\n",
+    "a function": "def mod():\n    return 0\n",
+    "a class": "class mod:\n    pass\n",
+    "a loop": "for mod in items:\n    pass\n",
+    "a with target": "with open('x') as mod:\n    pass\n",
+    "a caught error": "try:\n    pass\nexcept Exception as mod:\n    pass\n",
+    "a walrus": "if (mod := make()):\n    pass\n",
+    "an assignment in a module-level block": "if flag:\n    mod = make()\n",
+    "a function's global": "def reset():\n    global mod\n    mod = make()\n",
+    "a deletion": "del mod\n",
+}
+_PYTHON_OTHER_SCOPES = {
+    "nothing else": "",
+    "another function's own name": "def local():\n    mod = make()\n    return mod\n",
+    "a class attribute": "class K:\n    mod = make()\n",
+    "a comprehension's name": "names = [mod for mod in items]\n",
+}
+
+
+@pytest.mark.parametrize(
+    "statement", ["import pkg.mod as mod\n", "from pkg import mod\n"], ids=["import as", "from import"]
+)
+def test_a_python_module_alias_holds_its_module_only_where_module_level_code_binds_the_name_once(
+    tmp_path: Path, statement: str
+) -> None:
+    """`mod.run()` reads pkg/mod.py only while the import is the module's one binding of `mod`. An
+    assignment, a definition, a loop, a with or except target, a walrus, a function's `global` or a
+    deletion may leave `mod` holding something else, so the call stays a candidate. A name another
+    function, a class body or a comprehension binds is not the module's."""
+    # Arrange
+    cases = {**_PYTHON_REBINDINGS, **_PYTHON_OTHER_SCOPES}
+    use = "\n\ndef use():\n    return mod.run()\n"
+    files = {f"use_{number}.py": statement + cases[case] + use for number, case in enumerate(cases)}
+    index = committed(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/mod.py": "def run():\n    return 1\n",
+            "pkg/other.py": "def run():\n    return 2\n",
+            **files,
+        },
+    )
+
+    # Act
+    statuses = {
+        case: index.binding_of(file, files[file].count("\n"), "run", "mod").status.value
+        for case, file in zip(cases, files, strict=True)
+    }
+
+    # Assert
+    assert statuses == {
+        **{case: "candidate" for case in _PYTHON_REBINDINGS},
+        **{case: "resolved" for case in _PYTHON_OTHER_SCOPES},
+    }
+
+
+def test_a_dotted_python_import_holds_its_module_only_while_nothing_else_binds_its_first_name(
+    tmp_path: Path,
+) -> None:
+    """`import pkg.mod` makes `pkg.mod.run()` read pkg/mod.py, until module-level code binds `pkg`
+    again: the dotted name is looked up from `pkg`."""
+    # Arrange
+    use = "\n\ndef use():\n    return pkg.mod.run()\n"
+    index = committed(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/mod.py": "def run():\n    return 1\n",
+            "pkg/other.py": "def run():\n    return 2\n",
+            "kept.py": "import pkg.mod\n" + use,
+            "rebound.py": "import pkg.mod\npkg = make()\n" + use,
+        },
+    )
+
+    # Act
+    statuses = {
+        file: index.binding_of(file, line, "run", "pkg.mod").status.value
+        for file, line in (("kept.py", 5), ("rebound.py", 6))
+    }
+
+    # Assert
+    assert statuses == {"kept.py": "resolved", "rebound.py": "candidate"}
+
+
+def test_a_script_module_alias_holds_its_module_only_where_module_code_binds_the_name_once(
+    tmp_path: Path,
+) -> None:
+    """`db.query()` reads db.js only while the require or namespace import is the module's one binding
+    of `db`. Assigning `db` anywhere, declaring it again (a require inside a block declares no alias),
+    or a module-level function named `db` may leave it holding something else, so the call stays a
+    candidate. A name another function declares for itself is that function's own."""
+    # Arrange
+    cases = {
+        "a const require": ("const db = require('./db');\n", "resolved"),
+        "a namespace import": ("import * as db from './db';\n", "resolved"),
+        "another function's own db": (
+            "const db = require('./db');\nfunction other() { const db = 1; return db; }\n",
+            "resolved",
+        ),
+        "an assignment": ("let db = require('./db');\ndb = make();\n", "candidate"),
+        "an assignment in a function": (
+            "let db = require('./db');\nfunction reset() { db = make(); }\n",
+            "candidate",
+        ),
+        "a second declaration": ("var db = require('./db');\nvar db = wrap(db);\n", "candidate"),
+        "a function": ("var db = require('./db');\nfunction db() { return 0; }\n", "candidate"),
+        "a loop": ("var db = require('./db');\nfor (db of pools) {}\n", "candidate"),
+        "a require in a block": (
+            "var db = require('./db');\nif (legacy) {\n  var db = require('./fake');\n}\n",
+            "candidate",
+        ),
+    }
+    use = "function use() {\n  return db.query();\n}\n"
+    files = {f"use_{number}.js": head + use for number, (head, _) in enumerate(cases.values())}
+    index = committed(
+        tmp_path,
+        {
+            "db.js": "function query() { return 1; }\nmodule.exports = { query };\n",
+            "fake.js": "function query() { return 2; }\nmodule.exports = { query };\n",
+            **files,
+        },
+    )
+
+    # Act
+    statuses = {
+        case: index.binding_of(file, files[file].count("\n") - 1, "query", "db").status.value
+        for case, file in zip(cases, files, strict=True)
+    }
+
+    # Assert
+    assert statuses == {case: status for case, (_, status) in cases.items()}
 
 
 def test_an_import_alias_replaced_by_a_local_name_binds_nothing_through_the_import(tmp_path: Path) -> None:

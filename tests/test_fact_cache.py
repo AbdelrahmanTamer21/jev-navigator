@@ -141,8 +141,9 @@ def test_roundtrip_keeps_every_fact_a_script_module_records(tmp_path):
 
 def test_roundtrip_keeps_whether_a_module_alias_is_a_from_import(tmp_path):
     """A Python module alias comes back from the cache with its specifier and whether a from-import
-    bound it, which decides whether the package's own name comes first."""
-    content = b"import app.jobs as jobs\nfrom app import mail\n"
+    bound it, which decides whether the package's own name comes first, and so does a name module
+    code binds otherwise."""
+    content = b"import app.jobs as jobs\nfrom app import mail\nfor jobs in queues:\n    pass\n"
     (tmp_path / "module.py").write_bytes(content)
     facts = scan_facts(read_files(tmp_path, ["module.py"]), tmp_path, Unparsed())["module.py"]
     cache = FactCache(tmp_path / "cache")
@@ -151,6 +152,7 @@ def test_roundtrip_keeps_whether_a_module_alias_is_a_from_import(tmp_path):
     restored = cache.load("module.py", content)
 
     assert [alias.from_import for alias in facts.module_aliases] == [False, True]
+    assert facts.module_bindings == ("jobs",)
     assert restored == facts
 
 

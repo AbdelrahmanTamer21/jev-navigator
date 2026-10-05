@@ -190,6 +190,7 @@ def _encode(facts: FileFacts) -> dict:
         "module_aliases": [list(alias) for alias in facts.module_aliases],
         "exported_values": list(facts.exported_values),
         "renamed_exports": [list(pair) for pair in facts.renamed_exports],
+        "module_bindings": list(facts.module_bindings),
         "language": facts.language,
     }
 
@@ -232,5 +233,6 @@ def _decode(file: str, raw: dict) -> FileFacts:
         ),
         tuple(raw["exported_values"]),
         tuple((exported, own) for exported, own in raw["renamed_exports"]),
+        tuple(raw["module_bindings"]),
         language=raw["language"],
     )

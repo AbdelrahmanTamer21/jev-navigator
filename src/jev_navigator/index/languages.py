@@ -389,35 +389,94 @@ LOCAL_MODULE_BLOCK_RULES = {
     "javascript": _script_local_module_blocks("javascript"),
 }
 
+
+# The places a Python statement binds a name: an assignment's, an augmented assignment's or a loop's
+# target, a walrus, and a with or except target.
+_PYTHON_ASSIGNED_NAMES = """            - inside:
+                stopBy: end
+                field: left
+                any: [{kind: assignment}, {kind: augmented_assignment}, {kind: for_statement}]
+            - inside: {field: name, kind: named_expression}
+            - inside: {kind: as_pattern_target}"""
+_PYTHON_NOT_A_NAME = "inside: {stopBy: end, any: [{kind: attribute}, {kind: subscript}, {kind: type}]}"
+_PYTHON_PARAMETER_LISTS = "{any: [{kind: parameters}, {kind: lambda_parameters}, {kind: typed_parameter}]}"
+_PYTHON_OWN_SCOPES = "any: [{kind: function_definition}, {kind: class_definition}, {kind: lambda}]"
+
 LOCAL_NAME_RULES = {
-    "python": """  kind: identifier
+    "python": f"""  kind: identifier
   all:
     - not:
         not:
           any:
-            - inside: {any: [{kind: parameters}, {kind: lambda_parameters}, {kind: typed_parameter}]}
+            - inside: {_PYTHON_PARAMETER_LISTS}
             - inside:
                 field: name
-                any: [{kind: default_parameter}, {kind: typed_default_parameter}]
+                any: [{{kind: default_parameter}}, {{kind: typed_default_parameter}}]
             - inside:
-                any: [{kind: list_splat_pattern}, {kind: dictionary_splat_pattern}]
-                inside: {any: [{kind: parameters}, {kind: lambda_parameters}, {kind: typed_parameter}]}
-            - inside:
-                stopBy: end
-                field: left
-                any:
-                  - kind: assignment
-                  - kind: augmented_assignment
-                  - kind: for_statement
-                  - kind: for_in_clause
-            - inside: {field: name, kind: named_expression}
-            - inside: {kind: as_pattern_target}
-    - not: {not: {inside: {stopBy: end, kind: function_definition}}}
+                any: [{{kind: list_splat_pattern}}, {{kind: dictionary_splat_pattern}}]
+                inside: {_PYTHON_PARAMETER_LISTS}
+            - inside: {{stopBy: end, field: left, kind: for_in_clause}}
+{_PYTHON_ASSIGNED_NAMES}
+    - not: {{not: {{inside: {{stopBy: end, kind: function_definition}}}}}}
   not:
-    inside: {stopBy: end, any: [{kind: attribute}, {kind: subscript}, {kind: type}]}""",
+    {_PYTHON_NOT_A_NAME}""",
     "typescript": _script_local_names("typescript", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
     "tsx": _script_local_names("tsx", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
     "javascript": _script_local_names("javascript", _SCRIPT_LOCAL_EXCLUSIONS),
+}
+
+# The names module-level code binds otherwise than by an import or by a function or class it
+# defines (those are ``FileStructure.module_symbols``), one match per binding: in Python a
+# statement's target outside every function, class and lambda (a comprehension's names stay its
+# own), a deletion, and every name a function declares `global`, which it may bind for the module.
+# In a script, a declaration or loop variable outside every function, except the module alias a
+# `const name = require('module')` declares (see ``MODULE_ALIAS_RULES``), and every assignment,
+# since a function assigning a name it does not declare assigns the module's. A block's own
+# `let` or `const` counts too.
+_SCRIPT_REQUIRE_ALIAS = f"""{{field: name, kind: variable_declarator, \
+has: {{field: value, kind: call_expression, all: [{{has: {{field: function, regex: '^require$'}}}}, \
+{{has: {{field: arguments, has: {{kind: string}}}}}}]}}, inside: {{{_ANY_VARIABLES}, {_IN_MODULE}}}}}"""
+
+
+def _script_module_bindings(language: str, exclusions: str) -> str:
+    functions = ", ".join(f"{{kind: {kind}}}" for kind in FUNCTION_KINDS[language])
+    return f"""  any: [{_SCRIPT_NAME_KINDS}]
+  all:
+    - not:
+        not:
+          any:
+            - inside:
+                stopBy: end
+                field: left
+                any: [{{kind: assignment_expression}}, {{kind: augmented_assignment_expression}}]
+            - all:
+                - any:
+                    - inside: {{stopBy: end, field: name, kind: variable_declarator}}
+                    - inside: {{stopBy: end, field: left, kind: for_in_statement}}
+                - not: {{inside: {{stopBy: end, any: [{functions}]}}}}
+    - not: {{inside: {_SCRIPT_REQUIRE_ALIAS}}}
+  not:
+    any:
+{exclusions}"""
+
+
+MODULE_BINDING_RULES = {
+    "python": f"""  kind: identifier
+  all:
+    - not:
+        not:
+          any:
+{_PYTHON_ASSIGNED_NAMES}
+            - inside: {{stopBy: end, kind: delete_statement}}
+            - inside: {{kind: global_statement}}
+    - any:
+        - not: {{inside: {{stopBy: end, {_PYTHON_OWN_SCOPES}}}}}
+        - not: {{not: {{inside: {{kind: global_statement}}}}}}
+  not:
+    {_PYTHON_NOT_A_NAME}""",
+    "typescript": _script_module_bindings("typescript", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
+    "tsx": _script_module_bindings("tsx", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
+    "javascript": _script_module_bindings("javascript", _SCRIPT_LOCAL_EXCLUSIONS),
 }
 
 # A Python function's node starts at `def`: its decorators sit before it, beside it inside
@@ -469,6 +528,7 @@ MODULE_ALIAS_RULES[FLOW_LANGUAGE] = _SCRIPT_MODULE_ALIASES
 LOCAL_NAME_RULES[FLOW_LANGUAGE] = LOCAL_NAME_RULES["tsx"]
 LOCAL_MODULE_RULES[FLOW_LANGUAGE] = LOCAL_MODULE_RULES["tsx"]
 LOCAL_MODULE_BLOCK_RULES[FLOW_LANGUAGE] = LOCAL_MODULE_BLOCK_RULES["tsx"]
+MODULE_BINDING_RULES[FLOW_LANGUAGE] = MODULE_BINDING_RULES["tsx"]
 DECORATED_KINDS[FLOW_LANGUAGE] = DECORATED_KINDS["tsx"]
 
 # ast-grep reads `languageGlobs` only from a config file: a scan of flow files passes this sgconfig,
