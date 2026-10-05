@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import Barrier
 
 import pytest
-from git_repos import commit_files
+from git_repos import commit_files, read_files
 
 from jev_navigator.confirmation import day_of, today
 from jev_navigator.index import fact_cache, imports, languages, scope_scan, spans, tools
@@ -70,7 +70,7 @@ def example(tmp_path):
     source = tmp_path / "module.py"
     source.write_bytes(content)
     unparsed = Unparsed()
-    facts = scan_facts(["module.py"], tmp_path, unparsed)
+    facts = scan_facts(read_files(tmp_path, ["module.py"]), tmp_path, unparsed)
     assert not unparsed.files
     assert facts["module.py"].calls
     return content, facts["module.py"]
@@ -99,7 +99,7 @@ def test_roundtrip_keeps_every_fact_a_script_module_records(tmp_path):
         b"export { run as start };\n"
     )
     (tmp_path / "module.js").write_bytes(content)
-    facts = scan_facts(["module.js"], tmp_path, Unparsed())["module.js"]
+    facts = scan_facts(read_files(tmp_path, ["module.js"]), tmp_path, Unparsed())["module.js"]
     cache = FactCache(tmp_path / "cache")
 
     cache.save("module.js", content, facts)
@@ -115,7 +115,7 @@ def test_roundtrip_keeps_whether_a_module_alias_is_a_from_import(tmp_path):
     bound it, which decides whether the package's own name comes first."""
     content = b"import app.jobs as jobs\nfrom app import mail\n"
     (tmp_path / "module.py").write_bytes(content)
-    facts = scan_facts(["module.py"], tmp_path, Unparsed())["module.py"]
+    facts = scan_facts(read_files(tmp_path, ["module.py"]), tmp_path, Unparsed())["module.py"]
     cache = FactCache(tmp_path / "cache")
 
     cache.save("module.py", content, facts)
@@ -132,7 +132,7 @@ def test_roundtrip_keeps_the_members_of_each_namespace(tmp_path):
         b"  namespace Inner {\n    export function inner() {}\n  }\n}\n"
     )
     (tmp_path / "spaces.ts").write_bytes(content)
-    facts = scan_facts(["spaces.ts"], tmp_path, Unparsed())["spaces.ts"]
+    facts = scan_facts(read_files(tmp_path, ["spaces.ts"]), tmp_path, Unparsed())["spaces.ts"]
     cache = FactCache(tmp_path / "cache")
 
     cache.save("spaces.ts", content, facts)
@@ -168,6 +168,23 @@ def test_content_language_parser_and_rules_invalidate(tmp_path, example, monkeyp
     monkeypatch.setitem(languages.FUNCTION_KINDS, "python", ("function_definition", "lambda"))
     fact_cache._rules_identity.cache_clear()
     assert cache.load("module.py", content) is None
+
+
+def test_a_change_to_the_flow_rules_is_a_cache_miss_for_javascript(
+    tmp_path, monkeypatch, rule_identity_reset
+):
+    # Arrange: JavaScript the JavaScript grammar only partly reads takes its facts from the flow rules
+    content = b"export function typed(value: string): string {\n  return value;\n}\n"
+    cache = FactCache(tmp_path / "cache")
+    cache.save("typed.js", content, FileFacts(FileStructure((), (), ()), (), ()))
+
+    # Act
+    monkeypatch.setitem(languages.FUNCTION_KINDS, languages.FLOW_LANGUAGE, ("function_declaration",))
+    fact_cache._rules_identity.cache_clear()
+    reused = cache.load("typed.js", content)
+
+    # Assert
+    assert reused is None
 
 
 @pytest.mark.parametrize("broken", ["{", "null", "[]", '{"structure":{}}'])

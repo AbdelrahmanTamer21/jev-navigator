@@ -13,7 +13,7 @@ from jev_navigator.index.file_shape import (
     PARSEABLE_UP_TO_BYTES,
     Trigger,
     measure,
-    refusal_of,
+    placement_of,
     shape_of,
 )
 
@@ -34,41 +34,116 @@ def test_an_empty_file_has_no_lines_and_costs_only_the_base() -> None:
     shape = measure(b"")
 
     assert (shape.line_count, shape.longest_line, shape.chars_per_line) == (0, 0, 0.0)
-    assert not shape.too_large_to_parse
+    assert shape.fits_side_by_side
+
+
+def test_a_long_string_costs_by_its_size_and_minified_code_by_its_punctuation() -> None:
+    image_string = measure(b"export const background = '" + b"A" * 2_000_000 + b"';\n")
+    minified_code = measure(_one_line(2_000_000))
+
+    assert image_string.parse_peak_mb == pytest.approx(25 + 80 * 2, abs=1)
+    assert minified_code.parse_peak_mb > 1_000
+
+
+_TERMS = " + ".join(f"a{i}" for i in range(1300))
+_WORDS = " ".join(f'<b className="k">w{i}</b>' for i in range(400))
 
 
 @pytest.mark.parametrize(
-    ("characters", "measured_mb"),
-    [(24_745, 54), (46_329, 122), (88_165, 399), (119_687, 681), (134_721, 956)],
+    ("line_of", "real_peak_mb"),
+    [
+        (lambda n: f"let v{n} = `it's` + {_TERMS} + 'x';\n", 253.8),
+        (lambda n: f"/* don't */ let v{n} = {_TERMS} + 'x';\n", 253.5),
+        (lambda n: f'let v{n} = `say "${{{_TERMS}}}"`;\n', 253.7),
+        (lambda n: f"v{n} = '''don't''' + {_TERMS} + 'z'\n", 199.7),
+        (lambda n: f"const p{n} = <div>Don't {_WORDS} isn't</div>;\n", 186.8),
+    ],
+    ids=["template-apostrophe", "block-comment", "template-quote", "triple-quote", "jsx-text"],
 )
-def test_the_parse_peak_estimate_fits_the_measured_one_line_bundles_within_ten_percent(
-    characters: int, measured_mb: int
+def test_a_quote_that_opens_no_string_never_hides_the_code_after_it(line_of, real_peak_mb: float) -> None:
+    # Measured by jvn-verifier on 04.10.2026: 4 MB of such lines peak at these MB under ast-grep
+    content = _lines_up_to(4_000_000, line_of)
+
+    assert measure(content.encode()).parse_peak_mb >= real_peak_mb
+
+
+def _lines_up_to(size: int, line_of) -> str:
+    lines, total = [], 0
+    while total < size:
+        lines.append(line_of(len(lines)))
+        total += len(lines[-1])
+    return "".join(lines)
+
+
+def test_code_of_short_lines_costs_by_its_size() -> None:
+    # Measured on 04.10.2026: ordinary and dense code peaks at 53 to 75 MB per MB once it is parsed
+    statement = b"    total = compute(items, limit)\n"
+
+    side_by_side = measure(statement * 80_000)
+    over = measure(statement * 90_000)
+
+    assert side_by_side.fits_side_by_side
+    assert not over.fits_side_by_side
+    assert over.refusal(MAX_PARSE_PEAK_MB) is not None and "90,000 lines" in over.refusal(MAX_PARSE_PEAK_MB)
+
+
+def test_every_measured_file_of_short_lines_is_estimated_at_or_above_its_real_peak() -> None:
+    # (bytes of code, ast-grep's real peak in MB), 04.10.2026: Heedvane TypeScript repeated, saleor
+    # Python joined, and 55,000 dense lines of 45 operands in each language
+    measured = [
+        (1_170_000, 90.5),
+        (2_300_000, 161.8),
+        (8_050_000, 480.8),
+        (1_210_000, 92.1),
+        (6_030_000, 387.0),
+        (14_620_000, 909.0),
+        (14_890_000, 1142.1),
+    ]
+
+    dense_line = b"v = " + b" + ".join(b"a%d" % operand for operand in range(45)) + b"\n"
+    for code_bytes, real_peak in measured:
+        assert measure(dense_line * (code_bytes // len(dense_line))).parse_peak_mb >= real_peak
+
+
+@pytest.mark.parametrize(
+    ("operands", "real_peak"), [(330, 270.2), (1_400, 253.2)], ids=["2k-lines", "9k-lines"]
+)
+def test_four_megabytes_of_long_dense_lines_are_estimated_at_or_above_their_real_peak(
+    operands: int, real_peak: float
 ) -> None:
-    estimate = measure(_one_line(characters)).parse_peak_mb
+    # jvn-verifier's long dense TypeScript rows (04.10.2026): lines of about 2,000 and 9,300 bytes
+    line = b"v = " + b" + ".join(b"name%d" % operand for operand in range(operands)) + b";\n"
 
-    assert estimate == pytest.approx(measured_mb, rel=0.10)
-
-
-def test_many_short_lines_stay_cheap_however_large_the_file_is() -> None:
-    shape = measure(b"x = 1\n" * 120_000)
-
-    assert shape.size_bytes == 720_000
-    assert shape.parse_peak_mb < 30
-    assert not shape.too_large_to_parse
+    assert measure(line * (4_000_000 // len(line))).parse_peak_mb >= real_peak
 
 
-def test_the_bound_sits_between_a_20000_and_a_70000_character_single_line() -> None:
-    assert not measure(_one_line(20_000)).too_large_to_parse
-    assert not measure(_one_line(65_000)).too_large_to_parse
-    assert measure(_one_line(75_000)).too_large_to_parse
-    assert measure(_one_line(75_000)).parse_peak_mb > MAX_PARSE_PEAK_MB
+def test_a_long_line_of_short_strings_is_priced_as_code() -> None:
+    # Generated concatenations: 20,000-byte lines of short strings joined by `+`, no other punctuation
+    line = b"text = " + b" + ".join(b'"fragment"' for _ in range(1_500)) + b"\n"
+    concatenation = measure(line * (4_000_000 // len(line)))
+
+    assert concatenation.parse_peak_mb > 300
+
+
+def test_a_line_of_one_long_string_as_large_as_documensos_svg_path_is_parsed_side_by_side() -> None:
+    path = b'  d="' + b"M708 195.8c.4-1.5.8-3.5 2-4.7 " * 80_000 + b'"\n'
+
+    assert measure(b"<path\n" + path + b"/>\n").fits_side_by_side
+
+
+def test_the_bound_for_a_one_line_bundle_sits_between_25000_and_32000_characters() -> None:
+    assert measure(_one_line(25_000)).fits_side_by_side
+    assert not measure(_one_line(32_000)).fits_side_by_side
+    assert measure(_one_line(32_000)).parse_peak_mb > MAX_PARSE_PEAK_MB
 
 
 def test_the_refusal_names_the_estimated_peak_and_the_longest_line() -> None:
-    reason = measure(_one_line(668_777)).refusal
+    reason = measure(_one_line(668_777)).refusal(MAX_PARSE_PEAK_MB)
 
-    assert reason == "too large to parse: estimated parse peak 22 GB, longest line 668,777 bytes"
-    assert measure(_one_line(20_000)).refusal is None
+    assert reason is not None
+    assert reason.startswith("too large to parse: estimated parse peak ")
+    assert reason.endswith(", 1 line, longest line 668,777 bytes")
+    assert measure(_one_line(20_000)).refusal(MAX_PARSE_PEAK_MB) is None
 
 
 def _lines(count: int, width: int) -> bytes:
@@ -119,23 +194,23 @@ def test_a_component_with_one_long_svg_path_line_fires_nothing() -> None:
     assert shape.longest_line > 5_000
     assert shape.size_bytes < LARGE_FILE_BYTES
     assert shape.triggers == ()
-    assert not shape.too_large_to_parse
+    assert shape.fits_side_by_side
 
 
 def test_a_one_line_minified_bundle_fires_the_line_and_density_triggers_but_is_still_parseable() -> None:
     shape = measure(_one_line(24_745))
 
     assert shape.triggers == (Trigger.LONG_LINE, Trigger.DENSE_LINES)
-    assert not shape.too_large_to_parse
+    assert shape.fits_side_by_side
 
 
-def test_a_two_and_a_half_megabyte_image_string_fires_every_trigger_and_is_over_the_memory_bound() -> None:
+def test_a_two_and_a_half_megabyte_image_string_fires_every_trigger_and_is_still_parseable() -> None:
     background = b"export const background = '" + b"A" * 2_504_000 + b"';\n"
 
     shape = measure(background)
 
     assert shape.triggers == (Trigger.LONG_LINE, Trigger.DENSE_LINES, Trigger.LARGE_FILE)
-    assert shape.too_large_to_parse
+    assert shape.fits_side_by_side
 
 
 def test_shape_of_reads_one_file_given_the_repository_folder_and_the_path(tmp_path: Path) -> None:
@@ -149,15 +224,16 @@ def test_shape_of_reads_one_file_given_the_repository_folder_and_the_path(tmp_pa
     assert shape.triggers == (Trigger.LONG_LINE, Trigger.DENSE_LINES)
 
 
-def test_the_stat_shortcut_is_exact_a_file_up_to_the_safe_size_can_never_be_over_the_bound() -> None:
-    assert not measure(_one_line(PARSEABLE_UP_TO_BYTES)).too_large_to_parse
-    assert measure(_one_line(PARSEABLE_UP_TO_BYTES + 1)).too_large_to_parse
+def test_the_stat_shortcut_is_safe_a_file_up_to_the_safe_size_can_never_be_over_the_bound() -> None:
+    assert measure(b";" * PARSEABLE_UP_TO_BYTES).fits_side_by_side
+    assert measure(b"\n" * PARSEABLE_UP_TO_BYTES).fits_side_by_side
+    assert not measure(b";" * (PARSEABLE_UP_TO_BYTES + 700)).fits_side_by_side
 
 
 def test_a_small_file_is_cleared_from_its_size_without_reading_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / "small.js").write_bytes(_one_line(60_000))
+    (tmp_path / "small.js").write_bytes(_one_line(PARSEABLE_UP_TO_BYTES))
     (tmp_path / "big.js").write_bytes(_one_line(668_777))
     reads: list[Path] = []
     original = Path.read_bytes
@@ -168,9 +244,9 @@ def test_a_small_file_is_cleared_from_its_size_without_reading_it(
 
     monkeypatch.setattr(Path, "read_bytes", counting)
 
-    assert refusal_of(tmp_path, "small.js") is None
+    assert placement_of(tmp_path, "small.js", MAX_PARSE_PEAK_MB)[1] is None
     assert reads == []
-    assert refusal_of(tmp_path, "big.js").startswith("too large to parse")
+    assert placement_of(tmp_path, "big.js", MAX_PARSE_PEAK_MB)[1].startswith("too large to parse")
     assert [path.name for path in reads] == ["big.js"]
 
 
@@ -178,9 +254,38 @@ def test_line_lengths_are_measured_in_bytes_so_multibyte_text_errs_on_the_safe_s
     assert measure(("é" * 1_000).encode()).longest_line == 2_000
 
 
-def test_a_refusal_counts_the_longest_line_in_bytes_as_measured() -> None:
-    line = ("名();" * 12_000).encode()
+def _minified_bundle(characters: int) -> bytes:
+    schema = b'{"type":"object","properties":{"id":{"type":"string"},"tags":[1,2,3]}},'
+    return (schema * (characters // len(schema) + 1))[:characters]
 
-    reason = measure(line).refusal
 
-    assert reason is not None and reason.endswith("longest line 72,000 bytes")
+def test_a_launch_contract_shaped_minified_bundle_is_refused() -> None:
+    assert not measure(_minified_bundle(668_777)).fits_side_by_side
+    assert not measure(_minified_bundle(130_000)).fits_side_by_side
+
+
+def test_a_135000_character_minified_line_is_still_refused(tmp_path: Path) -> None:
+    (tmp_path / "bundle.js").write_bytes(_one_line(135_000))
+
+    assert placement_of(tmp_path, "bundle.js", MAX_PARSE_PEAK_MB)[1].startswith("too large to parse")
+
+
+def test_many_999_byte_minified_lines_are_refused_because_every_line_counts() -> None:
+    line = _minified_bundle(999)
+    bundle = b"\n".join([line] * 2_500)
+
+    shape = measure(bundle)
+
+    assert shape.longest_line == 999
+    assert not shape.fits_side_by_side
+
+
+def test_a_235_kb_hand_written_module_is_cleared() -> None:
+    statement = b"  const total = items.reduce((sum, item) => sum + item.value, 0);\n"
+    module = statement * 3_600
+
+    shape = measure(module)
+
+    assert shape.size_bytes > 235_000
+    assert shape.fits_side_by_side
+    assert shape.parse_peak_mb < 50

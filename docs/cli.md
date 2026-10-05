@@ -35,9 +35,12 @@ Credentials come from `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` in the process 
 from `~/.config/jvn/env`. The file uses dotenv syntax and is not executed. When `jvn`'s code runs
 from a jev-navigator checkout (`uv run jvn` there, or an editable install), it also reads that
 checkout's `.env`, after the environment and before the file; any install into site-packages
-(`uv tool install`, `pipx`, a non-editable `pip install`) reads no `.env`. A `.env` in the searched directory is never read. Either file may set only `TYPESAFE_*`,
-`JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names, and `jvn` names on stderr any other name it ignores.
-Help and schema discovery need no key and make no model calls.
+(`uv tool install`, `pipx`, a non-editable `pip install`) reads no `.env`. A `.env` in the searched
+directory is never read, unless that directory is the checkout `jvn`'s own code runs from. Either
+file may set only `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names, and
+`jvn` names on stderr any other name it ignores. The `JEV_NAVIGATOR_*` settings hold the
+judgment thresholds only; a search's budget comes from its flags or the request's JSON fields. Help
+and schema discovery need no key and make no model calls.
 
 ## Discover commands and request fields
 
@@ -63,7 +66,7 @@ unlimited unless you set a limit.
 | `--start PATH:LINE` | Automatic entry selection. Start from a known caller or entry point; repeat for multiple starts. Lines are 1-based, paths are relative to the search root. | `jvn find "the order limit" --start app/orders.py:42 --start app/routes.py:18` |
 | `--out PATH` | A unique run folder under `$XDG_DATA_HOME/jev-navigator/runs/`. Choose another new or empty directory; JVN never prunes a folder you name. | `jvn find "the order limit" --out ./order-evidence` |
 | `--answer-store PATH` | `$JEV_NAVIGATOR_ANSWER_STORE`, else `$XDG_CACHE_HOME/jev-navigator/answers-v2.sqlite` (`~/.cache` when unset or relative). The default store forgets a request no run reused for 30 days; a store you name keeps every answer, and must lie outside JVN's cache folder (`$XDG_CACHE_HOME/jev-navigator`), which JVN prunes: a run naming a store inside it stops with exit status 2. The shared store every run reads and writes; a run prints `answer store: PATH` on stderr. Point an eval arm at a new file so it never replays another arm's answers. A missing file is created; an existing one must be a JVN answer store, on a disk with the locks SQLite's WAL mode needs (any local disk). A run refuses any other file, naming it. `find`, `findall` and `trace` accept it. | `jvn find "the order limit" --answer-store ./arm-a.sqlite` |
-| `--resume PATH` | Off. Continue a budget-stopped or cancelled evidence pack into a new output directory. | `jvn find "the order limit" --resume ./order-evidence` |
+| `--resume PATH` | Off. Continue a budget-stopped, cancelled or failed evidence pack into a new output directory. | `jvn find "the order limit" --resume ./order-evidence` |
 | `--max-depth N` | Unlimited. Maximum relationship hops from the starting places; `0` opens only those places. | `jvn find "the order limit" --max-depth 3` |
 | `--max-steps N` | Unlimited. Maximum distinct code openings during navigation; entry selection is separate. | `jvn find "the order limit" --max-steps 8` |
 | `--max-calls N\|none` | `24`. Maximum model requests, including automatic entry selection; each is a paid request. `none` lifts the cap. One request may contain many questions. This is not a token or monetary cap. A search that reaches it ends with outcome `budget` and its unexplored places in `not_inspected`. | `jvn find "the order limit" --max-calls 8` |
@@ -74,6 +77,7 @@ unlimited unless you set a limit.
 | `--max-line-chars N` | `240`. Clip long lines in opened source, previews and signatures shown to the model. Source files are not edited. | `jvn find "the order limit" --max-line-chars 480` |
 | `--verbose` | Off. Print expanded masked requests on stderr as they are sent. Concise phase/request/elapsed progress is already on by default. | `jvn find "the order limit" --verbose` |
 | `--keep-requests` | Off. Keep the code in `manifest.json` and `report.md` and the exact request text in `journal.jsonl`. Without it the run folder holds code locations and request hashes only; Resume works either way. Use it only for your own or open-source code. | `jvn find "the order limit" --keep-requests` |
+| `--no-error-text` | Off, unless `JEV_NAVIGATOR_ERROR_TEXT=off`. Keep an error's message and the body of a response with an error status only as their length and SHA-256 in every run file. An error can quote its request, so this keeps code out of the run folder when a provider echoes it. stderr still shows the message, and `--keep-requests` keeps the text anyway. `find`, `findall` and `trace` accept it. | `jvn find "the order limit" --no-error-text` |
 | `-h`, `--help` | Print help and exit without searching. | `jvn find --help` |
 
 Limits and context sizes affect how much evidence the search can inspect. Read `search.outcome`,
@@ -103,8 +107,9 @@ identifies the newest pack. No input is required until another paid call would n
 JSON mode and redirected or piped input/output never prompt. An explicit `--max-calls 0` also
 returns immediately. Trace returns its recorded partial results at a call stop without prompting.
 
-When `search.outcome` is `budget` or `cancelled`, the pack contains `resume.json`. Supply that pack to a follow-up
-invocation with the same target, repository, prefixes and starts:
+When `search.outcome` is `budget`, `cancelled` or `failed`, the pack contains `resume.json`. Supply that pack to a
+follow-up invocation with the same target, repository, prefixes and starts. Resume asks a failed request
+again and replays every answer already stored, so nothing answered is paid for twice:
 
 ```sh
 jvn find "the order limit" --repo /path/to/repository --out ./first-pack
@@ -115,8 +120,8 @@ The follow-up invocation gets a fresh allowance by default (24 live calls for Fi
 `--max-calls none` changes that allowance. Stored answers and the journal carry forward, so replayed
 answers cost no live calls. The new manifest combines earlier and new visits, history and call counts;
 `search.calls_this_invocation` records only the new requests, while `search.calls` is cumulative;
-the previous pack remains intact. A cap reached during automatic entry selection saves that stage,
-and the next invocation replays its stored decisions before continuing. Resume requires unchanged
+the previous pack remains intact. A cap, Ctrl-C or failed request during automatic entry selection
+saves that stage, and the next invocation replays its stored decisions before continuing. Resume requires unchanged
 source and scope, the same thresholds and requested model. If the source changed, start a new search.
 
 ## JSON requests
@@ -176,7 +181,7 @@ JSON mode writes one result object to stdout. It contains:
 | `manifest` | Absolute path to the complete `manifest.json`. |
 | `report` | Absolute path to the readable `report.md`. |
 | `search` | Outcome, matched spans, source code, decisions, request counts and coverage details. |
-| `provider` | Requested/served model and `input_tokens`, the sum of the counts the provider reported. `responses_without_usage` counts responses that reported none (null when resumed from an older pack), so 0 tokens with a non-zero count means unknown, not free. `unanswered_requests` counts requests that were sent but never answered (a cancelled or failed call), whose usage is unknown too. `input_tokens_complete` is true only when both counts are 0; otherwise `input_tokens` is a lower bound. |
+| `provider` | Requested/served model and `input_tokens`, the sum of the counts the provider reported. `responses_without_usage` counts responses that reported none (null when resumed from an older pack), so 0 tokens with a non-zero count means unknown, not free. `unanswered_requests` counts requests that were sent but got no response carrying usage (a cancelled call, or one that failed with an error), so their usage is unknown too; report.md calls them "Requests whose usage is unknown". `input_tokens_complete` is true only when both counts are 0; otherwise `input_tokens` is a lower bound. |
 | `resume` | Evidence pack path to pass to `--resume` when the outcome is `budget` or `cancelled`; otherwise `null`. |
 
 Progress, expanded requests and errors go to stderr, so stdout remains parseable. For example:
@@ -191,9 +196,9 @@ Check the command's exit status before reading a result file:
 | Exit code | Meaning |
 |---|---|
 | `0` | A search finished and wrote its result. Read `search.outcome`; this does not guarantee a match. |
-| `1` | Search, configuration, filesystem or provider failure. Read stderr. |
+| `1` | Search, configuration, filesystem or provider failure. Read stderr. When a request of a Find or Find All search failed, the pack is written first: `search.outcome` is `failed`, `search.failure` holds the error's type, its causes, the journal `request_id`, the HTTP `status` when known and the `message` (only `message_length` and `message_sha256` with `--no-error-text`), and stderr shows the whole message and names the `--resume` path. |
 | `2` | Invalid command or request. Read stderr. |
-| `130` | Cancelled with Ctrl-C. Existing journal records remain available. |
+| `130` | Cancelled with Ctrl-C. Existing journal records remain available. A failure that arrives while the command is cancelling exits `1` with that failure instead, with the same resume state. |
 
 The evidence directory contains `report.md`, `manifest.json`, `journal.jsonl` and `answers.jsonl`.
 Every answer also goes to the shared answer store (see `--answer-store`), which holds no code; a later
@@ -201,12 +206,16 @@ run at the same commit replays from it after the live requests that learn the se
 `findall` and `trace`, one per place the first round of `find` opens, up to `--beam-width`), and copies
 what it replays into its own `answers.jsonl`. Find All and Trace items carry the commit and file
 hashes, so a run on a new commit asks again.
-Budget-stopped and cancelled packs also contain `resume.json`.
+Budget-stopped, cancelled and failed packs also contain `resume.json`.
 The manifest retains the full record even if a pipeline selects only a few output fields. By default
 the manifest, report, journal and resume state hold no source code: places appear as
 `path:start-end` with file hashes, neighbours as `path:line name`, a key mention as `mentions a key
-(path:line)`, and journal requests as hashes. With `--keep-requests` the manifest and report also carry the code and the journal the
-exact request body; inspect the journal's exact-capture flags when auditing bytes.
+(path:line)`, and journal requests as hashes. Error messages and the bodies of responses with an error
+status are kept as they came; an error can quote its request (a 422 validation body often does), so
+`--no-error-text` (or `JEV_NAVIGATOR_ERROR_TEXT=off`) keeps them only as their length and SHA-256, while
+stderr still shows the message. With `--keep-requests` the manifest and report also carry the code, the
+journal the exact request body, and every run file the error text; inspect the journal's exact-capture
+flags when auditing bytes.
 
 ## Agent workflow
 
@@ -281,7 +290,7 @@ JSON stdout contains `output_directory`, `manifest`, `report`, `trace`, `provide
 (`null` for trace). Progress and requests stay on stderr. See `trace.outcome`, its obligations and
 `unresolved_links` before interpreting coverage; `trace.unavailable_files` names, with the reason, each
 file the index has no facts for (gone or changed on disk, or refused by the parser), and report.md lists
-them. Ctrl-C stops the command with exit 130; an abrupt
+them. `trace.not_indexed_files` names each file or folder the listing left out, such as an ignored one, and report.md counts them by reason and top folder. Ctrl-C stops the command with exit 130; an abrupt
 interruption can leave the journal and answer store without a final manifest. The library also
 offers cooperative cancellation between traversal steps and model batches that writes a partial
 pack.
