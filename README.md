@@ -38,8 +38,8 @@ every use of JVN, the `jvn` command included, is a composition of the same block
 
 Between two stages a configuration can place a **Jev step**, one bounded decision such as a yes or no
 check or a pick from a list code built ([Layer 2](#layer-2-judgments)), or an **LLM step**, generation
-over an open space ([`LlmStep`](#llmstep-an-llm-call-you-add-yourself)). The configuration switches
-each step on or off.
+over an open space ([`LlmStep`](#llmstep-an-llm-call-you-add-yourself)). Which steps run is
+configuration: a recipe the caller passes as data names them, never an environment or deploy flag.
 
 | Block | Status |
 | --- | --- |
@@ -1068,10 +1068,15 @@ test did not run, so a run with a skip fails and names it, unless the test decla
 cannot run on with a `skipif` condition. To show the core works without the extra, run
 `uv run --no-dev --with pytest pytest --without-typesafe`: only there may the TypeSafe tests skip,
 and it refuses to start when the extra is installed. Run `uv run ruff check src tests` and
-`uv run ruff format --check src tests` before pushing. Local checks are the normal validation
-path for this small library; pushes and pull requests do not launch hosted CI. The `tests`
-workflow is available through GitHub Actions **Run workflow** when an explicit cross-version
-check is needed (Python 3.11 and 3.13, each with and without the TypeSafe extra).
+`uv run ruff format --check src tests` before pushing.
+
+Locally, run only the test files that cover or import what you changed (`uv run pytest
+--basetemp=<scratch dir> tests/<file>`); never the whole suite on the shared Mac (André,
+05.10.2026). Pushes and pull requests do not launch hosted CI, so once a head is the one to merge,
+start the `tests` workflow on its branch (`gh workflow run tests.yml -R ajbmachon/jev-navigator
+--ref <branch>`). It runs the whole suite on Python 3.11 and 3.13, each with and without the
+TypeSafe extra; judge it by its log. A whole-suite run that must happen outside CI goes to GX10
+nr3 over SSH with a memory cap, never to this Mac.
 
 ## License
 
