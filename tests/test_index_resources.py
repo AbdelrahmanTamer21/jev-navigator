@@ -12,7 +12,7 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 
 import pytest
-from git_repos import commit_files
+from git_repos import commit_files, read_files
 
 from jev_navigator.index import code_index, languages, tools
 from jev_navigator.index.code_index import CodeIndex
@@ -49,9 +49,10 @@ def callback_tree(root: Path, file_count: int) -> tuple[list[str], int]:
 
 
 def peak_bytes_while_scanning(root: Path, files: list[str]) -> int:
+    contents = read_files(root, files)
     tracemalloc.start()
     tracemalloc.reset_peak()
-    scan_facts(files, root, Unparsed())
+    scan_facts(contents, root, Unparsed())
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     return peak
@@ -59,7 +60,7 @@ def peak_bytes_while_scanning(root: Path, files: list[str]) -> int:
 
 def scanned(root: Path) -> tuple[dict, frozenset[str]]:
     unparsed = Unparsed()
-    facts = scan_facts(sorted(MIXED_SCOPE), root, unparsed)
+    facts = scan_facts(read_files(root, sorted(MIXED_SCOPE)), root, unparsed)
     return facts, unparsed.files
 
 
@@ -101,12 +102,18 @@ def test_a_file_list_longer_than_the_argument_limit_is_split_across_processes(
     # Arrange
     commit_files(tmp_path, MIXED_SCOPE)
     files = sorted(MIXED_SCOPE)
-    together = (scanned(tmp_path), sorted(tools.ripgrep_fixed("return", files, tmp_path, max_hits=10)))
+    together = (
+        scanned(tmp_path),
+        sorted(tools.ripgrep_fixed("return", files, tmp_path, max_hits=10, context_bytes=200)),
+    )
     spawned.clear()
     monkeypatch.setattr(tools, "MAX_ARGUMENT_BYTES", 30)
 
     # Act
-    split = (scanned(tmp_path), sorted(tools.ripgrep_fixed("return", files, tmp_path, max_hits=10)))
+    split = (
+        scanned(tmp_path),
+        sorted(tools.ripgrep_fixed("return", files, tmp_path, max_hits=10, context_bytes=200)),
+    )
 
     # Assert
     assert spawned[tools.AST_GREP] > 2
@@ -257,7 +264,9 @@ def test_symbols_on_the_same_lines_keep_their_source_order_on_every_scan(tmp_pat
     (tmp_path / "chain.ts").write_text("export const o = { b() { return 1; }, a() { return 2; } };\n")
 
     # Act: a fresh parse each time, since ast-grep may print matches in any order.
-    runs = [scan_facts(["chain.ts"], tmp_path, Unparsed())["chain.ts"] for _ in range(5)]
+    runs = [
+        scan_facts(read_files(tmp_path, ["chain.ts"]), tmp_path, Unparsed())["chain.ts"] for _ in range(5)
+    ]
 
     # Assert
     assert all(run == runs[0] for run in runs)
@@ -407,7 +416,7 @@ def test_a_declaration_on_a_first_line_after_a_byte_order_mark_keeps_its_name(tm
     (tmp_path / "flags.ts").write_bytes("\ufeffexport const enabled = true;\n".encode())
 
     # Act
-    facts = scan_facts(["settings.py", "flags.ts"], tmp_path, Unparsed())
+    facts = scan_facts(read_files(tmp_path, ["settings.py", "flags.ts"]), tmp_path, Unparsed())
 
     # Assert
     assert [span.name for span in facts["settings.py"].structure.declarations] == ["LIMIT", "OTHER"]
@@ -516,3 +525,37 @@ def test_a_pattern_file_search_over_more_files_than_a_parser_command_takes_start
     # Assert
     assert set(found) == {"app/orders.py", "app/rules.py", "web/plain.js", "web/typed.js"}
     assert spawned[tools.RIPGREP] == 1
+
+
+BUNDLE_PIECE = "var a=require('./util');a.util(1);"
+
+
+def bundle_beside_small_files(root: Path) -> list[str]:
+    """jvn-verifier's shape: a 20 MB one-line bundle naming ``util`` 1.2 million times, and 200 small
+    files that import it."""
+    (root / "src").mkdir(parents=True)
+    (root / "dist").mkdir()
+    (root / "dist/bundle.js").write_text(BUNDLE_PIECE * 600_000 + "\n")
+    for number in range(200):
+        (root / f"src/m{number}.js").write_text(
+            f"import {{ util }} from './util';\nexport const m{number} = util;\n"
+        )
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*.js"))
+
+
+def test_a_text_search_over_a_one_line_bundle_holds_only_a_window_around_each_hit(tmp_path: Path) -> None:
+    # Arrange
+    index = CodeIndex(tmp_path, bundle_beside_small_files(tmp_path))
+    tracemalloc.start()
+
+    # Act
+    hits = index.search_text("util", 2 * len(index.files))
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    # Assert: the bundle's 20 MB line never reaches Python, only a window around its first hit
+    [bundle_hit] = [hit for hit in hits if hit.file == "dist/bundle.js"]
+    assert len({hit.file for hit in hits}) == 201
+    assert peak < 10 * 2**20
+    assert bundle_hit.line == 1 and "util" in bundle_hit.text
+    assert len(bundle_hit.text) <= 2 * code_index.TEXT_HIT_CONTEXT_BYTES + len("util")

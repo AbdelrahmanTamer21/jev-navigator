@@ -228,7 +228,9 @@ def test_a_file_that_vanishes_during_the_scan_is_left_to_the_index_not_named_ski
     "search",
     [
         lambda repository: tools.ripgrep_files("needle", ("a.py",), repository),
-        lambda repository: tuple(hit.file for hit in tools.ripgrep_fixed("needle", ("a.py",), repository, 5)),
+        lambda repository: tuple(
+            hit.file for hit in tools.ripgrep_fixed("needle", ("a.py",), repository, 5, 200)
+        ),
         lambda repository: tuple(hit.file for hit in tools.ripgrep_lines(("needle",), ("a.py",), repository)),
     ],
     ids=["ripgrep_files", "ripgrep_fixed", "ripgrep_lines"],
