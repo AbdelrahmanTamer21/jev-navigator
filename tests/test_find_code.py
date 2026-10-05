@@ -6,7 +6,6 @@ import os
 import re
 import signal
 import threading
-import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import CancelledError
 from dataclasses import replace
@@ -1864,7 +1863,6 @@ def test_a_real_error_that_settled_before_the_interrupt_ends_the_search_failed_n
 
     def interrupt_once_the_error_settled() -> None:
         failed.wait(10)
-        time.sleep(0.3)
         os.kill(os.getpid(), signal.SIGINT)
 
     places = [
@@ -1892,4 +1890,48 @@ def test_a_real_error_that_settled_before_the_interrupt_ends_the_search_failed_n
     # Assert
     assert result.outcome == Outcome.FAILED
     assert isinstance(result.failure, OSError)
+    assert str(result.failure) == "disk full"
+
+
+@pytest.mark.usefixtures("python_sigint_handler")
+@pytest.mark.parametrize("attempt", range(20))
+def test_a_request_failing_as_ctrl_c_arrives_while_its_round_is_sent_ends_the_search_failed(
+    sample_index: CodeIndex, attempt: int
+) -> None:
+    # Arrange: the second place's send raises Ctrl-C itself, so the interrupt lands while the
+    # round is still handing its requests to the workers, and then fails with a real error
+    cancelled = threading.Event()
+
+    class FailsAsCtrlCArrives(ScriptedJevClient):
+        def send(self, state, questions):
+            if "def check_limits" in state["slice"]["code"]:
+                os.kill(os.getpid(), signal.SIGINT)
+                raise OSError("disk full")
+            cancelled.wait(10)
+            raise CancelledError
+
+        def cancel(self) -> None:
+            cancelled.set()
+
+    places = [
+        function_place(sample_index, sample_index.find_definition(name)[0])
+        for name in ("validate_order", "check_limits")
+    ]
+
+    # Act
+    try:
+        result = find_code(
+            sample_index,
+            Judge(FailsAsCtrlCArrives()),
+            TARGET,
+            [],
+            budget=SearchBudget(beam_width=2),
+            moves={},
+            initial_candidates=[(place, 1.0) for place in places],
+        )
+    finally:
+        cancelled.set()
+
+    # Assert
+    assert result.outcome == Outcome.FAILED
     assert str(result.failure) == "disk full"
