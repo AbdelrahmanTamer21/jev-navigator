@@ -26,6 +26,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import cached_property
 
 from ..judgments.questions import serialized_chars
 from .code_index import CodeIndex
@@ -37,6 +38,9 @@ from .spans import Span, holder_of
 PIECE_LINES = 60
 TOP_LEVEL_SYMBOL = "<top level>"
 UNSUPPORTED_LANGUAGE = "language not supported"
+_UNLISTED_TOP_LEVEL = (
+    "top-level code of only imports, comments, directives and brackets, which a listing leaves out"
+)
 _DIRECTIVE = re.compile(r"""^\s*["']use (?:client|server|strict)["']\s*;?\s*$""")
 _CLOSING_BRACKETS = re.compile(r"^[\s)\]};,]*$")
 
@@ -118,7 +122,7 @@ def list_units(index: CodeIndex, files: Sequence[str], *, box_chars: int) -> Uni
     files = tuple(dict.fromkeys(files))
     source_files = tuple(file for file in files if language_of(file))
     index.functions_in_files(source_files)
-    units = tuple(unit for file in source_files for unit in _SourceFile(index, file, box_chars).listed())
+    units = tuple(unit for file in source_files for unit in _SourceFile(index, file, box_chars).listed)
     unlisted = {file: UNSUPPORTED_LANGUAGE for file in files if not language_of(file)}
     unlisted |= {file: reason for file, reason in index.unavailable_files.items() if file in files}
     return UnitListing(units, unlisted)
@@ -194,15 +198,19 @@ class AnchorResolution:
     unresolved: tuple[UnresolvedAnchor, ...]
 
 
-def resolve_anchors(index: CodeIndex, anchors: Iterable[Anchor], *, box_chars: int) -> AnchorResolution:
+def resolve_anchors(
+    index: CodeIndex, anchors: Iterable[Anchor], *, box_chars: int, listed_only: bool = False
+) -> AnchorResolution:
     """The units ``anchors`` name. A line names the innermost unit holding it: a function, decorators
     included, or the file's top-level code outside every function, stubs included, even top-level
     code the listing leaves out. A range names each unit its non-blank lines touch, leaving out units
-    nested in another it names. Nothing is guessed: a file outside the scope or in a language JVN does
-    not parse, a line outside its file, a reversed range, and a blank line in a file with no top-level
-    code are reported, and a file is parsed only after its anchor is known to point inside it.
-    ``box_chars`` is ``list_units``'."""
-    resolver = _AnchorResolver(index, box_chars)
+    nested in another it names. With ``listed_only`` every unit named is one ``list_units`` lists: a
+    nested function gives way to the outermost function holding it, and top-level code the listing
+    leaves out names nothing. Nothing is guessed: a file outside the scope or in a language JVN does
+    not parse, a line outside its file, a reversed range, a blank line in a file with no top-level
+    code, and with ``listed_only`` lines of only unlisted top-level code are reported, and a file is
+    parsed only after its anchor is known to point inside it. ``box_chars`` is ``list_units``'."""
+    resolver = _AnchorResolver(index, box_chars, listed_only)
     found: dict[str, Unit] = {}
     unresolved = []
     for anchor in anchors:
@@ -230,6 +238,7 @@ class _SourceFile:
         self.functions = tuple(self._function_unit(span, functions) for span in functions)
         self.top_level = self._top_level_unit()
 
+    @cached_property
     def listed(self) -> tuple[Unit, ...]:
         outermost = tuple(unit for unit in self.functions if unit.nested_in is None)
         top_level = () if self.top_level is None or self._holds_no_code() else (self.top_level,)
@@ -238,6 +247,17 @@ class _SourceFile:
     def unit_at(self, line: int) -> Unit | None:
         holding = [unit for unit in self.functions if unit.start <= line <= unit.end]
         return min(holding, key=lambda unit: unit.end - unit.start, default=self.top_level)
+
+    def listed_holder(self, unit: Unit) -> Unit | None:
+        """``unit`` itself when a listing lists it, else the outermost function holding it; None for
+        top-level code the listing leaves out."""
+        while unit.nested_in is not None:
+            unit = self._functions_by_id[unit.nested_in]
+        return unit if unit in self.listed else None
+
+    @cached_property
+    def _functions_by_id(self) -> dict[str, Unit]:
+        return {function.id: function for function in self.functions}
 
     def qualified(self, span: Span) -> str:
         """``span``'s name after every holder's: ``OrderService.place``, ``registerRoutes.<anonymous:4>``."""
@@ -316,9 +336,10 @@ class _SourceFile:
 
 
 class _AnchorResolver:
-    def __init__(self, index: CodeIndex, box_chars: int) -> None:
+    def __init__(self, index: CodeIndex, box_chars: int, listed_only: bool) -> None:
         self._index = index
         self._box_chars = box_chars
+        self._listed_only = listed_only
         self._sources: dict[str, _SourceFile] = {}
 
     def resolve(self, anchor: Anchor) -> tuple[tuple[Unit, ...], str]:
@@ -330,8 +351,17 @@ class _AnchorResolver:
             return (), problem
         units = self._units_touching(anchor.file, start, end)
         if not units:
-            return (), f"line {start} of {anchor.file} is blank and outside every function"
-        return units, ""
+            return (), f"{_lines_named(anchor.file, start, end)}: blank and outside every function"
+        if not self._listed_only:
+            return units, ""
+        holders = self._listed_holders(anchor.file, units)
+        if not holders:
+            return (), f"{_lines_named(anchor.file, start, end)}: {_UNLISTED_TOP_LEVEL}"
+        return holders, ""
+
+    def _listed_holders(self, file: str, units: Iterable[Unit]) -> tuple[Unit, ...]:
+        source = self._source(file)
+        return tuple(holder for unit in units if (holder := source.listed_holder(unit)))
 
     def _units_touching(self, file: str, start: int, end: int) -> tuple[Unit, ...]:
         source = self._source(file)
@@ -396,6 +426,10 @@ def _runs(lines: Iterable[int]) -> list[LineRange]:
         else:
             runs.append([line, line])
     return [(start, end) for start, end in runs]
+
+
+def _lines_named(file: str, start: int, end: int) -> str:
+    return f"line {start} of {file}" if start == end else f"lines {start} to {end} of {file}"
 
 
 def _nests(inner: Unit, outer: Unit) -> bool:

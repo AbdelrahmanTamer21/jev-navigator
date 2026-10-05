@@ -133,6 +133,14 @@ def test_create():
     assert create
 """
 HELPERS = "def first():\n    return 1\n\n\ndef second():\n    return 2\n"
+LAYERS = """\
+def outer():
+    def middle():
+        def inner():
+            return 1
+        return inner()
+    return middle()
+"""
 
 TABLE = (
     "TABLE = {\n"
@@ -161,6 +169,7 @@ SHOP = {
     "app/long.py": LONG_BUT_SMALL,
     "app/table.py": TABLE,
     "app/helpers.py": HELPERS,
+    "app/layers.py": LAYERS,
     "web/wire.ts": SCRIPT_IMPORTS,
     "web/pick.ts": ONE_LINE_NESTED,
     "web/pair.ts": ONE_LINE_METHODS,
@@ -670,7 +679,7 @@ def test_a_line_between_units_names_the_top_level_code_or_is_reported(shop: Code
     assert [unit.id for unit in resolved.units] == ["app/table.py:top"]
     assert resolved.unresolved == (
         UnresolvedAnchor(
-            LineAnchor("app/helpers.py", 3), "line 3 of app/helpers.py is blank and outside every function"
+            LineAnchor("app/helpers.py", 3), "line 3 of app/helpers.py: blank and outside every function"
         ),
     )
 
@@ -706,6 +715,56 @@ def test_a_range_names_the_function_holding_a_nested_one_and_a_line_the_innermos
     assert [(unit.symbol, unit.nested_in) for unit in inner.units] == [
         ("Basket.total.helper", "app/basket.py:5-8")
     ]
+
+
+def test_listed_only_names_the_outermost_function_holding_a_nested_one(shop: CodeIndex) -> None:
+    # Arrange: `inner` sits in `middle`, which sits in `outer`; `helper` sits in `Basket.total`
+    anchors = (LineAnchor("app/layers.py", 4), RangeAnchor("app/basket.py", 6, 7))
+
+    # Act
+    innermost = resolve_anchors(shop, anchors, box_chars=JEV_BOX)
+    listed = resolve_anchors(shop, anchors, box_chars=JEV_BOX, listed_only=True)
+
+    # Assert
+    assert [unit.symbol for unit in innermost.units] == ["outer.middle.inner", "Basket.total.helper"]
+    assert [unit.symbol for unit in listed.units] == ["outer", "Basket.total"]
+
+
+def test_listed_only_reports_a_line_in_top_level_code_the_listing_leaves_out(shop: CodeIndex) -> None:
+    # Arrange: only_imports.py's top-level code is a comment and imports, on lines 1 to 7
+    anchors = (LineAnchor("app/only_imports.py", 3), RangeAnchor("app/only_imports.py", 1, 7))
+
+    # Act
+    innermost = resolve_anchors(shop, anchors, box_chars=JEV_BOX)
+    listed = resolve_anchors(shop, anchors, box_chars=JEV_BOX, listed_only=True)
+
+    # Assert
+    assert [unit.id for unit in innermost.units] == ["app/only_imports.py:top"]
+    assert listed.units == ()
+    assert [item.problem for item in listed.unresolved] == [
+        "line 3 of app/only_imports.py: top-level code of only imports, comments, directives and "
+        "brackets, which a listing leaves out",
+        "lines 1 to 7 of app/only_imports.py: top-level code of only imports, comments, directives and "
+        "brackets, which a listing leaves out",
+    ]
+
+
+def test_listed_only_names_only_units_the_listing_lists(shop: CodeIndex) -> None:
+    # Arrange: a line and a range on every line of each file
+    files = ("app/basket.py", "app/layers.py", "app/only_imports.py", "app/routes.py", "web/pick.ts")
+    anchors = [
+        anchor
+        for file in files
+        for count in [len(shop.lines(file))]
+        for anchor in (*(LineAnchor(file, line) for line in range(1, count + 1)), RangeAnchor(file, 1, count))
+    ]
+    listed_ids = {unit.id for unit in list_units(shop, files, box_chars=JEV_BOX).units}
+
+    # Act
+    resolved = resolve_anchors(shop, anchors, box_chars=JEV_BOX, listed_only=True)
+
+    # Assert: every listed unit is named, and nothing else
+    assert {unit.id for unit in resolved.units} == listed_ids
 
 
 def test_an_anchor_outside_the_scope_or_its_file_is_reported_before_any_parse(
