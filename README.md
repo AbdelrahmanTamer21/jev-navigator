@@ -722,8 +722,9 @@ neighbour alone. Larger code is cut on a line boundary with a visible note, and 
 the last shown line. A cut never grows back: under `neighbours_per_kind` a shorter cut can list a
 small neighbour in place of a large one, so the opening keeps that cut and the neighbours listed for it.
 Every opening starts from the code that fits the request asking whether it is the target, and
-`find_code.shown_for_target(code, target, input_limits, found=FOUND)` gives exactly that, for a
-caller that must show what Find shows. If not even its first line fits, the place stays
+`find_code.shown_for_target(code, target, input_limits, found=FOUND, masker=DEFAULT_MASKER)` gives
+exactly that, for a caller that must show what Find shows. Every size check measures a request as
+the judge's masker leaves it (`judge.masked_request_fits`), since masking can make it longer. If not even its first line fits, the place stays
 `not_inspected` with reason `budget`; Resume on a route with a larger box inspects that same source.
 `questions=SearchQuestions(found=...,
 could_contain=..., open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
