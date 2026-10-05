@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from conftest import WEBSITE_QUERIES
 from git_repos import commit_files
 
 from jev_navigator.directives.places import (
@@ -984,3 +985,73 @@ def test_a_line_outside_the_place_grammar_names_no_file(line: str) -> None:
 
     # Assert
     assert named is None
+
+
+SCHEMA = "prisma/schema.prisma"
+
+
+USER_QUERIES = """\
+import prisma from '@/lib/prisma';
+
+export async function getUser(userId: string) {
+  return prisma.client.user.findUnique({ where: { id: userId } });
+}
+"""
+
+
+@pytest.fixture
+def schema_index(tmp_path: Path, umami_schema: str) -> CodeIndex:
+    files = {SCHEMA: umami_schema, "src/website.ts": WEBSITE_QUERIES, "src/user.ts": USER_QUERIES}
+    return committed_index(tmp_path, files)
+
+
+def test_a_line_in_a_schema_model_opens_the_whole_model_and_a_settings_line_a_window(
+    schema_index: CodeIndex,
+) -> None:
+    # Act
+    model = place_for_line(schema_index, SCHEMA, 120, "start")
+    settings = place_for_line(schema_index, SCHEMA, 2, "start")
+
+    # Assert
+    assert model.open().span == Span(SCHEMA, 98, 131, "Website")
+    assert model.signature == f"{SCHEMA}:98 `model Website {{` (start)"
+    assert (settings.kind, settings.open().span) == ("window", Span(SCHEMA, 1, 12))
+
+
+def test_a_schema_start_offers_the_schemas_models_nearest_first(schema_index: CodeIndex) -> None:
+    # Arrange
+    opened = place_for_line(schema_index, SCHEMA, 1, "start").open()
+
+    # Act
+    models = [place.open().span for place in MOVES["same_file"](schema_index, opened)]
+
+    # Assert
+    assert len(models) == 26
+    assert [span.name for span in models[:3]] == ["User", "ApiKey", "Session"]
+    assert Span(SCHEMA, 98, 131, "Website") in models
+
+
+def test_a_model_offers_the_code_that_queries_it_through_its_client_accessor(schema_index: CodeIndex) -> None:
+    # Arrange
+    opened = place_for_line(schema_index, SCHEMA, 120, "start").open()
+
+    # Act
+    offered = [place for place in neighbours(schema_index, opened) if place.move == "client_calls"]
+
+    # Assert: only `Website`'s own client calls, not another model's.
+    assert [place.open().span.name for place in offered] == ["updateWebsite", "getWebsiteCount"]
+    assert offered[0].signature.endswith("(queries model Website by the text `.website.`)")
+
+
+def test_code_that_queries_a_model_offers_the_models_block(schema_index: CodeIndex) -> None:
+    # Arrange
+    opened = schema_index.read_slice(schema_index.find_definition("updateWebsite")[0])
+
+    # Act
+    offered = [place for place in neighbours(schema_index, opened) if place.move == "queried_models"]
+
+    # Assert
+    assert [place.open().span for place in offered] == [Span(SCHEMA, 98, 131, "Website")]
+    assert offered[0].signature == (
+        f"{SCHEMA}:98 `model Website {{` (model Website, which updateWebsite queries by the text `.website.`)"
+    )
