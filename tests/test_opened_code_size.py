@@ -4,14 +4,23 @@ client's input limits, and otherwise the longest start that fits, with a visible
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from conftest import BudgetedClient
 from git_repos import commit_files
 from search_deadline import searched_in_child
 
 from jev_navigator.adapters.routes import DREX_INPUT_LIMITS
-from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code
+from jev_navigator.directives.find_code import (
+    FOUND,
+    Outcome,
+    SearchBudget,
+    SearchQuestions,
+    find_code,
+    shown_for_target,
+)
 from jev_navigator.directives.places import MOVES, place_for_line
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
@@ -34,6 +43,12 @@ def _function_of(name: str, characters: int) -> str:
     body = "".join(lines[: characters // len(lines[0]) + 1])
     tail = f"    def {name}_tail(order):\n        return order\n\n    return {name}_tail(order)\n"
     return f"def {name}(order):\n    audit(order)\n{body}{tail}"
+
+
+def _calling_nothing(characters: int) -> str:
+    """A function of more than ``characters`` characters with no neighbour to list."""
+    lines = [f"    total_{line:05d} = order.amount * {line:05d}\n" for line in range(characters)]
+    return "def place(order):\n" + "".join(lines[: characters // len(lines[0]) + 1]) + "    return order\n"
 
 
 def _index(tmp_path: Path, files: dict[str, str]) -> CodeIndex:
@@ -139,3 +154,34 @@ def test_a_cut_under_a_per_kind_cap_settles_and_every_request_fits(tmp_path: Pat
     (neighbour,) = asked["neighbours"]
     assert neighbour.startswith(f"app/orders.py:{seen['tail_line']} `def place_tail(order):`")
     assert set_aside["app/audit.py:1 audit"] == "capped"
+
+
+LONGER_FOUND = replace(FOUND, instructions=FOUND.instructions + " Read every line before you answer." * 20)
+
+
+@pytest.mark.parametrize("found", [FOUND, LONGER_FOUND], ids=["default wording", "longer wording"])
+@pytest.mark.parametrize("characters", range(17_600, 20_400, 400))
+def test_find_shows_what_shown_for_target_shows(tmp_path: Path, found, characters: int) -> None:
+    # Arrange: a function with no neighbour, so the first cut alone decides what Find shows, under
+    # Drex's box of 19,660 characters: whole below it, cut above it
+    index = _index(tmp_path, {"app/orders.py": _calling_nothing(characters)})
+    client = BudgetedClient(JEV_INPUT_LIMITS.request_chars, input_box=DREX_INPUT_LIMITS.box_chars)
+    client.input_limits = DREX_INPUT_LIMITS
+    start = place_for_line(index, "app/orders.py", 1, "start")
+
+    # Act
+    result = find_code(
+        index,
+        Judge(client),
+        "the order total",
+        [start],
+        questions=SearchQuestions(found=found),
+        moves=CALLEES,
+        budget=ONE_OPENING,
+    )
+    shown = shown_for_target(start.open(), "the order total", DREX_INPUT_LIMITS, found=found)
+
+    # Assert
+    (opened,) = result.starts
+    assert client.refusals == 0
+    assert (opened.code.span, opened.code.text) == (shown.span, shown.text)

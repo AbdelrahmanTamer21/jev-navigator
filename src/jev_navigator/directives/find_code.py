@@ -41,7 +41,7 @@ from ..index.code_index import CodeIndex
 from ..index.languages import language_of
 from ..index.spans import CodeSlice
 from ..judgments.answers import JevResponse, NoulAnswer
-from ..judgments.client import InputBudgetExceededError
+from ..judgments.client import InputBudgetExceededError, InputLimits
 from ..judgments.judge import (
     ABORTED_SEND_ERRORS,
     CODE_FIELD,
@@ -398,6 +398,23 @@ async def find_code_async(
     return _result(search, stop, judge, index)
 
 
+def shown_for_target(
+    code: CodeSlice,
+    target_description: str,
+    input_limits: InputLimits,
+    *,
+    found: Check = FOUND,
+    max_line_chars: int = MAX_LINE_CHARS,
+) -> CodeSlice | None:
+    """How much of ``code`` Find shows when it asks whether ``code`` is the target: all of it when that
+    request fits the box of ``input_limits``, else the longest start that fits, ending in a visible
+    cut note, and None when not even the first line fits. It is the first cut of every opening; a
+    split opening's neighbours can cut it further. It measures the request before masking, which only
+    shortens it: every value the masker hides is at least as long as its mask."""
+    fits = partial(_found_request_fits, _target(target_description), found, input_limits)
+    return shown_slice(code, fits, max_line_chars)
+
+
 @dataclass(frozen=True)
 class _SearchOptions:
     """The keyword arguments ``find_code`` and ``find_code_async`` share."""
@@ -417,7 +434,7 @@ def _begin(
 ) -> tuple[_Search, Judge]:
     if options.commit is not None:
         index.require_commit(options.commit)
-    target = {"description": target_description}
+    target = _target(target_description)
     rule = options.stop_rule
     history = rule.new_history(target) if rule else History(sections={SUBJECT: target})
     if judge.journal is not None and hasattr(judge.journal, "record_step"):
@@ -696,7 +713,13 @@ def _open(index: CodeIndex, search: _Search, judge: Judge, item: _Queued) -> _Op
     fingerprint = content_hash(code.text)
     if fingerprint in search.judged_code:
         return None
-    shown = shown_slice(code, partial(_found_request_fits, search, judge), search.budget.max_line_chars)
+    shown = shown_for_target(
+        code,
+        search.target["description"],
+        judge.input_limits,
+        found=search.questions.found,
+        max_line_chars=search.budget.max_line_chars,
+    )
     if shown is None:
         search.visited.discard(item.place.key)
         search.cap_reached = True
@@ -751,38 +774,37 @@ def _beside_neighbours(
     """The opening with the neighbours it asks about, and the places the per-kind cap left out. A split
     opening sends the shown code with each neighbour alone, so a neighbour too large for that request
     cuts the code further, and a shorter cut can list more neighbours: listing repeats while each pass
-    shows fewer lines than the one before, so it ends. A cut never grows back: under a per-kind cap a
-    shorter cut can list a small neighbour in place of a large one, and growing back would list the
-    large one again. The opening returned fits, because its neighbours were listed for its cut and a
-    shorter start than the longest that fits also fits. When not even the first line fits beside the
-    largest neighbour, the opening keeps its cut, and the provider refuses that neighbour's request."""
+    shows fewer lines than the one before, so it ends. A cut never grows back, so it never shows more
+    than the first cut (``shown_for_target``) and the question whether it is the target always fits;
+    under a per-kind cap a shorter cut can list a small neighbour in place of a large one, and growing
+    back would list the large one again. The opening returned fits, because its neighbours were
+    listed for its cut and a shorter start than the longest that fits also fits. When not even the
+    first line fits beside the largest neighbour, the opening keeps its cut, and the provider refuses
+    that neighbour's request."""
     while True:
         listed, omitted = neighbours_and_omissions(
             index, code, search.budget.neighbours_per_kind, search.moves, opening.code.span
         )
         unseen = [place for place in listed if place.key not in search.visited]
         opening = replace(opening, candidates=[place for place in unseen if place.open().text.strip()])
-        fits = partial(_split_requests_fit, search, judge, _largest_neighbour(search, opening))
+        fits = partial(_neighbour_request_fits, search, judge, _largest_neighbour(search, opening))
         shown = shown_slice(code, fits, search.budget.max_line_chars)
         if shown is None or shown.span.end >= opening.code.span.end:
             return opening, omitted
         opening = replace(opening, code=shown)
 
 
-def _found_request_fits(search: _Search, judge: Judge, shown: CodeSlice) -> bool:
-    """Whether asking only whether ``shown`` is the target fits the judge's input box: the smallest
-    request an opening sends."""
-    found = search.questions.found
+def _found_request_fits(target: Mapping, found: Check, input_limits: InputLimits, shown: CodeSlice) -> bool:
+    """Whether asking only whether ``shown`` is ``target`` fits the box of ``input_limits``: the
+    smallest request an opening sends."""
     questions = {found.question_id: found.to_question()}
-    return not judge.input_limits.exceeded_by(_opened_state(search, shown), questions)
+    return not input_limits.exceeded_by(_opened_state(target, shown), questions)
 
 
-def _split_requests_fit(search: _Search, judge: Judge, largest: Mapping | None, shown: CodeSlice) -> bool:
-    """Whether every request of a split opening can fit the judge's input box: ``shown`` asked whether
-    it is the target, and asked about its largest neighbour alone."""
-    if not _found_request_fits(search, judge, shown):
-        return False
-    shared = _opened_state(search, shown)
+def _neighbour_request_fits(search: _Search, judge: Judge, largest: Mapping | None, shown: CodeSlice) -> bool:
+    """Whether asking about the opening's largest neighbour alone beside ``shown`` fits the judge's
+    input box."""
+    shared = _opened_state(search.target, shown)
     return largest is None or judge.fits_alone(_neighbour_check(search), largest, shared, "candidates")
 
 
@@ -792,15 +814,19 @@ def _largest_neighbour(search: _Search, opening: _Opening) -> Mapping | None:
     return max(items, key=serialized_chars, default=None)
 
 
-def _opened_state(search: _Search, code: CodeSlice) -> dict:
+def _target(description: str) -> dict:
+    return {"description": description}
+
+
+def _opened_state(target: Mapping, code: CodeSlice) -> dict:
     """What every request about an opening carries: the target and the code it shows."""
     shown = {"file": code.span.file, "lines": f"{code.span.start}-{code.span.end}", "code": code.text}
-    return {"target": search.target, "slice": shown}
+    return {"target": target, "slice": shown}
 
 
 def _opening_request(search: _Search, opening: _Opening) -> _OpeningRequest:
     code, candidates = opening.code, opening.candidates
-    shared = _opened_state(search, code)
+    shared = _opened_state(search.target, code)
     state = {**shared, "candidates": [_candidate_state(place, search.budget) for place in candidates]}
     asked = search.questions
     questions = {asked.found.question_id: asked.found.to_question()}
