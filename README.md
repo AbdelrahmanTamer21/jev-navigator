@@ -622,7 +622,10 @@ on its own scope, so searches sharing one judge never use up each other's budget
   more characters wherever it appears, a shorter one as a whole word, and a number of at most four
   characters or a value without letters or digits only where it stands. JVN's own question wording
   (instructions, and the criteria of a question that is not a choice) keeps its words, and a key of
-  the request equal to a short masked value does not refuse it. In a code file a plain identifier under a secret-named key
+  the request equal to a short masked value does not refuse it. A name that holds a hidden copy
+  (`x-runs-[MASKED]`) is still a name, and a string a copy changed is masked once more, so the
+  request sent is always one the rules leave as it is and the final scan refuses only what a
+  host's own scanner finds. In a code file a plain identifier under a secret-named key
   (`{ password: changeme }`) reads as code; in YAML it is a value.
   The complete candidate set is masked once, before packing, so copied values stay hidden across
   batches; the final scan still runs on every request before it is sent.

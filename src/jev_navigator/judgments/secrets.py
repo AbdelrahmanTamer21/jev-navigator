@@ -17,6 +17,7 @@ from functools import cache
 from typing import Protocol
 
 MASK = "[MASKED]"
+_MASK_AS_NAME_PART = "masked"
 BY_CONTENT_MIN_CHARS = 8
 RANDOM_VALUE_MIN_CHARS = 16
 HIGH_ENTROPY_BITS_PER_CHAR = 4.0
@@ -211,20 +212,28 @@ def masked_values(value: object, masker: Masker) -> frozenset[str]:
 
 
 def mask_everywhere(value: object, masker: Masker, values: frozenset[str], questions: bool = False) -> object:
-    """Masks every string by the masker's rules, then hides each of ``values`` wherever it still
-    appears. Keys are left as they are. In ``questions``, JVN's own wording hides no copies."""
+    """Masks every string by the masker's rules and hides each of ``values`` wherever it still appears.
+    A string a copy changed is masked once more, because a hidden copy can turn a kept value into one
+    the rules hide (``sessionToken: "[MASKED]-token"`` no longer repeats its key), and the request sent
+    must be one the rules leave as it is. Keys are left as they are. In ``questions``, JVN's own wording
+    hides no copies."""
     copies = [copy_pattern(secret) for secret in sorted(values - {MASK}, key=len, reverse=True)]
 
     @cache
     def hide(text: str, path: str | None, role: str) -> str:
-        text = masker.mask(text, path)
+        masked = masker.mask(text, path)
         if role == "wording":
-            return text
-        for copy in copies:
-            text = copy.sub(MASK, text)
-        return text
+            return masked
+        copied = _hide_copies(masked, copies)
+        return masked if copied == masked else masker.mask(copied, path)
 
     return _each_string(value, hide, questions=questions)
+
+
+def _hide_copies(text: str, copies: list[re.Pattern[str]]) -> str:
+    for copy in copies:
+        text = copy.sub(MASK, text)
+    return text
 
 
 def safe_options(options: Mapping[str, str], masker: Masker | None) -> dict[str, str]:
@@ -443,9 +452,11 @@ def _hides_under(kind: str, key: str, value: str) -> bool:
     """A value that repeats its key (``PASS: "PASS"``) shows nothing the key does not. Otherwise a secret
     key hides every literal; a suffixed key every literal but an environment variable's name, a path or a
     URL; a message key the same, except a sentence; a naming key only a credential-looking word, one word
-    of eight or more characters that names nothing."""
+    of eight or more characters that names nothing. An already masked part counts as a name part, so a
+    name that holds a hidden copy (``x-runs-[MASKED]``) is still a name."""
     if _repeats_its_key(key, value):
         return False
+    value = value.replace(MASK, _MASK_AS_NAME_PART)
     if kind == "secret":
         return True
     if kind == "message" and any(character.isspace() for character in value):

@@ -676,3 +676,44 @@ def test_a_copy_pattern_finds_a_long_value_anywhere_and_a_short_one_as_a_whole_w
 
     # Assert
     assert bool(found) is hidden
+
+
+@pytest.mark.parametrize(
+    ("line", "file", "copied"),
+    [
+        ('RUNS_REST_TOKEN_HEADER = "x-heedvane-runs-rest-token"\n', "enginepy/hub/auth.py", "token"),
+        ('RUNS_REST_TOKEN_HEADER = "x-heedvane-runs-rest-token"\n', "enginepy/hub/auth.py", "heedvane"),
+        ('TOKEN_STORE = "/var/lib/app/tokens"\n', "app/settings.py", "app"),
+        ('TOKEN_ENDPOINT = "https://auth.example.com/oauth/token"\n', "app/settings.py", "oauth"),
+    ],
+)
+def test_a_name_holding_a_copy_of_a_masked_value_stays_a_name_and_the_request_is_sent(
+    line: str, file: str, copied: str
+) -> None:
+    # Arrange
+    state = {
+        "named": {"file": file, "code": line},
+        "keyed": {"file": "app/fixtures.py", "code": f'password = "{copied}"\n'},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state["named"]["code"] == copy_pattern(copied).sub(MASK, line)
+
+
+def test_a_value_that_a_copy_turns_into_a_secret_is_masked_again_so_the_request_is_sent() -> None:
+    # Arrange
+    state = {
+        "fixture": {"file": "src/session.test.ts", "code": '  sessionToken: "session-token",\n'},
+        "keyed": {"file": "app/fixtures.py", "code": 'password = "session"\n'},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state["fixture"]["code"] == '  sessionToken: "[MASKED]",\n'
