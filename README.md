@@ -43,18 +43,19 @@ jvn help findall
 jvn schema findall
 ```
 
-`find` locates an implementation; `findall` finds a seed, examines related functions, then checks
-remaining function bodies for disconnected implementations. It uses batched Jev judgments and
-defaults to 48 live model calls (twice `find`); `--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
-[run folder](#where-jvn-keeps-runs-and-caches). `functions_examined` describes coverage of function bodies, not a proof
-of semantic equivalence or completeness across arbitrary code fragments. Uncertain answers and
+`find` locates an implementation; `findall` finds a seed, then judges every unit in scope (each
+function, method and file's top-level code), the units holding the seed's found code in its first
+wave of requests. It uses batched Jev judgments and defaults to 48 live model calls (twice `find`);
+`--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
+[run folder](#where-jvn-keeps-runs-and-caches). `units_examined` describes coverage of the units in
+scope, not a proof of semantic equivalence or completeness. Uncertain answers and
 unreadable or unsupported source stay visible. At a call stop, the terminal offers another allowance.
 For a later invocation or an agent pipeline, pass `--resume` with the folder the earlier run printed, and the same
 Find All query and scope. Completed judgments and the seed are retained; only unfinished work spends
 new model calls.
 
 For an engineer-authored library composition and its limits, see
-[Extending: seed-first Find All](docs/extending.md#compose-a-seed-first-find-all-search).
+[Extending: judge every unit with Find All](docs/extending.md#judge-every-unit-with-find-all).
 
 ## Install
 

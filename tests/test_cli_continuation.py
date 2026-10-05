@@ -14,6 +14,7 @@ import pytest
 from git_repos import commit_files
 from isolated_jvn import JVN
 
+from jev_navigator.cli import FIND_ALL_QUESTION
 from jev_navigator.cli_resume import load_resume, save_resume
 from jev_navigator.directives.find_code import SearchBudget, find_code
 from jev_navigator.directives.places import MOVES, function_place
@@ -46,7 +47,7 @@ def test_saved_find_frontier_restores_relationship_binding(tmp_path: Path) -> No
     # Act
     save_resume(resume_file, index, result, entry_pending=False)
     saved = json.loads(resume_file.read_text())
-    restored = load_resume(resume_file, index)
+    restored = load_resume(resume_file, index, find_all_question=FIND_ALL_QUESTION.question_id)
 
     # Assert
     frontier_record = saved["result"]["not_inspected"][0]
