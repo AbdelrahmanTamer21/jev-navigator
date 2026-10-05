@@ -35,6 +35,7 @@ from .languages import (
     FUNCTION_KINDS,
     LOCAL_NAME_RULES,
     MODULE_ALIAS_RULES,
+    MODULE_BINDING_RULES,
     MODULE_VARIABLE,
     NAME_HOLDERS,
     NAME_WRAPPERS,
@@ -200,6 +201,9 @@ class FileFacts:
     # urlParse` or `module.exports = { parse: urlParse }`, and ("default", "build") for its default
     # export, `export default build` or `module.exports = build` (see ``DEFAULT_EXPORTS``).
     renamed_exports: tuple[tuple[str, str], ...] = ()
+    # Each name module-level code binds otherwise than by an import or a module symbol, such as
+    # `mod = make()` or `for mod in mods` (see ``MODULE_BINDING_RULES``).
+    module_bindings: tuple[str, ...] = ()
     # Why the guard kept the file from the parser; such facts are empty and are never cached.
     refusal: str | None = None
     # The language the facts were read as: ``flow`` for JavaScript read with the tsx grammar. None
@@ -376,6 +380,7 @@ class _FileFound:
     from_imports: list[_FromImport] = field(default_factory=list)
     # Each name a from-import takes: its byte offset, the name it binds, and the name it imports.
     from_names: list[tuple[int, str, str]] = field(default_factory=list)
+    module_bindings: set[str] = field(default_factory=set)
     error_lines: list[tuple[int, int]] = field(default_factory=list)
 
     def add(self, match: dict) -> None:
@@ -408,6 +413,8 @@ class _FileFound:
             name = _captured_name(match)
             imported = _captured(match, "SPEC") or name
             self.from_names.append((match["range"]["byteOffset"]["start"], name, imported))
+        elif rule == _MODULE_BINDING_RULE:
+            self.module_bindings.add(match["text"])
         else:
             self._add_reference(match)
 
@@ -425,6 +432,7 @@ class _FileFound:
             tuple(alias for _, alias in sorted([*self.module_aliases, *self._from_import_aliases()])),
             tuple(sorted(self.exported_values)),
             tuple(sorted(self.renamed_exports)),
+            tuple(sorted(self.module_bindings)),
             language=self.language,
         )
 
@@ -888,6 +896,7 @@ _LOCAL_NAME_RULE = "local_name"
 _MODULE_ALIAS_RULE = "module_alias"
 _FROM_IMPORT_RULE = "from_import"
 _FROM_NAME_RULE = "from_name"
+_MODULE_BINDING_RULE = "module_binding"
 _PROPERTY_VALUE_RULE = "property_value"
 _SELF_NAMED_RULE = "self_named"
 _MODULE_EXPORT_RULE = "module_export"
@@ -953,6 +962,11 @@ def _module_alias_rules(languages: Sequence[str]) -> str:
     if "python" in languages:
         documents.append(_rule_document(_FROM_IMPORT_RULE, "python", PYTHON_FROM_IMPORT))
         documents += [_rule_document(_FROM_NAME_RULE, "python", rule) for rule in PYTHON_FROM_IMPORT_NAMES]
+    documents += [
+        _rule_document(_MODULE_BINDING_RULE, language, MODULE_BINDING_RULES[language])
+        for language in languages
+        if language in MODULE_BINDING_RULES
+    ]
     return "\n---\n".join(documents)
 
 
