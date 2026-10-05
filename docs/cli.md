@@ -211,8 +211,7 @@ Budget-stopped, cancelled and failed packs also contain `resume.json`.
 The manifest retains the full record even if a pipeline selects only a few output fields. By default
 the manifest, report, journal and resume state hold no source code: places appear as
 `path:start-end` with file hashes, neighbours as `path:line name` (the name of the enclosing symbol
-once navigation has read that file's structure), a key mention as `mentions a key (path:line)`, and
-journal requests as hashes. Error messages and the bodies of responses with an error
+when navigation parsed that file; a resumed search keeps each name its earlier save wrote, and shows by location a neighbour that an older pack stored with its code, in the manifest, the resume state and the journal it continues), a key mention as `mentions a key (path:line)`, and journal requests as hashes. Error messages and the bodies of responses with an error
 status are kept as they came; an error can quote its request (a 422 validation body often does), so
 `--no-error-text` (or `JEV_NAVIGATOR_ERROR_TEXT=off`) keeps them only as their length and SHA-256, while
 stderr still shows the message. With `--keep-requests` the manifest and report also carry the code, the
