@@ -211,7 +211,8 @@ the manifest, report, journal and resume state hold no source code: places appea
 when navigation parsed that file; a resumed search keeps each name its earlier save wrote, and shows by location a neighbour that an older pack stored with its code, in the manifest, the resume state and the journal it continues), a key mention as `mentions a key (path:line)`, and journal requests as hashes. Error messages and the bodies of responses with an error
 status are kept as they came; an error can quote its request (a 422 validation body often does), so
 `--no-error-text` (or `JEV_NAVIGATOR_ERROR_TEXT=off`) keeps them only as their length and SHA-256, while
-stderr still shows the message. With `--keep-requests` the manifest and report also carry the code, the
+stderr still shows the message. A resume applies its own setting to the journal it continues: resumed
+with error text off, the earlier pack's error messages and error bodies are rewritten to that form too. With `--keep-requests` the manifest and report also carry the code, the
 journal the exact request body, and every run file the error text; inspect the journal's exact-capture
 flags when auditing bytes.
 

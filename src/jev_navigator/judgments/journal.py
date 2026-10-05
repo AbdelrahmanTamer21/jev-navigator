@@ -213,11 +213,22 @@ def _response_fields(response: RawResponse, *, keep_error_body: bool) -> dict:
     fields = {"status": response.status, "content_type": response.content_type, "exact": response.exact}
     if keep_error_body or not _is_error_status(response.status):
         return {**fields, "body_base64": _base64(response.body)}
-    return {
-        **fields,
-        "body_length": len(response.body),
-        "body_sha256": hashlib.sha256(response.body).hexdigest(),
-    }
+    return {**fields, **_body_digest(response.body)}
+
+
+def error_text_digested(record: Mapping) -> dict:
+    """A written journal record as it reads with error text off: an error message keeps only its
+    length and SHA-256, and so does a body with an error status. A record without either is unchanged."""
+    digested = dict(record)
+    if "message" in digested:
+        digested.update(message_fields(digested.pop("message"), keep_text=False))
+    if "body_base64" in digested and _is_error_status(digested.get("status")):
+        digested.update(_body_digest(base64.b64decode(digested.pop("body_base64"))))
+    return digested
+
+
+def _body_digest(body: bytes) -> dict:
+    return {"body_length": len(body), "body_sha256": hashlib.sha256(body).hexdigest()}
 
 
 def _is_error_status(status: int | None) -> bool:
