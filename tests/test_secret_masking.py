@@ -14,6 +14,7 @@ from jev_navigator.judgments.secrets import (
     SecretInRequestError,
     SecretMasker,
     SecretScanner,
+    copy_pattern,
     is_high_entropy,
     mask_by_content,
     mask_request,
@@ -859,3 +860,21 @@ def test_a_masked_number_is_copied_only_from_five_characters(value: str, copied:
 
     # Assert
     assert (value not in masked_state["other"]["code"]) is copied
+
+
+@pytest.mark.parametrize(
+    ("value", "text", "hidden"),
+    [
+        ("hunter2hunter2", "xhunter2hunter2x", True),
+        ("hunter2", 'connect(user, "hunter2")', True),
+        ("hunter2", "hunter2x and $hunter2", False),
+    ],
+)
+def test_a_copy_pattern_finds_a_long_value_anywhere_and_a_short_one_as_a_whole_word(
+    value: str, text: str, hidden: bool
+) -> None:
+    # Act
+    found = copy_pattern(value).search(text)
+
+    # Assert
+    assert bool(found) is hidden
