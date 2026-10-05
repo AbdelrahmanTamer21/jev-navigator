@@ -566,7 +566,7 @@ class CodeIndex:
 
     def _local_module(self, file: str, line: int, name: str) -> str | None:
         """The module ``name`` holds at ``line`` when the innermost function there that binds it binds
-        it once, to a whole module."""
+        it once, to a whole module, and ``line`` lies from that binding to the end of its block."""
         holding = [
             local
             for local in self._read_local_bindings(file).get(name, ())
@@ -576,7 +576,7 @@ class CodeIndex:
             return None
         innermost = _innermost_lines((local.first, local.last) for local in holding)
         own = [local for local in holding if (local.first, local.last) == innermost]
-        if len(own) != 1:
+        if len(own) != 1 or not own[0].line <= line <= own[0].block_end:
             return None
         return own[0].module or None
 

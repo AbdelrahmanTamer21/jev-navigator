@@ -32,6 +32,7 @@ from .languages import (
     FLOW_LANGUAGE,
     FLOW_SGCONFIG,
     FUNCTION_KINDS,
+    LOCAL_MODULE_BLOCK_RULES,
     LOCAL_MODULE_RULES,
     LOCAL_NAME_RULES,
     MODULE_ALIAS_RULES,
@@ -79,6 +80,9 @@ class LocalName(NamedTuple):
     name: str
     line: int
     module: str = ""
+    # The last line of the block holding a binding that holds ``module``: the binding holds it from
+    # ``line`` to here, since a `const` is block-scoped.
+    block_end: int = 0
 
 
 class ModuleAlias(NamedTuple):
@@ -279,6 +283,8 @@ class _FileFound:
     bound_names: list[tuple[int, int, str]] = field(default_factory=list)
     # The module each `const` require binds, by the byte offset of the name it binds.
     local_modules: dict[int, str] = field(default_factory=dict)
+    # The byte range, end exclusive, and the last line of each block a `const` require may end in.
+    local_module_blocks: list[_Block] = field(default_factory=list)
     calls: list[tuple[tuple[str, int, int], CallMatch]] = field(default_factory=list)
     receivers: dict[tuple[str, int, str, str], set[str | None]] = field(default_factory=dict)
     export_names: set[str] = field(default_factory=set)
@@ -339,7 +345,9 @@ class _FileFound:
             _ordered(_marked(self.ranges, self.marks[_MODULE_EXPORT_RULE]), positions),
             _sorted(span for span, declaration in declared if declaration.kind.named_by_types),
             _sorted(span for span, declaration in declared if declaration.kind.named_by_values),
-            _local_names(self.ranges, self.classes, self.bound_names, self.local_modules),
+            _local_names(
+                self.ranges, self.classes, self.bound_names, self.local_modules, self.local_module_blocks
+            ),
             nodes.namespace_members(declared),
         )
 
@@ -365,6 +373,8 @@ class _FileFound:
         elif rule == _LOCAL_MODULE_RULE:
             name = match["metaVariables"]["single"]["NAME"]["range"]["byteOffset"]["start"]
             self.local_modules[name] = _unquoted(_captured(match, "SPEC"))
+        elif rule == _LOCAL_MODULE_BLOCK_RULE:
+            self.local_module_blocks.append(_Block(offsets["start"], offsets["end"], end))
         elif rule in _DECLARATION_BY_RULE:
             kind = _DECLARATION_BY_RULE[rule]
             self.declaration_nodes.append(_Declaration(offsets["start"], offsets["end"], start, end, kind))
@@ -415,18 +425,40 @@ def _local_names(
     classes: set[Span],
     names: list[tuple[int, int, str]],
     modules: dict[int, str],
+    blocks: list[_Block],
 ) -> tuple[LocalName, ...]:
     """Each bound name, with its line, the lines of the innermost function holding it, and the module
-    it holds when ``modules`` names one at its position. A name a class body binds (a Python class
-    attribute) reaches none of its methods, so it is no function's local name."""
+    it holds when ``modules`` names one at its position, until the end of its block. A name a class
+    body binds (a Python class attribute) reaches none of its methods, so it is no function's local
+    name."""
     ordered = sorted((_Node(start, end, span) for start, end, span in ranges), key=lambda node: node.start)
     starts = [node.start for node in ordered]
-    found = {
-        LocalName(holder.span.start, holder.span.end, name, line, modules.get(offset, ""))
-        for offset, line, name in names
-        if (holder := _innermost(ordered, starts, offset)) is not None and holder.span not in classes
-    }
+    ordered_blocks = sorted(blocks)
+    block_starts = [block.start for block in ordered_blocks]
+    found = set()
+    for offset, line, name in names:
+        holder = _innermost(ordered, starts, offset)
+        if holder is None or holder.span in classes:
+            continue
+        module = modules.get(offset, "")
+        block_end = _block_end(holder, ordered_blocks, block_starts, offset) if module else 0
+        found.add(LocalName(holder.span.start, holder.span.end, name, line, module, block_end))
     return tuple(sorted(found))
+
+
+def _block_end(holder: _Node, blocks: list[_Block], starts: list[int], offset: int) -> int:
+    """The last line of the block a declaration at ``offset`` in ``holder``'s own code sits in: its
+    statement block, or the function's body, which ends with the function."""
+    block = _innermost(blocks, starts, offset)
+    return holder.span.end if block is None else min(block.last_line, holder.span.end)
+
+
+class _Block(NamedTuple):
+    """A block's byte range, end exclusive, and its last line."""
+
+    start: int
+    end: int
+    last_line: int
 
 
 @dataclass(frozen=True)
@@ -669,6 +701,7 @@ _NAMESPACE_RULE = "namespace"
 _DECLARED_NAME_RULE = "declared_name"
 _LOCAL_NAME_RULE = "local_name"
 _LOCAL_MODULE_RULE = "local_module"
+_LOCAL_MODULE_BLOCK_RULE = "local_module_block"
 _MODULE_ALIAS_RULE = "module_alias"
 _PROPERTY_VALUE_RULE = "property_value"
 _SELF_NAMED_RULE = "self_named"
@@ -682,6 +715,7 @@ _STRUCTURE_RULE_IDS = frozenset(
         _DECLARED_NAME_RULE,
         _LOCAL_NAME_RULE,
         _LOCAL_MODULE_RULE,
+        _LOCAL_MODULE_BLOCK_RULE,
         *_MARK_RULES,
         _NAMESPACE_RULE,
         _ERROR_RULE,
@@ -736,6 +770,9 @@ def _structure_rules(languages: Sequence[str]) -> str:
         documents.append(_rule_document(_LOCAL_NAME_RULE, language, LOCAL_NAME_RULES[language]))
         if language in LOCAL_MODULE_RULES:
             documents.append(_rule_document(_LOCAL_MODULE_RULE, language, LOCAL_MODULE_RULES[language]))
+            documents.append(
+                _rule_document(_LOCAL_MODULE_BLOCK_RULE, language, LOCAL_MODULE_BLOCK_RULES[language])
+            )
         documents.append(_rule_document(_ERROR_RULE, language, "  kind: ERROR"))
         if VALUE_KINDS[language]:
             documents.append(_held_rule(language))

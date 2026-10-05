@@ -1451,6 +1451,59 @@ def test_a_name_a_function_binds_otherwise_stays_its_own_value(tmp_path: Path, b
     assert (binding.status.value, binding.target) == ("candidate", None), binding
 
 
+def test_a_const_require_holds_its_module_from_its_line_to_the_end_of_its_block(tmp_path: Path) -> None:
+    """A `const` is block-scoped: `const db = require('./db')` inside an `if` or a loop body holds
+    ./db from its own line to the end of that block, and one directly in the function body to the
+    end of the function. Before it, or after its block, `db` is the module-level ./other again, which
+    the function's own binding hides, so the call stays a candidate (jvn-verifier's p31). A `const`
+    in a `switch` case is scoped to the whole `switch`, no statement block, so it holds no module."""
+    # Arrange
+    module = "exports.query = function query() {{ return {n}; }};\n"
+    head = "const db = require('./other');\n"
+    index = committed(
+        tmp_path,
+        {
+            "app/db.js": module.format(n=1),
+            "app/other.js": module.format(n=2),
+            "app/in_if.js": head
+            + "function h(flag) {\n  if (flag) {\n    const db = require('./db');\n    db.query();\n  }\n"
+            "  return db.query();\n}\n",
+            "app/before.js": head
+            + "function h(flag) {\n  db.query();\n  if (flag) {\n    const db = require('./db');\n  }\n}\n",
+            "app/in_loop.js": head
+            + "function h(items) {\n  for (const x of items) {\n    const db = require('./db');\n  }\n"
+            "  return db.query();\n}\n",
+            "app/in_body.js": head
+            + "function h() {\n  const db = require('./db');\n  return db.query();\n}\n",
+            "app/in_switch.js": head
+            + "function h(kind) {\n  switch (kind) {\n    case 1:\n      const db = require('./db');\n  }\n"
+            "  return db.query();\n}\n",
+        },
+    )
+    sites = {
+        "inside the if block": ("app/in_if.js", 5),
+        "after the if block": ("app/in_if.js", 7),
+        "before the block": ("app/before.js", 3),
+        "after the loop": ("app/in_loop.js", 6),
+        "in the function body": ("app/in_body.js", 4),
+        "after a switch": ("app/in_switch.js", 7),
+    }
+
+    # Act
+    bindings = {site: index.binding_of(file, line, "query", "db") for site, (file, line) in sites.items()}
+
+    # Assert
+    query = Span("app/db.js", 1, 1, "query")
+    assert {site: (binding.status.value, binding.target) for site, binding in bindings.items()} == {
+        "inside the if block": ("resolved", query),
+        "after the if block": ("candidate", None),
+        "before the block": ("candidate", None),
+        "after the loop": ("candidate", None),
+        "in the function body": ("resolved", query),
+        "after a switch": ("candidate", None),
+    }
+
+
 def test_an_import_alias_replaced_by_a_local_name_binds_nothing_through_the_import(tmp_path: Path) -> None:
     """A parameter or local variable with an alias's name replaces the import inside its function:
     `halt()` there is not the module's `stop`, in TypeScript or Python, nor `cls()` after
