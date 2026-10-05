@@ -40,7 +40,6 @@ from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
 from .tsconfig import ScriptPaths, nearest_script_paths
 
 DEFAULT_WINDOW_RADIUS = 10
-MAX_TEXT_HITS = 20
 # The bytes kept on either side of a text hit, so a hit in a one-line bundle never holds the line.
 TEXT_HIT_CONTEXT_BYTES = 200
 CO_CHANGE_COMMITS = 200
@@ -793,12 +792,12 @@ class CodeIndex:
         return self.read_slice(span, origin)
 
     def search_text(
-        self, text: str, max_hits: int | None = MAX_TEXT_HITS, *, whole_word: bool = False
+        self, text: str, max_hits: int | None = None, *, whole_word: bool = False
     ) -> tuple[TextHit, ...]:
-        """Lines holding ``text`` in file and line order, the first ``max_hits`` or every one when it is
-        None, searched once per text, cap and word rule for the life of the index. A hit's text is the
-        line up to ``TEXT_HIT_CONTEXT_BYTES`` around its first match; ``whole_word`` keeps only matches
-        no word character touches."""
+        """Every line holding ``text``, in file and line order, or only the first ``max_hits`` when a
+        caller bounds them, searched once per text, bound and word rule for the life of the index. A
+        hit's text is the line up to ``TEXT_HIT_CONTEXT_BYTES`` around its first match; ``whole_word``
+        keeps only matches no word character touches."""
         return self._search_text(text, max_hits, whole_word)
 
     @memoized

@@ -327,7 +327,7 @@ class _Search:
         yield from self._admitted(self._listed(files))
         if not names or self.stopped():
             return
-        hits = {name: self.index.search_text(name, max_hits=None) for name in dict.fromkeys(names)}
+        hits = {name: self.index.search_text(name) for name in dict.fromkeys(names)}
         self.found = {name: len(found) for name, found in hits.items()}
         for chunk in _chunks(_rarest_first(hits), self.judge.items_per_request):
             if self.stopped():
