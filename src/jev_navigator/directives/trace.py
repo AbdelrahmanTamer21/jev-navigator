@@ -18,6 +18,7 @@ from ..index.code_index import CodeIndex
 from ..index.spans import Span
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge
 from ..judgments.questions import Check, Criterion
+from ..judgments.secrets import WORKFLOW
 from ..judgments.thresholds import NoulVerdict
 
 
@@ -192,7 +193,7 @@ def trace_workflow(
             for name, result in judge.iter_check_every(
                 checks,
                 items,
-                {"workflow": {"question": question}},
+                {WORKFLOW: {"question": question}},
                 list_name="trace",
                 cancelled=cancellation_requested,
             ):

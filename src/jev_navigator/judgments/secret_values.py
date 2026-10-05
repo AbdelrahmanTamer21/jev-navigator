@@ -96,7 +96,7 @@ def key_kind(key: str) -> str | None:
 def is_message_key(key: str) -> bool:
     """Whether the key's last word names a message (``help``, ``description``, ``descriptions``)."""
     parts = _key_parts(key)
-    return bool(parts) and (parts[-1] in _MESSAGE_SUFFIXES or parts[-1].removesuffix("s") in _MESSAGE_SUFFIXES)
+    return bool(parts) and not _MESSAGE_SUFFIXES.isdisjoint({parts[-1], parts[-1].removesuffix("s")})
 
 
 def _key_parts(key: str) -> list[str]:

@@ -832,7 +832,7 @@ def test_a_short_value_equal_to_a_request_key_does_not_refuse_the_request() -> N
     assert state["slice"]["code"] == 'const auth = { useToken: "[MASKED]" };\n'
 
 
-def test_question_wording_keeps_its_words_while_the_target_hides_a_copy() -> None:
+def test_question_wording_and_the_target_keep_their_words_while_the_code_hides_the_value() -> None:
     # Arrange
     state, questions, masked = _check_request('password = "admin"\n', "tests/fixtures.py")
 
@@ -840,8 +840,9 @@ def test_question_wording_keeps_its_words_while_the_target_hides_a_copy() -> Non
     refuse_if_secret(state, questions, SecretScanner(), masked)
 
     # Assert
-    assert state["target"]["description"] == "the [MASKED] check"
+    assert state["target"]["description"] == "the admin check"
     assert "the admin check" in json.dumps(questions)
+    assert "admin" not in state["slice"]["code"]
 
 
 @pytest.mark.parametrize(
@@ -968,3 +969,73 @@ def test_a_code_line_a_copy_changed_is_masked_again_as_code(line: str) -> None:
 
     # Assert
     assert masked_state["code"]["code"] == line.replace('"admin"', '"[MASKED]"')
+
+
+@pytest.mark.parametrize(
+    "point",
+    [
+        {"target": {"description": "where the shared include list is left empty"}},
+        {"targets": {"p0": "where the shared include list is left empty"}},
+        {"workflow": {"question": "where the shared include list is left empty"}},
+    ],
+    ids=["target", "targets", "workflow"],
+)
+def test_the_point_keeps_a_word_a_code_items_secret_holds(point: dict) -> None:
+    # Arrange: a test fixture gives secret-named variables the point's words as values
+    item = {"file": "tests/test_paths.py", "code": 'API_TOKEN = "include"\nDB_PASSWORD = "shared"\n'}
+    state = {**point, "slice": item}
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state[next(iter(point))] == next(iter(point.values()))
+    assert masked_state["slice"]["code"] == 'API_TOKEN = "[MASKED]"\nDB_PASSWORD = "[MASKED]"\n'
+
+
+def test_the_point_masks_a_secret_the_scanner_finds_in_it() -> None:
+    # Arrange
+    token = "ghp_" + "Q7rT2mX9vL4kP8wZ3nB6cF1hJ5dS0aGyE2uI"
+    state = {
+        "target": {"description": f"where the token {token} is sent"},
+        "slice": {"file": "a.py", "code": "x = 1\n"},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state["target"]["description"] == "where the token [MASKED] is sent"
+
+
+def test_a_code_item_hides_a_copy_of_a_secret_the_point_holds() -> None:
+    # Arrange
+    token = "ghp_" + "Q7rT2mX9vL4kP8wZ3nB6cF1hJ5dS0aGyE2uI"
+    state = {
+        "target": {"description": f"where {token} is sent"},
+        "slice": {"file": "a.py", "code": f"send({token!r})\n"},
+    }
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert masked_state["slice"]["code"] == "send('[MASKED]')\n"
+
+
+def test_a_code_item_under_a_nested_target_key_still_hides_copies() -> None:
+    # Arrange: only the request's own point is exempt; a "target" inside an item is code
+    item = {
+        "file": "tests/test_paths.py",
+        "code": 'API_TOKEN = "include1"\n',
+        "binding": {"target": "include1"},
+    }
+    state = {"slice": item}
+
+    # Act
+    masked_state, _, _ = mask_request(state, {}, SecretMasker())
+
+    # Assert
+    assert masked_state["slice"]["binding"]["target"] == "[MASKED]"

@@ -18,6 +18,7 @@ from ..index.spans import Span
 from ..judgments.answers import AnswerSource, answered_by
 from ..judgments.judge import Judge, PickResult
 from ..judgments.questions import Pick, serialized_chars
+from ..judgments.secrets import TARGET
 from .places import Place, function_place, range_place
 
 MAX_OPTIONS = 200
@@ -512,7 +513,7 @@ def _choose(judge, question, target, level, parent, entries, describe, identify)
 
 
 def _state(target: str, parent: str) -> dict:
-    return {"target": {"description": target}, "current": parent}
+    return {TARGET: {"description": target}, "current": parent}
 
 
 def _pick(judge, question, target, level, parent, entries, descriptions, identify):
