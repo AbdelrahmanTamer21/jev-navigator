@@ -15,14 +15,25 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .index.code_index import CodeIndex
-from .judgments.journal import message_fields
+from .judgments.journal import error_text_digested, keeps_request_text, message_fields
 from .judgments.relations import without_quoted_code
 
 _LINE_RANGE = re.compile(r"[-~]")
 _LABEL_NAME = re.compile(r"(?: [^\s`]+)?")
 _NEIGHBOUR_LISTS = ("could_contain", "not_inspected", "not_opened")
+
+
+def require_kept_request_text(run_file: Path, keep_requests: bool) -> None:
+    """A run continues ``run_file``, an earlier journal or answer store, without ``keep_requests``
+    only when the file kept no request's text, so a folder written without the flag holds no code."""
+    if not keep_requests and run_file.is_file() and keeps_request_text(run_file):
+        raise ValueError(
+            f"{run_file} keeps the text of its requests, so a run that continues it must keep it too: "
+            'add --keep-requests (JSON "keep_requests": true)'
+        )
 
 
 def place_location(place_key: str) -> str:
@@ -48,24 +59,38 @@ def is_place_label(place_key: str, text: str) -> bool:
     return text.startswith(location) and _LABEL_NAME.fullmatch(text, len(location)) is not None
 
 
-def carried_over_journal_line(line: str) -> str:
+def carried_over_journal_line(line: str, *, keep_error_text: bool) -> str:
     """A line of an earlier pack's journal as this pack keeps it. A history step neighbour whose
-    signature is not a label, the code signature an older pack wrote, shows its location instead; a
-    line that is not a JSON record stays as written."""
+    signature is not a label, the code signature an older pack wrote, shows its location instead.
+    Without ``keep_error_text`` every error message and error body reads as this pack writes them,
+    however the earlier pack kept them. A line that is not a JSON record stays as written."""
     try:
         record = json.loads(line)
     except ValueError:
         return line
+    carried = _carried_record(record, keep_error_text)
+    return line if carried == record else json.dumps(carried, sort_keys=True) + "\n"
+
+
+def _carried_record(record: dict, keep_error_text: bool) -> dict:
     if record["kind"] != "history_step":
-        return line
-    coded = [
-        offered
-        for offered in record["step"].get("judgments", {}).get("could_contain", [])
-        if not is_place_label(offered["place"], offered["signature"])
+        return record if keep_error_text else error_text_digested(record)
+    step = _with_labelled_neighbours(record["step"])
+    return {**record, "step": step if keep_error_text else failure_digested(step)}
+
+
+def _with_labelled_neighbours(step: Mapping) -> Mapping:
+    judgments = step.get("judgments", {})
+    offered = judgments.get("could_contain", [])
+    if all(is_place_label(entry["place"], entry["signature"]) for entry in offered):
+        return step
+    labelled = [
+        entry
+        if is_place_label(entry["place"], entry["signature"])
+        else {**entry, "signature": place_location(entry["place"])}
+        for entry in offered
     ]
-    for offered in coded:
-        offered["signature"] = place_location(offered["place"])
-    return json.dumps(record, sort_keys=True) + "\n" if coded else line
+    return {**step, "judgments": {**judgments, "could_contain": labelled}}
 
 
 @dataclass(frozen=True)

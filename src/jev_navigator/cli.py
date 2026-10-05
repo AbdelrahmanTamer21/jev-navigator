@@ -33,9 +33,14 @@ from .housekeeping import FINISHED_RUN_DAYS, RESUMABLE_RUN_DAYS
 from .index import tools
 from .index.code_index import CodeIndex
 from .index.languages import language_of
-from .judgments.answers import TokenTotal, answered_by
+from .judgments.answers import answered_by
 from .judgments.client import JevClient
-from .judgments.journal import ERROR_TEXT_VARIABLE, error_message, error_text_kept, message_fields
+from .judgments.journal import (
+    ERROR_TEXT_VARIABLE,
+    error_message,
+    error_text_kept,
+    message_fields,
+)
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import (
     SHARED_STORE_VARIABLE,
@@ -47,7 +52,14 @@ from .judgments.store import (
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
-from .run_files import PlaceLabels, carried_over_journal_line, failure_digested, source_shown, step_shown
+from .run_files import (
+    PlaceLabels,
+    carried_over_journal_line,
+    failure_digested,
+    require_kept_request_text,
+    source_shown,
+    step_shown,
+)
 from .usage_receipt import usage_receipt, usage_report_lines
 
 if TYPE_CHECKING:
@@ -63,7 +75,7 @@ NO_ERROR_TEXT_HELP = (
     f"SHA-256 (default: the text, or ${ERROR_TEXT_VARIABLE}=off); stderr still shows the message"
 )
 NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
-POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
+POSITIVE_BUDGET_FIELDS = ("beam_width", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
@@ -305,9 +317,11 @@ def create_evidence_pack(
     navigator = _navigator_provenance()
     thresholds = thresholds or Thresholds()
     previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client, workflow)
+    if resume_from is not None:
+        require_kept_request_text(resume_from.resolve() / "journal.jsonl", keep_requests)
     _prepare_output(output)
     if resume_from is not None:
-        _carry_over_run_logs(resume_from.resolve(), output, keep_requests)
+        _carry_over_run_logs(resume_from.resolve(), output, keep_requests, keep_error_text)
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
@@ -435,9 +449,7 @@ def create_evidence_pack(
             result,
             navigator=navigator,
             requested_model=getattr(client, "model", "unknown"),
-            served_model=judge.served_model,
-            input_total=judge.input_total,
-            unanswered_requests=judge.unanswered_requests,
+            judge=judge,
             duration_seconds=seed_duration_seconds,
             total_calls=seed_calls,
             entry_selection=selection,
@@ -594,7 +606,7 @@ A completed search can have a non-found outcome; inspect search.outcome in JSON 
   jvn find "the order limit" --start app/orders.py:42 --out ./order-evidence
   jvn find "the order limit" --max-calls 8 --max-depth 3 --max-steps 8
   jvn find "the order limit" --beam-width 1 --neighbours-per-kind 8
-  jvn find "the order limit" --preview-lines 8 --max-slice-chars 12000 --max-line-chars 240
+  jvn find "the order limit" --preview-lines 8 --max-line-chars 240
   jvn find "the order limit" --verbose
 
 All flags are optional. Live calls stop at 24 unless --max-calls sets another cap ('none' lifts it);
@@ -795,12 +807,6 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         help="Leading lines shown for each candidate preview (default: 8; 0 hides preview code)",
     )
     evidence.add_argument(
-        "--max-slice-chars",
-        type=int,
-        default=defaults.max_slice_chars,
-        help="Characters allowed in one opened code slice (default: 12000; not the whole request)",
-    )
-    evidence.add_argument(
         "--max-line-chars",
         type=int,
         default=defaults.max_line_chars,
@@ -991,9 +997,10 @@ def _previous_pack(
     return previous
 
 
-def _carry_over_run_logs(source: Path, output: Path, keep_requests: bool) -> None:
+def _carry_over_run_logs(source: Path, output: Path, keep_requests: bool, keep_error_text: bool) -> None:
     """The earlier pack's answers and journal continue in this pack. With ``keep_requests`` the journal
-    is copied whole; otherwise each line goes through ``run_files.carried_over_journal_line``."""
+    is copied whole; otherwise each line goes through ``run_files.carried_over_journal_line``, which
+    also applies this pack's error-text setting."""
     answers = source / "answers.jsonl"
     if answers.is_file():
         shutil.copyfile(answers, output / "answers.jsonl")
@@ -1004,7 +1011,7 @@ def _carry_over_run_logs(source: Path, output: Path, keep_requests: bool) -> Non
         shutil.copyfile(journal, output / "journal.jsonl")
         return
     with journal.open() as lines, (output / "journal.jsonl").open("w") as kept:
-        kept.writelines(carried_over_journal_line(line) for line in lines)
+        kept.writelines(carried_over_journal_line(line, keep_error_text=keep_error_text) for line in lines)
 
 
 def _default_output(repository: Path) -> Path:
@@ -1042,9 +1049,7 @@ def _manifest(
     *,
     navigator: dict,
     requested_model: str,
-    served_model: str | None,
-    input_total: TokenTotal,
-    unanswered_requests: int,
+    judge: Judge,
     duration_seconds: float,
     total_calls: int,
     entry_selection: EntrySelection | None,
@@ -1075,9 +1080,10 @@ def _manifest(
         "thresholds": thresholds.as_dict(),
         "provider": {
             "requested_model": requested_model,
-            "served_model": served_model,
-            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0) + input_total.reported,
-            **usage_receipt(previous, input_total, unanswered_requests),
+            "served_model": judge.served_model,
+            "input_tokens": (previous["provider"]["input_tokens"] if previous else 0)
+            + judge.input_total.reported,
+            **usage_receipt(previous, judge),
         },
         "search": {
             "outcome": result.outcome,
