@@ -292,14 +292,17 @@ class Judge:
         """Whether ``ask`` can send this request within this judge's input limits, masked as it is sent."""
         return masked_request_fits(state, questions, self.input_limits, self.masker)
 
-    def fits_alone(self, check: Check, item: Mapping, shared: Mapping, list_name: str = "items") -> bool:
-        """Whether the smallest request ``check_each`` can send about ``item``, ``shared`` with that
-        item alone, fits this judge's input limits, masked and measured as packing measures it."""
-        hidden = self._hidden_values([check], [item], shared)
+    def fits_alone(
+        self, checks: Sequence[Check], item: Mapping, shared: Mapping, list_name: str = "items"
+    ) -> bool:
+        """Whether the smallest request ``check_every`` can send about ``item``, every one of ``checks``
+        asked of that item alone with ``shared``, fits this judge's input limits, masked and measured as
+        packing measures it."""
+        hidden = self._hidden_values(checks, [item], shared)
         masked_item, masked_shared = self._masked_together([item, shared], hidden)
         plan = _CheckPlan(
             list_name,
-            [check],
+            list(checks),
             [masked_item],
             masked_shared,
             hidden,

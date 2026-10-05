@@ -11,6 +11,7 @@ import pytest
 from conftest import BudgetedClient
 from git_repos import commit_files
 
+from jev_navigator.directives.find_all import match_check
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.units import items_to_judge, list_units, read_ranges
 from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer
@@ -19,6 +20,7 @@ from jev_navigator.judgments.client import (
     JEV_REQUEST_TOKEN_LIMIT,
     JEV_STATE_TOKEN_LIMIT,
     InputBudgetExceededError,
+    InputLimits,
     MissingAnswerError,
     ReplayOnlyClient,
     UnansweredQuestionError,
@@ -1093,3 +1095,30 @@ def test_a_secret_in_check_wording_is_masked_once_per_plan_and_the_request_still
     assert token not in sent and "[MASKED]" in sent
     wording_masks = sum(count for text, count in masker.masked.items() if token in text)
     assert wording_masks == 1, "every request here asks at slot 0, so its wording is masked once"
+
+
+def _limited_judge(request_chars: int) -> Judge:
+    client = BudgetedClient(request_chars, input_box=100_000)
+    client.input_limits = InputLimits(100_000, request_chars)
+    return Judge(client)
+
+
+def test_fits_alone_measures_every_check_a_request_asks_of_the_item() -> None:
+    # Arrange: the smallest request limit at which one question about the item fits
+    first, second = match_check("first"), match_check("second")
+    shared = {"targets": {"first": "the order limit", "second": "the audit call"}}
+    item = {"file": "app/orders.py", "code": "def accept(order):\n    return len(order.items) <= 4"}
+    request_chars = next(
+        chars for chars in range(1, 20_000) if _limited_judge(chars).fits_alone([first], item, shared)
+    )
+    judge = _limited_judge(request_chars)
+
+    # Act
+    one_fits = judge.fits_alone([first], item, shared)
+    both_fit = judge.fits_alone([first, second], item, shared)
+
+    # Assert: the measure agrees with the requests check_every sends
+    assert (one_fits, both_fit) == (True, False)
+    assert judge.check_every([first], [item], shared)
+    with pytest.raises(InputBudgetExceededError):
+        judge.check_every([first, second], [item], shared)

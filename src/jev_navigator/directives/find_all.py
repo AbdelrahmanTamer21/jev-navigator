@@ -369,10 +369,20 @@ class _Search:
         for place in items_to_judge(unit):
             if self._already_delivered(place):
                 self.not_judged[place.id] = DELIVERED
-            elif not self._answered(place):
+            elif self._answered(place):
+                continue
+            elif not self._fits_alone(place):
+                self.not_judged[place.id] = TOO_LARGE
+            else:
                 self.not_judged[place.id] = NOT_REACHED
                 pending.append(place)
         return pending
+
+    def _fits_alone(self, place: Item) -> bool:
+        """Whether the request asking every target about ``place`` alone fits the Judge's limits as
+        masked: masking can lengthen code past the room measured before it."""
+        [entry] = self._entries([place])
+        return self.judge.fits_alone(self.checks, entry, self.shared, ITEMS)
 
     def _already_delivered(self, place: Item) -> bool:
         lines = self.delivered.get(place.file, frozenset())

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from conftest import BudgetedClient
+from test_opened_code_size import ShortSecretMasker, _numbered_secret
 
 from jev_navigator.directives.find_all import (
     DELIVERED,
@@ -314,6 +315,68 @@ def test_a_unit_of_exactly_its_room_is_judged_whole_and_one_character_more_is_to
         Judge(over).check_each(match_check("limit"), [entry], {TARGETS: LIMIT})
 
 
+def secrets_function(lines: int) -> str:
+    """A function of ``lines`` short secret assignments, each 2 characters longer once masked."""
+    return "def settings():\n" + "".join(_numbered_secret(line) for line in range(lines)) + "    return 1\n"
+
+
+def test_a_unit_that_fits_its_room_only_unmasked_is_too_large_and_the_search_goes_on(tmp_path: Path) -> None:
+    # Arrange: the largest function of short secrets within the room unmasked, which masking takes over
+    # the box, beside a small function
+    room = find_all(
+        repository(tmp_path, {"settings.py": "def settings():\n    return 1\n"}), Judge(labelled({})), LIMIT
+    ).room
+    lines = 0
+    while serialized_chars(secrets_function(lines + 1).removesuffix("\n")) <= room:
+        lines += 1
+    index = repository(tmp_path, {"settings.py": secrets_function(lines), "rules.py": ORDERS["rules.py"]})
+    provider = BudgetedClient(JEV_INPUT_LIMITS.request_chars, input_box=JEV_INPUT_LIMITS.box_chars)
+
+    # Act
+    result = find_all(index, Judge(provider, masker=ShortSecretMasker()), LIMIT, files=index.files)
+
+    # Assert
+    [settings] = [unit for unit in result.units if unit.path == "settings.py"]
+    assert settings.pieces == ()
+    assert result.not_judged == {settings.id: TOO_LARGE}
+    assert (result.stopped_by, result.failure, provider.refusals) == ("scope_examined", None, 0)
+    rules = [unit.id for unit in result.units if unit.path == "rules.py"]
+    assert [score.unit.id for score in result.scores("limit")] == rules
+
+
+def smallest_request_limit_fitting(checks: list, item: Mapping, shared: Mapping, box: int) -> int:
+    """The smallest whole-request limit beside ``box`` at which asking ``checks`` of ``item`` alone fits."""
+    return next(
+        chars
+        for chars in range(box, 4 * box)
+        if Judge(SmallBoxClient(input_limits=InputLimits(box, chars))).fits_alone(checks, item, shared)
+    )
+
+
+def test_a_unit_whose_request_asking_every_target_is_over_the_limit_is_too_large(tmp_path: Path) -> None:
+    # Arrange: a unit of exactly its room beside a small function, and a request limit at which the
+    # unit's request fits one target's question but not both targets' (the room is measured over the
+    # same paths, since it depends on the longest one)
+    both = {**LIMIT, "audit": "the call that records an order for auditing"}
+    small = {"big.py": "def big():\n    return 1\n", "rules.py": ORDERS["rules.py"]}
+    room = find_all(
+        repository(tmp_path, small), Judge(SmallBoxClient(input_limits=InputLimits(4_000))), both
+    ).room
+    index = repository(tmp_path, {"big.py": sized_function(room), "rules.py": ORDERS["rules.py"]})
+    entry = {"file": "big.py", "code": sized_function(room).removesuffix("\n")}
+    request_chars = smallest_request_limit_fitting([match_check("limit")], entry, {TARGETS: both}, 4_000)
+    provider = BudgetedClient(request_chars, input_box=4_000)
+    provider.input_limits = InputLimits(4_000, request_chars)
+
+    # Act
+    result = find_all(index, Judge(provider), both, files=index.files)
+
+    # Assert
+    [big] = [unit for unit in result.units if unit.path == "big.py"]
+    assert result.not_judged == {big.id: TOO_LARGE}
+    assert (result.stopped_by, result.failure, provider.refusals) == ("scope_examined", None, 0)
+
+
 def test_a_budget_stop_resumes_from_its_answers_without_asking_them_again(tmp_path: Path) -> None:
     # Arrange
     index = repository(tmp_path)
@@ -333,6 +396,21 @@ def test_a_budget_stop_resumes_from_its_answers_without_asking_them_again(tmp_pa
         4,
         4,
     )
+
+
+def test_a_resume_asks_every_target_its_saved_answers_lack(tmp_path: Path) -> None:
+    # Arrange: a finished search for one target, resumed with a second target added
+    index = repository(tmp_path)
+    first = find_all(index, Judge(labelled({})), LIMIT, files=index.files)
+    both = {**LIMIT, "audit": "the call that records an order for auditing"}
+
+    # Act
+    resumed = find_all(index, Judge(labelled({})), both, files=index.files, completed=first.judged)
+
+    # Assert
+    places = {answer.place.id for answer in first.judged["limit"]}
+    assert {answer.place.id for answer in resumed.judged["audit"]} == places
+    assert resumed.not_judged == first.not_judged
 
 
 def test_cancelled_before_the_search_parses_nothing_and_sends_nothing(tmp_path: Path) -> None:

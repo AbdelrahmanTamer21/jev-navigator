@@ -131,8 +131,10 @@ for score in result.scores("limit"):
 Each item Jev reads holds only the unit's file and code. The targets sit in the shared state, and each
 question reads "Look only at `items[n]`. Does that code match the description in `targets.<name>`?"
 (`match_check`). A unit larger than its room in a request (`result.room`) is judged by its pieces and
-scored by its best one; a piece still too large is named in `not_judged`. Every unit is one a listing
-lists, so a hit inside a nested function names the function holding it. No code step is capped: the
+scored by its best one; a piece still too large is named in `not_judged`, and so is a unit or piece
+whose request asking every target does not fit the client's limits once masked, since masking can
+lengthen code past the room (`Judge.fits_alone`). One unit never fails the search. Every unit is one
+a listing lists, so a hit inside a nested function names the function holding it. No code step is capped: the
 Judge's call cap is the only budget. The population goes to the Judge in waves of `batches_per_wave`
 requests' worth (16 by default). Its order holds between waves, and exactly only at one batch per
 wave. Like `items_per_request`, the wave size shapes the batches and so the answer store's keys.
