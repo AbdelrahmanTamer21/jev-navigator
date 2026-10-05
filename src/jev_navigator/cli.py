@@ -1280,6 +1280,9 @@ def _checkout_revision(checkout: Path | None) -> dict:
     return revision | {"source_revision": head, "source_dirty": dirty}
 
 
+CHECKOUT_GIT_TIMEOUT_SECONDS = 10
+
+
 class _CheckoutGitError(RuntimeError):
     """A git call about jvn's own checkout that failed, named by its arguments, with git's message."""
 
@@ -1289,7 +1292,7 @@ def _git(repository: Path, *args: str) -> str:
     environment inside it, so its status may take long. A failure, a timeout or a git that cannot
     start raises ``_CheckoutGitError``."""
     try:
-        return tools.git(args, repository, timeout=10).strip()
+        return tools.git(args, repository, timeout=CHECKOUT_GIT_TIMEOUT_SECONDS).strip()
     except (tools.ToolFailedError, OSError, subprocess.TimeoutExpired) as error:
         raise _CheckoutGitError(f"git {' '.join(args)} failed: {error}") from error
 
