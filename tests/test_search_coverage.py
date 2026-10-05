@@ -285,3 +285,20 @@ def test_a_unit_too_large_for_one_request_is_counted_apart_from_the_units_not_re
         "audit: none at the bar 0.80 among 4 unit(s) judged, best P=0.100; 0 not reached; "
         "1 too large to judge (not negative proof)"
     )
+
+
+def test_a_later_round_that_failed_makes_the_point_unknown(tmp_path: Path) -> None:
+    # Arrange: the first round judges rules.py's two units; the callee round over api.py fails at once
+    index = shop(tmp_path)
+    first = find_all(index, Judge(answering()), AUDIT, files=["rules.py"])
+    callees = find_all(index, one_at_a_time(FailsAfter(0)), AUDIT, files=["api.py"], batches_per_wave=1)
+
+    # Act
+    [audit] = point_results([Round(first), Round(callees, Source.CALLEE)], BAR)
+
+    # Assert
+    assert audit.outcome is Outcome.UNKNOWN
+    assert audit.render(BAR) == (
+        "audit: unknown, the search failed (ConnectionError: provider unreachable) after 2 unit(s) judged, "
+        "best P=0.100; 2 not reached"
+    )
