@@ -20,6 +20,8 @@ MASK = "[MASKED]"
 BY_CONTENT_MIN_CHARS = 8
 RANDOM_VALUE_MIN_CHARS = 16
 HIGH_ENTROPY_BITS_PER_CHAR = 4.0
+HIGH_ENTROPY_MIN_CHARS = 20
+TOKEN_CHARACTER_CLASS = r"[A-Za-z0-9+/=_\-]"
 
 _KEY = r"(?<![\w$.-])(?P<key>[A-Za-z_$][\w$.-]*+)"
 _SEPARATOR = r"[\"']?\s*[:=]\s*"
@@ -45,10 +47,11 @@ _URL_PASSWORD = re.compile(
 )
 _QUERY_VALUE = re.compile(r"[?&](?P<key>[A-Za-z_][\w.-]*+)=(?P<value>[^&\s#'\"`]++)")
 _ENV_FILE_VALUE = re.compile(
-    r"^[ \t]*(?:export[ \t]+)?(?P<key>[A-Z_][A-Z0-9_]*+)="
-    r"(?P<value>[^\s\"'`#$()\[\]{}][^\s\"'`#()\[\]{}]*+)[ \t]*(?=#|$)",
+    r"(?:^|(?<=[ \t;&|]))(?:export[ \t]+)?(?P<key>[A-Z_][A-Z0-9_]*+)="
+    r"(?P<value>[^\s\"'`#$()\[\]{}][^\s\"'`#()\[\]{}]*+)(?=[ \t;&|]|$)",
     re.M,
 )
+_USAGE_PLACEHOLDER = re.compile(r"\.\.\.|…|<[^<>]*>|\*+|x+", re.I)
 _CONFIG_SCALAR = re.compile(
     rf"^[ \t]*+(?:-[ \t]+)?(?:(?:export|ENV|ARG)[ \t]+)?[\"']?{_KEY}[\"']?[ \t]*+[:=][ \t]*+"
     r"(?P<value>[^\s#\"'`{\[|>&*!](?:[^\n#]*[^\s#])?)[ \t]*+(?:#[^\n]*)?$",
@@ -64,7 +67,9 @@ _LITERAL_FALLBACK = re.compile(
 _BARE_SECRET_VALUE = re.compile(
     rf"{_KEY}{_SEPARATOR}(?P<value>[\w.$@%+/~-][\w.$@%+/~=-]*+)(?=[ \t]*(?:$|[,;}})\]&]|#|//))", re.M
 )
-_QUOTED_ASSIGNMENT = re.compile(r"""[:=]\s*["'](?P<value>[A-Za-z0-9+/=_\-]{20,}+)["']""")
+_QUOTED_ASSIGNMENT = re.compile(
+    rf"""[:=]\s*["'](?P<value>{TOKEN_CHARACTER_CLASS}{{{HIGH_ENTROPY_MIN_CHARS},}}+)["']"""
+)
 _CALL = re.compile(r"(?<![\w.$])(?P<name>[\w.$]++)\((?P<arguments>[^(){}\[\]\n]*+)\)")
 _SECRET_CALL_WORD = re.compile(r"(?i)secret|token|password|passwd|credential|api_?key|hmac")
 _QUOTED_LITERAL = re.compile(r"(?P<quote>[\"'`])(?P<value>[^\"'`\n]+)(?P=quote)")
@@ -419,7 +424,9 @@ def _looks_generated(value: str) -> bool:
 
 
 def _env_file_literal(match: re.Match[str]) -> bool:
-    return not _DOTTED_PATH.fullmatch(match["value"])
+    """A written value, not a dotted path or a usage placeholder (``KEY=...``, ``KEY=<credential>``)."""
+    value = match["value"]
+    return not _DOTTED_PATH.fullmatch(value) and not _USAGE_PLACEHOLDER.fullmatch(value)
 
 
 def _url_password(match: re.Match[str]) -> bool:
@@ -453,10 +460,12 @@ def _bearer_value(match: re.Match[str]) -> bool:
 
 
 def _high_entropy_value(match: re.Match[str]) -> bool:
-    return _is_high_entropy(match["value"])
+    return is_high_entropy(match["value"])
 
 
-def _is_high_entropy(value: str) -> bool:
+def is_high_entropy(value: str) -> bool:
+    """Whether a value's characters are spread like a random token's: at least
+    ``HIGH_ENTROPY_BITS_PER_CHAR`` bits of Shannon entropy per character."""
     counts = Counter(value)
     bits = -sum(count / len(value) * math.log2(count / len(value)) for count in counts.values())
     return bits >= HIGH_ENTROPY_BITS_PER_CHAR
