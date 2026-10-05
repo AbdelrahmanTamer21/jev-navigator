@@ -52,7 +52,10 @@ scope, not a proof of semantic equivalence or completeness. Uncertain answers an
 unreadable or unsupported source stay visible. At a call stop, the terminal offers another allowance.
 For a later invocation or an agent pipeline, pass `--resume` with the folder the earlier run printed, and the same
 Find All query and scope. Completed judgments and the seed are retained; only unfinished work spends
-new model calls.
+new model calls. `findall` judges code only. The files JVN does not parse, such as YAML, JSON,
+Markdown, TOML and config files, are searched only when a caller asks for them, through the library's
+`find_all_text` and `find_text` ([extending.md](docs/extending.md#text-units)); env files are never
+read, though an env template (`.env.example`, `.env.sample`, `.env.template`) is read masked.
 
 For an engineer-authored library composition and its limits, see
 [Extending: judge every unit with Find All](docs/extending.md#judge-every-unit-with-find-all).
@@ -301,6 +304,7 @@ index.dependents(file)
 index.co_changed_files(file)
 
 units.list_units(index, files, box_chars=room)  # outermost functions and methods, Prisma schema blocks, top-level code; room: docs/extending.md
+units.list_units(index, files, box_chars=room, reading=units.Reading.TEXT)  # the text units of the files JVN does not parse
 units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=room)  # the units holding lines or line ranges
 
 operations.slice_around(index, file, line)  # the enclosing function, or a window
@@ -607,7 +611,8 @@ judge.choose_call(route, offers, state)  # function calling: operation plus its 
 
 Every one of these has an async form (`check_each_async`, `pick_async`, `ask_all_async`,
 `choose_call_async`, `ask_async`, and `iter_check_every_async`, which yields each wave's answers as
-the wave settles), and `find_code_async` and `find_all_async` are the async searches. They take any
+the wave settles), and `find_code_async`, `find_all_async` and `find_all_text_async` are the async
+searches. They take any
 `AsyncJevClient` (an object with `model` and `async ask(state, questions)`, optionally an async
 `send`), such as a host's own orchestrator; a sync client also works there and runs in a worker
 thread. Both paths share one core: masking, the secret scan, the hash, the store lookup, the call

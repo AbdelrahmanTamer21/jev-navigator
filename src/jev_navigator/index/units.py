@@ -429,10 +429,6 @@ class _TextFile(_FileUnits):
             if run is not None
         )
 
-    @cached_property
-    def top_level(self) -> Unit | None:
-        return None
-
 
 class _AnchorResolver:
     def __init__(self, index: CodeIndex, box_chars: int, listed_only: bool, reading: Reading) -> None:

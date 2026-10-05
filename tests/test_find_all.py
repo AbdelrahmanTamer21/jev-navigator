@@ -702,6 +702,7 @@ SETTINGS = {
     "settings.yaml": "database:\n  host: db.internal\n  database_password: hunter2abcdef\nretry_limit: 4\n",
     "app.conf": "DATABASE_HOST=db.internal\nDATABASE_PASSWORD=hunter2abcdef\nRETRY_LIMIT=4\n",
     ".env": "DATABASE_PASSWORD=hunter2abcdef\nRETRY_LIMIT=4\n",
+    ".env.example": "DATABASE_PASSWORD=hunter2abcdef\nRETRY_LIMIT=4\n",
 }
 
 
@@ -739,7 +740,9 @@ def test_a_secret_in_an_env_style_config_file_is_masked_in_the_request(tmp_path:
     assert "DATABASE_HOST=db.internal" in code and MASK in code and "hunter2abcdef" not in code
 
 
-def test_an_env_file_is_never_listed_named_or_reached_by_a_name(tmp_path: Path) -> None:
+def test_an_env_file_is_never_listed_named_or_reached_while_an_env_template_is_read_masked(
+    tmp_path: Path,
+) -> None:
     # Arrange
     index = repository(tmp_path, SETTINGS)
     provider = labelled({})
@@ -748,14 +751,17 @@ def test_an_env_file_is_never_listed_named_or_reached_by_a_name(tmp_path: Path) 
     result = find_all_text(index, Judge(provider), LIMIT, files=[".env"], names=["RETRY_LIMIT"])
 
     # Assert
-    assert [unit.path for unit in result.units] == ["app.conf"]
+    assert [unit.path for unit in result.units] == [".env.example", "app.conf"]
     assert result.unlisted == {".env": ENV_FILE}
-    assert result.names == {"RETRY_LIMIT": NameHits(2, 2, 1)}
-    assert all(state[ITEMS][0]["file"] != ".env" for state, _ in provider.requests)
+    assert result.names == {"RETRY_LIMIT": NameHits(3, 3, 1)}
+    sent = {item["file"]: item["code"] for state, _ in provider.requests for item in state[ITEMS]}
+    assert ".env" not in sent
+    assert MASK in sent[".env.example"] and "hunter2abcdef" not in sent[".env.example"]
 
 
 LOCKED = {
     "deps.yaml": "pinned:\n  left-pad: 1.3.0\n",
+    "pad.py": 'PACKAGE = "left-pad"\n',
     "package-lock.json": (
         '{\n  "name": "shop",\n  "packages": {"node_modules/left-pad": {"version": "1.3.0"}}\n}\n'
     ),
@@ -774,6 +780,19 @@ def test_a_name_hit_in_a_lockfile_is_skipped_unless_the_caller_names_the_lockfil
     assert [unit.path for unit in by_name.units] == ["deps.yaml"]
     assert by_name.names == {"left-pad": NameHits(1, 1, 0)}
     assert {unit.path for unit in named.units} == {"deps.yaml", "package-lock.json"}
+
+
+def test_a_yaml_name_hit_never_enters_find_alls_population(tmp_path: Path) -> None:
+    # Arrange
+    index = repository(tmp_path, SETTINGS)
+    provider = labelled({})
+
+    # Act
+    result = find_all(index, Judge(provider), LIMIT, names=["database_password"])
+
+    # Assert
+    assert (result.units, provider.requests) == ((), [])
+    assert result.names == {"database_password": NameHits(1, 1, 1)}
 
 
 def test_a_text_search_leaves_code_to_find_all_and_find_all_never_judges_text(tmp_path: Path) -> None:
@@ -807,7 +826,12 @@ def test_find_all_text_async_judges_exactly_what_find_all_text_judges(tmp_path: 
 
     # Assert
     assert judged_shape(concurrent) == judged_shape(sync)
-    assert {unit.path for unit in sync.units} == {"app.conf", "package-lock.json", "deps.yaml"}
+    assert {unit.path for unit in sync.units} == {
+        ".env.example",
+        "app.conf",
+        "package-lock.json",
+        "deps.yaml",
+    }
 
 
 GUIDES = {
