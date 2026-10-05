@@ -74,7 +74,7 @@ NO_ERROR_TEXT_HELP = (
     f"SHA-256 (default: the text, or ${ERROR_TEXT_VARIABLE}=off); stderr still shows the message"
 )
 NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
-POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
+POSITIVE_BUDGET_FIELDS = ("beam_width", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
@@ -604,7 +604,7 @@ A completed search can have a non-found outcome; inspect search.outcome in JSON 
   jvn find "the order limit" --start app/orders.py:42 --out ./order-evidence
   jvn find "the order limit" --max-calls 8 --max-depth 3 --max-steps 8
   jvn find "the order limit" --beam-width 1 --neighbours-per-kind 8
-  jvn find "the order limit" --preview-lines 8 --max-slice-chars 12000 --max-line-chars 240
+  jvn find "the order limit" --preview-lines 8 --max-line-chars 240
   jvn find "the order limit" --verbose
 
 All flags are optional. Live calls stop at 24 unless --max-calls sets another cap ('none' lifts it);
@@ -803,12 +803,6 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         type=int,
         default=defaults.preview_lines,
         help="Leading lines shown for each candidate preview (default: 8; 0 hides preview code)",
-    )
-    evidence.add_argument(
-        "--max-slice-chars",
-        type=int,
-        default=defaults.max_slice_chars,
-        help="Characters allowed in one opened code slice (default: 12000; not the whole request)",
     )
     evidence.add_argument(
         "--max-line-chars",
