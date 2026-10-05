@@ -29,6 +29,7 @@ from .languages import (
     COMMONJS_EXPORT_TARGET,
     COMMONJS_EXPORTS_OBJECT,
     DECLARED_NAME_RULES,
+    DECORATED_KINDS,
     EXPRESSION_KINDS,
     FLOW_LANGUAGE,
     FUNCTION_KINDS,
@@ -40,6 +41,7 @@ from .languages import (
     PROPERTY_TARGET,
     PYTHON_FROM_IMPORT,
     PYTHON_FROM_IMPORT_NAMES,
+    STUB_RULES,
     TYPE_AND_VALUE_DECLARATIONS,
     TYPE_DECLARATIONS,
     VALUE_DECLARATIONS,
@@ -124,6 +126,10 @@ class FileStructure:
     value_declarations: tuple[Span, ...] = ()
     local_names: tuple[LocalName, ...] = ()
     namespace_members: tuple[NamespaceMember, ...] = ()
+    # (start, end, first decorator line) of each function whose decorators sit before its first line.
+    decorated: tuple[tuple[int, int, int], ...] = ()
+    # (start, end) of each function whose body only declares a shape (``languages.STUB_RULES``).
+    stubs: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -176,20 +182,29 @@ class _Text(TypedDict):
     text: str
 
 
+class _Start(TypedDict):
+    line: int
+
+
+class _CapturedRange(TypedDict):
+    start: _Start
+
+
+class _CapturedNode(TypedDict):
+    range: _CapturedRange
+
+
 class _Captured(TypedDict, total=False):
     CALLEE: _Text
     FROM: _Text
     NAME: _Text
     OWN: _Text
     SPEC: _Text
+    DECORATOR: _CapturedNode
 
 
 class _MetaVariables(TypedDict, total=False):
     single: _Captured
-
-
-class _Start(TypedDict):
-    line: int
 
 
 class _End(TypedDict):
@@ -314,6 +329,8 @@ class _FileFound:
     declaration_nodes: list[_Declaration] = field(default_factory=list)
     declared_names: list[tuple[int, str]] = field(default_factory=list)
     bound_names: list[tuple[int, str]] = field(default_factory=list)
+    decorated: set[tuple[int, int, int]] = field(default_factory=set)
+    stubs: set[tuple[int, int]] = field(default_factory=set)
     calls: list[tuple[tuple[str, int, int], CallMatch]] = field(default_factory=list)
     receivers: dict[tuple[str, int, str, str], set[str | None]] = field(default_factory=dict)
     export_names: set[str] = field(default_factory=set)
@@ -333,6 +350,10 @@ class _FileFound:
             self.error_lines.append(_lines_of(match))
         elif rule in _STRUCTURE_RULE_IDS:
             self._add_structure(match)
+        elif rule == _DECORATED_RULE:
+            self.decorated.add((*_lines_of(match), _captured_line(match, "DECORATOR")))
+        elif rule == _STUB_RULE:
+            self.stubs.add(_lines_of(match))
         elif rule == "call":
             self._add_call(match)
         elif rule in _EXPORT_RULE_IDS:
@@ -390,6 +411,8 @@ class _FileFound:
             _sorted(span for span, declaration in declared if declaration.kind.named_by_values),
             _local_names(self.ranges, self.classes, self.bound_names),
             nodes.namespace_members(declared),
+            tuple(sorted(self.decorated)),
+            tuple(sorted(self.stubs)),
         )
 
     def _from_import_aliases(self) -> list[tuple[int, ModuleAlias]]:
@@ -733,6 +756,10 @@ def _captured_own_name(match: dict) -> str:
     return captured.get("OWN", captured.get("NAME", {})).get("text", "")
 
 
+def _captured_line(match: dict, variable: str) -> int:
+    return match["metaVariables"]["single"][variable]["range"]["start"]["line"] + 1
+
+
 _ERROR_RULE = "parse_error"
 _HELD_RULE = "held"
 _NAMESPACE_RULE = "namespace"
@@ -792,6 +819,12 @@ def _module_alias_rules(languages: Sequence[str]) -> str:
     return "\n---\n".join(documents)
 
 
+_DECORATED_RULE = "decorated"
+_STUB_RULE = "stub"
+# A walk back from a function past its decorators stops at the first sibling that is neither.
+_END_OF_DECORATORS = "{not: {any: [{kind: decorator}, {kind: comment}]}}"
+
+
 def _structure_rules(languages: Sequence[str]) -> str:
     documents = []
     for language in languages:
@@ -804,6 +837,10 @@ def _structure_rules(languages: Sequence[str]) -> str:
         ]
         documents.append(_rule_document(_DECLARED_NAME_RULE, language, DECLARED_NAME_RULES[language]))
         documents.append(_rule_document(_LOCAL_NAME_RULE, language, LOCAL_NAME_RULES[language]))
+        if DECORATED_KINDS[language]:
+            documents.append(_decorated_rule(language))
+        if language in STUB_RULES:
+            documents.append(_rule_document(_STUB_RULE, language, STUB_RULES[language]))
         documents.append(_rule_document(_ERROR_RULE, language, "  kind: ERROR"))
         if VALUE_KINDS[language]:
             documents.append(_held_rule(language))
@@ -859,6 +896,18 @@ def _held_rule(language: str) -> str:
     holders = _kinds(VALUE_KINDS[language])
     return _rule_document(
         _HELD_RULE, language, f"  any: {symbols}\n  not: {{not: {{inside: {{stopBy: end, any: {holders}}}}}}}"
+    )
+
+
+def _decorated_rule(language: str) -> str:
+    """Each function whose decorators sit before it, its first decorator captured as ``$DECORATOR``:
+    among the decorators and comments just before the function, the decorator no other one precedes."""
+    first_decorator = (
+        f"{{stopBy: {_END_OF_DECORATORS}, kind: decorator, pattern: $DECORATOR, "
+        f"not: {{follows: {{stopBy: {_END_OF_DECORATORS}, kind: decorator}}}}}}"
+    )
+    return _rule_document(
+        _DECORATED_RULE, language, f"  any: {_kinds(DECORATED_KINDS[language])}\n  follows: {first_decorator}"
     )
 
 
