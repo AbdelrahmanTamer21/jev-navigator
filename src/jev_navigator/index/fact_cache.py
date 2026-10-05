@@ -189,6 +189,8 @@ def _encode(facts: FileFacts) -> dict:
                 [function.constant, list(function.keys), asdict(function.span)]
                 for function in facts.structure.constant_functions
             ],
+            "decorated": [list(decorated) for decorated in facts.structure.decorated],
+            "stubs": [list(stub) for stub in facts.structure.stubs],
         },
         "calls": [asdict(call) for call in facts.calls],
         "references": [asdict(reference) for reference in facts.references],
@@ -224,6 +226,8 @@ def _decode(file: str, raw: dict) -> FileFacts:
                 ConstantFunction(constant, tuple(keys), _span(file, span))
                 for constant, keys, span in structure["constant_functions"]
             ),
+            tuple((int(start), int(end), int(line)) for start, end, line in structure["decorated"]),
+            tuple((int(start), int(end)) for start, end in structure["stubs"]),
         ),
         tuple(CallMatch(file, call["line"], call["name"], call.get("receiver")) for call in raw["calls"]),
         tuple(
