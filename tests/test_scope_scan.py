@@ -14,7 +14,14 @@ from jev_navigator.index import listing, scope_scan, tools
 from jev_navigator.index.bindings import Binding
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.languages import FLOW_LANGUAGE, FLOW_SGCONFIG, has_flow_pragma, language_of
-from jev_navigator.index.scope_scan import OPAQUE_RECEIVER, FileFacts, FileStructure, Unparsed, scan_facts
+from jev_navigator.index.scope_scan import (
+    OPAQUE_RECEIVER,
+    ConstantFunction,
+    FileFacts,
+    FileStructure,
+    Unparsed,
+    scan_facts,
+)
 from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
@@ -335,7 +342,7 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
 
 
 @pytest.mark.parametrize(
-    ("file", "source"),
+    ("file", "source", "counts"),
     [
         (
             "module.ts",
@@ -345,6 +352,7 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
             + _many("  m{n}() {{ return {n}; }},\n")
             + "};\n"
             + _wide_script_function(),
+            (1201, 301, 600, 602),
         ),
         (
             "module.js",
@@ -353,6 +361,17 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
             + _many("  e{n}() {{ return {n}; }},\n  s{n},\n  p{n}: p{n},\n")
             + "};\n"
             + _wide_script_function(),
+            (300, 601, 0, 602),
+        ),
+        (
+            "router.ts",
+            "export const appRouter = createWebRouter({\n"
+            + _many("  p{n}: procedure.query(({{ ctx }}) => ctx.v{n}),\n")
+            + "});\n"
+            + "export const auth = betterAuth({\n  hooks: {\n"
+            + _many("    h{n}: wrap((ctx) => ctx.h{n}),\n")
+            + "  },\n});\n",
+            (2, 600, 0, 600),
         ),
         (
             "module.py",
@@ -364,19 +383,21 @@ def test_the_scan_builds_the_same_facts_as_from_every_field_the_parser_prints(
             + _many("    p{n},\n")
             + "):\n    for item in items:\n"
             + _many("        l{n} = p{n}\n"),
+            (600, 1, 600, 601),
         ),
     ],
-    ids=["typescript", "javascript", "python"],
+    ids=["typescript", "javascript", "python", "router and config"],
 )
 def test_no_fact_rule_prints_more_than_the_node_it_matched(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str, source: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str, source: str, counts: tuple[int, ...]
 ) -> None:
     """ast-grep prints every node a rule's relations match. A relation to a large ancestor, such as
     the program, a module statement or an object literal, printed that ancestor once per match, so
     the parser's output and memory grew with matches times file size: 1.2 MB of ordinary code
     peaked over 2.5 GB. A match prints its own node three times (its text, its lines and its primary
     label), each as JSON. The matches are recorded as printed, every field decoded, because the
-    scan's own decoder skips the related nodes the whole file was printed in."""
+    scan's own decoder skips the related nodes the whole file was printed in. The facts are still all
+    found: the declarations, functions, module aliases and local names the source holds."""
     # Arrange
     (tmp_path / file).write_text(source)
     printed: list[dict] = []
@@ -390,9 +411,17 @@ def test_no_fact_rule_prints_more_than_the_node_it_matched(
     monkeypatch.setattr(tools, "ast_grep_rules", recorded_rules)
 
     # Act
-    scan_facts(read_files(tmp_path, [file]), tmp_path, Unparsed())
+    facts = scan_facts(read_files(tmp_path, [file]), tmp_path, Unparsed())[file]
 
     # Assert
+    structure = facts.structure
+    found = (
+        len(structure.declarations),
+        len(structure.functions),
+        len(facts.module_aliases),
+        len(structure.local_names),
+    )
+    assert found == counts
     oversized = {
         match["ruleId"]
         for match in printed
@@ -490,6 +519,25 @@ def test_the_pragma_scan_stops_at_real_code_even_when_the_head_is_long() -> None
     assert not has_flow_pragma([*long_head, "const a = 1; // @flow"])
     assert not has_flow_pragma([*long_head, "const a = 1;", "// @flow"])
     assert not has_flow_pragma([*long_head, "const a = 1; /* @flow */"])
+
+
+def test_the_functions_a_constant_builds_are_recorded_in_file_order_also_on_one_line(tmp_path: Path) -> None:
+    """Two functions on one line are one span; the scan records each with its own keys, in the order
+    the file holds them, so the facts are the same on every run."""
+    # Arrange
+    (tmp_path / "api.ts").write_text(
+        "export const api = router({ list: procedure.query(() => 1), remove: procedure.query(() => 2) });\n"
+    )
+
+    # Act
+    structure = scan_facts(read_files(tmp_path, ["api.ts"]), tmp_path, Unparsed())["api.ts"].structure
+
+    # Assert
+    (function,) = structure.functions
+    assert structure.constant_functions == (
+        ConstantFunction("api", ("list",), function),
+        ConstantFunction("api", ("remove",), function),
+    )
 
 
 def test_a_method_on_a_one_line_class_is_named_and_counted_itself(tmp_path: Path) -> None:

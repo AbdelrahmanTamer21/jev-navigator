@@ -17,7 +17,7 @@ from git_repos import commit_files
 from isolated_jvn import JVN
 from stored_messages import digested
 
-from jev_navigator.cli import create_evidence_pack
+from jev_navigator.cli import FIND_ALL_QUESTION, create_evidence_pack
 from jev_navigator.cli_resume import load_resume
 from jev_navigator.cli_trace import create_trace_evidence_pack
 from jev_navigator.directives.find_code import SearchBudget
@@ -175,6 +175,35 @@ def test_a_resumed_default_run_replays_its_stored_answers_and_finds_the_code(tmp
     assert files_holding_code(first) == files_holding_code(second) == []
 
 
+def test_a_pack_that_kept_its_request_text_is_not_resumed_without_keep_requests(tmp_path: Path) -> None:
+    # Arrange: a budget-stopped pack whose journal holds the text of its requests
+    repository = marked_repository(tmp_path / "repository")
+    first, second = tmp_path / "first", tmp_path / "second"
+    find_pack(repository, first, "find", 1, keep_requests=True)
+
+    # Act
+    with pytest.raises(ValueError) as refusal:
+        find_pack(repository, second, "find", 1, resume_from=first)
+
+    # Assert: the run writes nothing, and says which flag the pack needs
+    assert str(first) in str(refusal.value)
+    assert "--keep-requests" in str(refusal.value)
+    assert not second.exists()
+
+
+def test_a_pack_that_kept_its_request_text_resumes_with_keep_requests(tmp_path: Path) -> None:
+    # Arrange
+    repository = marked_repository(tmp_path / "repository")
+    first, second = tmp_path / "first", tmp_path / "second"
+    find_pack(repository, first, "find", 1, keep_requests=True)
+
+    # Act
+    resumed = find_pack(repository, second, "find", 1, keep_requests=True, resume_from=first)
+
+    # Assert
+    assert resumed["search"]["calls"] == 2
+
+
 def with_code_signatures(value: object, code_signatures: Mapping[str, str]) -> object:
     """``value`` with the ``signature`` of every place named in ``code_signatures`` set to its code."""
     if isinstance(value, list):
@@ -205,7 +234,9 @@ def test_a_run_resumed_from_a_pack_that_saved_neighbour_code_holds_no_code_text(
     first, second = tmp_path / "first", tmp_path / "second"
     find_pack(repository, first, "find", 1)
     index = CodeIndex.from_directory(repository, ("app/",), fact_cache_dir=tmp_path / "fact-cache")
-    frontier = load_resume(first / "resume.json", index).result.not_inspected
+    frontier = load_resume(
+        first / "resume.json", index, find_all_question=FIND_ALL_QUESTION.question_id
+    ).result.not_inspected
     save_as_before_labels(first, {entry.place_key: entry.signature for entry in frontier})
     assert files_holding_code(first) == ["journal.jsonl", "manifest.json", "resume.json"]
 
@@ -686,12 +717,16 @@ ERROR_TEXT_SETTINGS = {
 }
 
 
-def echoed_run(tmp_path: Path, command: str, setting: str) -> tuple[subprocess.CompletedProcess, Path, int]:
+def echoed_run(
+    tmp_path: Path, command: str, setting: str, *, output_name: str = "pack", extra: tuple[str, ...] = ()
+) -> tuple[subprocess.CompletedProcess, Path, int]:
     """``jvn COMMAND`` through the real TypeSafe client against a provider that echoes every request
     in a 422, with the error-text setting named by ``setting``; also how many requests the provider
-    received."""
-    repository = marked_repository(tmp_path / "repository")
-    output = tmp_path / "pack"
+    received. A second run in the same ``tmp_path`` reuses its repository."""
+    repository = tmp_path / "repository"
+    if not repository.exists():
+        marked_repository(repository)
+    output = tmp_path / output_name
     options, variables = ERROR_TEXT_SETTINGS[setting]
     arguments = [
         command,
@@ -702,6 +737,7 @@ def echoed_run(tmp_path: Path, command: str, setting: str) -> tuple[subprocess.C
         "app/entry.py:5",
         "--out",
         str(output),
+        *extra,
     ]
     server = echoing_server()
     environment = {
@@ -739,6 +775,22 @@ def test_an_echoed_error_body_stays_in_the_run_folder_unless_error_text_is_off(
     assert files_holding_code(output) == (["journal.jsonl"] if setting == "default" else [])
     if command != "trace":
         assert json.loads((output / "manifest.json").read_text())["search"]["failure"]["status"] == 422
+
+
+def test_a_resume_with_error_text_off_digests_the_echoed_error_bodies_it_carries(tmp_path: Path) -> None:
+    # Arrange: the first run keeps its error text, so its journal holds the echoed 422 bodies
+    pytest.importorskip("typesafe_sdk")
+    first, first_output, _ = echoed_run(tmp_path, "find", "default")
+    assert first.returncode == 1 and files_holding_code(first_output) == ["journal.jsonl"]
+
+    # Act
+    resumed, resumed_output, _ = echoed_run(
+        tmp_path, "find", "flag", output_name="resumed", extra=("--resume", str(first_output))
+    )
+
+    # Assert
+    assert resumed.returncode == 1, resumed.stderr
+    assert files_holding_code(resumed_output) == []
 
 
 class EchoesTheRequest:
@@ -805,6 +857,33 @@ def test_an_error_quoting_its_request_reaches_stderr_and_the_run_files_unless_er
     assert json.loads((output / "manifest.json").read_text())["search"]["outcome"] == "failed"
     expected = ["journal.jsonl", "manifest.json", "report.md"] if keep_error_text else []
     assert files_holding_code(output) == expected
+
+
+def failed_pack_that_kept_its_error_text(tmp_path: Path) -> tuple[Path, Path]:
+    """A pack written with error text on whose search failed on an error quoting its request."""
+    repository = marked_repository(tmp_path / "repository")
+    first = tmp_path / "first"
+    with pytest.raises(RuntimeError, match=MARKER):
+        find_pack(repository, first, "find", 5, EchoesTheRequest(), keep_error_text=True)
+    return repository, first
+
+
+@pytest.mark.parametrize("keep_error_text", [True, False])
+def test_a_resume_rewrites_the_carried_error_text_as_its_own_error_text_setting_says(
+    tmp_path: Path, keep_error_text: bool
+) -> None:
+    # Arrange
+    repository, first = failed_pack_that_kept_its_error_text(tmp_path)
+    second = tmp_path / "second"
+
+    # Act
+    find_pack(repository, second, "find", 5, keep_error_text=keep_error_text, resume_from=first)
+
+    # Assert
+    assert files_holding_code(second) == (["journal.jsonl", "manifest.json"] if keep_error_text else [])
+    records = [json.loads(line) for line in (second / "journal.jsonl").read_text().splitlines()]
+    carried = [record for record in records if record["kind"] == "failure"]
+    assert carried and all(("message" in record) is keep_error_text for record in carried)
 
 
 def test_keep_requests_keeps_the_whole_error_message_even_with_error_text_off(tmp_path: Path) -> None:

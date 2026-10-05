@@ -80,6 +80,222 @@ def test_a_file_option_shows_its_first_doc_line_and_its_symbol_names(tmp_path: P
     assert answers == "file answers.py: Typed answers. Symbols: distribution_confidence, Answer"
 
 
+@pytest.mark.parametrize(
+    "retry",
+    [
+        "function retry(again = () => 1) { return attempt(); }\n",
+        "export function retry(again = () => 1) {\n  return attempt();\n}\n",
+    ],
+    ids=["on one line", "over several lines"],
+)
+def test_a_function_whose_default_value_is_an_arrow_keeps_its_name_in_the_entry_text(
+    tmp_path: Path, retry: str
+) -> None:
+    """The arrow a default value holds shares the function's first line; the module still names the
+    function, so the entry text lists it."""
+    # Arrange
+    index = _index(
+        tmp_path, {"retry.ts": retry + "function attempt() {\n  return 1;\n}\n", "util/x.py": "x = 1\n"}
+    )
+
+    # Act
+    options = _root_options(index)
+
+    # Assert
+    assert _option_for(options, "file retry.ts") == "file retry.ts: Symbols: retry, attempt"
+
+
+@pytest.mark.parametrize(
+    ("file", "source", "symbols"),
+    [
+        (
+            "api.ts",
+            "export const api = {\n  list() {\n    return [];\n  },\n  get: (id) => id,\n};\n\n"
+            "export function helper() {\n  return api.list();\n}\n",
+            "helper, api.list, api.get",
+        ),
+        (
+            "typed.ts",
+            "export const handlers: Handlers = {\n  open: async (event) => event,\n};\n"
+            "const routes = {\n  home: () => 1,\n} satisfies Routes;\n",
+            "handlers.open, routes.home",
+        ),
+        (
+            "api.js",
+            "const api = {\n  list() {\n    return [];\n  },\n};\n\nmodule.exports = api;\n",
+            "api.list",
+        ),
+        ("exported.js", "module.exports = {\n  list() {\n    return [];\n  },\n};\n", "list"),
+        (
+            "tools.ts",
+            "namespace Tools {\n  export function run() {\n    return 1;\n  }\n}\n\n"
+            "function main() {\n  return Tools.run();\n}\n",
+            "main, run",
+        ),
+        ("trpc.ts", "const t = create({\n  errorFormatter() {\n    return 1;\n  },\n});\n", "errorFormatter"),
+        (
+            "frames.ts",
+            'export const Frames = Reference("frames", {\n  defaultValue: () => 1,\n});\n',
+            "defaultValue",
+        ),
+        (
+            "server.ts",
+            "const server = new Server({\n  onConnect() {\n    return 1;\n  },\n});\n",
+            "onConnect",
+        ),
+        (
+            "setup.ts",
+            "function setup() {\n  return create({\n    inner() {\n      return 1;\n    },\n  });\n}\n",
+            "setup",
+        ),
+        (
+            "auth.ts",
+            "export const auth = betterAuth({\n  hooks: {\n"
+            "    before() {\n      return 1;\n    },\n  },\n});\n",
+            "",
+        ),
+        ("probes.ts", "const probes = [1, { valueOf: () => 1 }];\n", ""),
+        ("suite.ts", 'describe("x", () => {\n  const helper = () => 1;\n  return helper();\n});\n', ""),
+    ],
+    ids=[
+        "an exported object beside a function",
+        "objects with a type",
+        "a CommonJS module exporting its object",
+        "a CommonJS exports object",
+        "a namespace member",
+        "a method of an object a module-level call is passed",
+        "a property function of an object a module-level call is passed",
+        "an object a module-level new is passed",
+        "a call inside a function",
+        "an object nested in the passed object",
+        "an object in a module-level array",
+        "a callback's own helpers",
+    ],
+)
+def test_the_entry_text_lists_what_the_module_names_then_its_objects_members(
+    tmp_path: Path, file: str, source: str, symbols: str
+) -> None:
+    """The functions and classes the module names come first. A function of an object a module-level
+    variable holds follows under the object's name, the same for ESM and CommonJS; a member of a
+    CommonJS exports object, of a namespace, and of an object a module-level call or `new` is passed
+    (trpc's `create({ errorFormatter() {} })`) under its own. Nothing else is a name of the module: a
+    call inside a function, an object nested in a passed object or held by an array, and a
+    callback's own helpers give none, so such a file's option lists no symbols."""
+    # Arrange
+    index = _index(tmp_path, {file: source, "util/x.py": "x = 1\n"})
+
+    # Act
+    options = _root_options(index)
+
+    # Assert
+    listed = f" Symbols: {symbols}" if symbols else ""
+    assert _option_for(options, f"file {file}") == f"file {file}:{listed}"
+
+
+@pytest.mark.parametrize(
+    ("file", "source", "symbols"),
+    [
+        (
+            "effect.ts",
+            'export const run = Effect.fn("run")(function* (id: string) {\n  return yield* load(id);\n});\n',
+            "run",
+        ),
+        ("untraced.ts", "export const quiet = Effect.fnUntraced(function* () {\n  return 1;\n});\n", "quiet"),
+        (
+            "layer.ts",
+            "export const StoreLive = Layer.effect(\n  Store,\n"
+            "  Effect.gen(function* () {\n    return {};\n  }),\n);\n",
+            "StoreLive",
+        ),
+        (
+            "cached.ts",
+            "export const getSession = cache((headers: Headers) => read(headers));\n",
+            "getSession",
+        ),
+        (
+            "router.ts",
+            "export const userRouter = createWebRouter({\n  list: procedure.query(({ ctx }) => ctx.users),\n"
+            "  remove: procedure.mutation(async ({ input }) => {\n    return input;\n  }),\n});\n",
+            "userRouter",
+        ),
+        (
+            "order.ts",
+            "function helper() {\n  return 1;\n}\n"
+            'export const run = Effect.fn("run")(function* () {\n  return helper();\n});\n'
+            "const api = {\n  list() {\n    return [];\n  },\n};\n",
+            "helper, run, api.list",
+        ),
+        ("plain.ts", "export const direct = (x: number) => x;\n", "direct"),
+        ("data.ts", 'export const LIMIT = 3;\nexport const labels = ["a", "b"];\n', ""),
+        ("steps.ts", "export const steps = [() => 1, () => 2];\n", ""),
+        ("sources.ts", "export const sources = [\n  () => 1,\n  () => 2,\n] as const;\n", ""),
+        (
+            "typed.ts",
+            'export const run = Effect.fn("run")(function* () {\n  return 1;\n}) as Runner;\n',
+            "run",
+        ),
+        (
+            "inner.ts",
+            'function setup() {\n  const run = Effect.fn("run")(function* () {\n'
+            "    return 1;\n  });\n  return run;\n}\n",
+            "setup",
+        ),
+        ("mapped.ts", "export const ids = items.map((item) => item.id);\n", ""),
+        ("filtered.ts", "export const CORE = LENSES.filter((lens) => lens.core);\n", ""),
+        ("sorted.ts", "export const ordered = [...items].sort((a, b) => a - b);\n", ""),
+        ("indexed.ts", "export const byId = new Map(items.map((item) => [item.id, item]));\n", ""),
+        ("table.ts", 'export const lines = new Map([\n  ["paused", (at: string) => at],\n]);\n', ""),
+        ("range.ts", "export const steps = Array.from({ length: 3 }, (_, index) => index);\n", ""),
+        (
+            "now.ts",
+            "export const now = Effect.map(Clock.currentTimeMillis, (millis) => new Date(millis));\n",
+            "now",
+        ),
+    ],
+    ids=[
+        "an Effect.fn",
+        "an Effect.fnUntraced",
+        "a layer built from a generator",
+        "a cached function",
+        "a router of procedures",
+        "beside a function and an object",
+        "an arrow it holds itself",
+        "constants holding no function",
+        "an array of functions, which is no call",
+        "an array under as const, which is no call either",
+        "a call under as",
+        "a constant inside a function",
+        "data mapped from a variable",
+        "data filtered from a constant",
+        "data sorted from an array",
+        "a map built from mapped data",
+        "a map holding functions",
+        "an array from a callback",
+        "an Effect mapped by the Effect module, which is no collection",
+    ],
+)
+def test_the_entry_text_names_a_function_a_module_level_constant_builds_by_the_constant(
+    tmp_path: Path, file: str, source: str, symbols: str
+) -> None:
+    """`export const run = Effect.fn("run")(function* ...)` is how an Effect codebase writes a
+    function: a module-level constant whose value is a call holding an unnamed function is named
+    under the constant's own name, once, among the module's own names in file order. A router
+    holding several procedures is named once, also under `as` or `satisfies`. A constant holding no
+    function, or holding functions in an array rather than a call, under `as const` too, and a
+    constant inside a function, give no name. Neither does data built through a callback: a
+    callback a collection step takes (`.map`, `.filter`, `.sort` on a collection, not on a module
+    such as `Effect`), or one inside `new Map`, `new Set` or `Array.from`."""
+    # Arrange
+    index = _index(tmp_path, {file: source, "util/x.py": "x = 1\n"})
+
+    # Act
+    options = _root_options(index)
+
+    # Assert
+    listed = f" Symbols: {symbols}" if symbols else ""
+    assert _option_for(options, f"file {file}") == f"file {file}:{listed}"
+
+
 def test_the_option_set_is_the_same_directories_and_files_as_before(tmp_path: Path) -> None:
     options = _root_options(_index(tmp_path, {**LIBRARY, "setup.py": "def setup():\n    pass\n"}))
 
@@ -94,13 +310,13 @@ def test_files_are_read_one_per_option_first_then_round_robin_up_to_the_read_bud
     folders = {f"area{number:02d}/mod.py": f"def thing_{number:02d}():\n    pass\n" for number in range(40)}
     index = _index(tmp_path, folders)
     read: list[str] = []
-    original = CodeIndex.top_level_symbols
+    original = CodeIndex.module_names
 
     def counting(self: CodeIndex, file: str):
         read.append(file)
         return original(self, file)
 
-    monkeypatch.setattr(CodeIndex, "top_level_symbols", counting)
+    monkeypatch.setattr(CodeIndex, "module_names", counting)
 
     reads_for_the_root_request: list[int] = []
 
