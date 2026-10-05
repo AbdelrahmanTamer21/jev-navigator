@@ -39,7 +39,6 @@ from .judgments.journal import (
     ERROR_TEXT_VARIABLE,
     error_message,
     error_text_kept,
-    keeps_request_text,
     message_fields,
 )
 from .judgments.judge import CallCapReachedError, Judge
@@ -53,7 +52,7 @@ from .judgments.store import (
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
-from .run_files import failure_digested, place_label, source_shown, step_shown
+from .run_files import failure_digested, place_label, require_kept_request_text, source_shown, step_shown
 from .usage_receipt import usage_receipt, usage_report_lines
 
 if TYPE_CHECKING:
@@ -310,7 +309,7 @@ def create_evidence_pack(
     thresholds = thresholds or Thresholds()
     previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client, workflow)
     if resume_from is not None:
-        _require_its_request_text_kept(resume_from.resolve(), keep_requests)
+        require_kept_request_text(resume_from.resolve() / "journal.jsonl", keep_requests)
     _prepare_output(output)
     if resume_from is not None:
         for name in ("answers.jsonl", "journal.jsonl"):
@@ -993,17 +992,6 @@ def _previous_pack(
             "resume must use the same workflow, repository, scope, target, starts, thresholds and model"
         )
     return previous
-
-
-def _require_its_request_text_kept(pack: Path, keep_requests: bool) -> None:
-    """A pack whose journal holds its requests' text resumes only with ``keep_requests``: the resumed
-    run continues that journal and its answers, and a folder written without the flag holds no code."""
-    journal = pack / "journal.jsonl"
-    if not keep_requests and journal.is_file() and keeps_request_text(journal):
-        raise ValueError(
-            f"{pack} keeps the text of its requests, so its resume must keep it too: "
-            'add --keep-requests (JSON "keep_requests": true)'
-        )
 
 
 def _default_output(repository: Path) -> Path:

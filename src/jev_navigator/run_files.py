@@ -13,13 +13,24 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from pathlib import Path
 
 from .index.code_index import CodeIndex
-from .judgments.journal import message_fields
+from .judgments.journal import keeps_request_text, message_fields
 from .judgments.relations import without_quoted_code
 
 _LINE_RANGE = re.compile(r"[-~]")
 _NEIGHBOUR_LISTS = ("could_contain", "not_inspected", "not_opened")
+
+
+def require_kept_request_text(run_file: Path, keep_requests: bool) -> None:
+    """A run continues ``run_file``, an earlier journal or answer store, without ``keep_requests``
+    only when the file kept no request's text, so a folder written without the flag holds no code."""
+    if not keep_requests and run_file.is_file() and keeps_request_text(run_file):
+        raise ValueError(
+            f"{run_file} keeps the text of its requests, so a run that continues it must keep it too: "
+            'add --keep-requests (JSON "keep_requests": true)'
+        )
 
 
 def place_location(place_key: str) -> str:
