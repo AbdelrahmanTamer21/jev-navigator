@@ -562,8 +562,8 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `secret: process.env.AUTH_SECRET` reaches Jev unchanged. Every rule scans in time linear in the line
   length. Masking works by content: a value of at least 8 characters hidden in one place is hidden
   everywhere in the request, for example where a relation text or another candidate quotes it; a
-  shorter value is masked only where it stands. A plain identifier under a secret-named key
-  (`password: changeme` in YAML) reads as code and is not masked.
+  shorter value is masked only where it stands. In a code file a plain identifier under a secret-named key
+  (`{ password: changeme }`) reads as code; in YAML it is a value.
   The complete candidate set is masked once, before packing, so copied values stay hidden across
   batches; the final scan still runs on every request before it is sent.
   `SecretScanner` refuses to send a request that still contains a secret, and a masked value
