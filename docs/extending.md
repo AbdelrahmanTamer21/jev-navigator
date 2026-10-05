@@ -10,7 +10,8 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `resolve_scope` | the files a search covers from folders, patterns, languages and a git ref, with tests, generated, vendored code and docs left out by default; a file only its shape marks as possibly generated is set aside under an output folder (`dist`, `build`, `generated`), and otherwise awaits Jev's generated judgment with its measured facts; a scope over its cap is refused with counts per folder and language (README, "Choosing the files a search covers") |
 | `judge_generated_files` | Jev's generated-file judgment for the files a scope left undecided: one question per file over its path, measured facts, up to 10 importers and up to 5 files naming its path, each with their true count, and two excerpts; a file the secret scan refuses is named as not judged (README, "Choosing the files a search covers") |
 | `CodeIndex` | mechanical lookups over a narrowed scope: definitions, callers, callees, references, text, imports, git history |
-| `index.units` | the units a search judges (functions, methods, each file's top-level code), cut into 60-line pieces only when larger than their room in a request, and the one resolver of lines and line ranges to units |
+| `index.units` | the units a search judges (functions, methods, Prisma schema blocks, each file's top-level code), cut into 60-line pieces only when larger than their room in a request, and the one resolver of lines and line ranges to units |
+| `index.prisma_schema` | a Prisma schema's model, view, enum and composite type blocks with their lines, and the client accessor a model or view is queried through (`model WebsiteEvent` is `prisma.websiteEvent`) |
 | `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc |
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
@@ -342,10 +343,10 @@ print([unit.id for unit in resolved.units], resolved.unresolved)
 longest question. Passing the whole box would let a unit just under it through, and the request
 carrying it would be refused.
 
-A unit is one function, one method, or one file's top-level code. Its id is the location
-`path:start-end`; top-level code is `path:top`. `list_units` lists the functions and methods no
-other function holds, and each file's top-level code, so every line of code sits in a listed unit
-once: a nested function or callback is inside its holder's text and is not listed. A unit's
+A unit is one function, one method, one Prisma schema block, or one file's top-level code. Its id is
+the location `path:start-end`; top-level code is `path:top`. `list_units` lists the functions and
+methods no other function holds, the blocks of each schema, and each file's top-level code, so every
+line of code sits in a listed unit once: a nested function or callback is inside its holder's text and is not listed. A unit's
 `symbol` names every holder, `OrderService.place`, and names an anonymous function by the line it
 starts on, `<anonymous:4>`. A function a module-level constant's call builds goes by the name the
 entry text gives it, `CodeIndex.constant_function_names`: `run` for `export const run =
@@ -367,10 +368,18 @@ function whose body is only `...`, `pass`, a docstring or `raise NotImplementedE
 (`CodeIndex.stubs_in`), is no unit of its own: its lines are top-level code, so a Protocol is judged
 whole.
 
-Top-level code is a file's lines outside every function and method, class bodies included, kept as
-runs of lines in order (`ranges`) without the blank lines at their edges. A file whose top-level code
-is only imports, comments, directives such as `"use client"`, lines of closing brackets and blank
-lines lists no top-level unit. A file in a language JVN does not parse gives no units and is named
+A `.prisma` file has no parser grammar, so `index.prisma_schema.schema_blocks` scans it: each `model`,
+`view`, `enum` and `type` block is one unit of kind `schema_block`, from its header line to the line of
+the brace that closes it, named `model Website`. Braces in strings and after `//` never count, and a
+header whose brace never closes is no block. A `generator` or `datasource` block holds settings, so
+its lines are the schema's top-level code. A model's code lives where it is queried, so a caller
+that starts at a schema adds each block's `client_accessor` as a name (`.website.` for `model
+Website`) to reach the functions that read and write it.
+
+Top-level code is a file's lines outside every function, method and schema block, class bodies
+included, kept as runs of lines in order (`ranges`) without the blank lines at their edges. A file
+whose top-level code is only imports, comments, directives such as `"use client"`, lines of closing
+brackets and blank lines lists no top-level unit. A file in a language JVN does not read gives no units and is named
 in `unlisted` with `language not supported`, as is a file that disappeared after the inventory, and a
 file outside the index's scope with the index's own reason (`no file at this path`) or `not in the index scope`.
 

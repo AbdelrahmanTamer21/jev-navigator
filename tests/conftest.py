@@ -1,6 +1,6 @@
-"""A small real repository (Python and TypeScript, two commits) that the index tests run against,
-every test's isolation from the developer's own decision-model settings, and the guard that fails a
-run with an undeclared skip."""
+"""A small real repository (Python and TypeScript, two commits) that the index tests run against, a
+real Prisma schema, every test's isolation from the developer's own decision-model settings, and the
+guard that fails a run with an undeclared skip."""
 
 from __future__ import annotations
 
@@ -164,6 +164,29 @@ def sample_repo(tmp_path: Path) -> Path:
     )
     git(root, "commit", "-qam", "orders and validation change together")
     return root
+
+
+UMAMI_SCHEMA = Path(__file__).parent / "fixtures" / "umami" / "schema.prisma"
+
+WEBSITE_QUERIES = """\
+import prisma from '@/lib/prisma';
+
+export async function updateWebsite(websiteId: string, data: { name: string }) {
+  return prisma.client.website.update({ where: { id: websiteId }, data });
+}
+
+export async function getWebsiteCount(userId: string) {
+  return prisma.client.website.count({ where: { userId, deletedAt: null } });
+}
+"""
+
+
+@pytest.fixture
+def umami_schema() -> str:
+    """umami's real Prisma schema at ec0ff50 (MIT, its license beside it): a generator, a datasource
+    and 26 models, ``Website`` on lines 98 to 131. ``WEBSITE_QUERIES`` queries that model through its
+    client accessor, as umami's own queries do."""
+    return UMAMI_SCHEMA.read_text()
 
 
 OUTER_CACHE_ROOT = cache_root()
