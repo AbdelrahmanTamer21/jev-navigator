@@ -3,6 +3,7 @@ client's input limits, and otherwise the longest start that fits, with a visible
 
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -26,6 +27,7 @@ from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
+from jev_navigator.judgments.secrets import MASK
 from jev_navigator.testing import ScriptedJevClient
 
 NEIGHBOUR_CAP_SEARCH = Path(__file__).with_name("neighbour_cap_search.py")
@@ -185,3 +187,110 @@ def test_find_shows_what_shown_for_target_shows(tmp_path: Path, found, character
     (opened,) = result.starts
     assert client.refusals == 0
     assert (opened.code.span, opened.code.text) == (shown.span, shown.text)
+
+
+class ShortSecretMasker:
+    """The rule #99 adds to the masker: the quoted value of every assignment to a name holding
+    PASSWORD is masked however short it is, so a value shorter than the 8-character mask makes the
+    request longer."""
+
+    _VALUE = re.compile(r'PASSWORD\w* = "([^"]+)"')
+
+    def mask(self, text: str) -> str:
+        return self._VALUE.sub(lambda match: match[0].replace(match[1], MASK), text)
+
+    def masked_values(self, text: str) -> list[str]:
+        return [match[1] for match in self._VALUE.finditer(text)]
+
+
+def _holding_short_secrets(characters: int, calls_audit: bool) -> str:
+    """A function of more than ``characters`` characters whose lines give secret-named keys values of
+    6 characters, each 2 characters longer once masked."""
+    lines = [f'    DB_PASSWORD_{line:05d} = "k{line:05d}"\n' for line in range(characters)]
+    body = "".join(lines[: characters // len(lines[0]) + 1])
+    return "def place(order):\n" + ("    audit(order)\n" if calls_audit else "") + body + "    return order\n"
+
+
+def _drex_client() -> BudgetedClient:
+    client = BudgetedClient(JEV_INPUT_LIMITS.request_chars, input_box=DREX_INPUT_LIMITS.box_chars)
+    client.input_limits = DREX_INPUT_LIMITS
+    return client
+
+
+@pytest.mark.parametrize("characters", range(16_000, 19_600, 600))
+def test_the_first_cut_measures_the_request_as_masked(tmp_path: Path, characters: int) -> None:
+    # Arrange: a function with no neighbour, whose masked request is longer than its text
+    index = _index(tmp_path, {"app/orders.py": _holding_short_secrets(characters, calls_audit=False)})
+    client = _drex_client()
+    start = place_for_line(index, "app/orders.py", 1, "start")
+    judge = Judge(client, masker=ShortSecretMasker())
+
+    # Act
+    result = find_code(index, judge, "the order total", [start], moves=CALLEES, budget=ONE_OPENING)
+    masked = shown_for_target(start.open(), "the order total", DREX_INPUT_LIMITS, masker=ShortSecretMasker())
+    unmasked = shown_for_target(start.open(), "the order total", DREX_INPUT_LIMITS, masker=None)
+
+    # Assert: Find shows the masked measure's cut, never longer than the unmasked one, and the
+    # provider refuses nothing
+    (opened,) = result.starts
+    assert client.refusals == 0
+    assert (opened.code.span, opened.code.text) == (masked.span, masked.text)
+    assert masked.span.end <= unmasked.span.end
+
+
+def test_a_function_whose_masked_request_is_over_the_box_is_cut_shorter_than_its_text_allows(
+    tmp_path: Path,
+) -> None:
+    # Arrange: the largest function whose unmasked request fits Drex's box whole
+    index = _index(tmp_path, {"app/orders.py": _holding_short_secrets(17_000, calls_audit=False)})
+    start = place_for_line(index, "app/orders.py", 1, "start")
+    code = start.open()
+
+    # Act
+    unmasked = shown_for_target(code, "the order total", DREX_INPUT_LIMITS, masker=None)
+    masked = shown_for_target(code, "the order total", DREX_INPUT_LIMITS, masker=ShortSecretMasker())
+
+    # Assert
+    assert unmasked.span == code.span
+    assert masked.span.end < code.span.end
+
+
+@pytest.mark.parametrize("calls_audit", [False, True], ids=["no neighbour", "a neighbour"])
+@pytest.mark.parametrize("characters", range(16_000, 19_600, 600))
+def test_every_request_of_an_opening_with_short_secrets_fits_once_masked(
+    tmp_path: Path, characters: int, calls_audit: bool
+) -> None:
+    # Arrange: with `audit` called, the opening asks about a neighbour as well
+    index = _index(tmp_path, {"app/orders.py": _holding_short_secrets(characters, calls_audit=calls_audit)})
+    client = _drex_client()
+    start = place_for_line(index, "app/orders.py", 1, "start")
+    judge = Judge(client, masker=ShortSecretMasker())
+
+    # Act
+    result = find_code(index, judge, "the order total", [start], moves=CALLEES, budget=ONE_OPENING)
+
+    # Assert
+    assert result.outcome is not Outcome.FAILED
+    assert client.refusals == 0
+    assert len(client.requests) >= 1
+
+
+def test_a_neighbour_that_fits_only_unmasked_does_not_fit_alone(tmp_path: Path) -> None:
+    # Arrange: neighbours of more and more short secrets; the last one that fits unmasked
+    check = FOUND
+    shared = {"target": {"description": "the order total"}}
+    plain, masking = Judge(_drex_client(), masker=None), Judge(_drex_client(), masker=ShortSecretMasker())
+
+    def neighbour(lines: int) -> dict:
+        code = "".join(f'DB_PASSWORD_{line:05d} = "k{line:05d}"\n' for line in range(lines))
+        return {"file": "app/settings.py", "lines": [1, lines], "code": code}
+
+    largest = max(
+        lines for lines in range(400, 700) if plain.fits_alone(check, neighbour(lines), shared, "candidates")
+    )
+
+    # Act
+    fits_masked = masking.fits_alone(check, neighbour(largest), shared, "candidates")
+
+    # Assert
+    assert not fits_masked

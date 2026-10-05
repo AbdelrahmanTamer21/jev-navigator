@@ -48,6 +48,7 @@ from ..judgments.judge import (
     CallCapReachedError,
     CheckResult,
     Judge,
+    masked_request_fits,
 )
 from ..judgments.questions import (
     ITEM_PLACEHOLDER,
@@ -58,6 +59,7 @@ from ..judgments.questions import (
     content_hash,
     serialized_chars,
 )
+from ..judgments.secrets import DEFAULT_MASKER, Masker
 from ..judgments.thresholds import NoulVerdict, Thresholds
 from .places import MOVES, Move, Place, neighbours_and_omissions, place_relationship
 from .shown import MAX_LINE_CHARS, cut_long_line, shown_slice
@@ -404,14 +406,20 @@ def shown_for_target(
     input_limits: InputLimits,
     *,
     found: Check = FOUND,
+    masker: Masker | None = DEFAULT_MASKER,
     max_line_chars: int = MAX_LINE_CHARS,
 ) -> CodeSlice | None:
     """How much of ``code`` Find shows when it asks whether ``code`` is the target: all of it when that
-    request fits the box of ``input_limits``, else the longest start that fits, ending in a visible
-    cut note, and None when not even the first line fits. It is the first cut of every opening; a
-    split opening's neighbours can cut it further. It measures the request before masking, which only
-    shortens it: every value the masker hides is at least as long as its mask."""
-    fits = partial(_found_request_fits, _target(target_description), found, input_limits)
+    request, masked by ``masker`` as a judge sends it, fits the box of ``input_limits``, else the
+    longest start that fits, ending in a visible cut note, and None when not even the first line fits.
+    It is the first cut of every opening; a split opening's neighbours can cut it further. Pass the
+    judge's masker: masking can make a request longer, so the measure is of the masked request."""
+    target = _target(target_description)
+    questions = {found.question_id: found.to_question()}
+
+    def fits(shown: CodeSlice) -> bool:
+        return masked_request_fits(_opened_state(target, shown), questions, input_limits, masker)
+
     return shown_slice(code, fits, max_line_chars)
 
 
@@ -718,6 +726,7 @@ def _open(index: CodeIndex, search: _Search, judge: Judge, item: _Queued) -> _Op
         search.target["description"],
         judge.input_limits,
         found=search.questions.found,
+        masker=judge.masker,
         max_line_chars=search.budget.max_line_chars,
     )
     if shown is None:
@@ -794,13 +803,6 @@ def _beside_neighbours(
         opening = replace(opening, code=shown)
 
 
-def _found_request_fits(target: Mapping, found: Check, input_limits: InputLimits, shown: CodeSlice) -> bool:
-    """Whether asking only whether ``shown`` is ``target`` fits the box of ``input_limits``: the
-    smallest request an opening sends."""
-    questions = {found.question_id: found.to_question()}
-    return not input_limits.exceeded_by(_opened_state(target, shown), questions)
-
-
 def _neighbour_request_fits(search: _Search, judge: Judge, largest: Mapping | None, shown: CodeSlice) -> bool:
     """Whether asking about the opening's largest neighbour alone beside ``shown`` fits the judge's
     input box."""
@@ -863,7 +865,7 @@ def _ask_within_cap(judge: Judge, search: _Search, opening: _Opening):
     out before this request; ``_Failed`` when the request failed."""
     request = _opening_request(search, opening)
     try:
-        if not judge.input_limits.exceeded_by(request.state, request.questions):
+        if judge.fits(request.state, request.questions):
             try:
                 response = judge.ask(
                     request.state, request.questions, thresholds=search.thresholds, sources=request.sources
@@ -882,7 +884,7 @@ def _ask_within_cap(judge: Judge, search: _Search, opening: _Opening):
 async def _ask_within_cap_async(judge: Judge, search: _Search, opening: _Opening):
     request = _opening_request(search, opening)
     try:
-        if not judge.input_limits.exceeded_by(request.state, request.questions):
+        if judge.fits(request.state, request.questions):
             try:
                 response = await judge.ask_async(
                     request.state, request.questions, thresholds=search.thresholds, sources=request.sources
@@ -944,7 +946,7 @@ def _opening_priority(judge: Judge, search: _Search, request: _OpeningRequest) -
     if pick is None or pick.question_id not in request.questions:
         return {}, request.priority_unavailable
     questions = {pick.question_id: request.questions[pick.question_id]}
-    if judge.input_limits.exceeded_by(request.state, questions):
+    if not judge.fits(request.state, questions):
         return (
             {},
             "The global priority hint exceeds the request-size packing estimate; "
