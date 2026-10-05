@@ -152,8 +152,9 @@ ENGINE_MASKED = [
     ),
 ]
 
-# An identifier under a secret-named key reads as code (``{ id_token: token }``), so these stay; the
-# last one holds identifiers only once its comment is set aside.
+# In a code file an identifier under a secret-named key reads as code (``{ id_token: token }``), so these
+# stay; the first one holds identifiers only once its comment is set aside. In config text (a config file,
+# or text from no file) the line-shaped ones are values, as the Engine reads them.
 IDENTIFIER_VALUES = [
     (
         "password: {phrase: secret, # } and 'quotes' stay in the comment\n"
@@ -186,10 +187,23 @@ def test_every_word_the_engine_hides_is_hidden_and_every_word_it_keeps_stays(
     assert _words(engine_result) <= _words(masked)
 
 
+CODE_PATH = "src/settings.ts"
+CONFIG_LINES = [(value, result) for value, result in IDENTIFIER_VALUES if value.startswith("DB_PASSWORD: ")]
+
+
 @pytest.mark.parametrize("value, engine_result", IDENTIFIER_VALUES)
 def test_an_identifier_under_a_secret_named_key_stays_code(value: str, engine_result: str) -> None:
+    # Act
+    masked = SecretMasker().mask(value, CODE_PATH)
+
+    # Assert
+    assert masked == value
+
+
+@pytest.mark.parametrize("value, engine_result", CONFIG_LINES)
+def test_an_unquoted_config_value_hides_every_word_the_engine_hides(value: str, engine_result: str) -> None:
     # Act
     masked = SecretMasker().mask(value)
 
     # Assert
-    assert masked == value
+    assert _words(masked) & (_words(value) - _words(engine_result)) == set()

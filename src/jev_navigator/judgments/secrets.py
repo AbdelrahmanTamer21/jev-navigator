@@ -20,13 +20,13 @@ class Masker(Protocol):
     """``mask`` hides secrets in one text; ``masked_values`` lists the values it hides there, so they
     can be hidden everywhere else in the request too."""
 
-    def mask(self, text: str) -> str: ...
+    def mask(self, text: str, path: str | None = None) -> str: ...
 
-    def masked_values(self, text: str) -> list[str]: ...
+    def masked_values(self, text: str, path: str | None = None) -> list[str]: ...
 
 
 class Scanner(Protocol):
-    def findings(self, text: str) -> list[str]: ...
+    def findings(self, text: str, path: str | None = None) -> list[str]: ...
 
 
 class SecretInRequestError(RuntimeError):
@@ -41,21 +41,24 @@ class SecretMasker:
     (an identifier, dotted path, call, env lookup or interpolation) is code and stays.
 
     ``masked_values`` lists only values of at least ``BY_CONTENT_MIN_CHARS`` characters: a shorter
-    value is masked where it stands, because hiding a short word everywhere would blank ordinary code."""
+    value is masked where it stands, because hiding a short word everywhere would blank ordinary code.
 
-    def mask(self, text: str) -> str:
-        return hide_secrets(text)[0]
+    ``path`` is the file the text comes from. In a config file, or in text from no file, an unquoted value
+    under a secret key is a value (``POSTGRES_PASSWORD: example``); in code it stays (``token: str``)."""
 
-    def masked_values(self, text: str) -> list[str]:
-        return [value for value in hide_secrets(text)[1] if len(value) >= BY_CONTENT_MIN_CHARS]
+    def mask(self, text: str, path: str | None = None) -> str:
+        return hide_secrets(text, path)[0]
+
+    def masked_values(self, text: str, path: str | None = None) -> list[str]:
+        return [value for value in hide_secrets(text, path)[1] if len(value) >= BY_CONTENT_MIN_CHARS]
 
 
 @dataclass(frozen=True)
 class SecretScanner:
     """Reports what the built-in masker would have masked; used as the final check before sending."""
 
-    def findings(self, text: str) -> list[str]:
-        return [value[:4] for value in hide_secrets(text)[1]]
+    def findings(self, text: str, path: str | None = None) -> list[str]:
+        return [value[:4] for value in hide_secrets(text, path)[1]]
 
 
 def mask_request(state: Mapping, questions: Mapping, masker: Masker) -> tuple[Mapping, Mapping, frozenset]:
@@ -71,7 +74,9 @@ def mask_by_content(value: object, masker: Masker) -> object:
 
 def masked_values(value: object, masker: Masker) -> frozenset[str]:
     """Every value the masker hides anywhere inside nested JSON-like data, keys included."""
-    return frozenset(found for text in dict.fromkeys(_strings(value)) for found in masker.masked_values(text))
+    return frozenset(
+        found for text, path in dict.fromkeys(_strings(value)) for found in masker.masked_values(text, path)
+    )
 
 
 def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> object:
@@ -80,8 +85,8 @@ def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> ob
     longest_first = sorted(values - {MASK}, key=len, reverse=True)
 
     @cache
-    def hide(text: str) -> str:
-        text = masker.mask(text)
+    def hide(text: str, path: str | None) -> str:
+        text = masker.mask(text, path)
         for secret in longest_first:
             text = text.replace(secret, MASK)
         return text
@@ -102,30 +107,40 @@ def refuse_if_secret(
     """Refuses when a value masked elsewhere is still in the request (it can only sit in a key), or
     when the scanner finds a secret."""
     texts = _strings(state) + _strings(questions)
-    if any(value in text for text in texts for value in masked):
+    if any(value in text for text, _ in texts for value in masked):
         raise SecretInRequestError("a masked value is still in the request, in a key; nothing was sent")
     if scanner is None:
         return
-    for text in texts:
-        if scanner.findings(text):
+    for text, path in texts:
+        if scanner.findings(text, path):
             raise SecretInRequestError("the final scan found a secret in the request; nothing was sent")
 
 
-def _each_string(value: object, change: Callable[[str], str]) -> object:
+def _each_string(value: object, change: Callable[[str, str | None], str], path: str | None = None) -> object:
+    """Changes every string, each with the file it comes from (see ``_file_of``)."""
     if isinstance(value, str):
-        return change(value)
+        return change(value, path)
     if isinstance(value, Mapping):
-        return {key: _each_string(item, change) for key, item in value.items()}
+        inner = _file_of(value, path)
+        return {key: _each_string(item, change, inner) for key, item in value.items()}
     if isinstance(value, list | tuple):
-        return [_each_string(item, change) for item in value]
+        return [_each_string(item, change, path) for item in value]
     return value
 
 
-def _strings(value: object) -> list[str]:
+def _strings(value: object, path: str | None = None) -> list[tuple[str, str | None]]:
+    """Every string, keys included, with the file it comes from."""
     if isinstance(value, str):
-        return [value]
+        return [(value, path)]
     if isinstance(value, Mapping):
-        return [text for key, item in value.items() for text in [str(key), *_strings(item)]]
+        inner = _file_of(value, path)
+        return [pair for key, item in value.items() for pair in [(str(key), None), *_strings(item, inner)]]
     if isinstance(value, list | tuple):
-        return [text for item in value for text in _strings(item)]
+        return [pair for item in value for pair in _strings(item, path)]
     return []
+
+
+def _file_of(mapping: Mapping, outer: str | None) -> str | None:
+    """A mapping's ``file`` names the file its strings come from (a slice's code, a candidate's lines)."""
+    file = mapping.get("file")
+    return file if isinstance(file, str) else outer

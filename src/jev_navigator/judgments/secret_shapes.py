@@ -77,6 +77,14 @@ _PLAIN_VALUE = re.compile(
 _BARE_VALUE = re.compile(
     rf"{KEY}{SEPARATOR}(?P<value>[\w.$@%+/~-][\w.$@%+/~=-]*+)(?=[ \t]*(?:$|[,;}})\]&]|#|//))", re.M
 )
+_CONFIG_SCALAR = re.compile(
+    rf"^[ \t]*+(?:-[ \t]+)?(?:(?:export|ENV|ARG)[ \t]+)?[\"']?{KEY}[\"']?[ \t]*+[:=][ \t]*+"
+    r"(?P<value>[^\s#\"'`{\[|>&*!](?:[^\n#]*[^\s#])?)[ \t]*+(?:#[^\n]*)?$",
+    re.M,
+)
+_CONFIG_SUFFIXES = (".yml", ".yaml", ".env", ".ini", ".cfg", ".conf", ".properties", ".toml", ".dockerfile")
+_CONFIG_NON_VALUES = frozenset({"null", "~", "true", "false", "yes", "no", "on", "off"})
+_CI_EXPRESSION = re.compile(r"\$\{\{[^{}]*\}\}")
 _LITERAL_FALLBACK = re.compile(
     rf"{KEY}{SEPARATOR}[^\n,;:=]*?(?:\|\||\?\?|\bor\b)\s*(?P<quote>[\"'`])(?P<value>[^\"'`\n]+)(?P=quote)"
 )
@@ -89,14 +97,23 @@ _IDENTIFIER_WORDS = re.compile(r"[A-Za-z]+(?:_[A-Za-z]+)*")
 _PLACEHOLDER = re.compile(r"(?i)pass(?:word|wd)?|pwd|secret|token|x+|\*+|<[^>]*>|\.\.\.|…")
 
 
-def hide_secrets(text: str) -> tuple[str, list[str]]:
-    """The text with every secret value masked, and the values that were masked, in rule order."""
+def hide_secrets(text: str, path: str | None = None) -> tuple[str, list[str]]:
+    """The text with every secret value masked, and the values that were masked, in rule order. Text
+    from a config file, or from no file, also has its unquoted values under secret keys masked."""
     hidden: list[str] = []
-    for rule in _RULES:
+    for rule in _CONFIG_RULES if is_config_shaped(path) else _RULES:
         spans = rule(text)
         hidden += [text[start:end] for start, end in spans]
         text = _masked_spans(text, spans)
     return text, [value for value in hidden if value and value != MASK]
+
+
+def is_config_shaped(path: str | None) -> bool:
+    """Text from no file, or from a config file, a dotenv file or a Dockerfile."""
+    if path is None:
+        return True
+    name = path.rsplit("/", 1)[-1].lower()
+    return name.endswith(_CONFIG_SUFFIXES) or name.startswith((".env", "dockerfile"))
 
 
 def _masked_spans(text: str, spans: list[Span]) -> str:
@@ -230,6 +247,15 @@ def _query_secret(match: re.Match[str]) -> bool:
     )
 
 
+def _config_literal(match: re.Match[str]) -> bool:
+    """An unquoted config value, unless it is empty, a boolean, or a whole reference: ``${VAR}``, ``$VAR``
+    or a CI expression (``${{ secrets.TOKEN }}``)."""
+    value = match["value"]
+    return (
+        value.lower() not in _CONFIG_NON_VALUES and not _CI_EXPRESSION.fullmatch(value) and is_literal(value)
+    )
+
+
 def _bearer_value(match: re.Match[str]) -> bool:
     return any(character.isdigit() for character in match["value"])
 
@@ -263,3 +289,4 @@ _RULES: tuple[Callable[[str], list[Span]], ...] = (
     _call_literal_spans,
     _matches(_QUOTED_ASSIGNMENT, _high_entropy_value),
 )
+_CONFIG_RULES = (*_RULES, _matches(_CONFIG_SCALAR, _keyed(_config_literal)))
