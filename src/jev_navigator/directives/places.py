@@ -27,9 +27,10 @@ _ENVIRONMENT_READ = re.compile(
 )
 _QUOTED_KEY = re.compile(r"""["'`]([A-Za-z_][\w.:/\-]{5,79})["'`]""")
 _KEY_SHAPE = re.compile(r"[._:/-]")
-MAX_KEY_HITS = 30
+_WINDOW_KEY_LINES = re.compile(r"(\d+)~\d+")
 _PLACE_LINES = re.compile(r":\d+(?:-\d+)? ")
 _WINDOW_LINE = re.compile(r"line \d+ ")
+MAX_KEY_HITS = 30
 _PASSED_ON_ROLES = frozenset(
     {"argument", "decorator", "collection", "assignment", "export", "return", "receiver", "type"}
 )
@@ -46,47 +47,15 @@ class Place:
     move: str | None = None
 
 
-def located_line(file: str, lines: str, text: str) -> str:
-    """A place's signature: ``file:lines``, a space, and its text (see ``_is_place_text``)."""
-    return f"{file}:{lines} {text}"
-
-
-def located_file(signature: str) -> str | None:
-    """The file a ``located_line`` signature names, read by its grammar from each ``:lines `` separator.
-    None when no split fits, and when more than one does (a path or a quoted code line that holds a
-    separator itself), so a caller that needs the file reads such a signature as config."""
-    files: list[str] = []
-    for separator in _PLACE_LINES.finditer(signature):
-        if separator.start() and _is_place_text(signature[separator.end() :]):
-            files.append(signature[: separator.start()])
-            if len(files) > 1:
-                return None
-    return files[0] if files else None
-
-
-def _is_place_text(text: str) -> bool:
-    """A place's text: an optional ``line N `` then quoted code, ending with the closing quote or a
-    parenthesised relation, or anywhere when ``cut_long_line`` cut it."""
-    body = text.removesuffix(LINE_CUT_MARK)
-    window_line = _WINDOW_LINE.match(body)
-    quoted = body[window_line.end() :] if window_line else body
-    if not quoted.startswith("`"):
-        return False
-    return body != text or quoted.endswith("`") or ("` (" in quoted and quoted.endswith(")"))
-
-
 def function_place(
     index: CodeIndex, span: Span, relation: str = "", *, binding: Binding | None = None
 ) -> Place:
     """A function, class or declaration, opened whole."""
-    first_line = index.read_slice(Span(span.file, span.start, span.start)).text.strip()
     shown_relation = _with_binding(relation, binding)
-    note = f" ({shown_relation})" if shown_relation else ""
-    signature = located_line(span.file, str(span.start), f"`{first_line}`{note}")
     return Place(
         span.key,
         "function",
-        signature,
+        _function_signature(index, span, shown_relation),
         lambda: index.read_slice(span, origin=shown_relation or "function"),
         relation or None,
         binding,
@@ -113,11 +82,7 @@ def window_place(
         window = index.read_window(file, line, radius).span
         return index.read_slice(replace(window, name=name), origin=shown_relation)
 
-    span = open_window().span
-    text_line = index.read_slice(Span(file, line, line)).text.strip()
-    signature = located_line(
-        file, f"{span.start}-{span.end}", f"line {line} `{text_line}` ({shown_relation})"
-    )
+    signature = _window_signature(index, open_window().span, line, shown_relation)
     return Place(f"{file}:{line}~{radius}", "window", signature, open_window, relation or None, binding)
 
 
@@ -125,15 +90,77 @@ def range_place(index: CodeIndex, file: str, start: int, end: int, relation: str
     """Lines chosen by their position (before or after a place, the start of a file); no single line
     made them a neighbour, so the signature quotes their first line of code and carries no binding."""
     span = Span(file, start, end)
-    lines = index.read_slice(span).text.split("\n")
-    code_line = first_code_line(lines, file)
-    quoted = (
-        next((line.strip() for line in lines if line.strip()), "") if code_line is None else lines[code_line]
-    )
-    signature = located_line(span.file, f"{span.start}-{span.end}", f"`{quoted.strip()}` ({relation})")
+    signature = _range_signature(index, span, relation)
     return Place(
         span.key, "window", signature, lambda: index.read_slice(span, origin=relation), relation or None
     )
+
+
+def restored_signature(
+    index: CodeIndex, key: str, kind: str, span: Span, relation: str | None, binding: Binding | None
+) -> str:
+    """The signature the builder of a place with this ``key`` and ``kind`` gives it, from the code of
+    its opened ``span``: a saved place keeps no code, so a restored one rebuilds what the builder
+    showed. Only lines are read, nothing is parsed."""
+    if kind == "function":
+        return _function_signature(index, span, _with_binding(relation or "", binding))
+    line = _window_line(key)
+    if line is not None:
+        return _window_signature(index, span, line, _with_binding(relation or "", binding))
+    return _range_signature(index, span, relation or "")
+
+
+def _window_line(key: str) -> int | None:
+    """The line a window key, ``path:line~radius``, names; None for any other key."""
+    lines = _WINDOW_KEY_LINES.fullmatch(key.rpartition(":")[2])
+    return int(lines[1]) if lines else None
+
+
+def _function_signature(index: CodeIndex, span: Span, shown_relation: str) -> str:
+    first_line = index.read_slice(Span(span.file, span.start, span.start)).text.strip()
+    note = f" ({shown_relation})" if shown_relation else ""
+    return f"{span.file}:{span.start} `{first_line}`{note}"
+
+
+def _window_signature(index: CodeIndex, window: Span, line: int, shown_relation: str) -> str:
+    """The window's lines and the line that made it a neighbour, quoted."""
+    text_line = index.read_slice(Span(window.file, line, line)).text.strip()
+    return f"{window.file}:{window.start}-{window.end} line {line} `{text_line}` ({shown_relation})"
+
+
+def _range_signature(index: CodeIndex, span: Span, relation: str) -> str:
+    """The range's first line of code, quoted; no single line made it a neighbour."""
+    lines = index.read_slice(span).text.split("\n")
+    code_line = first_code_line(lines, span.file)
+    quoted = (
+        next((line.strip() for line in lines if line.strip()), "") if code_line is None else lines[code_line]
+    )
+    return f"{span.key} `{quoted.strip()}` ({relation})"
+
+
+def located_file(signature: str) -> str | None:
+    """The file a place's signature names, parsed by the grammar the signature builders write: the
+    file, ``:lines`` and a space at each separator, then the place's text (see ``_is_place_text``).
+    None when no split fits, and when more than one does (a path or a quoted code line that holds a
+    separator itself), so a caller that needs the file reads such a signature as config."""
+    files: list[str] = []
+    for separator in _PLACE_LINES.finditer(signature):
+        if separator.start() and _is_place_text(signature[separator.end() :]):
+            files.append(signature[: separator.start()])
+            if len(files) > 1:
+                return None
+    return files[0] if files else None
+
+
+def _is_place_text(text: str) -> bool:
+    """A place's text: an optional ``line N `` then quoted code, ending with the closing quote or a
+    parenthesised relation, or anywhere when ``cut_long_line`` cut it."""
+    body = text.removesuffix(LINE_CUT_MARK)
+    window_line = _WINDOW_LINE.match(body)
+    quoted = body[window_line.end() :] if window_line else body
+    if not quoted.startswith("`"):
+        return False
+    return body != text or quoted.endswith("`") or ("` (" in quoted and quoted.endswith(")"))
 
 
 def first_code_line(lines: Sequence[str], file: str) -> int | None:
@@ -422,12 +449,10 @@ def _keys_in(code: str) -> list[str]:
 
 
 def _lines_mentioning(index: CodeIndex, opened: CodeSlice, key: str) -> list[TextHit]:
-    whole_key = re.compile(rf"(?<!\w){re.escape(key)}(?!\w)")
     return [
         hit
-        for hit in index.search_text(key, MAX_KEY_HITS + 1)
-        if whole_key.search(hit.text)
-        and not (hit.file == opened.span.file and opened.span.contains(hit.line))
+        for hit in index.search_text(key, MAX_KEY_HITS + 1, whole_word=True)
+        if not (hit.file == opened.span.file and opened.span.contains(hit.line))
     ]
 
 

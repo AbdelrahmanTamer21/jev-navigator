@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from .judgments.judge import CheckResult, Judge
 from .judgments.store import run_answer_store
 from .judgments.thresholds import Thresholds
 from .progress import ProgressJournal, TerminalProgress
+from .run_files import require_kept_request_text
 from .usage_receipt import usage_receipt, usage_report_lines
 
 SCHEMA_VERSION = "jev-navigator.trace-evidence-pack/v1"
@@ -46,6 +48,7 @@ def create_trace_evidence_pack(
     answers_from: Path | None = None,
     answer_store: Path | None = None,
     keep_requests: bool = False,
+    keep_error_text: bool = True,
 ) -> dict:
     """Trace the workflow around ``starts`` and write the reviewable evidence pack to ``output``.
 
@@ -56,10 +59,12 @@ def create_trace_evidence_pack(
     as there; ``depth`` and ``cancelled`` pass through to the static walk. ``served_model`` pins the
     model identity that ``answers.jsonl`` replays against, as a resumed pack does; ``answers_from``
     seeds this pack's answer store from a prior pack's, so identical questions about identical code
-    replay without a new request. ``answer_store`` is the shared store file behind the pack
-    (default ``shared_store_path()``). ``question`` is
-    the workflow question every obligation is asked about. By default the pack keeps code locations
-    and request hashes; ``keep_requests`` also keeps the code and request text.
+    replay without a new request; a store that kept its requests' text seeds only a pack with
+    ``keep_requests``, and is refused before ``output`` is made. ``answer_store`` is the shared store
+    file behind the pack (default ``shared_store_path()``). ``question`` is the workflow question every
+    obligation is asked about. By default the pack keeps code locations
+    and request hashes; ``keep_requests`` also keeps the code and request text. Error messages and
+    error bodies are kept unless ``keep_error_text`` is False.
 
     Returns the manifest that is persisted as ``manifest.json`` next to ``report.md``,
     ``answers.jsonl`` (the shared answer store) and ``journal.jsonl`` (the shared request journal
@@ -76,17 +81,17 @@ def create_trace_evidence_pack(
     output = output.resolve()
     if output.exists() and any(output.iterdir()):
         raise ValueError(f"output directory is not empty: {output}")
+    seed = _seed_store(answers_from, keep_requests) if answers_from is not None else None
     output.mkdir(parents=True, exist_ok=True)
-    if answers_from is not None:
-        source = answers_from.resolve()
-        if not source.is_file():
-            raise ValueError(f"no answer store to replay at {source}")
-        shutil.copyfile(source, output / "answers.jsonl")
+    if seed is not None:
+        shutil.copyfile(seed, output / "answers.jsonl")
     thresholds = thresholds or Thresholds()
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
-    journal = ProgressJournal(journal_path, progress, keep_request_text=keep_requests)
+    journal = ProgressJournal(
+        journal_path, progress, keep_request_text=keep_requests, keep_error_text=keep_error_text
+    )
     progress.start()
     outcome = "failed"
     try:
@@ -127,6 +132,16 @@ def create_trace_evidence_pack(
         progress.close(outcome)
 
 
+def _seed_store(answers_from: Path, keep_requests: bool) -> Path:
+    """The answer store to seed the pack's own from. A store that kept its requests' text seeds only a
+    pack that keeps them too (``run_files.require_kept_request_text``)."""
+    source = answers_from.resolve()
+    if not source.is_file():
+        raise ValueError(f"no answer store to replay at {source}")
+    require_kept_request_text(source, keep_requests)
+    return source
+
+
 def _start_span(index: CodeIndex, start: str) -> Span:
     """The concrete function span that contains the caller's ``PATH:LINE`` start."""
     path, separator, raw_line = start.rpartition(":")
@@ -164,7 +179,7 @@ def _manifest(
             "repository": str(repository),
             "revision": index.commit,
             "prefixes": list(prefixes),
-            "tracked_files": len(index.files),
+            "indexed_files": len(index.files),
         },
         "thresholds": thresholds.as_dict(),
         "depth": depth,
@@ -172,9 +187,8 @@ def _manifest(
             "requested_model": getattr(judge.client, "model", "unknown"),
             "served_model": judge.served_model,
             "calls": judge.calls,
-            "replayed_answers": judge.replayed_answers,
             "input_tokens": judge.input_total.reported,
-            **usage_receipt(None, judge.input_total, judge.unanswered_requests),
+            **usage_receipt(None, judge),
         },
         "trace": {
             "outcome": _outcome(result),
@@ -188,6 +202,7 @@ def _manifest(
             "excluded": [_span_json(span) for span in result.excluded],
             "unresolved_links": [_link_json(link) for link in result.unresolved_links],
             "unavailable_files": index.unavailable_files,
+            "not_indexed_files": index.not_indexed_files,
         },
     }
 
@@ -260,6 +275,26 @@ def unavailable_file_lines(files: Mapping[str, str]) -> list[str]:
     return [f"- `{file}`: {reason}" for file, reason in sorted(files.items())]
 
 
+def not_indexed_lines(entries: Mapping[str, str], listed_in: str) -> list[str]:
+    """The files and folders the listing left out, counted by reason and top folder, so a build output of
+    thousands of ignored files stays one row; ``listed_in`` names where every one is listed by name."""
+    if not entries:
+        return []
+    counts = Counter((reason, _top_folder(path)) for path, reason in entries.items())
+    return [
+        f"{len(entries):,} files and folders were not indexed; {listed_in} names each one.",
+        "",
+        "| Reason | Folder | Entries |",
+        "| --- | --- | ---: |",
+        *(f"| {reason} | {folder} | {count:,} |" for (reason, folder), count in sorted(counts.items())),
+    ]
+
+
+def _top_folder(path: str) -> str:
+    folder, separator, _ = path.partition("/")
+    return f"`{folder}/`" if separator else "top level"
+
+
 def _report(manifest: dict) -> str:
     trace = manifest["trace"]
     lines = [
@@ -311,6 +346,9 @@ def _report(manifest: dict) -> str:
             ]
     if trace["unavailable_files"]:
         lines += ["", "## Files without facts", "", *unavailable_file_lines(trace["unavailable_files"])]
+    if trace["not_indexed_files"]:
+        listed_in = "`trace.not_indexed_files` in `manifest.json`"
+        lines += ["", "## Files not indexed", "", *not_indexed_lines(trace["not_indexed_files"], listed_in)]
     lines += ["", "## Unresolved static links", ""]
     if not trace["unresolved_links"]:
         lines.append("Every static link in the walked component is resolved.")

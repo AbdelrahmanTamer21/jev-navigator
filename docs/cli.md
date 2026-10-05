@@ -35,9 +35,12 @@ Credentials come from `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL` in the process 
 from `~/.config/jvn/env`. The file uses dotenv syntax and is not executed. When `jvn`'s code runs
 from a jev-navigator checkout (`uv run jvn` there, or an editable install), it also reads that
 checkout's `.env`, after the environment and before the file; any install into site-packages
-(`uv tool install`, `pipx`, a non-editable `pip install`) reads no `.env`. A `.env` in the searched directory is never read. Either file may set only `TYPESAFE_*`,
-`JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names, and `jvn` names on stderr any other name it ignores.
-Help and schema discovery need no key and make no model calls.
+(`uv tool install`, `pipx`, a non-editable `pip install`) reads no `.env`. A `.env` in the searched
+directory is never read, unless that directory is the checkout `jvn`'s own code runs from. Either
+file may set only `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names, and
+`jvn` names on stderr any other name it ignores. The `JEV_NAVIGATOR_*` settings hold the
+judgment thresholds only; a search's budget comes from its flags or the request's JSON fields. Help
+and schema discovery need no key and make no model calls.
 
 ## Discover commands and request fields
 
@@ -70,10 +73,10 @@ unlimited unless you set a limit.
 | `--beam-width N` | `3`. Places opened together in a navigation round. `1` makes navigation sequential. A wider round may do more work before a match stops the search. | `jvn find "the order limit" --beam-width 1` |
 | `--neighbours-per-kind N` | Unlimited. Retain at most this many candidates per relationship kind from each opened place. Explicitly omitted candidates stay visible in the result. | `jvn find "the order limit" --neighbours-per-kind 8` |
 | `--preview-lines N` | `8`. Leading source lines shown with a neighbour candidate's signature; `0` omits its code preview. | `jvn find "the order limit" --preview-lines 12` |
-| `--max-slice-chars N` | `12000`. Character allowance for an opened code slice, ending on a line boundary. This does not bound the entire request, its candidate previews or its questions. | `jvn find "the order limit" --max-slice-chars 24000` |
 | `--max-line-chars N` | `240`. Clip long lines in opened source, previews and signatures shown to the model. Source files are not edited. | `jvn find "the order limit" --max-line-chars 480` |
 | `--verbose` | Off. Print expanded masked requests on stderr as they are sent. Concise phase/request/elapsed progress is already on by default. | `jvn find "the order limit" --verbose` |
-| `--keep-requests` | Off. Keep the code in `manifest.json` and `report.md` and the exact request text in `journal.jsonl`. Without it the run folder holds code locations and request hashes only; Resume works either way. Use it only for your own or open-source code. | `jvn find "the order limit" --keep-requests` |
+| `--keep-requests` | Off. Keep the code in `manifest.json` and `report.md` and the exact request text in `journal.jsonl`. Without it the run folder holds code locations and request hashes only. A pack written without it resumes either way; a pack written with it resumes only with it, because the resumed run continues its journal and answers, and is refused otherwise with a message naming the flag. The library's `create_trace_evidence_pack(answers_from=...)` holds a store to the same rule. Use it only for your own or open-source code. | `jvn find "the order limit" --keep-requests` |
+| `--no-error-text` | Off, unless `JEV_NAVIGATOR_ERROR_TEXT=off`. Keep an error's message and the body of a response with an error status only as their length and SHA-256 in every run file. An error can quote its request, so this keeps code out of the run folder when a provider echoes it. stderr still shows the message, and `--keep-requests` keeps the text anyway. `find`, `findall` and `trace` accept it. | `jvn find "the order limit" --no-error-text` |
 | `-h`, `--help` | Print help and exit without searching. | `jvn find --help` |
 
 Limits and context sizes affect how much evidence the search can inspect. Read `search.outcome`,
@@ -116,8 +119,8 @@ The follow-up invocation gets a fresh allowance by default (24 live calls for Fi
 `--max-calls none` changes that allowance. Stored answers and the journal carry forward, so replayed
 answers cost no live calls. The new manifest combines earlier and new visits, history and call counts;
 `search.calls_this_invocation` records only the new requests, while `search.calls` is cumulative;
-the previous pack remains intact. A cap reached during automatic entry selection saves that stage,
-and the next invocation replays its stored decisions before continuing. Resume requires unchanged
+the previous pack remains intact. A cap, Ctrl-C or failed request during automatic entry selection
+saves that stage, and the next invocation replays its stored decisions before continuing. Resume requires unchanged
 source and scope, the same thresholds and requested model. If the source changed, start a new search.
 
 ## JSON requests
@@ -152,7 +155,6 @@ All the options in the longer example can also be supplied as one object:
   "beam_width": 1,
   "neighbours_per_kind": 8,
   "preview_lines": 8,
-  "max_slice_chars": 12000,
   "max_line_chars": 240,
   "verbose": false
 }
@@ -177,7 +179,7 @@ JSON mode writes one result object to stdout. It contains:
 | `manifest` | Absolute path to the complete `manifest.json`. |
 | `report` | Absolute path to the readable `report.md`. |
 | `search` | Outcome, matched spans, source code, decisions, request counts and coverage details. |
-| `provider` | Requested/served model and `input_tokens`, the sum of the counts the provider reported. `responses_without_usage` counts responses that reported none (null when resumed from an older pack), so 0 tokens with a non-zero count means unknown, not free. `unanswered_requests` counts requests that were sent but got no response carrying usage (a cancelled call, or one that failed with an error), so their usage is unknown too; report.md calls them "Requests whose usage is unknown". `input_tokens_complete` is true only when both counts are 0; otherwise `input_tokens` is a lower bound. |
+| `provider` | Requested/served model and `input_tokens`, the sum of the counts the provider reported. `responses_without_usage` counts responses that reported none (null when resumed from an older pack), so 0 tokens with a non-zero count means unknown, not free. `unanswered_requests` counts requests that were sent but got no response carrying usage (a cancelled call, or one that failed with an error), so their usage is unknown too; report.md calls them "Requests whose usage is unknown". `input_tokens_complete` is true only when both counts are 0; otherwise `input_tokens` is a lower bound. `replayed_answers` counts the answers an answer store gave instead of Jev, summed over a resume chain (null when resumed from an older pack). |
 | `resume` | Evidence pack path to pass to `--resume` when the outcome is `budget` or `cancelled`; otherwise `null`. |
 
 Progress, expanded requests and errors go to stderr, so stdout remains parseable. For example:
@@ -192,7 +194,7 @@ Check the command's exit status before reading a result file:
 | Exit code | Meaning |
 |---|---|
 | `0` | A search finished and wrote its result. Read `search.outcome`; this does not guarantee a match. |
-| `1` | Search, configuration, filesystem or provider failure. Read stderr. When a request of a Find or Find All search failed, the pack is written first: `search.outcome` is `failed`, `search.failure` holds the error's type, message, causes and journal `request_id`, and stderr names the `--resume` path. |
+| `1` | Search, configuration, filesystem or provider failure. Read stderr. When a request of a Find or Find All search failed, the pack is written first: `search.outcome` is `failed`, `search.failure` holds the error's type, its causes, the journal `request_id`, the HTTP `status` when known and the `message` (only `message_length` and `message_sha256` with `--no-error-text`), and stderr shows the whole message and names the `--resume` path. |
 | `2` | Invalid command or request. Read stderr. |
 | `130` | Cancelled with Ctrl-C. Existing journal records remain available. A failure that arrives while the command is cancelling exits `1` with that failure instead, with the same resume state. |
 
@@ -205,9 +207,14 @@ hashes, so a run on a new commit asks again.
 Budget-stopped, cancelled and failed packs also contain `resume.json`.
 The manifest retains the full record even if a pipeline selects only a few output fields. By default
 the manifest, report, journal and resume state hold no source code: places appear as
-`path:start-end` with file hashes, neighbours as `path:line name`, a key mention as `mentions a key
-(path:line)`, and journal requests as hashes. With `--keep-requests` the manifest and report also carry the code and the journal the
-exact request body; inspect the journal's exact-capture flags when auditing bytes.
+`path:start-end` with file hashes, neighbours as `path:line name` (the name of the enclosing symbol
+when navigation parsed that file; a resumed search keeps each name its earlier save wrote, and shows by location a neighbour that an older pack stored with its code, in the manifest, the resume state and the journal it continues), a key mention as `mentions a key (path:line)`, and journal requests as hashes. Error messages and the bodies of responses with an error
+status are kept as they came; an error can quote its request (a 422 validation body often does), so
+`--no-error-text` (or `JEV_NAVIGATOR_ERROR_TEXT=off`) keeps them only as their length and SHA-256, while
+stderr still shows the message. A resume applies its own setting to the journal it continues: resumed
+with error text off, the earlier pack's error messages and error bodies are rewritten to that form too. With `--keep-requests` the manifest and report also carry the code, the
+journal the exact request body, and every run file the error text; inspect the journal's exact-capture
+flags when auditing bytes.
 
 ## Agent workflow
 
@@ -282,7 +289,7 @@ JSON stdout contains `output_directory`, `manifest`, `report`, `trace`, `provide
 (`null` for trace). Progress and requests stay on stderr. See `trace.outcome`, its obligations and
 `unresolved_links` before interpreting coverage; `trace.unavailable_files` names, with the reason, each
 file the index has no facts for (gone or changed on disk, or refused by the parser), and report.md lists
-them. Ctrl-C stops the command with exit 130; an abrupt
+them. `trace.not_indexed_files` names each file or folder the listing left out, such as an ignored one, and report.md counts them by reason and top folder. Ctrl-C stops the command with exit 130; an abrupt
 interruption can leave the journal and answer store without a final manifest. The library also
 offers cooperative cancellation between traversal steps and model batches that writes a partial
 pack.

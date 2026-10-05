@@ -213,3 +213,41 @@ def test_find_all_lists_its_judged_functions_in_file_and_line_order_however_answ
     )
     assert forward == backward
     assert forward == sorted(forward, key=lambda key: int(key.split(":")[1].split("-")[0]))
+
+
+class CancelsAsItFails:
+    """Answers its first request, then fails the second while the host asks to cancel, as a host does
+    when it stops on the first error it sees."""
+
+    def __init__(self, error: Exception) -> None:
+        self.script = ScriptedJevClient(default_noul=0.96)
+        self.model = self.script.model
+        self.error = error
+        self.cancel_requested = False
+        self.requests = 0
+
+    def ask(self, state, questions):
+        self.requests += 1
+        if self.requests == 2:
+            self.cancel_requested = True
+            raise self.error
+        return self.script.ask(state, questions)
+
+
+def test_a_failed_request_stays_failed_when_the_host_cancels_at_the_same_time(tmp_path):
+    # Arrange
+    for name in ("alpha", "beta", "gamma"):
+        (tmp_path / f"{name}.py").write_text(
+            f"def {name}(item):\n    note = {('x' * 40000)!r}\n    return len(item) <= 3\n"
+        )
+    index = CodeIndex(tmp_path, ["alpha.py", "beta.py", "gamma.py"])
+    error = RuntimeError("Jev answered 503")
+    provider = CancelsAsItFails(error)
+
+    # Act
+    result = find_all(index, Judge(provider), "item limit", [], cancelled=lambda: provider.cancel_requested)
+
+    # Assert
+    assert result.stopped_by == "failed"
+    assert result.failure is error
+    assert len(result.judged) == provider.requests - 1

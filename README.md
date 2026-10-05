@@ -105,9 +105,41 @@ When its code runs from a jev-navigator source checkout (`uv run jvn` there, or 
 install), `jvn` first fills what is missing from that checkout's `.env` (see `.env.example`). Any
 install into site-packages (`uv tool install`, `pipx`, a non-editable `pip install`) reads no
 `.env`, and when the directory it runs in holds one, it says on stderr that it did not read it. It
-never reads a `.env` from the directory or repository it searches. A settings file can set only
+never reads a `.env` from the directory or repository it searches, unless that is the checkout
+its own code runs from. A settings file can set only
 `jvn`'s own `TYPESAFE_*`, `JEV_NAVIGATOR_*` and `SYSTEM_ONE_*` names; `jvn` names on stderr any
-other name it ignores, never its value.
+other name it ignores, never its value. The `JEV_NAVIGATOR_*` settings hold the judgment thresholds
+only; a search's budget comes from its flags or the request's JSON fields.
+
+### Decision-model routes
+
+`SYSTEM_ONE_ROUTES` names the decision models `jvn` asks, in order. With
+`SYSTEM_ONE_ROUTES=drex,jev`, every request goes to Drex first, and to Jev only when Drex fails; the
+journal records each attempt with the route that made it. A size refusal is not a failure: it goes back
+to the judge, which splits the request, because the next route would get the same request. Each route
+reads `SYSTEM_ONE_<NAME>_ENDPOINT`, `SYSTEM_ONE_<NAME>_MODEL` and `SYSTEM_ONE_<NAME>_API_KEY`; `drex`
+and `jev` also take `SYSTEM_ONE_<NAME>=1` for their hosted endpoint and model. Only the `jev` route
+falls back to `TYPESAFE_API_KEY`: every other route needs its own key, so your TypeSafe key never goes
+to Drex or to a server you configured. A route missing its endpoint, model or key stops the command
+before any request, naming the route and the setting. Without `SYSTEM_ONE_ROUTES`, `jvn` uses the default Jev client described above.
+
+Each route has an input limit for the state plus the longest question: Drex accepts 8,192 tokens and
+Jev 32,000, as Analysis Engine measured them; `jvn` turns tokens into characters at the one rate
+`REQUEST_CHARS_PER_TOKEN` in `judgments/client.py`. Any other
+route sets its own with `SYSTEM_ONE_<NAME>_INPUT_TOKENS`, or the command stops naming that setting.
+`jvn` packs every request to the smallest limit in the table, so whichever route answers can take it,
+and remembers a size refusal under the limit of the route that refused. Point Drex at `jvn` through
+the route table: the default client always packs to Jev's limit.
+
+Each route also has its own concurrency: how many requests it receives in flight at once. Drex admits
+2 (it answers HTTP 429 to a third) and Jev takes 32, as Analysis Engine measured them; any other route
+sets `SYSTEM_ONE_<NAME>_CONCURRENCY`, or the command stops naming that setting. A request waits for a
+free slot of the route it goes to before it is sent, so waiting never counts against its timeout, and a
+request that falls back to Jev is not held back by Drex's limit.
+
+One difference under routes: Ctrl-C cannot abort a request already in flight, so the command waits for
+those requests to finish, keeps their answers, and then stops with a resumable pack. Without routes,
+Ctrl-C aborts requests in flight.
 
 ### JSON input for agents and pipelines
 
@@ -165,7 +197,7 @@ Without a start, `jvn` uses typed Jev judgments to select entry candidates from 
 
 Every live call is a paid request, so `--max-calls` defaults to 24 for the whole run, choosing an entry
 point included; a search that reaches it ends with outcome `budget` and a resumable `not_inspected`
-frontier (or a saved entry-selection stage if the cap arrives earlier). Resume with another `jvn find`
+frontier (or a saved entry-selection stage if the cap, Ctrl-C or a failed request arrives earlier). Resume with another `jvn find`
 invocation using `--resume /path/to/previous-pack`; it gets a fresh call allowance and writes a new pack
 while keeping the earlier evidence. `--max-calls none` lifts the cap. Depth and step limits are unset by default. If you want an
 explicit allowance for a particular search, you can supply one:
@@ -196,7 +228,7 @@ An explicitly selected output directory must be new or empty. Each evidence pack
   same questions replays from it after the live requests that learn the served model (one for Find
   All and Trace, one per place a Find's first round opens, up to `--beam-width`; Find All and
   Trace items carry the commit and file hashes, so a new commit asks again), and copies what it replays into its own
-  `answers.jsonl`. `jvn trace` reports those answers as `replayed_answers` beside its live `calls`.
+  `answers.jsonl`. Every pack reports those answers as `provider.replayed_answers` beside its live calls.
   `--answer-store PATH` points a run at another store file; each run prints the store it uses.
 - `resume.json` (budget-stopped, cancelled or failed runs): the frontier as locations; Resume re-reads the
   code from the unchanged repository.
@@ -244,8 +276,11 @@ applies every rule now.
 ```python
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator import operations, comments
+from jev_navigator.index import units
 
-index = CodeIndex.from_git(repo_root, prefixes=("app/", "web/"))
+index = CodeIndex.from_directory(repo_root, prefixes=("app/", "web/"))  # tracked or not, minus ignored
+index.not_indexed_files  # {"node_modules/": "ignored", ...}: every file or folder left out, with the reason
+tracked = CodeIndex.from_git(repo_root, ["app/orders.py"])  # only what git tracks; the rest is not_indexed
 old = CodeIndex.at_commit(repo_root, "abc123", prefixes=("app/",))  # from git objects, checkout untouched
 index.find_definition("LIMITS_KEY")  # functions, classes, constants, assignments, types, enums
 index.find_callers("validate_order")  # CallSite(file, line, caller, binding), found by name
@@ -254,12 +289,17 @@ index.find_references("send_invoice")  # Reference(name, file, line, role, holde
 index.references_in(span)  # names a function passes on without calling (callbacks, registries)
 index.enclosing_symbol(file, line)
 index.symbols_in(file)
+index.decorator_starts_in(file)  # each decorated function's span and its first decorator line
+index.stubs_in(file)  # functions whose body is only ..., pass, a docstring or raise NotImplementedError
 index.read_slice(span)
 index.read_window(file, line, radius=10)
 index.search_text("orders.max_items")  # ripgrep over the narrowed files only
 index.imports(file)
 index.dependents(file)
 index.co_changed_files(file)
+
+units.list_units(index, files, box_chars=room)  # outermost functions and methods, top-level code; room: docs/extending.md
+units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=room)  # the units holding lines or line ranges
 
 operations.slice_around(index, file, line)  # the enclosing function, or a window
 operations.code_described_by_comment(index, file, line)  # the whole next symbol or block
@@ -334,7 +374,10 @@ reading them, and a warm lookup starts no text search and parses no file. The fi
 index covers its whole scope: each file the table lacks is read from the fact cache, or parsed, and
 its rows are written. A changed file gets new rows under its new content, a file deleted before the
 first lookup answers none, one deleted later is reported unavailable and proves nothing, and a change
-to the parser or to any language's rules starts a new table. `definitions_in(file)` reads one file's
+to the parser or to any language's rules starts a new table. When the table is warm but the fact
+cache is not (after a change to the fact rules, or after housekeeping pruned it), callers and
+references load the facts their bindings read, the files of the uses and of the definitions, in one
+scan instead of one per file. `definitions_in(file)` reads one file's
 definitions from the table. The table holds names and line numbers, never code. A file counts as read
 in a Find's counts only when navigation reached it, never because the table covered it. A call's or
 argument's receiver, in the table and in the cached facts alike, is kept only when it is a plain chain
@@ -351,7 +394,8 @@ index first read, the text its SHA-256 names, never in its new form. The index k
 first read compressed for the run, about 2 MB per 1,000 files of Heedvane's web app. Each call
 site's binding is computed once, and `search_text` and `co_changed_files` each run their tool once
 per argument for the life of the index. The index keeps the lines of a bounded number of recently
-read files (`LINE_CACHE_FILES`). There is no default file-count refusal or parser timeout, and no requested file is silently
+read files (`LINE_CACHE_FILES`). Every cache an index keeps lives in the index itself and none holds
+it back, so a dropped index, with its facts and first reads, is freed at once. There is no default file-count refusal or parser timeout, and no requested file is silently
 omitted.
 
 Before that pass, `.js` files whose leading comments (before any code, after an optional byte-order
@@ -379,7 +423,10 @@ which a minified bundle of a few tens of kilobytes on one line drives up. Files 
 (`tools.single_parse_limit_mb()`), is parsed alone, one at a time, with no other file beside it. A file
 over the single-file limit is never handed to ast-grep, and neither is a large file that cannot be read
 to measure it. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
-peak, the limit it is over, and the longest line in bytes. A refused file is never recorded as parsed: it stays readable and
+peak, the limit it is over, and the longest line in bytes. A file that ast-grep itself skips without
+parsing (it prints nothing for a file that is not valid UTF-8, or for one of more than 3,000,000
+bytes and 200,000 lines, which a file parsed alone can be) is refused too, as `not parsed`, and is
+never taken for a file without functions. A refused file is never recorded as parsed: it stays readable and
 searchable as text, it keeps its path in import relations (also as a re-export target), a name its
 bytes mention binds `unknown`, `jvn stats` names it as never scanned, and `find_comments` lists it in
 `refused_files`. Any ast-grep or ripgrep failure other than that verified disappearance still fails the
@@ -457,6 +504,15 @@ else:
   under dist/" and its measured facts. Anywhere else it stays in `files`, counted toward the cap, and
   is listed in `resolved.awaiting_generated_judgment` with its measured facts, for Jev to judge. With
   `with_generated` nothing is measured and nothing awaits a judgment.
+- `judgments.generated_files.judge_generated_files(judge, index, resolved.awaiting_generated_judgment)`
+  asks Jev about those files, one question each: is the file generated, meaning no person edits it as
+  source? Each file is sent as its path, its measured facts, up to 10 files that import it with their
+  true count, up to 5 files that name its path with the naming line (at most 200 characters around
+  the path; files outside the scope count, non-test files come first; a path written relative to the
+  naming file, such as `../src/a.js`, or joined to a variable folder, such as `$root/src/a.js`, is not
+  found) and their true count, and two 2,000-character excerpts (the opening and the middle). A file
+  the secret scan would refuse is never sent and comes back in `not_judged` with the reason. Nothing calls it yet: the
+  search that acts on the answers lands with Find v2's round controller.
 - `include` and `exclude` entries without `*`, `?` or `[` are folders or files. Other entries are
   globs over the whole path: `**` crosses folders, and a glob without `/` matches the file name at any
   depth unless a leading `/` anchors it at the root.
@@ -561,8 +617,8 @@ on its own scope, so searches sharing one judge never use up each other's budget
   secret key is masked too (`POSTGRES_PASSWORD: example`), unless it is empty, a boolean or a whole
   `${VAR}`, `$VAR` or `${{ ... }}` reference; in code it stays (`token: str`). A request mapping's
   `file` names the file of the strings inside it, and a candidate's signature names its file the same
-  way (`located_line` in `directives/places.py` writes it, and `located_file` beside it parses exactly that
-  grammar); a signature that names no file, or whose file is ambiguous, reads as config. An upper-case environment assignment is a value
+  way (the signature builders in `directives/places.py` write it, and `located_file` beside them parses
+  exactly that grammar); a signature that names no file, or whose file is ambiguous, reads as config. An upper-case environment assignment is a value
   wherever it stands on a shell, Makefile or CI line (`run: API_TOKEN=... npm test`), unless it is a
   usage placeholder (`KEY=...`, `KEY=<credential>`). A secret flag on a command line
   (`psql --password=...`, `deploy --api-token ...`) and a Stripe secret key anywhere are values too.
@@ -708,9 +764,13 @@ holds exactly that revision (use `CodeIndex.at_commit` for history); a mismatch 
 by default, with a beam of 3. The CLI sets a default allowance of 24 model requests for Find and
 48 for Find All. Everything is a parameter: `SearchBudget` also sets
 `neighbours_per_kind`, `preview_lines`, `max_line_chars` (240: longer lines and signatures are cut and
-marked "[line cut]") and `max_slice_chars` (12,000: an opened place is cut on a line boundary with a
-note, and `Visit.code` ends at the last shown line). If the first line cannot fit, the place stays
-`not_inspected` with reason `budget`; Resume with a larger slice budget inspects that same source.
+marked "[line cut]"). An opened place goes to Jev whole when its requests fit the input box of the
+judge's client (Jev's 32,000 tokens are 76,800 characters, `judgments.client.JEV_INPUT_LIMITS`): the
+request asking whether it is the target, and, when the opening is split, the request asking about each
+neighbour alone. Larger code is cut on a line boundary with a visible note, and `Visit.code` ends at
+the last shown line. A cut never grows back: under `neighbours_per_kind` a shorter cut can list a
+small neighbour in place of a large one, so the opening keeps that cut and the neighbours listed for it. If not even its first line fits, the place stays `not_inspected` with reason
+`budget`; Resume on a route with a larger box inspects that same source.
 `questions=SearchQuestions(found=...,
 could_contain=..., open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
 `places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `imported`,
@@ -744,13 +804,15 @@ explicitly. An unknown name raises `UnknownSectionError`. Each section has its o
 (newest entries kept, long text cut; defaults in `DEFAULT_LIMITS`), applied before the character budget.
 Text limits also apply inside nested lists and mappings. Rendering a limited view preserves the
 complete code and judgments in the append-only record.
-The budget is a character box, capped at Jev's documented 32,000 tokens for state plus the longest
-question times 2.4 characters per token (the Engine's `REQUEST_CHARS_PER_TOKEN`), 76,800 characters
-(the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026). A whole request
-may reach the documented 64k tokens, 153,600 characters. The batching owner (`check_each`,
-`check_every`) and the `find_code` opening questions measure the same boxes before sending and split
-what would exceed them; a direct `Judge.ask` sends what it is given and relies on the provider's
-refusal. When the selected sections still do not fit, the
+The budget is a character box: the client's input limit for state plus the longest question, less
+the longest question asked, measured together with the shared state, and within `budget_chars` when
+the history sets one. Each client declares its
+limits as `input_limits` (`InputLimits`, in characters at the rate `REQUEST_CHARS_PER_TOKEN`); a
+client that declares none is taken to be Jev, 32,000 tokens for state plus the longest question and
+64k tokens for a whole request (the Engine measured 32,883 tokens accepted and about 33,200 refused on 27.09.2026). The
+batching owner (`check_each`, `check_every`) and the `find_code` opening questions measure the same
+limits before sending and split what would exceed them; a direct `Judge.ask` sends what it is given
+and relies on the provider's refusal. When the selected sections still do not fit, the
 pluggable `evict` policy trims them; the default `drop_oldest_code` replaces the oldest code bodies with
 `[evicted]` and records each eviction in `history.evictions`. A check that reads no code never evicts.
 Pass `recorder=` (for example a `JsonlJournal`) to record every appended step; the recorder gets each
@@ -774,8 +836,14 @@ costs no calls. A `choose_next` step lists the places opened next, each with its
 code, the `contains_target` probability and verdict, every neighbour offered with its `could_contain`
 probability, the `open_first` pick, and places set aside (`capped` or `depth`). A final `stop` step
 names the outcome, the not-inspected frontier with reasons, and the last stop check, so the history
-and the result agree. Without a stop rule nothing reads the history; with one, the stop check reads the
-sections it selects (by default only the fetched code). `HistoryStep` is generic: append your own steps (an agent's tool call and result) the same way.
+and the result agree. Each Jev judgment in a step names the answer behind it in `answered_by` (a place
+`choose_next` opens names the answer that scored it in `scored_by`): the request's `request_sha256`, the
+`question_id` it was asked under, and `from_store`. The journal's `request` row with that hash lists the
+question id, and that row's `response` holds the answer, also for an opening split into several requests;
+packs written before these fields resume as before. Each automatic entry selection decision in the
+manifest's `entry_selection`, and each Find All verdict in `found`, `unsure` and `searched`, names its
+answer the same way. Without a stop rule nothing reads the history; with
+one, the stop check reads the sections it selects (by default only the fetched code). `HistoryStep` is generic: append your own steps (an agent's tool call and result) the same way.
 
 ## LlmStep: an LLM call you add yourself
 
@@ -858,8 +926,11 @@ Neither a question hash nor a frozen manifest proves model quality or dataset co
 `uv run pytest --basetemp=<scratch dir>`. Tests run offline against small real git repositories and
 `ScriptedJevClient`. The suite retains the ten Express/Next.js and FastAPI/GraphQL graph
 capability regressions and verifies request/response capture through a real local HTTP socket.
-The TypeSafe adapter's tests run only with the extra installed:
-`uv run --extra typesafe pytest`. Run `uv run ruff check src tests` and
+Plain `uv run pytest` installs the TypeSafe extra with the dev group, so every test runs. A skipped
+test did not run, so a run with a skip fails and names it, unless the test declares a platform it
+cannot run on with a `skipif` condition. To show the core works without the extra, run
+`uv run --no-dev --with pytest pytest --without-typesafe`: only there may the TypeSafe tests skip,
+and it refuses to start when the extra is installed. Run `uv run ruff check src tests` and
 `uv run ruff format --check src tests` before pushing. Local checks are the normal validation
 path for this small library; pushes and pull requests do not launch hosted CI. The `tests`
 workflow is available through GitHub Actions **Run workflow** when an explicit cross-version

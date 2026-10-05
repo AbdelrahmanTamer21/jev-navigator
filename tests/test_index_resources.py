@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import subprocess
 import sys
 import tracemalloc
+import weakref
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
 import pytest
-from git_repos import commit_files
+from git_repos import commit_files, read_files
 
 from jev_navigator.index import code_index, languages, tools
 from jev_navigator.index.code_index import CodeIndex
@@ -47,9 +49,10 @@ def callback_tree(root: Path, file_count: int) -> tuple[list[str], int]:
 
 
 def peak_bytes_while_scanning(root: Path, files: list[str]) -> int:
+    contents = read_files(root, files)
     tracemalloc.start()
     tracemalloc.reset_peak()
-    scan_facts(files, root, Unparsed())
+    scan_facts(contents, root, Unparsed())
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     return peak
@@ -57,7 +60,7 @@ def peak_bytes_while_scanning(root: Path, files: list[str]) -> int:
 
 def scanned(root: Path) -> tuple[dict, frozenset[str]]:
     unparsed = Unparsed()
-    facts = scan_facts(sorted(MIXED_SCOPE), root, unparsed)
+    facts = scan_facts(read_files(root, sorted(MIXED_SCOPE)), root, unparsed)
     return facts, unparsed.files
 
 
@@ -99,17 +102,67 @@ def test_a_file_list_longer_than_the_argument_limit_is_split_across_processes(
     # Arrange
     commit_files(tmp_path, MIXED_SCOPE)
     files = sorted(MIXED_SCOPE)
-    together = (scanned(tmp_path), sorted(tools.ripgrep_fixed("return", files, tmp_path, max_hits=10)))
+    together = (
+        scanned(tmp_path),
+        sorted(tools.ripgrep_fixed("return", files, tmp_path, max_hits=10, context_bytes=200)),
+    )
     spawned.clear()
     monkeypatch.setattr(tools, "MAX_ARGUMENT_BYTES", 30)
 
     # Act
-    split = (scanned(tmp_path), sorted(tools.ripgrep_fixed("return", files, tmp_path, max_hits=10)))
+    split = (
+        scanned(tmp_path),
+        sorted(tools.ripgrep_fixed("return", files, tmp_path, max_hits=10, context_bytes=200)),
+    )
 
     # Assert
     assert spawned[tools.AST_GREP] > 2
     assert spawned[tools.RIPGREP] > 1
     assert split == together
+
+
+def every_cache_filled(index: CodeIndex) -> frozenset[str]:
+    """Uses every lookup that caches, so each per-index cache holds an entry."""
+    for name in ("check", "place", "handle", "LIMIT", "absent"):
+        index.find_definition(name)
+        index.find_callers(name)
+        index.find_references(name)
+        index.call_site_count(name)
+    for file in index.files:
+        index.lines(file)
+        index.imports(file)
+        index.functions_in(file)
+        index.co_changed_files(file)
+    index.search_text("order")
+    return index.unparsed_files
+
+
+@pytest.fixture
+def no_cycle_collector():
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.enable()
+
+
+@pytest.mark.parametrize("build", ["from_git", "from_directory"])
+def test_a_dropped_index_is_freed_at_once_without_the_cycle_collector(
+    tmp_path: Path, build: str, no_cycle_collector: None
+) -> None:
+    # Arrange: an index whose facts, lines, name rows and every cache have been filled
+    commit_files(tmp_path, MIXED_SCOPE)
+    index = getattr(CodeIndex, build)(tmp_path, fact_cache_dir=tmp_path.parent / "facts")
+    every_cache_filled(index)
+    alive = weakref.ref(index)
+    sources_alive = weakref.ref(index._sources)
+
+    # Act
+    del index
+
+    # Assert: the index and its reader, which holds the compressed first reads, are both gone
+    assert alive() is None
+    assert sources_alive() is None
 
 
 def test_the_line_cache_holds_at_most_its_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,6 +181,27 @@ def test_the_line_cache_holds_at_most_its_bound(tmp_path: Path, monkeypatch: pyt
     # Assert
     assert again == {"c.py": first["c.py"], "a.py": first["a.py"]}
     assert set(index.unavailable_files) == {"a.py"}
+
+
+def test_the_line_cache_evicts_the_least_recently_read_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: a two-file line cache reads a.py, b.py, a.py again, then c.py; then a.py and b.py change
+    monkeypatch.setattr(code_index, "LINE_CACHE_FILES", 2)
+    for name in ("a.py", "b.py", "c.py"):
+        (tmp_path / name).write_text(f"def {name[0]}():\n    return 1\n")
+    index = CodeIndex(tmp_path, ["a.py", "b.py", "c.py"])
+    for file in ("a.py", "b.py", "a.py", "c.py"):
+        index.lines(file)
+    for name in ("a.py", "b.py"):
+        (tmp_path / name).write_text("def edited():\n    return 2\n")
+
+    # Act: a.py was read more recently than b.py, so only b.py goes back to the disk
+    for file in ("a.py", "b.py"):
+        index.lines(file)
+
+    # Assert
+    assert set(index.unavailable_files) == {"b.py"}
 
 
 def test_a_repeated_text_search_starts_no_second_process(sample_index: CodeIndex, spawned) -> None:
@@ -190,7 +264,9 @@ def test_symbols_on_the_same_lines_are_ordered_by_name_on_every_scan(tmp_path: P
     (tmp_path / "chain.ts").write_text("export const o = { b() { return 1; }, a() { return 2; } };\n")
 
     # Act: a fresh parse each time, since ast-grep may print matches in any order.
-    runs = [scan_facts(["chain.ts"], tmp_path, Unparsed())["chain.ts"] for _ in range(5)]
+    runs = [
+        scan_facts(read_files(tmp_path, ["chain.ts"]), tmp_path, Unparsed())["chain.ts"] for _ in range(5)
+    ]
 
     # Assert
     assert all(run == runs[0] for run in runs)
@@ -340,7 +416,7 @@ def test_a_declaration_on_a_first_line_after_a_byte_order_mark_keeps_its_name(tm
     (tmp_path / "flags.ts").write_bytes("\ufeffexport const enabled = true;\n".encode())
 
     # Act
-    facts = scan_facts(["settings.py", "flags.ts"], tmp_path, Unparsed())
+    facts = scan_facts(read_files(tmp_path, ["settings.py", "flags.ts"]), tmp_path, Unparsed())
 
     # Assert
     assert [span.name for span in facts["settings.py"].structure.declarations] == ["LIMIT", "OTHER"]
@@ -424,3 +500,62 @@ def test_a_literal_search_over_more_files_than_a_parser_command_takes_starts_one
     assert len(sample_index.files) > 2
     assert {hit.file for hit in hits} >= {"app/orders.py", "app/validation.py"}
     assert spawned[tools.RIPGREP] == 1
+
+
+@pytest.mark.parametrize(
+    "search",
+    [
+        lambda files, root: [hit.file for hit in tools.ripgrep_lines(["return"], files, root)],
+        lambda files, root: list(tools.ripgrep_files("return", files, root)),
+    ],
+    ids=["ripgrep_lines", "ripgrep_files"],
+)
+def test_a_pattern_file_search_over_more_files_than_a_parser_command_takes_starts_one_ripgrep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawned: Counter[str], search
+) -> None:
+    # Arrange: a parser command takes two files at most, the search covers six
+    commit_files(tmp_path, MIXED_SCOPE)
+    files = sorted(MIXED_SCOPE)
+    monkeypatch.setattr(tools, "MAX_FILES_PER_COMMAND", 2)
+    spawned.clear()
+
+    # Act
+    found = search(files, tmp_path)
+
+    # Assert
+    assert set(found) == {"app/orders.py", "app/rules.py", "web/plain.js", "web/typed.js"}
+    assert spawned[tools.RIPGREP] == 1
+
+
+BUNDLE_PIECE = "var a=require('./util');a.util(1);"
+
+
+def bundle_beside_small_files(root: Path) -> list[str]:
+    """jvn-verifier's shape: a 20 MB one-line bundle naming ``util`` 1.2 million times, and 200 small
+    files that import it."""
+    (root / "src").mkdir(parents=True)
+    (root / "dist").mkdir()
+    (root / "dist/bundle.js").write_text(BUNDLE_PIECE * 600_000 + "\n")
+    for number in range(200):
+        (root / f"src/m{number}.js").write_text(
+            f"import {{ util }} from './util';\nexport const m{number} = util;\n"
+        )
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*.js"))
+
+
+def test_a_text_search_over_a_one_line_bundle_holds_only_a_window_around_each_hit(tmp_path: Path) -> None:
+    # Arrange
+    index = CodeIndex(tmp_path, bundle_beside_small_files(tmp_path))
+    tracemalloc.start()
+
+    # Act
+    hits = index.search_text("util", 2 * len(index.files))
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    # Assert: the bundle's 20 MB line never reaches Python, only a window around its first hit
+    [bundle_hit] = [hit for hit in hits if hit.file == "dist/bundle.js"]
+    assert len({hit.file for hit in hits}) == 201
+    assert peak < 10 * 2**20
+    assert bundle_hit.line == 1 and "util" in bundle_hit.text
+    assert len(bundle_hit.text) <= 2 * code_index.TEXT_HIT_CONTEXT_BYTES + len("util")
