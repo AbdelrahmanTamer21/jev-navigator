@@ -971,8 +971,8 @@ def _object_member_rules(language: str) -> list[str]:
     function, class and namespace."""
     scopes = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language], *NAMESPACE_KINDS[language]))
     passed = f"{{kind: arguments, not: {{inside: {{stopBy: end, any: {scopes}}}}}}}"
-    values = _kinds(("object", *NAME_WRAPPERS[grammar_of(language)]))
-    variable = f"{{field: name, all: [{MODULE_VARIABLE}, {{has: {{field: value, any: {values}}}}}]}}"
+    objects = _past_wrappers_of(language, ("object",))
+    variable = f"{{field: name, all: [{MODULE_VARIABLE}, {{has: {{field: value, any: {objects}}}}}]}}"
     owner = f"  kind: identifier\n  not: {{not: {{inside: {variable}}}}}"
     return [
         _rule_document(_OBJECT_MEMBER_RULE, language, _members_of(language, MODULE_VARIABLE)),
@@ -986,9 +986,8 @@ def _constant_rules(language: str) -> list[str]:
     such as `as`, and the key of every pair outside every function, class and namespace in such a
     variable's value that holds a function (see ``ConstantFunction``). A key that is computed names
     nothing. The pair rule prints the pair; every relation sits under a double negation."""
-    variable = (
-        f"{{field: name, all: [{MODULE_VARIABLE}, {{has: {{field: value, any: {_calls(language)}}}}}]}}"
-    )
+    calls = _past_wrappers_of(language, ("call_expression", "new_expression"))
+    variable = f"{{field: name, all: [{MODULE_VARIABLE}, {{has: {{field: value, any: {calls}}}}}]}}"
     owner = f"  kind: identifier\n  not: {{not: {{inside: {variable}}}}}"
     symbols = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language]))
     scopes = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language], *NAMESPACE_KINDS[language]))
@@ -1006,14 +1005,12 @@ def _constant_rules(language: str) -> list[str]:
     ]
 
 
-def _calls(language: str) -> str:
-    """A call or `new`, itself or past wrappers (see ``NAME_WRAPPERS``): `wrap(...)` and
-    `wrap(...) as Runner`, never `[...] as const`."""
-    calls = _kinds(("call_expression", "new_expression"))
-    wrappers = _kinds(NAME_WRAPPERS[grammar_of(language)])
-    return (
-        f"[{{any: {calls}}}, {{any: {wrappers}, has: {{stopBy: {_past_wrappers(language)}, any: {calls}}}}}]"
-    )
+def _past_wrappers_of(language: str, kinds: Sequence[str]) -> str:
+    """A node of ``kinds``, itself or as the first node no wrapper (see ``NAME_WRAPPERS``) holds: a
+    call is `wrap(...)` and `wrap(...) as Runner`, never `[...] as const`."""
+    wanted = _kinds(kinds)
+    wrapped = f"{{stopBy: {_past_wrappers(language)}, any: {wanted}}}"
+    return f"[{{any: {wanted}}}, {{any: {_kinds(NAME_WRAPPERS[grammar_of(language)])}, has: {wrapped}}}]"
 
 
 def _members_of(language: str, holder: str) -> str:
