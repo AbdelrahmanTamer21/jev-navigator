@@ -43,18 +43,19 @@ jvn help findall
 jvn schema findall
 ```
 
-`find` locates an implementation; `findall` finds a seed, examines related functions, then checks
-remaining function bodies for disconnected implementations. It uses batched Jev judgments and
-defaults to 48 live model calls (twice `find`); `--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
-[run folder](#where-jvn-keeps-runs-and-caches). `functions_examined` describes coverage of function bodies, not a proof
-of semantic equivalence or completeness across arbitrary code fragments. Uncertain answers and
+`find` locates an implementation; `findall` finds a seed, then judges every unit in scope (each
+function, method and file's top-level code), the units holding the seed's found code in its first
+wave of requests. It uses batched Jev judgments and defaults to 48 live model calls (twice `find`);
+`--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
+[run folder](#where-jvn-keeps-runs-and-caches). `units_examined` describes coverage of the units in
+scope, not a proof of semantic equivalence or completeness. Uncertain answers and
 unreadable or unsupported source stay visible. At a call stop, the terminal offers another allowance.
 For a later invocation or an agent pipeline, pass `--resume` with the folder the earlier run printed, and the same
 Find All query and scope. Completed judgments and the seed are retained; only unfinished work spends
 new model calls.
 
 For an engineer-authored library composition and its limits, see
-[Extending: seed-first Find All](docs/extending.md#compose-a-seed-first-find-all-search).
+[Extending: judge every unit with Find All](docs/extending.md#judge-every-unit-with-find-all).
 
 ## Install
 
@@ -293,7 +294,8 @@ index.decorator_starts_in(file)  # each decorated function's span and its first 
 index.stubs_in(file)  # functions whose body is only ..., pass, a docstring or raise NotImplementedError
 index.read_slice(span)
 index.read_window(file, line, radius=10)
-index.search_text("orders.max_items")  # ripgrep over the narrowed files only
+index.search_text("orders.max_items")  # ripgrep over the narrowed files only, every hit in file and line order
+index.search_text("orders.max_items", max_hits=30)  # only the first 30 hits
 index.imports(file)
 index.dependents(file)
 index.co_changed_files(file)
@@ -603,7 +605,8 @@ judge.choose_call(route, offers, state)  # function calling: operation plus its 
 ```
 
 Every one of these has an async form (`check_each_async`, `pick_async`, `ask_all_async`,
-`choose_call_async`, `ask_async`), and `find_code_async` is the async search. They take any
+`choose_call_async`, `ask_async`, and `iter_check_every_async`, which yields each wave's answers as
+the wave settles), and `find_code_async` and `find_all_async` are the async searches. They take any
 `AsyncJevClient` (an object with `model` and `async ask(state, questions)`, optionally an async
 `send`), such as a host's own orchestrator; a sync client also works there and runs in a worker
 thread. Both paths share one core: masking, the secret scan, the hash, the store lookup, the call
@@ -617,6 +620,11 @@ forms send their batches on a thread pool under the same `max_concurrency` and f
 call cap stays exact under concurrency, and after a failure or cancellation no batch sends a new
 request, while answers already received still yield. A sync method given an async client raises
 `TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
+
+Places: `check_each`, `check_every` and their `iter_` and async forms take `places`, one
+`index.units.Item` per item, when items are code units. A place orders the batches (file, then
+lines) and goes into the stored record, never into the state, so each item carries only the fields a
+question reads; each `CheckResult` names its `place`.
 
 Budgets: `judge.calls` counts requests sent (store hits are free; `judge.replayed_answers` counts
 the answers the store gave instead). `Judge(max_calls=N)` caps a judge
@@ -723,9 +731,9 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `record.sent_request()`, with a judge that has no store. `JsonlJournal(keep_request_text=True)`
   likewise keeps the body as handed to the client (`body_base64`) and the wire bytes when captured
   (`sent_body_base64`), and `export_for_review` keeps the order the request is sent in. By default the store keeps
-  hashes, question wording, and each item's ids, file, lines, commit and names, so
-  `rebuild_request(record, CodeIndex.at_commit(...), shared)` rebuilds a request from the code at
-  that commit and proves it matches, or names the part that differs. A request whose items carried a
+  hashes, question wording, and each item's ids, file, lines, commit and names, or its place's file
+  and runs, so `rebuild_request(record, CodeIndex.at_commit(...), shared)` rebuilds a request from
+  the code at that commit and proves it matches, or names the part that differs. A request whose items carried a
   field that can quote code, such as a Trace link line or a Find signature, keeps that field withheld,
   so it does not rebuild exactly; the mismatch then names the withheld fields first.
 
