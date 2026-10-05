@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
-from git_repos import commit_all, git, write_files
+from git_repos import commit_all, git, refuse_ownership, write_files
 
 from jev_navigator.index import tools
 from jev_navigator.index.code_index import (
@@ -1089,7 +1089,7 @@ def test_working_tree_metadata_raises_when_git_refuses_the_repository(tmp_path: 
     # Arrange
     write_files(tmp_path, {"a.py": "x = 1\n"})
     commit_all(tmp_path)
-    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    refuse_ownership(monkeypatch)
 
     # Act and assert: a refused repository is never read as a plain folder with no revision
     with pytest.raises(tools.ToolFailedError, match="dubious ownership"):
