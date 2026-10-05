@@ -228,6 +228,12 @@ def test_the_entry_text_lists_what_the_module_names_then_its_objects_members(
         ("plain.ts", "export const direct = (x: number) => x;\n", "direct"),
         ("data.ts", 'export const LIMIT = 3;\nexport const labels = ["a", "b"];\n', ""),
         ("steps.ts", "export const steps = [() => 1, () => 2];\n", ""),
+        ("sources.ts", "export const sources = [\n  () => 1,\n  () => 2,\n] as const;\n", ""),
+        (
+            "typed.ts",
+            'export const run = Effect.fn("run")(function* () {\n  return 1;\n}) as Runner;\n',
+            "run",
+        ),
         (
             "inner.ts",
             'function setup() {\n  const run = Effect.fn("run")(function* () {\n'
@@ -245,6 +251,8 @@ def test_the_entry_text_lists_what_the_module_names_then_its_objects_members(
         "an arrow it holds itself",
         "constants holding no function",
         "an array of functions, which is no call",
+        "an array under as const, which is no call either",
+        "a call under as",
         "a constant inside a function",
     ],
 )
@@ -254,8 +262,9 @@ def test_the_entry_text_names_a_function_a_module_level_constant_builds_by_the_c
     """`export const run = Effect.fn("run")(function* ...)` is how an Effect codebase writes a
     function: a module-level constant whose value is a call holding an unnamed function is named
     under the constant's own name, once, among the module's own names in file order. A router
-    holding several procedures is named once. A constant holding no function, or holding functions in
-    an array rather than a call, and a constant inside a function, give no name."""
+    holding several procedures is named once, also under `as` or `satisfies`. A constant holding no
+    function, or holding functions in an array rather than a call, under `as const` too, and a
+    constant inside a function, give no name."""
     # Arrange
     index = _index(tmp_path, {file: source, "util/x.py": "x = 1\n"})
 

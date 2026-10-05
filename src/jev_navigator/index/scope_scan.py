@@ -982,13 +982,13 @@ def _object_member_rules(language: str) -> list[str]:
 
 
 def _constant_rules(language: str) -> list[str]:
-    """The name of every module-level variable whose value is a call or `new`, past wrappers such as
-    `as`, and the key of every pair outside every function, class and namespace in such a
+    """The name of every module-level variable whose value is a call or `new`, also under wrappers
+    such as `as`, and the key of every pair outside every function, class and namespace in such a
     variable's value that holds a function (see ``ConstantFunction``). A key that is computed names
     nothing. The pair rule prints the pair; every relation sits under a double negation."""
-    grammar = grammar_of(language)
-    built = _kinds(("call_expression", "new_expression", *NAME_WRAPPERS[grammar]))
-    variable = f"{{field: name, all: [{MODULE_VARIABLE}, {{has: {{field: value, any: {built}}}}}]}}"
+    variable = (
+        f"{{field: name, all: [{MODULE_VARIABLE}, {{has: {{field: value, any: {_calls(language)}}}}}]}}"
+    )
     owner = f"  kind: identifier\n  not: {{not: {{inside: {variable}}}}}"
     symbols = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language]))
     scopes = _kinds((*FUNCTION_KINDS[language], *CLASS_KINDS[language], *NAMESPACE_KINDS[language]))
@@ -1004,6 +1004,16 @@ def _constant_rules(language: str) -> list[str]:
         _rule_document(_CONSTANT_OWNER_RULE, language, owner),
         _rule_document(_CONSTANT_KEY_RULE, language, key),
     ]
+
+
+def _calls(language: str) -> str:
+    """A call or `new`, itself or past wrappers (see ``NAME_WRAPPERS``): `wrap(...)` and
+    `wrap(...) as Runner`, never `[...] as const`."""
+    calls = _kinds(("call_expression", "new_expression"))
+    wrappers = _kinds(NAME_WRAPPERS[grammar_of(language)])
+    return (
+        f"[{{any: {calls}}}, {{any: {wrappers}, has: {{stopBy: {_past_wrappers(language)}, any: {calls}}}}}]"
+    )
 
 
 def _members_of(language: str, holder: str) -> str:
