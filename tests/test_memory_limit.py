@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import json
 import mmap
 import os
 import shutil
@@ -23,6 +24,7 @@ import pytest
 from git_repos import commit_files
 from test_cli_failures import closable, hashes, journal_failures, manifest_of, provider_error, use_clients
 from test_cli_run_logs import TARGET, limit_client
+from test_oversized_guard import _real_code_file
 
 from jev_navigator import cli, memory_limit
 from jev_navigator.directives.find_code import Outcome, SearchBudget, find_code, find_code_async
@@ -30,6 +32,7 @@ from jev_navigator.directives.places import place_for_line
 from jev_navigator.index import tools
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.fact_cache import FactCache
+from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.round import RoundRegistration, freeze
 from jev_navigator.memory_limit import MemoryLimit, MemoryLimitReachedError
@@ -237,7 +240,7 @@ def test_a_reader_that_stops_early_does_not_wait_for_its_child(
             started_processes.append(self)
 
     monkeypatch.setattr(subprocess, "Popen", RecordedPopen)
-    lines = tools._json_lines([sys.executable, "-c", PRINTS_A_LINE_THEN_STAYS], tmp_path)
+    lines = tools._json_lines([sys.executable, "-c", PRINTS_A_LINE_THEN_STAYS], tmp_path, decode=json.loads)
     started = time.monotonic()
 
     # Act
@@ -289,6 +292,29 @@ def test_growth_past_the_allowance_while_an_index_is_open_starts_no_further_proc
     # Assert
     assert _scans(commands) == []
     assert "app/orders.py" not in index.parsed_files
+
+
+@pytest.mark.parametrize(
+    "run_git",
+    [lambda folder: tools.git(["--version"], folder), tools.inside_git_worktree],
+    ids=["git", "inside_git_worktree"],
+)
+def test_growth_past_the_allowance_while_an_index_is_open_starts_no_git(
+    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: list[list[str]], run_git
+) -> None:
+    # Arrange
+    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
+    index = CodeIndex(sample_repo, ["app/orders.py"], fact_cache_dir=tmp_path / "facts")
+    run_git(tmp_path)
+    started_before = list(commands)
+
+    # Act
+    with _holding(200), pytest.raises(MemoryLimitReachedError, match="memory allowance of 100 MB"):
+        run_git(tmp_path)
+
+    # Assert
+    assert commands == started_before
+    assert index.files == ("app/orders.py",)
 
 
 def test_growth_past_the_allowance_stops_loading_cached_facts(
@@ -855,6 +881,65 @@ def test_scans_in_parallel_threads_of_one_process_take_turns_and_all_finish(
 
     # Assert
     assert outcomes == ["finished"] * 8
+
+
+class _ConcurrentScans:
+    """Counts the ast-grep scans this process runs at once, and notes when one parsing a file alone
+    (``--threads 1``) has started; every scan still runs."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.running = 0
+        self.most = 0
+        self.alone_started = threading.Event()
+        counting = threading.Lock()
+        scans = self
+
+        class CountedPopen(subprocess.Popen):
+            def __init__(self, arguments, *args, **kwargs) -> None:
+                self.counted = arguments[:2] == [tools.AST_GREP, "scan"]
+                if self.counted:
+                    with counting:
+                        scans.running += 1
+                        scans.most = max(scans.most, scans.running)
+                super().__init__(arguments, *args, **kwargs)
+                if self.counted and arguments[arguments.index("--threads") + 1] == "1":
+                    scans.alone_started.set()
+
+            def wait(self, timeout=None):
+                returncode = super().wait(timeout)
+                if self.counted:
+                    self.counted = False
+                    with counting:
+                        scans.running -= 1
+                return returncode
+
+        monkeypatch.setattr(subprocess, "Popen", CountedPopen)
+
+
+def test_a_file_parsed_alone_in_one_thread_and_a_scan_in_another_take_turns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: one index holds 3 MB of real code, estimated at 270 MB, over the side-by-side share, so
+    # it is parsed alone; another holds twenty small files, and its scan starts while that parse runs.
+    scans = _ConcurrentScans(monkeypatch)
+    commit_files(tmp_path / "big", {"src/big.py": _real_code_file(3_000_000)})
+    big = CodeIndex.from_git(tmp_path / "big", fact_cache_dir=tmp_path / "big-facts")
+    library = Path(sysconfig.get_paths()["stdlib"])
+    names = sorted(path.name for path in library.glob("*.py"))[:20]
+    small = _copied_index(library, names, tmp_path / "small")
+    parsed_alone: list[Span] = []
+    alone = threading.Thread(target=lambda: parsed_alone.extend(big.functions_in("src/big.py")))
+
+    # Act
+    alone.start()
+    scans.alone_started.wait(30)
+    side_by_side = small.functions_in_files(names)
+    alone.join()
+
+    # Assert
+    assert scans.alone_started.is_set()
+    assert scans.most == 1
+    assert parsed_alone and side_by_side
 
 
 def _copied_index(library: Path, names: list[str], root: Path) -> CodeIndex:

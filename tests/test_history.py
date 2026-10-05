@@ -28,9 +28,9 @@ from jev_navigator.history import (
     judge_sections,
 )
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.judgments.client import JEV_INPUT_BOX_CHARS, InputBudgetExceededError
+from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputBudgetExceededError, InputLimits
 from jev_navigator.judgments.journal import JsonlJournal
-from jev_navigator.judgments.judge import Judge, request_exceeds_input_budget
+from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import Check, Criterion, serialized_chars
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
@@ -160,10 +160,6 @@ def test_a_check_that_reads_no_code_never_evicts_code() -> None:
     assert history.evictions == []
 
 
-def test_the_budget_is_capped_at_jevs_state_limit() -> None:
-    assert History(budget_chars=10**6).budget_chars == JEV_INPUT_BOX_CHARS
-
-
 def test_sections_that_do_not_fit_even_without_code_raise_and_evict_nothing() -> None:
     # Arrange: the decisions alone need more than the budget, and no code is read to evict.
     history = History(budget_chars=100)
@@ -218,8 +214,20 @@ def test_the_history_leaves_room_for_the_question_that_reads_it() -> None:
     judge_history(Judge(client), history, long_question)
 
     state, questions = client.requests[0]
-    assert not request_exceeds_input_budget(state, questions)
+    assert not JEV_INPUT_LIMITS.exceeded_by(state, questions)
     assert history.evictions
+
+
+def test_a_judge_holds_a_larger_history_budget_within_its_clients_state_limit() -> None:
+    # Arrange: the history allows a million characters, the client's box leaves five after the question
+    client = ScriptedJevClient(default_noul=0.9)
+    client.input_limits = InputLimits(box_chars=serialized_chars(FETCHED_HOLDS_LIMIT.to_question()) + 5)
+    history = History(budget_chars=10**6)
+    history.append(step(1))
+
+    # Act and Assert
+    with pytest.raises(HistoryTooLargeError, match="more than 5 characters"):
+        judge_history(Judge(client), history, FETCHED_HOLDS_LIMIT, sections=("fetched",))
 
 
 def test_every_appended_step_is_journaled(tmp_path: Path) -> None:
@@ -434,7 +442,9 @@ def test_each_search_step_records_judgments_candidates_and_why_the_next_place_wa
     assert [entry["operation"] for entry in steps] == ["choose_next", "open", "choose_next", "open", "stop"]
     first_choice, first_open, second_choice = steps[0], steps[1], steps[2]
     assert first_choice["arguments"]["chosen"][0]["reason"] == "start"
-    assert first_open["judgments"]["contains_target"] == {"probability": 0.1, "verdict": "no"}
+    contains_target = first_open["judgments"]["contains_target"]
+    assert (contains_target["probability"], contains_target["verdict"]) == (0.1, "no")
+    assert contains_target["answered_by"]["question_id"].startswith("contains_target@")
     offered = first_open["judgments"]["could_contain"]
     assert offered and {"place", "signature", "probability", "verdict"} <= set(offered[0])
     assert first_open["decision"] == "start judged no"
@@ -518,3 +528,45 @@ def test_the_default_stop_view_is_the_fetched_code_and_verdicts_need_the_decisio
     }
     assert "probability" not in json.dumps(steps_with_code)
     assert verdicts["decisions"][-1]["judgments"]["contains_target"]["verdict"] == "no"
+
+
+def test_an_interrupt_in_the_stop_rule_after_a_merged_round_never_reopens_that_rounds_places(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange: the round's place is judged and merged, then Ctrl-C lands while the stop rule asks
+    class InterruptedInTheStopRule(ScriptedJevClient):
+        def send(self, state, questions):
+            if any(question_id.startswith(HOLDS_LIMIT.question_id) for question_id in questions):
+                raise KeyboardInterrupt
+            return super().send(state, questions)
+
+    start = [place_for_line(sample_index, "app/orders.py", 6, "start")]
+    cancelled = find_code(
+        sample_index,
+        Judge(InterruptedInTheStopRule(default_noul=0.1)),
+        "the item limit check",
+        start,
+        budget=SearchBudget(beam_width=1),
+        stop_rule=StopRule(HOLDS_LIMIT),
+    )
+    merged = [entry.fetched[0].source for entry in cancelled.history.steps if entry.operation == "open"]
+    resumed_client = ScriptedJevClient(default_noul=0.1)
+
+    # Act
+    find_code(
+        sample_index,
+        Judge(resumed_client),
+        "the item limit check",
+        [],
+        budget=SearchBudget(beam_width=1, max_steps=2),
+        resume=cancelled,
+    )
+
+    # Assert
+    opened_before = {(source["file"], "{}-{}".format(*source["lines"])) for source in merged}
+    asked = [(state["slice"]["file"], state["slice"]["lines"]) for state, _ in resumed_client.requests]
+    asked_again = [place for place in asked if place in opened_before]
+    assert cancelled.outcome == Outcome.CANCELLED
+    assert len(merged) == 1
+    assert asked, "the resumed search must open the rest of the frontier"
+    assert asked_again == []

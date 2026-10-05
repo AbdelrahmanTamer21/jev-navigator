@@ -8,31 +8,35 @@ import importlib.metadata
 import json
 import os
 import shutil
+import subprocess
 import sys
-from collections.abc import MutableMapping, Sequence
+from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from time import monotonic
+from typing import TYPE_CHECKING
 
-from .adapters.typesafe import TypeSafeJevClient
+from .adapters.routes import RoutedJevClient, system_one_client
 from .cache_root import cache_root
 from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
-from .cli_trace import create_trace_evidence_pack, unavailable_file_lines
+from .cli_trace import create_trace_evidence_pack, not_indexed_lines, unavailable_file_lines
 from .data_root import default_run_folder
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code, search_failure
 from .directives.places import Place, place_for_line
+from .environment import checkout_root, load_typesafe_environment
 from .housekeeping import FINISHED_RUN_DAYS, RESUMABLE_RUN_DAYS
 from .index import tools
 from .index.code_index import CodeIndex
 from .index.languages import language_of
-from .judgments.answers import TokenTotal
+from .judgments.answers import TokenTotal, answered_by
 from .judgments.client import JevClient
+from .judgments.journal import ERROR_TEXT_VARIABLE, error_message, error_text_kept, message_fields
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import (
     SHARED_STORE_VARIABLE,
@@ -44,13 +48,20 @@ from .judgments.store import (
 from .judgments.thresholds import Thresholds
 from .operations import TraceGraph
 from .progress import ProgressJournal, TerminalProgress
-from .run_files import place_label, source_shown, step_shown
+from .run_files import failure_digested, place_label, source_shown, step_shown
 from .usage_receipt import usage_receipt, usage_report_lines
+
+if TYPE_CHECKING:
+    from .adapters.typesafe import TypeSafeJevClient
 
 SCHEMA_VERSION = "jev-navigator.evidence-pack/v1"
 KEEP_REQUESTS_HELP = (
     "Keep the code and full request text in the run folder (default: code locations and request "
     "hashes only); for your own or open-source code"
+)
+NO_ERROR_TEXT_HELP = (
+    "Keep an error's message and an error response's body in the run folder only as their length and "
+    f"SHA-256 (default: the text, or ${ERROR_TEXT_VARIABLE}=off); stderr still shows the message"
 )
 NON_NEGATIVE_BUDGET_FIELDS = ("max_depth", "max_steps", "max_calls", "neighbours_per_kind", "preview_lines")
 POSITIVE_BUDGET_FIELDS = ("beam_width", "max_slice_chars", "max_line_chars")
@@ -100,10 +111,11 @@ def _run_search(args: argparse.Namespace) -> int:
     repository = Path(args.repo).resolve()
     output = Path(args.out).expanduser() if args.out else _default_output(repository)
     answer_store = _answer_store(args)
-    client: TypeSafeJevClient | None = None
+    client: TypeSafeJevClient | RoutedJevClient | None = None
     try:
-        _load_typesafe_environment(os.environ)
-        client = TypeSafeJevClient()  # model=None resolves TYPESAFE_DEFAULT_MODEL in the adapter
+        load_typesafe_environment(os.environ)
+        keep_error_text = error_text_kept(args.no_error_text)
+        client = system_one_client(os.environ)
         if args.command == "trace":
             manifest = create_trace_evidence_pack(
                 repository,
@@ -118,6 +130,7 @@ def _run_search(args: argparse.Namespace) -> int:
                 verbose=args.verbose,
                 answer_store=answer_store,
                 keep_requests=args.keep_requests,
+                keep_error_text=keep_error_text,
             )
         else:
             resume_from = Path(args.resume).expanduser() if getattr(args, "resume", None) else None
@@ -134,6 +147,7 @@ def _run_search(args: argparse.Namespace) -> int:
                     verbose=args.verbose,
                     answer_store=answer_store,
                     keep_requests=args.keep_requests,
+                    keep_error_text=keep_error_text,
                     workflow=args.command,
                     resume_from=resume_from,
                 )
@@ -278,9 +292,12 @@ def create_evidence_pack(
     workflow: str = "find",
     resume_from: Path | None = None,
     keep_requests: bool = False,
+    keep_error_text: bool = True,
 ) -> dict:
     """Run the real index/search owners and persist their reviewable evidence. By default the pack
-    keeps code locations and request hashes; ``keep_requests`` also keeps the code and request text."""
+    keeps code locations and request hashes; ``keep_requests`` also keeps the code and request text.
+    Error messages and error bodies are kept unless ``keep_error_text`` is False (see
+    ``journal.error_text_kept``)."""
     if workflow not in ("find", "findall"):
         raise ValueError(f"unknown search workflow: {workflow}")
     repository = repository.resolve()
@@ -298,7 +315,9 @@ def create_evidence_pack(
     journal_path = output / "journal.jsonl"
     journal_path.touch()
     progress = TerminalProgress(journal_path, verbose=verbose)
-    journal = ProgressJournal(journal_path, progress, keep_request_text=keep_requests)
+    journal = ProgressJournal(
+        journal_path, progress, keep_request_text=keep_requests, keep_error_text=keep_error_text
+    )
     progress.start()
     outcome = "failed"
     try:
@@ -444,12 +463,16 @@ def create_evidence_pack(
             )
         if enumeration is not None:
             manifest["seed_search"] = previous["seed_search"] if resuming_enumeration else manifest["search"]
-            manifest["search"] = _find_all_summary(enumeration, judge.calls, duration_seconds, previous)
+            manifest["search"] = _find_all_summary(
+                enumeration, judge.calls, duration_seconds, previous, index.not_indexed_files
+            )
         failure = enumeration.failure if enumeration is not None and enumeration.failure else result.failure
         if failure is not None:
             manifest["search"]["failure"] = _failure_record(failure, judge, journal)
         if not keep_requests:
             _drop_code(manifest, index)
+        if not journal.keeps_error_text:
+            _digest_history_failures(manifest)
         _write_json(output / "manifest.json", manifest)
         (output / "report.md").write_text(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
@@ -484,13 +507,16 @@ def _choose_entry(
 
 
 def _failure_record(error: BaseException, judge: Judge, journal: ProgressJournal) -> dict:
-    """The error that ended the search, with its cause chain and the journal request it failed in."""
+    """The error that ended the search, with its cause chain, the journal request it failed in, and
+    that request's route and HTTP status when known. Messages are kept as ``message_fields`` allows."""
     request_id = judge.failed_request(error)
+    keep = journal.keeps_error_text
     return {
-        **_error_fields(error),
-        "causes": [_error_fields(cause) for cause in _causes(error)],
+        **_error_fields(error, keep),
+        "causes": [_error_fields(cause, keep) for cause in _causes(error)],
         "request_id": request_id,
         "route": journal.routes.get(request_id) if request_id is not None else None,
+        "status": journal.statuses.get(request_id) if request_id is not None else None,
     }
 
 
@@ -504,11 +530,19 @@ def _entry_pending_lines(search: dict) -> list[str]:
 
 def _failure_lines(search: dict, bullet: str) -> list[str]:
     failure = search.get("failure")
-    return [f"{bullet}Failure: {failure['type']}: {failure['message']}"] if failure else []
+    if not failure:
+        return []
+    status = f" (HTTP {failure['status']})" if failure["status"] is not None else ""
+    if "message" in failure:
+        return [f"{bullet}Failure: {failure['type']}{status}: {failure['message']}"]
+    return [
+        f"{bullet}Failure: {failure['type']}{status}; its message ({failure['message_length']} characters, "
+        f"SHA-256 `{failure['message_sha256']}`) was printed to stderr; --no-error-text kept only its digest"
+    ]
 
 
-def _error_fields(error: BaseException) -> dict:
-    return {"type": type(error).__name__, "message": str(error)}
+def _error_fields(error: BaseException, keep: bool) -> dict:
+    return {"type": type(error).__name__, **message_fields(error_message(error), keep_text=keep)}
 
 
 def _causes(error: BaseException) -> list[BaseException]:
@@ -542,7 +576,8 @@ def _parser() -> argparse.ArgumentParser:
 For agents: jvn schema find prints the request's JSON Schema without making model calls.
 JSON mode writes results to stdout; progress goes to stderr. Ctrl-C cancels.
 Results default to <directory>-<timestamp> under $XDG_DATA_HOME/jev-navigator/runs (~/.local/share).
-Credentials: process environment, then ~/.config/jvn/env (TYPESAFE_API_KEY / TYPESAFE_BASE_URL).
+Credentials: process environment, then the .env of the jev-navigator checkout jvn runs from (if any),
+then ~/.config/jvn/env (TYPESAFE_API_KEY / TYPESAFE_BASE_URL).
 Use jvn help find for options and examples. Exit codes: 0 completed, 1 failed, 2 invalid input, 130 cancelled.
 A completed search can have a non-found outcome; inspect search.outcome in JSON output.""",
     )
@@ -638,6 +673,7 @@ For JSON field names, types and defaults: jvn schema find. Full examples: docs/c
     trace.add_argument("--verbose", action="store_true", help="Print expanded masked model requests")
     _add_answer_store_argument(trace)
     trace.add_argument("--keep-requests", action="store_true", help=KEEP_REQUESTS_HELP)
+    trace.add_argument("--no-error-text", action="store_true", help=NO_ERROR_TEXT_HELP)
     stats = commands.add_parser(
         "stats",
         help="count and rank parsed functions/classes without model calls",
@@ -778,6 +814,7 @@ def _add_search_arguments(find: argparse.ArgumentParser, *, max_calls: int = DEF
         help="show expanded masked requests on stderr (default: concise live progress)",
     )
     find.add_argument("--keep-requests", action="store_true", help=KEEP_REQUESTS_HELP)
+    find.add_argument("--no-error-text", action="store_true", help=NO_ERROR_TEXT_HELP)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -966,18 +1003,6 @@ def _scope_warning(file_count: int) -> str | None:
     return f"jvn: large scope contains {file_count:,} tracked files; indexing may take longer"
 
 
-def _load_typesafe_environment(
-    environment: MutableMapping[str, str],
-    path: Path | None = None,
-) -> None:
-    """Load official TypeSafe SDK settings: process environment, then this tool's checkout `.env`
-    (never a repository under analysis), then the legacy `~/.config/jvn/env`; a process value always
-    takes precedence."""
-    from .environment import load_typesafe_environment
-
-    load_typesafe_environment(environment, legacy=path)
-
-
 def _parse_start(index: CodeIndex, value: str) -> Place:
     path, separator, raw_line = value.rpartition(":")
     if not separator or not path:
@@ -1026,7 +1051,7 @@ def _manifest(
             "repository": str(repository),
             "revision": index.commit,
             "prefixes": list(prefixes),
-            "tracked_files": len(index.files),
+            "indexed_files": len(index.files),
         },
         "target": target,
         "requested_starts": list(starts),
@@ -1076,12 +1101,19 @@ def _manifest(
                 "pending": list(result.parser_scans_pending),
             },
             "unavailable_files": {**result.unavailable_files, **(scope_unavailable or {})},
+            "not_indexed_files": index.not_indexed_files,
             "history": [
                 *old_search.get("history", []),
                 *([step.to_json() for step in result.history.steps] if result.history else []),
             ],
         },
     }
+
+
+def _digest_history_failures(manifest: dict) -> None:
+    for name in ("search", "seed_search"):
+        search = manifest.get(name) or {}
+        search["history"] = [failure_digested(step) for step in search.get("history", [])]
 
 
 def _drop_code(manifest: dict, index: CodeIndex) -> None:
@@ -1119,7 +1151,9 @@ def _step_without_code(step: dict, index: CodeIndex) -> dict:
     return shown
 
 
-def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previous: dict | None) -> dict:
+def _find_all_summary(
+    result: FindAllResult, calls: int, elapsed: float, previous: dict | None, not_indexed: dict[str, str]
+) -> dict:
     old_search = previous["search"] if previous else {}
 
     def answer(value):
@@ -1131,6 +1165,7 @@ def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previou
             "verdict": value.verdict,
             "request_sha256": value.request_sha256,
             "from_store": value.from_store,
+            **answered_by(value.source()),
         }
 
     return {
@@ -1148,8 +1183,16 @@ def _find_all_summary(result: FindAllResult, calls: int, elapsed: float, previou
         "unparsed_files": sorted(result.unparsed_files),
         "unsupported_files": list(result.unsupported_files),
         "unavailable_files": dict(result.unavailable_files),
+        "not_indexed_files": dict(not_indexed),
         "graph": asdict(result.graph),
     }
+
+
+def _not_indexed_section(search: dict) -> list[str]:
+    if not search["not_indexed_files"]:
+        return []
+    listed_in = "`search.not_indexed_files` in `manifest.json`"
+    return ["", "## Files not indexed", "", *not_indexed_lines(search["not_indexed_files"], listed_in)]
 
 
 def _find_all_report(manifest: dict) -> str:
@@ -1182,6 +1225,7 @@ def _find_all_report(manifest: dict) -> str:
         lines.append(f"- {field}: {', '.join(search[field]) or 'none'}")
     lines.append("- unavailable_files:" if search["unavailable_files"] else "- unavailable_files: none")
     lines += unavailable_file_lines(search["unavailable_files"])
+    lines += _not_indexed_section(search)
     lines += ["", "## Matching bodies", ""]
     for value in search["found"]:
         source = value["source"]
@@ -1201,24 +1245,39 @@ def _navigator_provenance() -> dict:
         digest.update(b"\0")
         digest.update(path.read_bytes())
         digest.update(b"\0")
-    repository = next((parent for parent in package_root.parents if (parent / ".git").exists()), None)
-    revision = None
-    dirty = None
-    if repository is not None:
-        revision = _git(repository, "rev-parse", "HEAD")
-        dirty = bool(_git(repository, "status", "--porcelain", "--untracked-files=all"))
     return {
         "package_version": importlib.metadata.version("jev-navigator"),
-        "source_revision": revision,
-        "source_dirty": dirty,
+        **_checkout_revision(checkout_root()),
         "source_tree_sha256": digest.hexdigest(),
     }
 
 
+def _checkout_revision(checkout: Path | None) -> dict:
+    """jvn's own checkout's HEAD and whether it has changes. Without a checkout there is no
+    revision to record; when git cannot answer, its message is kept instead of stopping the run."""
+    revision: dict = {"source_revision": None, "source_dirty": None, "source_revision_error": None}
+    if checkout is None:
+        return revision
+    try:
+        head = _git(checkout, "rev-parse", "HEAD")
+        dirty = bool(_git(checkout, "status", "--porcelain", "--untracked-files=all"))
+    except _CheckoutGitError as error:
+        return revision | {"source_revision_error": str(error)}
+    return revision | {"source_revision": head, "source_dirty": dirty}
+
+
+class _CheckoutGitError(RuntimeError):
+    """A git call about jvn's own checkout that failed, named by its arguments, with git's message."""
+
+
 def _git(repository: Path, *args: str) -> str:
     """The checkout above JVN's own source can be a whole project, when JVN is installed in a virtual
-    environment inside it, so its status may take long."""
-    return tools.git(args, repository, timeout=10).strip()
+    environment inside it, so its status may take long. A failure, a timeout or a git that cannot
+    start raises ``_CheckoutGitError``."""
+    try:
+        return tools.git(args, repository, timeout=10).strip()
+    except (tools.ToolFailedError, OSError, subprocess.TimeoutExpired) as error:
+        raise _CheckoutGitError(f"git {' '.join(args)} failed: {error}") from error
 
 
 def _visit(visit: Visit) -> dict:
@@ -1253,13 +1312,18 @@ def _outcome_summary(search: dict) -> str:
     judged, read, total = search["files_judged"], search["files_read"], search["code_files"]
     seen = f"Jev judged code in {judged} of {total} files"
     if outcome == "nothing_left":
-        return f"{outcome} (nothing left worth opening: {seen}; all {total} were read)"
-    parts = [f"not found: {seen}", f"{read - judged} more were read only to list links"]
-    parts.append(f"{total - read} never reached")
-    if search["unparsed_files"]:
-        parts.append(f"{len(search['unparsed_files'])} parsed only partly")
-    if search["unavailable_files"]:
-        parts.append(f"{len(search['unavailable_files'])} gone from disk")
+        parts = [f"nothing left worth opening: {seen}", f"all {total} were read"]
+    else:
+        parts = [f"not found: {seen}", f"{read - judged} more were read only to list links"]
+        parts.append(f"{total - read} never reached")
+        if search["unparsed_files"]:
+            parts.append(f"{len(search['unparsed_files'])} parsed only partly")
+        if search["unavailable_files"]:
+            parts.append(
+                f"{len(search['unavailable_files'])} unavailable (gone, changed or refused by the parser)"
+            )
+    if search.get("not_indexed_files"):
+        parts.append(f"{len(search['not_indexed_files'])} not indexed, such as ignored")
     return f"{outcome} ({'; '.join(parts)})"
 
 
@@ -1308,6 +1372,9 @@ def _report(manifest: dict) -> str:
         "- Files unavailable (disappeared or changed on disk, or refused by the parser): "
         f"{len(search['unavailable_files'])}.",
         *unavailable_file_lines(search["unavailable_files"]),
+        f"- Files and folders not indexed (ignored, or otherwise left out of the listing): "
+        f"{len(search['not_indexed_files'])}.",
+        *_not_indexed_section(search),
         "",
         "## Opened code",
         "",

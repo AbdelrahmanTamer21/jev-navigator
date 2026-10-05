@@ -1,5 +1,5 @@
 """The code a request shows: long lines cut, and a whole slice cut at a line boundary, so one line or
-one long function can never push a request past Jev's state limit. Every cut stays visible."""
+one long function can never push a request past a route's state limit. Every cut stays visible."""
 
 from __future__ import annotations
 

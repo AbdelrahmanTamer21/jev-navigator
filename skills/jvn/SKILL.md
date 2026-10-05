@@ -29,6 +29,8 @@ jvn trace 'how the source quote becomes an accepted or rejected claim' --start a
 ```
 
 Run in the source directory, or add `--repo /path/to/repo`. Dirty trees and non-Git directories work.
+Every file under it is searched whether git tracks it or not; ignored files (a .gitignore, or outside
+Git ripgrep's ignore files) are not, and the report lists them as not indexed with the reason.
 Output defaults to a unique run folder under `~/.local/share/jev-navigator/runs/` whose path the run prints; nothing is written into the project. Trace starts must be repository-relative
 `PATH:LINE` values inside a function or method, not a class declaration. Unknown entry? Find first,
 inspect the returned function, then trace it. Quote the entire natural-language argument once.
@@ -91,7 +93,8 @@ JVN prunes its own caches and run folders as runs end (rules: `docs/cli.md`, Dis
 housekeeping); `jvn cache status` shows disk use. Copy a run folder you want to keep, or use `--out`.
 
 Live searches send source to the configured provider: reuse the user's source and spend authorization,
-and never print credentials (environment or `~/.config/jvn/env`). Progress is stderr, JSON stdout.
+and never print credentials (the environment, the `.env` of a jev-navigator checkout `jvn` runs
+from, or `~/.config/jvn/env`). Progress is stderr, JSON stdout.
 Check the exit status first: 0 completed, 1 failed, 2 invalid input, 130 cancelled.
 
 Library compositions and maintained options: `docs/extending.md` and `docs/cli.md` in the

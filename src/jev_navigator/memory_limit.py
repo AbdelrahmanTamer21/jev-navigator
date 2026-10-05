@@ -1,24 +1,27 @@
 """JVN's memory limit: an allowance for each JVN process, and one ceiling for all of them on a machine.
 
-Every process JVN starts (ast-grep, ripgrep, git) is started through ``started``. The first one takes
-one of the machine's memory slots, waiting up to ``wait_seconds`` for room. The process keeps the slot
-until it exits, and the operating system releases the lock then, however the process ends, so no slot
-outlives its holder. The ceiling holds ``ceiling_mb // allowance_mb`` slots, one ``flock``-ed file each,
-in a folder that no HOME setting moves.
+Every process JVN starts (ast-grep, ripgrep, git) is started through ``started``, except a model step's
+command-line connector (``connectors``). The first started process takes one of the machine's memory
+slots, waiting up to ``wait_seconds`` for room. The process keeps the slot until it exits, and the
+operating system releases the lock then, however the process ends, so no slot outlives its holder. The
+ceiling holds ``ceiling_mb // allowance_mb`` slots, one ``flock``-ed file each, in a folder that no HOME
+setting moves.
 
 While a started process runs, a watchdog thread measures, every ``SAMPLE_SECONDS``, how far this process
-has grown past its baseline, its footprint when it took its slot, plus the footprint of every process it
-started.
-Over the allowance it kills those processes, and each ``started`` block whose process it killed raises
+has grown past its baseline (below), plus the footprint of every process it started. Over the allowance
+it kills those processes, and each ``started`` block whose process it killed raises
 ``MemoryLimitReachedError``. Growth while no process runs is refused at the next ``check``: before any
 process starts and while cached facts load.
 
-Measuring growth rather than the whole process means a host that embeds JVN, such as a long-lived server
-or a test runner, is charged only for what JVN adds. While no ``CodeIndex`` is alive the process holds
-nothing of JVN's, so the baseline moves to the footprint at every ``check`` made then and when the first
-index opens: what a host grows between two searches is never charged to the second. A failed search
-leaves its dropped index in a reference cycle, its failure's traceback holding the frames that hold the
-index, so before an index counts as alive where that decides, the cycle collector runs once.
+Growth is measured from a baseline, so a host that embeds JVN, such as a long-lived server or a test
+runner, is not charged for what it held before. While no ``CodeIndex`` is alive the process holds nothing
+of JVN's, so the baseline moves to the footprint at every ``check`` made then and when the first index
+opens: what a host grows between two searches is never charged to the second. While an index is alive,
+what the process grows by counts against the allowance, whoever caused it. A host that keeps a search
+result keeps its index alive through the result's own places, so counting that memory is correct. A
+failed search leaves its dropped index in a reference cycle, its failure's traceback holding the frames
+that hold the index, so before an index counts as alive where that decides, the cycle collector runs
+once.
 
 The footprint is the operating system's physical footprint: libproc's ``ri_phys_footprint`` on macOS,
 which counts compressed pages that the resident size leaves out, and resident plus swapped memory on

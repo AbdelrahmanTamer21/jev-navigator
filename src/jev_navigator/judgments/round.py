@@ -217,15 +217,16 @@ def _hash_value(value: object) -> str:
 
 def _checkout_dirty(repository: Path) -> bool | None:
     if _git_commit(repository) is None:
-        return None  # checkout state is unknown outside a repository
+        return None  # checkout state is unknown outside a repository or before its first commit
     return bool(tools.git(["status", "--porcelain"], repository))
 
 
 def _git_commit(repository: Path) -> str | None:
-    try:
-        return tools.git(["rev-parse", "HEAD"], repository).strip() or None
-    except (tools.ToolFailedError, OSError):
+    """HEAD's commit; None outside a Git worktree or before its first commit. A repository git
+    refuses raises, so a frozen round never records a refused checkout as having no commit."""
+    if not tools.inside_git_worktree(repository):
         return None
+    return tools.head_commit(repository) or None
 
 
 def _same(what: str, found, registered) -> None:

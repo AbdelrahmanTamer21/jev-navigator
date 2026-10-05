@@ -13,6 +13,7 @@ from types import MappingProxyType
 
 from ..index.bindings import Binding
 from ..index.code_index import CodeIndex
+from ..index.scope import is_test_file
 from ..index.spans import CallEdge, CodeSlice, Span, TextHit
 from ..judgments.relations import key_mention
 
@@ -29,8 +30,6 @@ MAX_KEY_HITS = 30
 _PASSED_ON_ROLES = frozenset(
     {"argument", "decorator", "collection", "assignment", "export", "return", "receiver", "type"}
 )
-_TEST_DIRECTORIES = frozenset({"test", "tests", "__tests__", "spec"})
-_TEST_FILE_NAME = re.compile(r"^test_|_test\.|\.test\.|\.spec\.|^conftest\.py$")
 
 
 @dataclass(frozen=True)
@@ -238,7 +237,7 @@ def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
         return []
     sites = sorted(
         (site for site in index.find_callers(opened.span.name) if _may_reach(site.binding, opened.span)),
-        key=lambda site: _is_test_file(site.file),
+        key=lambda site: is_test_file(site.file),
     )
     return [
         place_for_line(index, site.file, site.line, f"calls {opened.span.name}", binding=site.binding)
@@ -261,7 +260,7 @@ def _callees(index: CodeIndex, opened: CodeSlice) -> list[Place]:
 def _callee_rank(index: CodeIndex, edge: CallEdge) -> tuple[bool, bool, int]:
     """A callee with no definition yields no place, so its call sites are never counted."""
     targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
-    only_tests = bool(targets) and all(_is_test_file(target.file) for target in targets)
+    only_tests = bool(targets) and all(is_test_file(target.file) for target in targets)
     return not edge.binding.proven, only_tests, index.call_site_count(edge.name) if targets else 0
 
 
@@ -333,12 +332,6 @@ def _with_binding(relation: str, binding: Binding | None) -> str:
     return f"{relation}, {binding.status}: {binding.reason}"
 
 
-def _is_test_file(path: str) -> bool:
-    directories, _, name = path.rpartition("/")
-    in_test_directory = not _TEST_DIRECTORIES.isdisjoint(directories.split("/"))
-    return in_test_directory or bool(_TEST_FILE_NAME.search(name))
-
-
 def _same_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     """The other functions of the file, nearest to the opened code first; a function nested in
     another is part of that function. An anonymous function first offers its nearest named
@@ -395,12 +388,10 @@ def _keys_in(code: str) -> list[str]:
 
 
 def _lines_mentioning(index: CodeIndex, opened: CodeSlice, key: str) -> list[TextHit]:
-    whole_key = re.compile(rf"(?<!\w){re.escape(key)}(?!\w)")
     return [
         hit
-        for hit in index.search_text(key, MAX_KEY_HITS + 1)
-        if whole_key.search(hit.text)
-        and not (hit.file == opened.span.file and opened.span.contains(hit.line))
+        for hit in index.search_text(key, MAX_KEY_HITS + 1, whole_word=True)
+        if not (hit.file == opened.span.file and opened.span.contains(hit.line))
     ]
 
 

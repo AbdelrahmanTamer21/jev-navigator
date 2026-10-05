@@ -45,7 +45,9 @@ class OutstandingJournal(JsonlJournal):
         super().record_response(request_id, response)
         self._settled()
 
-    def record_failure(self, request_id: str, error: str, response: RawResponse | None = None) -> None:
+    def record_failure(
+        self, request_id: str, error: BaseException, response: RawResponse | None = None
+    ) -> None:
         super().record_failure(request_id, error, response)
         self._settled()
 
