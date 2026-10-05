@@ -309,7 +309,14 @@ than AST parent identities. The `jvn stats` CLI writes these measurements as JSO
 model:
 
 ```python
-from jev_navigator.index.units import LineAnchor, RangeAnchor, items_to_judge, list_units, read_ranges, resolve_anchors
+from jev_navigator.index.units import (
+    LineAnchor,
+    RangeAnchor,
+    items_to_judge,
+    list_units,
+    read_ranges,
+    resolve_anchors,
+)
 
 room = judge.input_limits.box_chars - beside_the_unit  # the characters one unit's text may take in a request
 listing = list_units(index, index.files, box_chars=room)
@@ -319,7 +326,9 @@ print(listing.unlisted)  # files that gave no units, each with its reason
 for item in items_to_judge(listing.units[0]):  # the unit, or its pieces that fit the box
     print(item.id, item.ranges, read_ranges(index, item.file, item.ranges)[:60])
 
-resolved = resolve_anchors(index, [LineAnchor("app/routes.py", 21), RangeAnchor("app/orders.py", 5, 7)], box_chars=room)
+resolved = resolve_anchors(
+    index, [LineAnchor("app/routes.py", 21), RangeAnchor("app/orders.py", 5, 7)], box_chars=room
+)
 print([unit.id for unit in resolved.units], resolved.unresolved)
 ```
 

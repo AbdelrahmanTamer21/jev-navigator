@@ -298,8 +298,10 @@ index.imports(file)
 index.dependents(file)
 index.co_changed_files(file)
 
-units.list_units(index, files, box_chars=room)  # outermost functions and methods, top-level code; room: docs/extending.md
-units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=room)  # the units holding lines or line ranges
+# outermost functions and methods, top-level code; room: docs/extending.md
+units.list_units(index, files, box_chars=room)
+# the units holding lines or line ranges
+units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=room)
 
 operations.slice_around(index, file, line)  # the enclosing function, or a window
 operations.code_described_by_comment(index, file, line)  # the whole next symbol or block
