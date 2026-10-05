@@ -328,6 +328,8 @@ operations.trace_callers(index, symbol)  # and trace_callees; optional depth, ot
 operations.trace_graph(index, index.find_definition(symbol))  # calls and non-call references
 operations.similar_functions(index, symbol)
 operations.code_named_in_doc(index, text)
+# the scope files texts or anchor files name by path: NamedFiles(code, text, named_by)
+operations.files_named_by(index, texts, anchor_files)
 
 comments.find_comments(index, files)  # FoundComments(kept, dropped) of CommentBlock
 comments.comments_in_diff(index, base, head)  # changed comments, and comments above changed code

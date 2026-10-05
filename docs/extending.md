@@ -12,7 +12,8 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `CodeIndex` | mechanical lookups over a narrowed scope: definitions, callers, callees, references, text, imports, git history |
 | `index.units` | the units a search judges (functions, methods, Prisma schema blocks, each file's top-level code), cut into 60-line pieces only when larger than their room in a request, and the one resolver of lines and line ranges to units |
 | `index.prisma_schema` | a Prisma schema's model, view, enum and composite type blocks with their lines, and the client accessor a model or view is queried through (`model WebsiteEvent` is `prisma.websiteEvent`) |
-| `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc |
+| `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc, files a text names by path (`files_named_by`) |
+| `mentions` | the one owner of whether a token in a text is a path (`paths_in`) |
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
 | `find_code` | a best-first search that opens places until the code a description names is found |
@@ -162,6 +163,15 @@ becomes range anchors, and the population is every file in scope, so a seed-sear
 the whole scope. Use `jvn findall "functions that enforce the order item limit"` or
 `jvn --json '{"command":"findall","target":"functions that enforce the order item limit"}'`.
 The evidence pack retains the seed search, per-unit answers and raw request identities.
+
+A population can start from the files a text names by path. `operations.files_named_by(index,
+texts, anchor_files)` reads `texts` and the whole text of each anchor file for path tokens
+(`mentions.paths_in`: a file name with a suffix, perhaps under folders, without a leading `./`, `../`
+or `/`). A token names each scope file whose path is the token or ends with `/` and the token, so
+`jobs/sweep.py` names `web/jobs/sweep.py` but never `xjobs/sweep.py`, and a bare `ci.yml` names every
+`ci.yml`. Anchor files are never named, an anchor file outside the scope is never read, and a named
+file is not read for further names. The result splits `code` files, for `find_all`'s `files`, from
+`text` files, and `named_by` keeps the token that named each one. No model is called.
 
 ### Find one location
 
