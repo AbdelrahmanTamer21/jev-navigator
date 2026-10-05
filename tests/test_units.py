@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
+from conftest import WEBSITE_QUERIES
 from git_repos import commit_all, git, write_files
 
 from jev_navigator.index.code_index import CodeIndex
@@ -428,6 +430,61 @@ def test_files_the_parser_cannot_read_are_named_with_their_reason(shop: CodeInde
     }
 
 
+SCHEMA = "prisma/schema.prisma"
+
+
+@pytest.fixture
+def schema_index(tmp_path: Path, umami_schema: str) -> CodeIndex:
+    root = tmp_path / "umami"
+    write_files(root, {SCHEMA: umami_schema, "src/queries/website.ts": WEBSITE_QUERIES})
+    commit_all(root)
+    return CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+
+def test_a_prisma_schema_lists_each_block_as_a_unit_and_its_settings_as_top_level_code(
+    schema_index: CodeIndex, umami_schema: str
+) -> None:
+    # Act
+    listing = list_units(schema_index, ("src/queries/website.ts", SCHEMA), box_chars=JEV_BOX)
+
+    # Assert: the schema's 26 models, each whole, then its generator and datasource as top-level
+    # code, after the units of the file listed before it.
+    assert listing.unlisted == {}
+    assert [unit.symbol for unit in listing.units[:2]] == ["updateWebsite", "getWebsiteCount"]
+    schema_units = listing.units[2:]
+    assert [unit.kind for unit in schema_units] == [UnitKind.SCHEMA_BLOCK] * 26 + [UnitKind.TOP_LEVEL]
+    website = next(unit for unit in schema_units if unit.symbol == "model Website")
+    assert (website.id, website.ranges, website.language, website.nested_in, website.pieces) == (
+        "prisma/schema.prisma:98-131",
+        ((98, 131),),
+        "prisma",
+        None,
+        (),
+    )
+    assert website.content_sha256 == _sha256(_lines(umami_schema, 98, 131))
+    assert (schema_units[-1].id, schema_units[-1].ranges) == ("prisma/schema.prisma:top", ((1, 10),))
+    covered = Counter(
+        line for unit in schema_units for start, end in unit.ranges for line in range(start, end + 1)
+    )
+    code_lines = [number for number, text in enumerate(umami_schema.split("\n"), 1) if text.strip()]
+    assert [covered[number] for number in code_lines] == [1] * len(code_lines)
+
+
+def test_a_line_of_a_schema_names_the_block_holding_it_and_a_settings_line_its_top_level_code(
+    schema_index: CodeIndex,
+) -> None:
+    # Arrange: a field of `Website`, a generator setting, and a range from `Website`'s last lines
+    # into `WebsiteEvent`.
+    anchors = (LineAnchor(SCHEMA, 120), LineAnchor(SCHEMA, 2), RangeAnchor(SCHEMA, 130, 134))
+
+    # Act
+    resolved = resolve_anchors(schema_index, anchors, box_chars=JEV_BOX, listed_only=True)
+
+    # Assert
+    assert [unit.symbol for unit in resolved.units] == ["model Website", "<top level>", "model WebsiteEvent"]
+    assert resolved.unresolved == ()
+
+
 def test_a_files_top_level_code_is_one_unit_without_function_bodies(shop: CodeIndex) -> None:
     # Act
     top = _units_by_id(shop, ("app/routes.py",))["app/routes.py:top"]
@@ -483,6 +540,23 @@ def test_a_file_gone_after_the_inventory_is_named_not_listed(tmp_path: Path) -> 
     # Assert
     assert [unit.id for unit in listing.units] == ["app/kept.py:1-2"]
     assert listing.unlisted == {"app/gone.py": "disappeared after inventory"}
+
+
+def test_a_file_the_index_never_held_is_named_with_the_index_reason_not_raised(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    write_files(root, {"app/kept.py": "def kept():\n    return 1\n"})
+    commit_all(root)
+    index = CodeIndex.from_git(root, ["app/kept.py", "app/removed.py"], fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    listing = list_units(index, ["app/kept.py", "app/removed.py", "app/never_asked.py"], box_chars=JEV_BOX)
+
+    # Assert: the index's own reason where it has one, else that the file is outside its scope.
+    assert [unit.id for unit in listing.units] == ["app/kept.py:1-2"]
+    assert listing.unlisted == {
+        "app/removed.py": "no file at this path",
+        "app/never_asked.py": "not in the index scope",
+    }
 
 
 def test_top_level_code_over_the_box_is_cut_into_pieces(shop: CodeIndex) -> None:

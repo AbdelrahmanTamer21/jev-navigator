@@ -236,10 +236,10 @@ class ShortSecretMasker:
 
     _VALUE = re.compile(r'PASSWORD\w* = "([^"]+)"')
 
-    def mask(self, text: str) -> str:
+    def mask(self, text: str, path: str | None = None) -> str:
         return self._VALUE.sub(lambda match: match[0].replace(match[1], MASK), text)
 
-    def masked_values(self, text: str) -> list[str]:
+    def masked_values(self, text: str, path: str | None = None) -> list[str]:
         return [match[1] for match in self._VALUE.finditer(text)]
 
 
@@ -343,11 +343,13 @@ def test_a_neighbour_that_fits_only_unmasked_does_not_fit_alone(tmp_path: Path) 
         return {"file": "app/settings.py", "lines": [1, lines], "code": code}
 
     largest = max(
-        lines for lines in range(400, 700) if plain.fits_alone(check, neighbour(lines), shared, "candidates")
+        lines
+        for lines in range(400, 700)
+        if plain.fits_alone([check], neighbour(lines), shared, "candidates")
     )
 
     # Act
-    fits_masked = masking.fits_alone(check, neighbour(largest), shared, "candidates")
+    fits_masked = masking.fits_alone([check], neighbour(largest), shared, "candidates")
 
     # Assert
     assert not fits_masked

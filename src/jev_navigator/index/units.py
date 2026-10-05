@@ -1,11 +1,12 @@
 """Units: what a search judges and what a result names, and the one resolver of lines to units.
 
-A unit is one function, one method, or one file's top-level code: its lines outside every function
-and method, class bodies included, kept as runs of lines in order. A function's or method's unit
-starts at its first decorator, so a route travels with its handler, while its id stays the index's
-span key. A stub, a function whose body only declares a shape (``CodeIndex.stubs_in``), is no unit:
-its lines are top-level code. A record carries the unit's identity, kind, qualified symbol and the
-hash of its own text. Only a unit larger than its room in a request (``box_chars``) is cut, into
+A unit is one function, one method, one block of a Prisma schema (a model, view, enum or composite
+type, header to closing brace), or one file's top-level code: its lines outside every function,
+method and block, class bodies included, kept as runs of lines in order. A function's or method's
+unit starts at its first decorator, so a route travels with its handler, while its id stays the
+index's span key. A stub, a function whose body only declares a shape (``CodeIndex.stubs_in``), is
+no unit: its lines are top-level code. A record carries the unit's identity, kind, qualified symbol
+and the hash of its own text. Only a unit larger than its room in a request (``box_chars``) is cut, into
 pieces of up to 60 lines with no overlap; a piece never spans two runs. The unit stays one unit,
 scored by its best piece. A piece still over that room is too large to judge: it is named with its
 range and size and never judged.
@@ -32,12 +33,14 @@ from ..judgments.questions import serialized_chars
 from .code_index import CodeIndex
 from .imports import import_lines, without_comments
 from .languages import language_of
+from .prisma_schema import SCHEMA_LANGUAGE, is_schema_file, schema_blocks
 from .scope import is_test_file
 from .spans import Span, holder_of
 
 PIECE_LINES = 60
 TOP_LEVEL_SYMBOL = "<top level>"
 UNSUPPORTED_LANGUAGE = "language not supported"
+OUTSIDE_SCOPE = "not in the index scope"
 _UNLISTED_TOP_LEVEL = (
     "top-level code of only imports, comments, directives and brackets, which a listing leaves out"
 )
@@ -50,6 +53,7 @@ LineRange = tuple[int, int]
 class UnitKind(StrEnum):
     FUNCTION = "function"
     METHOD = "method"
+    SCHEMA_BLOCK = "schema_block"
     TOP_LEVEL = "top_level"
 
 
@@ -112,20 +116,30 @@ class UnitListing:
 
 
 def list_units(index: CodeIndex, files: Sequence[str], *, box_chars: int) -> UnitListing:
-    """The functions and methods of ``files`` that no other function holds, and each file's top-level
-    code, in file order and then by position, parsing every source file in one batched scan. Every
-    line of code is in a listed unit. A file whose top-level code is only imports, comments,
-    directives (``"use client"``), lines of closing brackets and blank lines lists no top-level unit.
-    A file in a language JVN does not parse, or gone since the inventory, is named in ``unlisted``.
-    ``box_chars`` is the room one unit's text has in a request, as ``serialized_chars`` counts it: the
-    client's box (``InputLimits.box_chars``) less what the request carries beside the unit."""
+    """The functions and methods of ``files`` that no other function holds, the blocks of each Prisma
+    schema, and each file's top-level code, in file order and then by position, parsing every source
+    file in one batched scan. Every line of code is in a listed unit. A file whose top-level code is
+    only imports, comments, directives (``"use client"``), lines of closing brackets and blank lines
+    lists no top-level unit. A file in a language JVN does not read, gone since the inventory, or
+    outside the index's scope is named in ``unlisted``, the last with the index's own reason where it
+    has one. ``box_chars`` is the room one unit's text has in a request, as ``serialized_chars``
+    counts it: the client's box (``InputLimits.box_chars``) less what the request carries beside the
+    unit."""
     files = tuple(dict.fromkeys(files))
-    source_files = tuple(file for file in files if language_of(file))
-    index.functions_in_files(source_files)
-    units = tuple(unit for file in source_files for unit in _SourceFile(index, file, box_chars).listed)
-    unlisted = {file: UNSUPPORTED_LANGUAGE for file in files if not language_of(file)}
+    in_scope = frozenset(index.files)
+    not_indexed = index.not_indexed_files
+    unlisted = {file: not_indexed.get(file, OUTSIDE_SCOPE) for file in files if file not in in_scope}
+    read_files = tuple(file for file in files if file in in_scope and _has_units(file))
+    index.functions_in_files(tuple(file for file in read_files if language_of(file)))
+    units = tuple(unit for file in read_files for unit in _file_units(index, file, box_chars).listed)
+    unlisted |= {file: UNSUPPORTED_LANGUAGE for file in files if file in in_scope and not _has_units(file)}
     unlisted |= {file: reason for file, reason in index.unavailable_files.items() if file in files}
     return UnitListing(units, unlisted)
+
+
+def _has_units(file: str) -> bool:
+    """Whether JVN reads ``file``'s units: a source file its parser reads, or a Prisma schema."""
+    return language_of(file) is not None or is_schema_file(file)
 
 
 @dataclass(frozen=True)
@@ -222,63 +236,50 @@ def resolve_anchors(
     return AnchorResolution(tuple(found.values()), tuple(unresolved))
 
 
-class _SourceFile:
-    """The units of one source file, built from the index's functions and the file's lines."""
+def _file_units(index: CodeIndex, file: str, box_chars: int) -> _FileUnits:
+    return (_SchemaFile if is_schema_file(file) else _SourceFile)(index, file, box_chars)
+
+
+class _FileUnits:
+    """The units of one file: its inner units, built by each kind of file, and its top-level code,
+    the lines outside every inner unit. ``_language`` is the language its units name."""
+
+    _language: str
 
     def __init__(self, index: CodeIndex, file: str, box_chars: int) -> None:
         self._index = index
         self._file = file
         self._box_chars = box_chars
         self._lines = index.lines(file)
-        self._symbols = index.symbols_in(file)
-        self._all_functions = frozenset(index.functions_in(file))
-        self._decorator_starts = index.decorator_starts_in(file)
-        stubs = frozenset(index.stubs_in(file))
-        functions = _one_per_range(span for span in index.functions_in(file) if span not in stubs)
-        self.functions = tuple(self._function_unit(span, functions) for span in functions)
+        self.inner = self._inner_units()
         self.top_level = self._top_level_unit()
+
+    def _inner_units(self) -> tuple[Unit, ...]:
+        raise NotImplementedError
 
     @cached_property
     def listed(self) -> tuple[Unit, ...]:
-        outermost = tuple(unit for unit in self.functions if unit.nested_in is None)
+        outermost = tuple(unit for unit in self.inner if unit.nested_in is None)
         top_level = () if self.top_level is None or self._holds_no_code() else (self.top_level,)
         return (*outermost, *top_level)
 
     def unit_at(self, line: int) -> Unit | None:
-        holding = [unit for unit in self.functions if unit.start <= line <= unit.end]
+        holding = [unit for unit in self.inner if unit.start <= line <= unit.end]
         return min(holding, key=lambda unit: unit.end - unit.start, default=self.top_level)
 
     def listed_holder(self, unit: Unit) -> Unit | None:
         """``unit`` itself when a listing lists it, else the outermost function holding it; None for
         top-level code the listing leaves out."""
         while unit.nested_in is not None:
-            unit = self._functions_by_id[unit.nested_in]
+            unit = self._inner_by_id[unit.nested_in]
         return unit if unit in self.listed else None
 
     @cached_property
-    def _functions_by_id(self) -> dict[str, Unit]:
-        return {function.id: function for function in self.functions}
-
-    def qualified(self, span: Span) -> str:
-        """``span``'s name after every holder's: ``OrderService.place``, ``registerRoutes.<anonymous:4>``."""
-        names = []
-        current: Span | None = span
-        while current is not None:
-            names.append(current.name if _is_named(current) else f"<anonymous:{current.start}>")
-            current = holder_of(self._symbols, current)
-        return ".".join(reversed(names))
-
-    def _function_unit(self, span: Span, functions: Sequence[Span]) -> Unit:
-        holder = holder_of(self._symbols, span)
-        is_method = holder is not None and holder not in self._all_functions
-        outer = holder_of(functions, span)
-        kind = UnitKind.METHOD if is_method else UnitKind.FUNCTION
-        nested_in = None if outer is None else outer.key
-        start = self._decorator_starts.get(span, span.start)
-        return self._unit(span.key, ((start, span.end),), kind, self.qualified(span), nested_in)
+    def _inner_by_id(self) -> dict[str, Unit]:
+        return {unit.id: unit for unit in self.inner}
 
     def _top_level_unit(self) -> Unit | None:
-        inside = _lines_of(self.functions)
+        inside = _lines_of(self.inner)
         outside = (line for line in range(1, len(self._lines) + 1) if line not in inside)
         ranges = tuple(trimmed for run in _runs(outside) if (trimmed := self._without_blank_edges(run)))
         if not ranges:
@@ -313,7 +314,7 @@ class _SourceFile:
             ranges,
             kind,
             symbol,
-            language_of(self._file) or "",
+            self._language,
             is_test_file(self._file),
             self._index.read_slice(Span(self._file, *ranges[0])).commit,
             _sha256(text),
@@ -335,12 +336,64 @@ class _SourceFile:
         return Piece(number, start, end, _sha256(text), chars, chars > self._box_chars)
 
 
+class _SourceFile(_FileUnits):
+    """A source file's units: its functions and methods, from the index's spans."""
+
+    def __init__(self, index: CodeIndex, file: str, box_chars: int) -> None:
+        self._symbols = index.symbols_in(file)
+        self._all_functions = frozenset(index.functions_in(file))
+        self._decorator_starts = index.decorator_starts_in(file)
+        self._language = language_of(file) or ""
+        super().__init__(index, file, box_chars)
+
+    def _inner_units(self) -> tuple[Unit, ...]:
+        stubs = frozenset(self._index.stubs_in(self._file))
+        functions = _one_per_range(span for span in self._index.functions_in(self._file) if span not in stubs)
+        return tuple(self._function_unit(span, functions) for span in functions)
+
+    def qualified(self, span: Span) -> str:
+        """``span``'s name after every holder's: ``OrderService.place``, ``registerRoutes.<anonymous:4>``."""
+        names = []
+        current: Span | None = span
+        while current is not None:
+            names.append(current.name if _is_named(current) else f"<anonymous:{current.start}>")
+            current = holder_of(self._symbols, current)
+        return ".".join(reversed(names))
+
+    def _function_unit(self, span: Span, functions: Sequence[Span]) -> Unit:
+        holder = holder_of(self._symbols, span)
+        is_method = holder is not None and holder not in self._all_functions
+        outer = holder_of(functions, span)
+        kind = UnitKind.METHOD if is_method else UnitKind.FUNCTION
+        nested_in = None if outer is None else outer.key
+        start = self._decorator_starts.get(span, span.start)
+        return self._unit(span.key, ((start, span.end),), kind, self.qualified(span), nested_in)
+
+
+class _SchemaFile(_FileUnits):
+    """A Prisma schema's units: one per model, view, enum and composite type block, named by its
+    keyword and name (``model Website``)."""
+
+    _language = SCHEMA_LANGUAGE
+
+    def _inner_units(self) -> tuple[Unit, ...]:
+        return tuple(
+            self._unit(
+                Span(self._file, block.start, block.end).key,
+                ((block.start, block.end),),
+                UnitKind.SCHEMA_BLOCK,
+                f"{block.keyword} {block.name}",
+            )
+            for block in schema_blocks(self._lines)
+        )
+
+
 class _AnchorResolver:
     def __init__(self, index: CodeIndex, box_chars: int, listed_only: bool) -> None:
         self._index = index
         self._box_chars = box_chars
         self._listed_only = listed_only
-        self._sources: dict[str, _SourceFile] = {}
+        self._sources: dict[str, _FileUnits] = {}
 
     def resolve(self, anchor: Anchor) -> tuple[tuple[Unit, ...], str]:
         start, end = (
@@ -384,13 +437,13 @@ class _AnchorResolver:
     def _file_problem(self, file: str) -> str:
         if file not in self._index.files:
             return f"{file} is not in scope"
-        if not language_of(file):
+        if not _has_units(file):
             return UNSUPPORTED_LANGUAGE
         return ""
 
-    def _source(self, file: str) -> _SourceFile:
+    def _source(self, file: str) -> _FileUnits:
         if file not in self._sources:
-            self._sources[file] = _SourceFile(self._index, file, self._box_chars)
+            self._sources[file] = _file_units(self._index, file, self._box_chars)
         return self._sources[file]
 
 

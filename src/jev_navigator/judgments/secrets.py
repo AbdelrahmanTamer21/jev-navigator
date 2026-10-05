@@ -8,48 +8,56 @@ passes its own objects; turning either off must be explicit (``masker=None`` or 
 
 from __future__ import annotations
 
-import math
 import re
-from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import cache
 from typing import Protocol
 
-MASK = "[MASKED]"
-_PRIVATE_KEY_BLOCK = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----|\Z)", re.S
+from ..directives.places import located_file
+from .secret_shapes import (
+    BY_CONTENT_MIN_CHARS,
+    HIGH_ENTROPY_MIN_CHARS,
+    MASK,
+    TOKEN_CHARACTER_CLASS,
+    hide_secrets,
+    is_high_entropy,
 )
-_KEY_MARKER_LINE = re.compile(r"^.*-----(?:BEGIN|END) [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*$", re.M)
-_TOKEN_SHAPES = (
-    re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}\b"),
-    re.compile(r"\bglpat-[A-Za-z0-9_\-]{16,}\b"),
-    re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}\b"),
-    re.compile(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_\-]{20,}\b"),
-    re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),
-    re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"),
-)
-_SECRET_ASSIGNMENT = re.compile(
-    r"""(?i)\b[\w.-]*(?:secret|token|password|passwd|pwd|api[_-]?key|access[_-]?key|private[_-]?key|credential)"""
-    r"""[\w.-]*\s*[:=]\s*["']([^"'\s]{8,})["']"""
-)
-_QUOTED_ASSIGNMENT = re.compile(r"""[:=]\s*["']([A-Za-z0-9+/=_\-]{20,})["']""")
-HIGH_ENTROPY_BITS_PER_CHAR = 4.0
+
+_SHORT_NUMBER = re.compile(r"[\d.,:_+-]{1,4}")
+_CHOICE_QUESTION = "choice"
+
+__all__ = [
+    "BY_CONTENT_MIN_CHARS",
+    "HIGH_ENTROPY_MIN_CHARS",
+    "MASK",
+    "TOKEN_CHARACTER_CLASS",
+    "Masker",
+    "Scanner",
+    "SecretInRequestError",
+    "SecretMasker",
+    "SecretScanner",
+    "is_high_entropy",
+    "mask_by_content",
+    "mask_everywhere",
+    "mask_request",
+    "masked_values",
+    "refuse_if_secret",
+    "safe_options",
+]
 
 
 class Masker(Protocol):
     """``mask`` hides secrets in one text; ``masked_values`` lists the values it hides there, so they
     can be hidden everywhere else in the request too."""
 
-    def mask(self, text: str) -> str: ...
+    def mask(self, text: str, path: str | None = None) -> str: ...
 
-    def masked_values(self, text: str) -> list[str]: ...
+    def masked_values(self, text: str, path: str | None = None) -> list[str]: ...
 
 
 class Scanner(Protocol):
-    def findings(self, text: str) -> list[str]: ...
+    def findings(self, text: str, path: str | None = None) -> list[str]: ...
 
 
 class SecretInRequestError(RuntimeError):
@@ -58,26 +66,23 @@ class SecretInRequestError(RuntimeError):
 
 @dataclass(frozen=True)
 class SecretMasker:
-    """Private-key blocks with their BEGIN and END lines, common token shapes, secret-named
-    assignments, and high-entropy quoted values in assignments."""
+    """Masks secret values and keeps code: private-key blocks, common token shapes, Bearer values,
+    env-file values, quoted, bare and fallback values under secret-named keys, literal arguments to
+    secret-named calls, and high-entropy quoted values in assignments. A value that is a reference
+    (an identifier, dotted path, call, env lookup or interpolation) is code and stays.
 
-    def mask(self, text: str) -> str:
-        text = _PRIVATE_KEY_BLOCK.sub(MASK, text)
-        text = _KEY_MARKER_LINE.sub(MASK, text)
-        for shape in _TOKEN_SHAPES:
-            text = shape.sub(MASK, text)
-        text = _SECRET_ASSIGNMENT.sub(_mask_group, text)
-        return _QUOTED_ASSIGNMENT.sub(_mask_if_high_entropy, text)
+    ``masked_values`` lists every masked value but a short number (``"1.5"``, ``"0"``), so request masking
+    hides each copy elsewhere too: anywhere for a value of ``BY_CONTENT_MIN_CHARS`` or more characters,
+    as a whole word for a shorter one (see ``copy_pattern``).
 
-    def masked_values(self, text: str) -> list[str]:
-        found = [match.group(0) for match in _PRIVATE_KEY_BLOCK.finditer(text)]
-        found += [match.group(0) for match in _KEY_MARKER_LINE.finditer(text)]
-        found += [match.group(0) for shape in _TOKEN_SHAPES for match in shape.finditer(text)]
-        found += [match.group(1) for match in _SECRET_ASSIGNMENT.finditer(text)]
-        found += [
-            match.group(1) for match in _QUOTED_ASSIGNMENT.finditer(text) if _is_high_entropy(match.group(1))
-        ]
-        return [value for value in found if value != MASK]
+    ``path`` is the file the text comes from. In a config file, or in text from no file, an unquoted value
+    under a secret key is a value (``POSTGRES_PASSWORD: example``); in code it stays (``token: str``)."""
+
+    def mask(self, text: str, path: str | None = None) -> str:
+        return hide_secrets(text, path)[0]
+
+    def masked_values(self, text: str, path: str | None = None) -> list[str]:
+        return [value for value in hide_secrets(text, path)[1] if _is_copied(value)]
 
 
 DEFAULT_MASKER = SecretMasker()
@@ -88,22 +93,19 @@ DEFAULT_MASKER = SecretMasker()
 class SecretScanner:
     """Reports what the built-in masker would have masked; used as the final check before sending."""
 
-    def findings(self, text: str) -> list[str]:
-        found = [match.group(0)[:12] for match in _KEY_MARKER_LINE.finditer(text)]
-        found += [match.group(0)[:8] for shape in _TOKEN_SHAPES for match in shape.finditer(text)]
-        found += [match.group(1)[:4] for match in _SECRET_ASSIGNMENT.finditer(text) if match.group(1) != MASK]
-        found += [
-            match.group(1)[:4]
-            for match in _QUOTED_ASSIGNMENT.finditer(text)
-            if _is_high_entropy(match.group(1))
-        ]
-        return found
+    def findings(self, text: str, path: str | None = None) -> list[str]:
+        return [value[:4] for value in hide_secrets(text, path)[1]]
 
 
 def mask_request(state: Mapping, questions: Mapping, masker: Masker) -> tuple[Mapping, Mapping, frozenset]:
-    """The masked state and questions, and every value that was hidden in either."""
+    """The masked state and questions, and every value that was hidden in either. JVN's own question
+    wording keeps its words (see ``_wording_keys``)."""
     values = masked_values([state, questions], masker)
-    return mask_everywhere(state, masker, values), mask_everywhere(questions, masker, values), values
+    return (
+        mask_everywhere(state, masker, values),
+        mask_everywhere(questions, masker, values, questions=True),
+        values,
+    )
 
 
 def mask_by_content(value: object, masker: Masker) -> object:
@@ -113,22 +115,28 @@ def mask_by_content(value: object, masker: Masker) -> object:
 
 def masked_values(value: object, masker: Masker) -> frozenset[str]:
     """Every value the masker hides anywhere inside nested JSON-like data, keys included."""
-    return frozenset(found for text in dict.fromkeys(_strings(value)) for found in masker.masked_values(text))
+    return frozenset(
+        found
+        for text in dict.fromkeys(_strings(value))
+        for found in masker.masked_values(text.text, text.path)
+    )
 
 
-def mask_everywhere(value: object, masker: Masker, values: frozenset[str]) -> object:
+def mask_everywhere(value: object, masker: Masker, values: frozenset[str], questions: bool = False) -> object:
     """Masks every string by the masker's rules, then hides each of ``values`` wherever it still
-    appears. Keys are left as they are; ``refuse_if_secret`` refuses a request with one in a key."""
-    longest_first = sorted(values - {MASK}, key=len, reverse=True)
+    appears. Keys are left as they are. In ``questions``, JVN's own wording hides no copies."""
+    copies = [copy_pattern(secret) for secret in sorted(values - {MASK}, key=len, reverse=True)]
 
     @cache
-    def hide(text: str) -> str:
-        text = masker.mask(text)
-        for secret in longest_first:
-            text = text.replace(secret, MASK)
+    def hide(text: str, path: str | None, role: str) -> str:
+        text = masker.mask(text, path)
+        if role == "wording":
+            return text
+        for copy in copies:
+            text = copy.sub(MASK, text)
         return text
 
-    return _each_string(value, hide)
+    return _each_string(value, hide, questions=questions)
 
 
 def safe_options(options: Mapping[str, str], masker: Masker | None) -> dict[str, str]:
@@ -141,47 +149,108 @@ def safe_options(options: Mapping[str, str], masker: Masker | None) -> dict[str,
 def refuse_if_secret(
     state: Mapping, questions: Mapping, scanner: Scanner | None, masked: frozenset[str] = frozenset()
 ) -> None:
-    """Refuses when a value masked elsewhere is still in the request (it can only sit in a key), or
-    when the scanner finds a secret."""
-    texts = _strings(state) + _strings(questions)
-    if any(value in text for text in texts for value in masked):
+    """Refuses when a value masked elsewhere is still in the request, or when the scanner finds a secret.
+    A key counts only for a value of ``BY_CONTENT_MIN_CHARS`` or more characters (a short value such as
+    ``"false"`` equals JVN's own keys), and question wording, which keeps its words, never counts."""
+    texts = _strings(state) + _strings(questions, questions=True)
+    copies = [(value, copy_pattern(value)) for value in masked - {MASK}]
+    if any(_holds_copy(text, value, copy) for text in texts for value, copy in copies):
         raise SecretInRequestError("a masked value is still in the request, in a key; nothing was sent")
     if scanner is None:
         return
     for text in texts:
-        if scanner.findings(text):
+        if scanner.findings(text.text, text.path):
             raise SecretInRequestError("the final scan found a secret in the request; nothing was sent")
 
 
-def _each_string(value: object, change: Callable[[str], str]) -> object:
+def copy_pattern(value: str) -> re.Pattern[str]:
+    """Where a masked value's copies stand: anywhere for a value of ``BY_CONTENT_MIN_CHARS`` or more
+    characters, and as a whole word for a shorter one, so ``hunter2`` is hidden but ``hunter2x`` stays."""
+    if len(value) >= BY_CONTENT_MIN_CHARS:
+        return re.compile(re.escape(value))
+    return re.compile(rf"(?<![\w$]){re.escape(value)}(?![\w$])")
+
+
+@dataclass(frozen=True)
+class _RequestText:
+    """A string of a request, the file it comes from, and its role: a "value", a "key" of the request's
+    structure, or question "wording"."""
+
+    text: str
+    path: str | None
+    role: str
+
+
+def _holds_copy(text: _RequestText, value: str, copy: re.Pattern[str]) -> bool:
+    if text.role == "wording" or (text.role == "key" and len(value) < BY_CONTENT_MIN_CHARS):
+        return False
+    return bool(copy.search(text.text))
+
+
+def _is_copied(value: str) -> bool:
+    """A masked value is hidden everywhere else too, unless it is a number of at most four characters or
+    holds no letter or digit (``"<"``)."""
+    return any(character.isalnum() for character in value) and not _SHORT_NUMBER.fullmatch(value)
+
+
+def _wording_keys(mapping: Mapping, questions: bool) -> frozenset[str]:
+    """The keys of a question that hold JVN's own wording, written from code: its instructions, and its
+    criteria unless it is a choice, whose criteria are the options code supplies (signatures)."""
+    if not questions or "instructions" not in mapping:
+        return frozenset()
+    return frozenset(
+        {"instructions"} if mapping.get("type") == _CHOICE_QUESTION else {"instructions", "criteria"}
+    )
+
+
+def _each_string(
+    value: object,
+    change: Callable[[str, str | None, str], str],
+    path: str | None = None,
+    role: str = "value",
+    questions: bool = False,
+) -> object:
+    """Changes every string, each with the file it comes from (see ``_file_of``) and its role."""
     if isinstance(value, str):
-        return change(value)
+        return change(value, path, role)
     if isinstance(value, Mapping):
-        return {key: _each_string(item, change) for key, item in value.items()}
+        inner, wording = _file_of(value, path), _wording_keys(value, questions)
+        return {
+            key: _each_string(item, change, inner, "wording" if key in wording else role, questions)
+            for key, item in value.items()
+        }
     if isinstance(value, list | tuple):
-        return [_each_string(item, change) for item in value]
+        return [_each_string(item, change, path, role, questions) for item in value]
     return value
 
 
-def _strings(value: object) -> list[str]:
+def _strings(
+    value: object, path: str | None = None, role: str = "value", questions: bool = False
+) -> list[_RequestText]:
+    """Every string, keys included, with the file it comes from and its role."""
     if isinstance(value, str):
-        return [value]
+        return [_RequestText(value, path, role)]
     if isinstance(value, Mapping):
-        return [text for key, item in value.items() for text in [str(key), *_strings(item)]]
+        inner, wording = _file_of(value, path), _wording_keys(value, questions)
+        return [
+            text
+            for key, item in value.items()
+            for text in [
+                _RequestText(str(key), None, "key"),
+                *_strings(item, inner, "wording" if key in wording else role, questions),
+            ]
+        ]
     if isinstance(value, list | tuple):
-        return [text for item in value for text in _strings(item)]
+        return [text for item in value for text in _strings(item, path, role, questions)]
     return []
 
 
-def _mask_group(match: re.Match) -> str:
-    return match.group(0).replace(match.group(1), MASK)
-
-
-def _mask_if_high_entropy(match: re.Match) -> str:
-    return _mask_group(match) if _is_high_entropy(match.group(1)) else match.group(0)
-
-
-def _is_high_entropy(value: str) -> bool:
-    counts = Counter(value)
-    bits = -sum(count / len(value) * math.log2(count / len(value)) for count in counts.values())
-    return bits >= HIGH_ENTROPY_BITS_PER_CHAR
+def _file_of(mapping: Mapping, outer: str | None) -> str | None:
+    """The file a mapping's strings come from: its ``file`` (a slice's code), or the file its
+    ``signature`` names (a candidate's preview), else the enclosing mapping's."""
+    file = mapping.get("file")
+    if isinstance(file, str):
+        return file
+    signature = mapping.get("signature")
+    named = located_file(signature) if isinstance(signature, str) else None
+    return named or outer
