@@ -7,6 +7,8 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 
 | Piece | What it gives you |
 | --- | --- |
+| `resolve_scope` | the files a search covers from folders, patterns, languages and a git ref, with tests, generated, vendored code and docs left out by default; a file only its shape marks as possibly generated is set aside under an output folder (`dist`, `build`, `generated`), and otherwise awaits Jev's generated judgment with its measured facts; a scope over its cap is refused with counts per folder and language (README, "Choosing the files a search covers") |
+| `judge_generated_files` | Jev's generated-file judgment for the files a scope left undecided: one question per file over its path, measured facts, up to 10 importers and up to 5 files naming its path, each with their true count, and two excerpts; a file the secret scan refuses is named as not judged (README, "Choosing the files a search covers") |
 | `CodeIndex` | mechanical lookups over a narrowed scope: definitions, callers, callees, references, text, imports, git history |
 | `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc |
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
@@ -136,7 +138,9 @@ only for the same source bytes, scope, target, Check and thresholds; the CLI ver
 in its saved pack. Completed positive, negative and uncertain judgments retain their original
 request hashes and are not sent again. Static graph reconstruction does not consume model calls.
 Cancellation keeps coverage partial and reporting does not trigger scans of untouched files.
-Provider errors propagate; retained journal receipts describe the work actually performed.
+Ctrl-C during judging ends it `cancelled`, and a failed request ends it `failed` with `failure` holding
+the same error; both keep every answer that arrived in `judged`, so `completed=` resumes it. Retained
+journal receipts describe the work actually performed.
 
 The CLI composes entry selection and `find_code` with this function. A seed-search miss still permits
 the disconnected fallback. Use `jvn findall "functions that enforce the order item limit"` or
@@ -165,6 +169,15 @@ The CLI creates a unique run folder under `$XDG_DATA_HOME/jev-navigator/runs/` w
 omitted. Each run retains its report, manifest and request journal. An `--out` folder inside the
 searched directory is excluded from the CLI's source inventory so repeated searches do not search
 their own evidence. Library callers can similarly pass `exclude_paths` to `CodeIndex.from_directory`.
+
+The CLI indexes every file under the search root whether git tracks it or not, minus ignored ones: in a
+Git worktree by git's ignore rules, including the lines of an enclosing repository's .gitignore that
+match the root, and outside Git by ripgrep's ignore files. Each file or folder left out (ignored, a
+separate git repository, a symbolic link) is named with its reason in `search.not_indexed_files`,
+`trace.not_indexed_files` or the statistics pack's `coverage.not_indexed`; the reports count them by
+reason and top folder, so thousands of ignored build outputs stay one row. A left-out folder that holds
+no indexed file is named once, ending in `/`. A file that is new or edited since the last commit is
+read from the disk, and its slices carry the commit plus `+worktree`.
 
 Agents can pass the same CLI request as JSON with `jvn --json request.json`, an inline JSON object,
 or `jvn --json -` for stdin. `jvn schema find` emits its JSON Schema without model calls. The CLI parser remains the single owner of options, types and defaults. `target` is

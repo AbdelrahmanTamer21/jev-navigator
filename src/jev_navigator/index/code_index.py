@@ -9,13 +9,13 @@ from __future__ import annotations
 import re
 import tempfile
 import threading
+import weakref
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from functools import cache
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
-from . import tools
+from . import listing, tools
 from .bindings import (
     Binding,
     BindingResolver,
@@ -38,6 +38,7 @@ from .imports import (
 from .languages import (
     language_of,
 )
+from .memo import memoized
 from .name_table import CALL, DEFINITION_KINDS, REFERENCE, FileEntry, NameRow, NameTable, git_blob_id
 from .packages import Packages
 from .scope_scan import (
@@ -56,6 +57,8 @@ from .tsconfig import ScriptPaths, nearest_script_paths
 
 DEFAULT_WINDOW_RADIUS = 10
 MAX_TEXT_HITS = 20
+# The bytes kept on either side of a text hit, so a hit in a one-line bundle never holds the line.
+TEXT_HIT_CONTEXT_BYTES = 200
 CO_CHANGE_COMMITS = 200
 LINE_CACHE_FILES = 512
 _COMMIT_MARK = "@@commit@@"
@@ -66,7 +69,7 @@ _Result = TypeVar("_Result")
 CoChange = tuple[str, int]
 
 
-_NO_STRUCTURE = FileStructure((), (), (), (), (), (), ())
+_NO_STRUCTURE = FileStructure()
 _KIND_ORDER = {kind: rank for rank, kind in enumerate((*DEFINITION_KINDS, CALL, REFERENCE))}
 
 
@@ -97,6 +100,7 @@ class CodeIndex:
         scan_observer: ScanObserver | None = None,
         fact_cache_dir: Path | None = None,
         blob_ids: Mapping[str, str] | None = None,
+        not_indexed: Mapping[str, str] | None = None,
     ) -> None:
         self.root = Path(root)
         self.git_root = Path(git_root) if git_root is not None else self.root
@@ -115,9 +119,10 @@ class CodeIndex:
         self._code_files = tuple(path for path in self.files if language_of(path))
         self._unavailable: dict[str, str] = {}
         self._refused: dict[str, str] = {}
-        self._sources = SourceFiles(self.root, self._unavailable, LINE_CACHE_FILES, self._standing_first_read)
-        self._script_paths_in = cache(self._read_script_paths)
-        self._packages = cache(self._read_packages)
+        self._not_indexed = dict(not_indexed or {})
+        self._sources = SourceFiles(
+            self.root, self._unavailable, LINE_CACHE_FILES, _held_weakly(self._standing_first_read)
+        )
         self._unparsed = Unparsed()
         self._facts: dict[str, FileFacts] = {}
         self._facts_lock = threading.RLock()
@@ -133,22 +138,6 @@ class CodeIndex:
         self._file_order: dict[str, int] = {}
         self._reached: set[str] = set()
         self._incomplete_in_table: frozenset[str] = frozenset()
-        self._named = cache(self._places_named)
-        self._text_hits = cache(self._search_text)
-        self._co_changes = cache(self._read_co_changes)
-        self._calls_named = cache(self._calls_with_name)
-        self._references_named = cache(self._references_with_name)
-        self._definitions = cache(self._definitions_by_name)
-        self._module_scope_in = cache(self._module_scope_spans)
-        self._export_names_in = cache(self._read_export_names)
-        self._reexports_in = cache(self._read_reexports)
-        self._exporters = cache(self._read_exporters)
-        self._importable_in = cache(self._read_importable_definitions)
-        self._names_imported = cache(self._read_imported_names)
-        self._local_scopes = cache(self._read_local_scopes)
-        self._binding = cache(self._compute_binding)
-        self._nameable = cache(self._nameable_definitions)
-        self._unread_names = cache(self._read_unread_names)
 
     @classmethod
     def from_git(
@@ -161,22 +150,25 @@ class CodeIndex:
         scan_observer: ScanObserver | None = None,
         fact_cache_dir: Path | None = None,
     ) -> CodeIndex:
-        """The tracked regular files under ``prefixes`` (every one when none are given). Symbolic links
-        and submodules are left out: a link can point outside the scope, or at a directory."""
+        """The regular files git tracks under ``prefixes`` (every one when none are given), read from the
+        checkout at its commit; for a repository root with an explicit path list. Symbolic links and
+        submodules are left out: a link can point outside the scope, or at a directory. Every file under
+        the root that is not tracked, and a requested path with no file, is named in
+        ``not_indexed_files``; ``from_directory`` indexes untracked files too."""
         root = Path(root)
         blobs = _regular_blobs(tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root))
         commit = tools.git(["rev-parse", "HEAD"], root).strip()
-        changed = _changed_paths(tools.git(["status", "--porcelain", "-z", "--", *prefixes], root))
         return cls(
             root,
             list(blobs),
             max_files=max_files,
             commit=commit,
-            changed_files=changed,
+            changed_files=_changed_under(root, prefixes),
             binding_resolver=binding_resolver,
             scan_observer=scan_observer,
             fact_cache_dir=fact_cache_dir,
             blob_ids=blobs,
+            not_indexed=listing.left_out_of_tracked(root, prefixes, blobs),
         )
 
     @classmethod
@@ -191,17 +183,20 @@ class CodeIndex:
         scan_observer: ScanObserver | None = None,
         fact_cache_dir: Path | None = None,
     ) -> CodeIndex:
-        """Index current files using ripgrep's ignore policy, with Git metadata when available.
+        """Index current files, tracked by git or not, minus ignored ones (see ``listing.working_files``),
+        with Git metadata when available.
 
-        Modified and untracked files are included. In a Git worktree, slices carry the current HEAD
-        plus ``+worktree`` when their file differs; outside Git they carry no commit. Every slice
-        also carries its current file SHA-256, so either case identifies the inspected bytes.
+        Modified and untracked files are included; ignored ones are named in ``not_indexed_files``. In a
+        Git worktree, slices carry the current HEAD plus ``+worktree`` when their file differs; outside
+        Git they carry no commit. Every slice also carries its current file SHA-256, so either case
+        identifies the inspected bytes.
         """
         root = Path(root)
         excluded = tuple(path.resolve() for path in exclude_paths)
+        listed = listing.working_files(root, prefixes)
         files = tuple(
             file
-            for file in tools.listed_files(root, prefixes)
+            for file in listed.files
             if not any((root / file).resolve().is_relative_to(path) for path in excluded)
         )
         commit, changed, blobs = _working_git_metadata(root, prefixes)
@@ -215,6 +210,7 @@ class CodeIndex:
             scan_observer=scan_observer,
             fact_cache_dir=fact_cache_dir,
             blob_ids=blobs,
+            not_indexed=listed.not_indexed,
         )
 
     @classmethod
@@ -311,6 +307,12 @@ class CodeIndex:
         return dict(self._refused)
 
     @property
+    def not_indexed_files(self) -> dict[str, str]:
+        """Files and folders under the root that were never part of the scope, each with the reason, such
+        as ignored; a folder ends in ``/``."""
+        return dict(self._not_indexed)
+
+    @property
     def available_files(self) -> tuple[str, ...]:
         return self._available_files(self.files)
 
@@ -353,6 +355,12 @@ class CodeIndex:
         self._reached.update(files)
         return {file: self._facts[file] for file in files if file in self._facts}
 
+    def read_language(self, file: str) -> str | None:
+        """The language ``file``'s facts were read as, so every later scan of the file reads it with
+        the same grammar; None when no grammar read it."""
+        facts = self.facts_in_files([file]).get(file)
+        return facts.language if facts is not None else None
+
     def definitions_in(self, file: str) -> tuple[Span, ...]:
         """The named functions, classes and declarations in ``file``, from the name table, so a
         warm index answers without loading the file's facts."""
@@ -378,16 +386,17 @@ class CodeIndex:
     def find_definition(self, name: str) -> tuple[Span, ...]:
         """Functions, classes, and the constants, assignments, types, interfaces and enums of
         ``declarations_in``."""
-        return self._definitions(name)
+        return self._definitions_by_name(name)
 
     def find_callers(self, name: str) -> tuple[CallSite, ...]:
         """Calls to ``name`` found by name in the syntax tree, each with its binding status. When one
         line holds both ``x.name(...)`` and ``name(...)``, the plain call stands for that line."""
         sites: dict[tuple[str, int], str | None] = {}
-        for call in self._calls_named(name):
+        for call in self._calls_with_name(name):
             key = (call.file, call.line)
             if call.name == name and (key not in sites or call.receiver is None):
                 sites[key] = call.receiver
+        self._load_facts_for_bindings(name, (file for file, _ in sites))
         return tuple(
             CallSite(
                 file, line, self.enclosing_symbol(file, line), self.binding_of(file, line, name, receiver)
@@ -397,7 +406,7 @@ class CodeIndex:
 
     def call_site_count(self, name: str) -> int:
         """How many call sites in scope call ``name``; a name called from fewer places is more specific."""
-        return len(self._calls_named(name))
+        return len(self._calls_with_name(name))
 
     def find_callees(self, function: Span) -> tuple[str, ...]:
         """Names called inside ``function``; see ``callee_edges`` for their bindings."""
@@ -424,7 +433,9 @@ class CodeIndex:
         parameter typed with a class, a subclass) has no call edge to follow. A member passed as an
         argument (``self.handler``) is bound like a method call on an unknown receiver, never proven
         by a same-named function."""
-        return self._references(self._references_named(name))
+        matches = self._references_with_name(name)
+        self._load_facts_for_bindings(name, (match.file for match in matches))
+        return self._references(matches)
 
     def references_in(self, function: Span) -> tuple[Reference, ...]:
         """Names ``function`` passes on without calling them, limited to names defined in scope."""
@@ -444,7 +455,7 @@ class CodeIndex:
         declaration a type can name, an export any definition, and a call or any other use (an
         argument, receiver, condition, decorator...) a function, class or declaration a value can
         name, such as a module constant holding a callable."""
-        return self._binding(file, line, name, receiver, role)
+        return self._compute_binding(file, line, name, receiver, role)
 
     def _references(self, matches: Iterable[ReferenceMatch]) -> tuple[Reference, ...]:
         matches = sorted(set(matches))
@@ -460,6 +471,7 @@ class CodeIndex:
             for match in matches
         )
 
+    @memoized
     def _compute_binding(
         self, file: str, line: int, name: str, receiver: str | None, role: str | None
     ) -> Binding:
@@ -487,7 +499,7 @@ class CodeIndex:
         return in_namespace if in_namespace is not None else self._binding_through_import(file, name, role)
 
     def _call_facts(self, file: str, name: str, receiver: str | None, role: str | None) -> CallFacts:
-        definitions, module_scope = self._nameable(name, role)
+        definitions, module_scope = self._nameable_definitions(name, role)
         return CallFacts(
             file,
             name,
@@ -540,19 +552,31 @@ class CodeIndex:
         if role in ("type", "export"):
             return False
         looked_up = name if receiver is None else first_identifier(receiver)
-        return any(first <= line <= last for first, last in self._local_scopes(file).get(looked_up, ()))
+        return any(first <= line <= last for first, last in self._read_local_scopes(file).get(looked_up, ()))
 
+    @memoized
     def _read_local_scopes(self, file: str) -> dict[str, tuple[tuple[int, int], ...]]:
         scopes: dict[str, list[tuple[int, int]]] = {}
         for local in self._file_structure(file).local_names:
             scopes.setdefault(local.name, []).append((local.first, local.last))
         return {name: tuple(lines) for name, lines in scopes.items()}
 
+    def _load_facts_for_bindings(self, name: str, use_files: Iterable[str]) -> None:
+        """Loads, in one scan, the facts that binding the uses of ``name`` reads: the files the uses
+        sit in and the files that define the name. With a warm table and an empty fact cache they
+        would otherwise load one file per scan. A name nothing uses loads nothing."""
+        uses = tuple(use_files)
+        if not uses:
+            return
+        definition_files = (span.file for span in self.find_definition(name))
+        self._ensure_facts(tuple(dict.fromkeys((*uses, *definition_files))))
+
+    @memoized
     def _nameable_definitions(self, name: str, role: str | None) -> tuple[tuple[Span, ...], tuple[Span, ...]]:
         """The definitions of ``name`` a use in ``role`` can name, and those of them their module's
         scope names. Neither depends on where the use sits, so every use of a name shares them."""
         definitions = tuple(span for span in self.find_definition(name) if self._can_name(role, span))
-        return definitions, tuple(span for span in definitions if span in self._module_scope_in(span.file))
+        return definitions, tuple(span for span in definitions if span in self._module_scope_spans(span.file))
 
     def _files_hiding(self, name: str) -> frozenset[str]:
         """Where a definition of ``name`` could sit unseen: a file gone from the disk, or an unparsed or
@@ -560,9 +584,10 @@ class CodeIndex:
         lines that never mention the name cannot hold one. Every file that mentions it has already
         been scanned to look for its definitions, so the answer does not depend on scan order."""
         unread = (*self._known_unparsed(), *self._refused)
-        mentioning = (file for file in unread if name in self._unread_names(file))
+        mentioning = (file for file in unread if name in self._read_unread_names(file))
         return frozenset(mentioning) | self._unavailable.keys()
 
+    @memoized
     def _read_unread_names(self, file: str) -> frozenset[str]:
         """The words on the lines of ``file`` that its ERROR nodes span; the whole file's words while
         its facts are still being recorded, or when the parser refused it."""
@@ -578,6 +603,7 @@ class CodeIndex:
             return _NO_STRUCTURE
         return self._facts_in(file).structure
 
+    @memoized
     def _definitions_by_name(self, name: str) -> tuple[Span, ...]:
         definitions = {
             Span(file, row.start, row.end, name): None
@@ -594,12 +620,14 @@ class CodeIndex:
             return role != "type" or span not in structure.functions
         return span in (structure.type_declarations if role == "type" else structure.value_declarations)
 
+    @memoized
     def _calls_with_name(self, name: str) -> tuple[CallMatch, ...]:
         return tuple(
             CallMatch(file, row.start, name, row.receiver)
             for file, row in self._readable_places(name, (CALL,))
         )
 
+    @memoized
     def _references_with_name(self, name: str) -> tuple[ReferenceMatch, ...]:
         return tuple(
             ReferenceMatch(file, row.start, row.role or "", name, row.receiver)
@@ -609,10 +637,11 @@ class CodeIndex:
     def _readable_places(self, name: str, kinds: Sequence[str]) -> Iterator[tuple[str, NameRow]]:
         """The places of ``name`` of ``kinds`` in files still readable: a file that disappeared or
         changed since the scope was covered answers nothing."""
-        for file, row in self._named(name):
+        for file, row in self._places_named(name):
             if row.kind in kinds and file not in self._unavailable:
                 yield file, row
 
+    @memoized
     def _places_named(self, name: str) -> tuple[tuple[str, NameRow], ...]:
         """Every place in scope ``name`` sits, as (file, row), in file order and then in the order of
         the file's facts: definitions first, symbols before declarations."""
@@ -698,8 +727,7 @@ class CodeIndex:
 
     def _parse(self, contents: Mapping[str, bytes]) -> None:
         """Parses the files whose bytes are ``contents``; the caller holds the facts lock."""
-        to_scan = tuple(contents)
-        scanned = self._run_scan("facts", lambda: self._scan_available_facts(to_scan), len(to_scan))
+        scanned = self._run_scan("facts", lambda: self._scan_available_facts(contents), len(contents))
         for file, facts in scanned.items():
             if self._read_bytes(file) is None:
                 continue
@@ -729,9 +757,12 @@ class CodeIndex:
                 self._unparsed.add("facts", (file,))
         return to_parse
 
-    def _scan_available_facts(self, files: Sequence[str]) -> dict[str, FileFacts]:
+    def _scan_available_facts(self, contents: Mapping[str, bytes]) -> dict[str, FileFacts]:
         return self._on_available(
-            tuple(files), lambda remaining: scan_facts(remaining, self.root, self._unparsed)
+            tuple(contents),
+            lambda remaining: scan_facts(
+                {file: contents[file] for file in remaining}, self.root, self._unparsed
+            ),
         )
 
     def _on_available(self, files: tuple[str, ...], run: Callable[[tuple[str, ...]], _Result]) -> _Result:
@@ -746,6 +777,7 @@ class CodeIndex:
                     raise
                 files = available
 
+    @memoized
     def _module_scope_spans(self, file: str) -> frozenset[Span]:
         """Symbols and declarations that ``file``'s module scope names; the scan decides it for
         symbols from the syntax tree."""
@@ -798,7 +830,9 @@ class CodeIndex:
         return imports_otherwise or self._binds_otherwise(init, member) or init in self._files_hiding(member)
 
     def _module_path(self, file: str, specifier: str) -> str | None:
-        resolved = resolve_import(specifier, file, self._scope, self._script_paths(file), self._packages())
+        resolved = resolve_import(
+            specifier, file, self._scope, self._script_paths(file), self._read_packages()
+        )
         return None if resolved is None else resolved.path
 
     def _binding_through_import(self, file: str, name: str, role: str | None) -> Binding | None:
@@ -807,7 +841,7 @@ class CodeIndex:
         name``), or as a default import, which takes the module's default export. Decided from the module the
         import names (see ``_binding_through_exporters``). None when nothing imports ``name``, when
         ``file`` defines ``name`` itself, or when the import names no module of the scope."""
-        imported = self._names_imported(file).get(name)
+        imported = self._read_imported_names(file).get(name)
         if imported is None or self._defines(file, name, role):
             return None
         return self._binding_through_exporters(file, imported.specifier, imported.exported or "default", role)
@@ -820,11 +854,13 @@ class CodeIndex:
         of the scope: one definition proves the target, several leave a candidate, an exporter that
         may hide it (see ``_hides``) leaves it unknown, and no definition leaves a candidate naming
         the modules. None when ``specifier`` names no module of the scope."""
-        exporters = self._exporters(file, specifier, name)
+        exporters = self._read_exporters(file, specifier, name)
         if not exporters:
             return None
         definitions = tuple(
-            span for exporter in exporters for span in self._importable_in(exporter.path, name, role)
+            span
+            for exporter in exporters
+            for span in self._read_importable_definitions(exporter.path, name, role)
         )
         hiding = {exporter.path for exporter in exporters if self._hides(exporter.path, name)}
         return binding_from_facts(
@@ -848,8 +884,11 @@ class CodeIndex:
 
     def _defines(self, file: str, name: str, role: str | None) -> bool:
         """Whether ``file``'s module scope defines ``name`` as a definition ``role`` can name."""
-        return any(span.name == name and self._can_name(role, span) for span in self._module_scope_in(file))
+        return any(
+            span.name == name and self._can_name(role, span) for span in self._module_scope_spans(file)
+        )
 
+    @memoized
     def _read_importable_definitions(self, file: str, name: str, role: str | None) -> tuple[Span, ...]:
         """The definitions another module imports from ``file`` as ``name``, symbols before
         declarations as ``find_definition`` orders them; every importer shares them. A Python module
@@ -859,7 +898,7 @@ class CodeIndex:
         the functions and classes it assigns to CommonJS exports."""
         structure = self._file_structure(file)
         own_names = self._own_names(file, name)
-        exported = {span for span in self._module_scope_in(file) if span.name in own_names}
+        exported = {span for span in self._module_scope_spans(file) if span.name in own_names}
         exported |= {span for span in structure.commonjs_exports if span.name == name}
         return tuple(
             span
@@ -869,13 +908,14 @@ class CodeIndex:
 
     def _own_names(self, file: str, name: str) -> frozenset[str]:
         """The names of the definitions ``file`` exports as ``name``: the same name in a Python
-        module, and in a script module the ones ``_export_names_in`` gives."""
+        module, and in a script module the ones ``_read_export_names`` gives."""
         return (
             frozenset((name,))
             if language_of(file) == "python"
-            else self._export_names_in(file).get(name, frozenset())
+            else self._read_export_names(file).get(name, frozenset())
         )
 
+    @memoized
     def _read_export_names(self, file: str) -> dict[str, frozenset[str]]:
         """Each name script module ``file`` exports from its own definitions, ``default`` for its
         default export, with the names of the definitions it may export under it: a module that
@@ -887,10 +927,13 @@ class CodeIndex:
         own_names = {name: frozenset((name,)) for name in (*facts.export_names, *facts.exported_values)}
         return own_names | {exported: frozenset(owns) for exported, owns in renamed.items()}
 
+    @memoized
     def _read_exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
         """The module ``file``'s import of ``specifier`` resolves to, then each module it re-exports
         ``name`` from, with the evidence for each."""
-        resolved = resolve_import(specifier, file, self._scope, self._script_paths(file), self._packages())
+        resolved = resolve_import(
+            specifier, file, self._scope, self._script_paths(file), self._read_packages()
+        )
         if resolved is None:
             return ()
         found = {resolved.path: resolved}
@@ -898,7 +941,7 @@ class CodeIndex:
         seen = {(resolved.path, resolved.proven)}
         while pending:
             exporter = pending.pop()
-            for names, target_specifier in self._reexports_in(exporter.path):
+            for names, target_specifier in self._read_reexports(exporter.path):
                 if names is not None and name not in names:
                     continue
                 target = resolve_import(
@@ -906,7 +949,7 @@ class CodeIndex:
                     exporter.path,
                     self._scope,
                     self._script_paths(exporter.path),
-                    self._packages(),
+                    self._read_packages(),
                 )
                 if target is None:
                     continue
@@ -919,16 +962,18 @@ class CodeIndex:
                 if identity in seen:
                     continue
                 seen.add(identity)
-                if self._refused_parse(inherited.path) or name in self._export_names_in(inherited.path):
+                if self._refused_parse(inherited.path) or name in self._read_export_names(inherited.path):
                     prior = found.get(inherited.path)
                     if prior is None or inherited.proven:
                         found[inherited.path] = inherited
                 pending.append(inherited)
         return tuple(found.values())
 
+    @memoized
     def _read_reexports(self, file: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
         return reexported_names("\n".join(self._lines_of(file)), file)
 
+    @memoized
     def _read_imported_names(self, file: str) -> dict[str, ImportedName]:
         return imported_names("\n".join(self._lines_of(file)), file)
 
@@ -964,14 +1009,21 @@ class CodeIndex:
         span = Span(file, max(1, line - radius), min(len(self._lines_of(file)), line + radius))
         return self.read_slice(span, origin)
 
-    def search_text(self, text: str, max_hits: int = MAX_TEXT_HITS) -> tuple[TextHit, ...]:
-        """Lines holding ``text``, searched once per text for the life of the index."""
-        return self._text_hits(text, max_hits)
+    def search_text(
+        self, text: str, max_hits: int = MAX_TEXT_HITS, *, whole_word: bool = False
+    ) -> tuple[TextHit, ...]:
+        """Lines holding ``text``, searched once per text for the life of the index. A hit's text is
+        the line up to ``TEXT_HIT_CONTEXT_BYTES`` around its first match; ``whole_word`` keeps only
+        matches no word character touches."""
+        return self._search_text(text, max_hits, whole_word)
 
-    def _search_text(self, text: str, max_hits: int) -> tuple[TextHit, ...]:
+    @memoized
+    def _search_text(self, text: str, max_hits: int, whole_word: bool) -> tuple[TextHit, ...]:
         found = self._on_available(
             self._available_files(self.files),
-            lambda files: tools.ripgrep_fixed(text, files, self.root, max_hits),
+            lambda files: tools.ripgrep_fixed(
+                text, files, self.root, max_hits, TEXT_HIT_CONTEXT_BYTES, whole_word=whole_word
+            ),
         )
         hits = sorted(hit for hit in found if hit.file in self._scope)
         return tuple(hits[:max_hits])
@@ -979,7 +1031,7 @@ class CodeIndex:
     def imports(self, file: str) -> tuple[str, ...]:
         source = "\n".join(self._lines_of(file))
         script_paths = self._script_paths(file)
-        packages = self._packages()
+        packages = self._read_packages()
         resolved = (
             resolve_import(specifier, file, self._scope, script_paths, packages)
             for specifier in imported_modules(source, file)
@@ -990,7 +1042,7 @@ class CodeIndex:
         """The scope files ``text``, lines of ``file``, imports from, in source order, each with the
         names it takes by name or None for the whole module."""
         script_paths = self._script_paths(file)
-        packages = self._packages()
+        packages = self._read_packages()
         found: dict[str, tuple[ImportFact, frozenset[str] | None]] = {}
         for specifier, names in module_imports(text, file):
             fact = resolve_import(specifier, file, self._scope, script_paths, packages)
@@ -1011,8 +1063,9 @@ class CodeIndex:
         """Scope files most often committed together with ``file``, with their shared-commit counts;
         the history is read once per file for the life of the index."""
         self._require_in_scope(file)
-        return self._co_changes(file)[:limit]
+        return self._read_co_changes(file)[:limit]
 
+    @memoized
     def _read_co_changes(self, file: str) -> tuple[CoChange, ...]:
         if not self.commit:
             return ()
@@ -1047,11 +1100,13 @@ class CodeIndex:
 
     def _script_paths(self, file: str) -> ScriptPaths | None:
         """The path aliases of the configs nearest to a script file, read once per directory."""
-        return None if file.endswith(".py") else self._script_paths_in(str(PurePosixPath(file).parent))
+        return None if file.endswith(".py") else self._read_script_paths(str(PurePosixPath(file).parent))
 
+    @memoized
     def _read_script_paths(self, directory: str) -> ScriptPaths | None:
         return nearest_script_paths(self.root, directory)
 
+    @memoized
     def _read_packages(self) -> Packages:
         """The package.json files of the folders holding scope files, read once, on first use."""
         return Packages(self.root, self.files)
@@ -1110,6 +1165,13 @@ class CodeIndex:
             raise ValueError(f"{file} is outside the index scope")
 
 
+def _held_weakly(method: Callable[..., _Result]) -> Callable[..., _Result]:
+    """``method``, called through a weak reference to its object, so whatever holds the returned
+    function never keeps that object alive."""
+    weak = weakref.WeakMethod(method)
+    return lambda *args: weak()(*args)
+
+
 def _blobs_to_export(repository: Path, commit: str, listed: Sequence[str]) -> dict[str, str]:
     """Object ids of the listed files and of every script config (tsconfig, jsconfig, package.json)
     in ``commit``, keyed by path."""
@@ -1156,14 +1218,21 @@ def _changed_paths(status: str) -> list[str]:
 
 def _working_git_metadata(root: Path, prefixes: Sequence[str]) -> tuple[str, list[str], dict[str, str]]:
     """The HEAD commit, the changed and untracked paths, and the index blob id of each tracked file;
-    all empty outside Git."""
-    try:
-        commit = tools.git(["rev-parse", "HEAD"], root).strip()
-        status = tools.git(["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root)
-        listing = tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root)
-    except tools.ToolFailedError:
+    all empty outside Git, and no revision before the first commit. A repository git refuses raises
+    rather than reading as a plain folder."""
+    if not tools.inside_git_worktree(root):
         return "", [], {}
-    return commit, _changed_paths(status), _regular_blobs(listing)
+    commit = tools.head_commit(root)
+    staged = tools.git(["ls-files", "--stage", "-z", "--", *prefixes], root)
+    return commit, _changed_under(root, prefixes), _regular_blobs(staged)
+
+
+def _changed_under(root: Path, prefixes: Sequence[str]) -> list[str]:
+    """The changed and untracked paths under ``root``, relative to it. git status names paths from the
+    top of the repository, which is not ``root`` for a folder inside it."""
+    status = tools.git(["status", "--porcelain", "-z", "--untracked-files=all", "--", *prefixes], root)
+    prefix = tools.git(["rev-parse", "--show-prefix"], root).rstrip("\n")
+    return [path.removeprefix(prefix) for path in _changed_paths(status) if path.startswith(prefix)]
 
 
 def _regular_blobs(listing: str) -> dict[str, str]:
