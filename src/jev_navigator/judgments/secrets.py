@@ -49,7 +49,7 @@ _ENV_FILE_VALUE = re.compile(
     r"(?P<value>[^\s\"'`#$()\[\]{}][^\s\"'`#()\[\]{}]*+)[ \t]*(?=#|$)",
     re.M,
 )
-_QUOTED_SECRET_VALUE = re.compile(rf"{_KEY}{_SEPARATOR}(?P<quote>[\"'`])(?P<value>[^\"'`\s]++)(?P=quote)")
+_QUOTED_SECRET_VALUE = re.compile(rf"{_KEY}{_SEPARATOR}(?P<quote>[\"'`])(?P<value>[^\"'`\n]++)(?P=quote)")
 _LITERAL_FALLBACK = re.compile(
     rf"{_KEY}{_SEPARATOR}[^\n,;:=]*?(?:\|\||\?\?|\bor\b)\s*(?P<quote>[\"'`])(?P<value>[^\"'`\n]+)(?P=quote)"
 )
@@ -95,6 +95,21 @@ _NAME_SHAPED = re.compile(r"[A-Za-z_][A-Za-z_.\-]*")
 _PATH_SHAPED = re.compile(r"(?:~|\.{1,2})?/?[\w.@-]+(?:/[\w.@\[\]-]+)+/?|/[\w.@-]*")
 _URL_SHAPED = re.compile(r"[a-z][a-z0-9+.-]*://\S+")
 _ENVIRONMENT_NAME = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+")
+_MESSAGE_SUFFIXES = frozenset(
+    {
+        "message",
+        "msg",
+        "error",
+        "err",
+        "text",
+        "hint",
+        "title",
+        "description",
+        "placeholder",
+        "prompt",
+        "help",
+    }
+)
 _DEFAULT_PASSWORDS = frozenset({"password", "passwd", "pwd", "secret", "admin", "root"})
 _KEY_SEPARATORS = re.compile(r"[._\-$\s]+")
 _NAME_LITERAL = re.compile(r"[A-Z][A-Z0-9_]*|[a-z]+(?:[-_./][a-z]+)*")
@@ -271,7 +286,8 @@ def _is_key_material(value: str, quote: str) -> bool:
 def _key_kind(key: str) -> str | None:
     """The key's kind when a secret word is one of its parts: "secret" when the secret word ends the key
     (``DB_PASSWORD``, ``authToken``, ``credentials``), "naming" when a naming word ends it (``SECRET_ENV``,
-    ``token_url``, ``secretAccessKeyId``), else "suffixed" (``SECRET_KEY_BASE``, ``GH_TOKEN_RO``). None when
+    ``token_url``, ``secretAccessKeyId``), "message" when a message word ends it (``PASSWORD_ERROR``), else
+    "suffixed" (``SECRET_KEY_BASE``, ``GH_TOKEN_RO``). None when
     no part is a secret word (``max_tokens``, ``tokenizer``, ``bypass``)."""
     parts = _key_parts(key)
     end = _last_secret_word_end(parts)
@@ -279,7 +295,9 @@ def _key_kind(key: str) -> str | None:
         return None
     if end == len(parts):
         return "secret"
-    return "naming" if parts[-1] in _NAMING_SUFFIXES else "suffixed"
+    if parts[-1] in _NAMING_SUFFIXES:
+        return "naming"
+    return "message" if parts[-1] in _MESSAGE_SUFFIXES else "suffixed"
 
 
 def _key_parts(key: str) -> list[str]:
@@ -308,13 +326,15 @@ def _keyed_value_hides(kind_holds: Callable[[str], bool]) -> Callable[[re.Match[
 def _hides_under(kind: str, key: str, value: str) -> bool:
     """A value that repeats its key (``PASS: "PASS"``) shows nothing the key does not. Otherwise a secret
     key hides every literal; a suffixed key every literal but an environment variable's name, a path or a
-    URL; a naming key only a credential-looking word, one word of eight or more characters that names
-    nothing."""
+    URL; a message key the same, except a sentence; a naming key only a credential-looking word, one word
+    of eight or more characters that names nothing."""
     if _repeats_its_key(key, value):
         return False
     if kind == "secret":
         return True
-    if kind == "suffixed":
+    if kind == "message" and any(character.isspace() for character in value):
+        return False
+    if kind in ("suffixed", "message"):
         return not (
             _ENVIRONMENT_NAME.fullmatch(value)
             or _PATH_SHAPED.fullmatch(value)

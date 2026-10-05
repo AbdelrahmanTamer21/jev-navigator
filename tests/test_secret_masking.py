@@ -339,6 +339,8 @@ def test_a_secret_word_inside_another_word_is_not_a_secret_key(code: str) -> Non
     [
         'DB_PASSWORD_PROD = "hunter2"',
         'GH_TOKEN_RO: "s3cr3t"',
+        'GH_TOKEN_RO = "correct horse battery staple"',
+        'PASSWORD_ERROR = "hunter2"',
         "SECRET_KEY_BASE=abc",
         '"credentials_json": "{}x",',
         'password_hash = "pw"',
@@ -357,6 +359,8 @@ def test_a_short_value_under_a_suffixed_secret_key_is_masked(line: str) -> None:
     [
         'INSPECTION_STATUS = Object.freeze({ PASS: "PASS", FAIL: "FAIL" });',
         'FAIL = "fail"',
+        'PASSWORD_ERROR = "Password must be at least 8 characters."',
+        'TOKEN_HELP_TEXT = "Paste the token from your settings page."',
         'Token: "token"',
         'TOKEN_TYPE = "type"',
         'DB_PASSWORD_PROD: "DB_PASSWORD"',
