@@ -16,7 +16,7 @@ from ..index.spans import Span
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge, unit_place
 from ..judgments.questions import Check
 from ..judgments.thresholds import NoulVerdict
-from .find_code import FOUND
+from .find_code import FOUND, search_failure
 
 CONTAINS_IMPLEMENTATION = replace(
     FOUND,
@@ -37,6 +37,7 @@ class FindAllResult:
     unavailable_files: Mapping[str, str]
     stopped_by: str
     calls: int
+    failure: Exception | None = None
 
     @property
     def matched(self) -> tuple[CheckResult, ...]:
@@ -84,8 +85,11 @@ def find_all(
     Completed functions are not re-judged, including when remaining batches regroup on resume.
 
     Judge owns packing, caching, secrets and caller-selected live-call budgets. This composition
-    has no file/function/call cap and does not truncate bodies. Provider errors propagate with
-    their cause; the Judge journal retains the requests and responses actually made.
+    has no file/function/call cap and does not truncate bodies. A failed request ends it
+    ``failed``, ``failure`` holding the same error (see ``search_failure``), and Ctrl-C ends it
+    ``cancelled``; either way ``judged`` keeps every answer that arrived, so ``completed=`` resumes
+    it. Ctrl-C while the relationship graph is built, before any judgment, still raises. The Judge
+    journal retains the requests and responses actually made.
     """
     judge = judge.scope()
     graph = operations.trace_graph(index, seeds, cancelled=cancelled)
@@ -93,6 +97,7 @@ def find_all(
     seen = {answer.item["span_key"] for answer in completed}
     remaining_files = list(index.files)
     stop = "connected_component"
+    failure: Exception | None = None
     inventoried: dict[str, set[str]] = {}
 
     def stopped() -> bool:
@@ -131,7 +136,12 @@ def find_all(
                     stop = "scope_examined"
         except CallCapReachedError:
             stop = "budget"
-        if stopped():
+        except KeyboardInterrupt:
+            stop = "cancelled"
+        except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
+            failure = search_failure(error)
+            stop = "failed"
+        if stopped() and failure is None:
             stop = "cancelled"
 
     # Only facts already collected may establish that a file is finished. No final parser sweep.
@@ -149,6 +159,7 @@ def find_all(
         index.unavailable_files,
         stop,
         judge.calls,
+        failure,
     )
 
 
