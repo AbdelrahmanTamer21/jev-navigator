@@ -187,3 +187,20 @@ def test_default_frontier_follows_fresh_identifier_references_and_incoming_calls
     assert result.stopped_by == "scope_examined", result.failure
     assert {unit.path for unit in result.units} == {"entry.py", "support.py", "consumer.py", "config.toml"}
     assert not result.not_judged
+
+
+def test_default_lists_target_word_files_before_paths_read_from_supplied_code(tmp_path: Path) -> None:
+    index = shop_index(
+        tmp_path,
+        {
+            "entry.py": "def entry():\n    return 'a/other.py'\n",
+            "a/other.py": "def other():\n    return 1\n",
+            "z/limit.py": "def maximum():\n    return 2\n",
+        },
+    )
+    client = ScriptedJevClient()
+    result = asyncio.run(
+        FrontierConfiguration().search(index, Judge(client), {"p": "limit"}, files=["entry.py"])
+    )
+    assert result.stopped_by == "scope_examined", result.failure
+    assert client.requests[0][0]["items"][0]["file"] == "z/limit.py"

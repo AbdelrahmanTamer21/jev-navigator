@@ -81,9 +81,9 @@ class SearchConfiguration:
 
 
 FRONTIER_SOURCES = (
+    FILE_WORDS,
     NAMED_FILES,
     TEXT_NAMED_FILES,
-    FILE_WORDS,
     ANCHORS,
     FILES,
     NAMES,
