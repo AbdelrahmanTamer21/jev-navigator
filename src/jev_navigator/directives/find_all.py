@@ -197,7 +197,11 @@ class FindAllResult:
     def ranked_with(self, target: str, previous: FindAllResult) -> tuple[UnitScore, ...]:
         """Rank a resumed search together with the earlier search's units, without dropping either."""
         scores = {
-            score.unit.id: score
+            (
+                score.unit.id
+                if self.question_profile == MATCH or score.piece is None
+                else score.unit.piece_id(score.piece)
+            ): score
             for score in (*previous._observed_scores(target), *self._observed_scores(target))
         }
         if self.question_profile != MATCH:
@@ -206,7 +210,17 @@ class FindAllResult:
 
     def _observed_scores(self, target: str) -> tuple[UnitScore, ...]:
         order = {answer.place.id: number for number, answer in enumerate(self.judged[target])}
-        return tuple(sorted(self.scores(target), key=lambda score: order[score.answer.place.id]))
+        if self.question_profile == MATCH:
+            scores = self.scores(target)
+        else:
+            answers = {answer.place.id: answer for answer in self.judged[target]}
+            by_id = {unit.id: unit for unit in self.units}
+            scores = tuple(
+                score
+                for unit in self.units
+                for score in _unit_observations(unit, by_id[self.repeat_of.get(unit.id, unit.id)], answers)
+            )
+        return tuple(sorted(scores, key=lambda score: order[score.answer.place.id]))
 
     def _rank(self, score: UnitScore, features: Mapping[str, Features]) -> tuple[float, float, str, str]:
         unit_features = features.get(score.unit.id)
@@ -974,6 +988,19 @@ def _chunks(values: Iterable[T], size: int) -> Iterator[list[T]]:
             chunk = []
     if chunk:
         yield chunk
+
+
+def _unit_observations(
+    unit: Unit, judged_as: Unit, answers: Mapping[str, CheckResult]
+) -> Iterator[UnitScore]:
+    """Every observed piece, so one piece's relevance cannot hide another piece's role."""
+    if not judged_as.pieces:
+        if (answer := answers.get(judged_as.id)) is not None:
+            yield UnitScore(unit, answer, None)
+        return
+    for piece in judged_as.pieces:
+        if (answer := answers.get(judged_as.piece_id(piece))) is not None:
+            yield UnitScore(unit, answer, unit.pieces[piece.index])
 
 
 def _unit_score(

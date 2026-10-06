@@ -165,3 +165,37 @@ def test_role_ties_follow_search_order_when_later_batch_finishes_first(tmp_path:
     assert result.failure is None
     assert provider.requests[0][0]["items"][0]["file"] == "unit16.py"
     assert [score.unit.path for score in result.ranked("p0")] == list(index.files)
+
+
+def test_required_role_keeps_its_best_piece_before_a_units_best_relevance_piece(tmp_path: Path):
+    from jev_navigator.judgments.client import InputLimits
+
+    body = "".join(f"    x{number} = {number}\n" for number in range(129))
+    (tmp_path / "big.py").write_text(f"def big():\n{body}")
+    (tmp_path / "other.py").write_text("def other():\n    return True\n")
+    commit_all(tmp_path)
+    index = CodeIndex.from_git(tmp_path)
+
+    def answer(question_id, _question, state):
+        code = state["items"][int(question_id.rsplit("#", 1)[1])]["code"]
+        role = question_id.split("_p0@", 1)[0]
+        if role == "guard":
+            return 0.95 if "x99 = 99" in code else 0.90 if "def other" in code else 0.1
+        return 0.99 if role == "satisfied" and "x1 = 1" in code else 0.1
+
+    class SmallBox(ScriptedJevClient):
+        input_limits = InputLimits(1500, None)
+
+    result = find_all(
+        index,
+        Judge(SmallBox(nouls=answer), masker=None, scanner=None),
+        {"p0": "the guard"},
+        files=index.files,
+        question_profile=ROLES_V2,
+        required_roles=("guard",),
+    )
+    assert result.failure is None
+    winner = result.ranked("p0")[0]
+    assert winner.unit.path == "big.py"
+    assert winner.answer.components["guard"].probability == 0.95
+    assert winner.piece.start == 61

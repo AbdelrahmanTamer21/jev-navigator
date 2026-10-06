@@ -135,14 +135,14 @@ def retain_roles(scores: Sequence, required: Sequence[str]) -> tuple:
     """Best per required role first, then stable relevance order, with uncertain best retained."""
     if unknown := set(required) - set(LOCAL_ROLES):
         raise ValueError(f"unknown local roles: {sorted(unknown)}")
+    by_id = {
+        score.unit.id if score.piece is None else score.unit.piece_id(score.piece): score for score in scores
+    }
     observed = [
-        RoleAnswers(
-            score.unit.id, {role: answer.probability for role, answer in score.answer.components.items()}
-        )
-        for score in scores
+        RoleAnswers(place_id, {role: answer.probability for role, answer in score.answer.components.items()})
+        for place_id, score in by_id.items()
     ]
     composed = compose_roles(observed, required)
-    by_id = {score.unit.id: score for score in scores}
     ordered = [
         by_id[answer.unit_id]
         for answer in (*filter(None, composed["best_by_role"].values()), *composed["ranked"])
