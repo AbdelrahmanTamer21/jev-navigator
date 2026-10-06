@@ -1043,9 +1043,35 @@ def test_a_model_offers_the_code_that_queries_it_through_its_client_accessor(sch
     assert offered[0].signature.endswith("(queries model Website by the text `.website.`)")
 
 
-def test_code_that_queries_a_model_offers_the_models_block(schema_index: CodeIndex) -> None:
-    # Arrange
-    opened = schema_index.read_slice(schema_index.find_definition("updateWebsite")[0])
+WEBSITE_TEST = """\
+import prisma from '@/lib/prisma';
+
+export async function seedWebsite() {
+  return prisma.client.website.create({ data: { name: 'test' } });
+}
+"""
+
+
+def test_a_models_client_calls_in_tests_come_after_those_in_production(
+    tmp_path: Path, umami_schema: str
+) -> None:
+    # Arrange: the test file's path sorts before the production file's.
+    files = {SCHEMA: umami_schema, "src/website.test.ts": WEBSITE_TEST, "src/website.ts": WEBSITE_QUERIES}
+    index = committed_index(tmp_path, files)
+    opened = place_for_line(index, SCHEMA, 120, "start").open()
+
+    # Act
+    offered = MOVES["client_calls"](index, opened)
+
+    # Assert
+    names = [place.open().span.name for place in offered]
+    assert names == ["updateWebsite", "getWebsiteCount", "seedWebsite"]
+
+
+@pytest.mark.parametrize("function", ["updateWebsite", "getWebsiteCount"])
+def test_code_that_queries_a_model_offers_the_models_block(schema_index: CodeIndex, function: str) -> None:
+    # Arrange: `getWebsiteCount` also holds `userId`, the bare accessor of `model User`.
+    opened = schema_index.read_slice(schema_index.find_definition(function)[0])
 
     # Act
     offered = [place for place in neighbours(schema_index, opened) if place.move == "queried_models"]
@@ -1053,5 +1079,5 @@ def test_code_that_queries_a_model_offers_the_models_block(schema_index: CodeInd
     # Assert
     assert [place.open().span for place in offered] == [Span(SCHEMA, 98, 131, "Website")]
     assert offered[0].signature == (
-        f"{SCHEMA}:98 `model Website {{` (model Website, which updateWebsite queries by the text `.website.`)"
+        f"{SCHEMA}:98 `model Website {{` (model Website, which {function} queries by the text `.website.`)"
     )
