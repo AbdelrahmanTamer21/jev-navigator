@@ -7,6 +7,7 @@ from shop_search import shop_index
 
 from jev_navigator.composition import FrontierConfiguration
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.judgments.secrets import SecretMasker
 from jev_navigator.sources import (
     ANCHORS,
     CALLEES,
@@ -126,3 +127,42 @@ def test_zero_budget_discovers_files_without_calling_the_client(tmp_path: Path) 
     assert len(result.not_judged) == 2
     assert result.calls == 0
     assert not client.requests
+
+
+def test_matching_more_file_words_ranks_before_alphabetical_file_listing(tmp_path: Path) -> None:
+    index = shop_index(
+        tmp_path,
+        {
+            "a/limit.py": "def alpha():\n    return 1\n",
+            "z/feature_limit.py": "def beta():\n    return 2\n",
+        },
+    )
+    client = ScriptedJevClient()
+    result = asyncio.run(
+        FrontierConfiguration(sources=(FILE_WORDS,), hops=()).search(
+            index, Judge(client), {"p": "feature limit"}
+        )
+    )
+    assert result.stopped_by == "scope_examined"
+    assert [item["file"] for item in client.requests[0][0]["items"]] == ["z/feature_limit.py", "a/limit.py"]
+
+
+def test_cached_builtin_masking_keeps_path_rules_and_cross_item_secret_copies(tmp_path: Path) -> None:
+    secret = "abc123TOKEN987secretVALUE456"
+    index = shop_index(
+        tmp_path,
+        {
+            "app.py": f"def run():\n    api_key = '{secret}'\n    return api_key\n",
+            "config.yaml": f"message: {secret}\ntoken: config-only-value\n",
+        },
+    )
+    cached, uncached = ScriptedJevClient(), ScriptedJevClient()
+    config = FrontierConfiguration(sources=(FILES,), hops=())
+    for judge in (Judge(cached), Judge(uncached, masker=SecretMasker())):
+        result = asyncio.run(config.search(index, judge, {"p": "configuration"}, files=index.files))
+        assert result.stopped_by == "scope_examined", result.failure
+    assert cached.requests == uncached.requests
+    code = str(cached.requests)
+    assert secret not in code
+    assert "config-only-value" not in code
+    assert "[MASKED]" in code

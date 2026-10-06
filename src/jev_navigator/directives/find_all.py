@@ -22,6 +22,7 @@ import asyncio
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from itertools import groupby
 from typing import TypeVar
 
@@ -41,6 +42,7 @@ from ..index.units import (
 )
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
 from ..judgments.questions import Check, item_path, serialized_chars
+from ..judgments.secrets import DEFAULT_MASKER
 from ..judgments.thresholds import NoulVerdict
 from ..mentions import code_names_in
 from ..sources import ANCHORS, CALLEES, CALLERS, FILES, NAMES, TEXT_NAMES, Reach, Seeds, Source
@@ -409,11 +411,22 @@ def _begin(
     if batches_per_wave < 1:
         raise ValueError("batches_per_wave must be at least 1")
     shares = checked_shares(composition.shares, targets, composition.policy)
+    scoped = judge.scope()
+    if scoped.masker is DEFAULT_MASKER:
+        scoped.masker = _SearchMasker()
     search = _Search(
-        index, judge.scope(), targets, delivered, cancelled, batches_per_wave, reading, composition, shares
+        index, scoped, targets, delivered, cancelled, batches_per_wave, reading, composition, shares
     )
     search.resume(completed or {})
     return search
+
+
+class _SearchMasker:
+    """Reuse deterministic built-in scans for this search, with bounded string retention."""
+
+    def __init__(self) -> None:
+        self.mask = lru_cache(maxsize=256)(DEFAULT_MASKER.mask)
+        self.masked_values = lru_cache(maxsize=256)(DEFAULT_MASKER.masked_values)
 
 
 def _stop_by(error: KeyboardInterrupt | Exception | None) -> tuple[str, Exception | None]:
@@ -804,7 +817,11 @@ class _Search:
         listed = {unit.path for unit in listing.units}
         for reach in reaches:
             self._record_name_resolution(reach, reach.at not in listed)
-        return [(unit, reach_of[unit.path]) for unit in listing.units]
+        units = listing.units
+        if self.policy.search_order:
+            order = {file: position for position, file in enumerate(reach_of)}
+            units = sorted(units, key=lambda unit: order[unit.path])
+        return [(unit, reach_of[unit.path]) for unit in units]
 
     def _record_name_resolution(self, reach: Reach, without_unit: bool) -> None:
         for name in reach.names:
