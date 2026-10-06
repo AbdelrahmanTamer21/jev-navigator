@@ -282,8 +282,8 @@ Name lookups read `name_table.NameTable`: one SQLite file per `table_identity()`
 blob id of the file content, and hold names, kinds, lines, roles and receivers as the facts hold them:
 `scope_scan.receiver_of` keeps a receiver only as a plain chain of names and records anything else,
 which could quote a string literal, as `OPAQUE_RECEIVER`. `CodeIndex` records the files navigation
-reaches apart from the table's coverage, and `parsed_files`, `parser_scans_pending` and
-`observed_unparsed_files` read only the reached files. Two processes may write the table at once: a new file is created whole and
+reaches apart from the table's coverage (a Prisma schema is reached once `schema_blocks_in` reads it),
+and `parsed_files`, `parser_scans_pending` and `observed_unparsed_files` read only the reached files. Two processes may write the table at once: a new file is created whole and
 linked into place (`shared_database.open_shared_database`), and each content's rows are written in
 one transaction. A bidirectional
 trace prepares the scoped fact inventory in one batch before walking incoming and outgoing links;
