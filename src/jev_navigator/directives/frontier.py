@@ -105,7 +105,7 @@ class Features:
 
 
 def name_rarities(hit_counts: Mapping[str, int]) -> dict[str, float]:
-    """What finding each name adds: a name with fewer hits is rarer and adds more."""
+    """What each name adds to a unit whose code contains it: a name with fewer hits is rarer and adds more."""
     return {name: 1 / math.log2(2 + count) for name, count in hit_counts.items()}
 
 
