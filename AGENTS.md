@@ -4,9 +4,11 @@ JVN is a library of building blocks for searching code. These rules are always l
 which blocks are built or being built, lives in the README's
 [Architecture](README.md#architecture-blocks-mini-workflows-and-configurations) section.
 
-- **Levels.** Code primitives compose into mini-workflows (`find`, `find_all`, `trace`, `find_text`,
-  `find_all_text`); mini-workflows compose into larger workflows through typed configurations.
-- **Default.** `jvn search` is the default configuration; every other use is another named configuration.
+- **Levels.** Code primitives compose into mini-workflows (`find`, `find_all` and `trace` are built;
+  `find_text` and `find_all_text` are being built); mini-workflows compose into larger workflows
+  through typed configurations (being built).
+- **Default.** `jvn search`, being built, is to be the default configuration; every other use is
+  another named configuration.
 - **Optional steps.** A Jev step (a bounded decision) or an LLM step (generation over an open space) can
   sit between stages. Which steps run is configuration, a recipe the caller passes as data; never an
   environment or deploy flag.

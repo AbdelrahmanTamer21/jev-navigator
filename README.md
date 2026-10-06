@@ -30,11 +30,11 @@ every use of JVN, the `jvn` command included, is a composition of the same block
    callees, references, imports, text hits, units and git history
    ([Layer 1](#layer-1-index-operations-and-comments-no-model)).
 2. **Mini-workflows** compose primitives and Jev judgments into one kind of search: `find`
-   (`find_code`), `find_all`, `trace`, `find_text` and `find_all_text`
-   ([Layer 3](#layer-3-directives)).
-3. **Configurations** compose mini-workflows into a larger workflow. A configuration is typed: it
-   names the mini-workflows, their order, their inputs and their budgets. `jvn search` is the default
-   configuration.
+   (`find_code`), `find_all` and `trace` are built, and `find_text` and `find_all_text` are being
+   built ([Layer 3](#layer-3-directives)).
+3. **Configurations** (being built) compose mini-workflows into a larger workflow. A configuration is
+   typed: it names the mini-workflows, their order, their inputs and their budgets. `jvn search`, also
+   being built, is to be the default configuration.
 
 Between two stages a configuration can place a **Jev step**, one bounded decision such as a yes or no
 check or a pick from a list code built ([Layer 2](#layer-2-judgments)), or an **LLM step**, generation
