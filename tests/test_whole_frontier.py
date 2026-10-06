@@ -91,12 +91,17 @@ def test_follow_named_file_and_its_text_to_a_second_named_file(tmp_path: Path) -
             "config/limits.toml": "maximum = 7\n",
         },
     )
+    config = FrontierConfiguration(max_calls=1, sources=(FILES,), hops=(NAMED_FILES, TEXT_NAMED_FILES))
+    first = asyncio.run(config.search(index, Judge(ScriptedJevClient()), {"p": "policy"}, files=["app.py"]))
+    assert first.stopped_by == "budget"
+    assert {unit.path for unit in first.units} == {"app.py", "docs/policy.md"}
     result = asyncio.run(
-        FrontierConfiguration(sources=(FILES,), hops=(NAMED_FILES, TEXT_NAMED_FILES)).search(
+        FrontierConfiguration(sources=config.sources, hops=config.hops).search(
             index,
             Judge(ScriptedJevClient()),
             {"p": "policy"},
             files=["app.py"],
+            completed=first.judged,
         )
     )
     assert result.stopped_by == "scope_examined", result.failure

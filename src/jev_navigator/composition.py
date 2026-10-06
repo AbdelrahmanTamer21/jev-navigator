@@ -10,7 +10,7 @@ from .directives.find_all import FindAllResult, find_all_async, find_all_text_as
 from .directives.frontier import STAGE_ORDER, WHOLE_FRONTIER, Policy
 from .index.code_index import CodeIndex
 from .index.units import Anchor, RangeAnchor, Reading
-from .judgments.judge import Judge
+from .judgments.judge import CheckResult, Judge
 from .mentions import names_from_text
 from .sources import (
     ANCHORS,
@@ -133,6 +133,7 @@ class FrontierConfiguration:
         anchors: Sequence[Anchor] = (),
         names: Sequence[str] = (),
         delivered: Sequence[RangeAnchor] = (),
+        completed: Mapping[str, Sequence[CheckResult]] | None = None,
     ) -> FindAllResult:
         if self.max_calls < 0:
             raise ValueError("max_calls must be non-negative")
@@ -149,6 +150,7 @@ class FrontierConfiguration:
             anchors=anchors,
             names=names,
             delivered=delivered,
+            completed=completed,
             sources=self.sources,
             hops=self.hops,
             reading=Reading.MIXED,

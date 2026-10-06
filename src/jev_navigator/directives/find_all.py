@@ -33,12 +33,11 @@ from ..index.units import (
     RangeAnchor,
     Reading,
     Unit,
+    UnitReader,
     UnresolvedAnchor,
     best_piece,
     items_to_judge,
-    list_units,
     read_ranges,
-    resolve_each,
 )
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
 from ..judgments.questions import Check, item_path, serialized_chars
@@ -466,11 +465,13 @@ class _Search:
         self.target_of = {check.name: target for check, target in zip(self.checks, targets, strict=True)}
         self.shared = {TARGETS: self.targets}
         self.room = _room(judge, index, self.checks, self.shared)
+        self.reader = UnitReader(index, self.room, listed_only=True, reading=reading)
         self.delivered = _lines_by_file(delivered)
         self.cancelled = cancelled
         self.answered: set[tuple[str, str]] = set()
         self.judged: dict[str, list[CheckResult]] = {target: [] for target in targets}
         self.units: dict[str, Unit] = {}
+        self.resolved_units: dict[str | Anchor, tuple[Unit, ...]] = {}
         self.entered_by: dict[str, str] = {}
         self.features: dict[str, dict[str, Features]] = {target: {} for target in targets}
         self.repeat_of: dict[str, str] = {}
@@ -554,7 +555,7 @@ class _Search:
         pending = list(self._staged_population())
         expanded: set[str] = set()
         terms = set(self.seeds.names)
-        while pending and not self.stopped():
+        while not self.stopped():
             yield from _chunks(pending, size)
             judged = {
                 self.unit_of_place[answer.place.id]
@@ -562,7 +563,10 @@ class _Search:
                 for answer in answers
                 if answer.place is not None and answer.place.id in self.unit_of_place
             }
-            fresh = [unit for unit in self.units.values() if unit.id in judged - expanded]
+            fresh_ids = judged - expanded
+            fresh = [unit for unit in self.units.values() if unit.id in fresh_ids]
+            if not fresh:
+                return
             expanded.update(unit.id for unit in fresh)
             codes = tuple(read_ranges(self.index, unit.path, unit.ranges) for unit in fresh)
             names = tuple(
@@ -767,16 +771,32 @@ class _Search:
     def _units_reached(self, reaches: Sequence[Reach]) -> list[tuple[Unit, Reach]]:
         """The units ``reaches`` name, each with the reach that named it: every listed unit of a file,
         the units an anchor names."""
-        files = [reach for reach in reaches if _is_file_reach(reach)]
-        anchors = [reach for reach in reaches if not _is_file_reach(reach)]
-        return self._units_of_files(files) + self._units_at_anchors(anchors)
+        if not self.policy.expands:
+            files = [reach for reach in reaches if _is_file_reach(reach)]
+            anchors = [reach for reach in reaches if not _is_file_reach(reach)]
+            return self._units_of_files(files) + self._units_at_anchors(anchors)
+        unseen = list(
+            {reach.at: reach for reach in reversed(reaches) if reach.at not in self.resolved_units}.values()
+        )
+        unseen.reverse()
+        files = [reach for reach in unseen if _is_file_reach(reach)]
+        anchors = [reach for reach in unseen if not _is_file_reach(reach)]
+        resolved = self._units_of_files(files) + self._units_at_anchors(anchors)
+        by_place: dict[str | Anchor, list[Unit]] = {reach.at: [] for reach in unseen}
+        for unit, reach in resolved:
+            by_place[reach.at].append(unit)
+        self.resolved_units.update((at, tuple(units)) for at, units in by_place.items())
+        result = []
+        for reach in reaches:
+            units = self.resolved_units[reach.at]
+            self._record_name_resolution(reach, not units)
+            result.extend((unit, reach) for unit in units)
+        return result
 
     def _units_of_files(self, reaches: Sequence[Reach]) -> list[tuple[Unit, Reach]]:
         if not reaches:
             return []
-        listing = list_units(
-            self.index, [reach.at for reach in reaches], box_chars=self.room, reading=self.reading
-        )
+        listing = self.reader.list_files([reach.at for reach in reaches])
         self.unlisted.update(listing.unlisted)
         reach_of: dict[str, Reach] = {}
         for reach in reaches:
@@ -796,9 +816,7 @@ class _Search:
         """The units each anchor names. An anchor reached by a name that names none counts against that
         name; any other is ``unresolved``."""
         anchors = [reach.at for reach in reaches]
-        resolved = resolve_each(
-            self.index, anchors, box_chars=self.room, listed_only=True, reading=self.reading
-        )
+        resolved = ((anchor, *self.reader.resolve(anchor)) for anchor in anchors)
         units = []
         for reach, (anchor, named, problem) in zip(reaches, resolved, strict=True):
             self._record_name_resolution(reach, bool(problem))
