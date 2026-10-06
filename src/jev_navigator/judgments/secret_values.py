@@ -93,6 +93,15 @@ def key_kind(key: str) -> str | None:
     return "message" if parts[-1] in _MESSAGE_SUFFIXES else "suffixed"
 
 
+def is_message_key(key: str) -> bool:
+    """Whether the key's last word names a message (``help``, ``description``, ``descriptions``)."""
+    parts = _key_parts(key)
+    if not parts:
+        return False
+    last = parts[-1]
+    return last in _MESSAGE_SUFFIXES or last.removesuffix("s") in _MESSAGE_SUFFIXES
+
+
 def _key_parts(key: str) -> list[str]:
     return [part.lower() for piece in re.split(r"[._\-$]+", key) for part in _KEY_PART.findall(piece)]
 

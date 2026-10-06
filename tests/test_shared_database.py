@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import gc
 import os
 import sqlite3
 import time
+import warnings
+from collections.abc import Callable
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
 from jev_navigator import shared_database
+from jev_navigator.index import name_table
 from jev_navigator.judgments.store import SqliteAnswerStore
 from jev_navigator.shared_database import UnusableDatabaseError
 
@@ -29,10 +34,13 @@ def test_a_file_sqlite_cannot_switch_to_wal_mode_is_refused_naming_the_path(tmp_
     # Arrange: SQLite's lock-free dotfile mode, like a file system without POSIX locks, answers a WAL
     # request with the rollback mode instead of an error
     path = tmp_path / "answers.sqlite"
-    database = sqlite3.connect(f"file:{tmp_path / 'probe.sqlite'}?vfs=unix-dotfile", uri=True)
+    probe = f"file:{tmp_path / 'probe.sqlite'}?vfs=unix-dotfile"
 
     # Act
-    with pytest.raises(UnusableDatabaseError) as refused:
+    with (
+        closing(sqlite3.connect(probe, uri=True)) as database,
+        pytest.raises(UnusableDatabaseError) as refused,
+    ):
         shared_database.switch_to_wal(database, path)
 
     # Assert
@@ -46,16 +54,16 @@ SCHEMA = "create table rows (text text not null);"
 def test_a_shared_database_returns_the_space_of_deleted_rows_to_the_disk(tmp_path: Path) -> None:
     # Arrange
     path = tmp_path / "store.sqlite"
-    database = shared_database.open_shared_database(path, SCHEMA)
-    with database:
-        database.executemany("insert into rows values (?)", [("x" * 500,)] * 5_000)
-    database.execute("pragma wal_checkpoint(truncate)")
-    before = path.stat().st_size
-    with database:
-        database.execute("delete from rows")
+    with closing(shared_database.open_shared_database(path, SCHEMA)) as database:
+        with database:
+            database.executemany("insert into rows values (?)", [("x" * 500,)] * 5_000)
+        database.execute("pragma wal_checkpoint(truncate)")
+        before = path.stat().st_size
+        with database:
+            database.execute("delete from rows")
 
-    # Act
-    shared_database.release_free_pages(database)
+        # Act
+        shared_database.release_free_pages(database)
 
     # Assert
     assert path.stat().st_size < before / 10
@@ -82,3 +90,27 @@ def test_a_side_file_belongs_to_its_database(tmp_path: Path, name: str) -> None:
 
     # Assert
     assert base == tmp_path / "store.sqlite"
+
+
+@pytest.mark.parametrize(
+    "opened",
+    [
+        pytest.param(lambda root: name_table.NameTable(root), id="name table"),
+        pytest.param(lambda root: SqliteAnswerStore(root / "answers.sqlite"), id="answer store"),
+    ],
+)
+def test_a_shared_database_owner_closes_its_connection_when_it_is_collected(
+    tmp_path: Path, opened: Callable[[Path], object]
+) -> None:
+    # Arrange
+    gc.collect()
+    owner = opened(tmp_path)
+
+    # Act
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        del owner
+        gc.collect()
+
+    # Assert
+    assert [str(warning.message) for warning in caught if warning.category is ResourceWarning] == []

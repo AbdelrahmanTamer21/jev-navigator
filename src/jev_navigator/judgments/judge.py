@@ -28,6 +28,7 @@ from .client import (
     UnansweredQuestionError,
     input_limits_of,
 )
+from .item_keys import relaxed_item_key, strict_item_key
 from .journal import AttemptJournalCallbackError, Journal, JournalRequest, RawResponse
 from .questions import (
     Check,
@@ -323,6 +324,7 @@ class Judge:
             self.items_per_request,
             self.input_limits,
             masker=self.masker,
+            given=_GivenState((item,), shared),
         )
         return _fits_in_batch(plan, [0])
 
@@ -934,8 +936,9 @@ class Judge:
         across batches. A value found in any check's wording is hidden in the items and shared state
         too, where it may stand without the context that marks it as secret. The final scan before
         each send still runs. Batches form over every item,
-        answered or not, so they do not depend on the store. Each per-item store key includes its
-        masked item, the shared state, the question and the batch it was asked in.
+        answered or not, so they do not depend on the store. Each item's answer is stored under its
+        strict and its relaxed key (see ``item_keys``); lookups here use the strict key, which
+        includes the batch the item was asked in.
 
         ``places``, one per item, are where each item's code comes from: they order the batches (unless
         ``keep_order`` keeps the given order) and go into the record (its sources and skeleton), never
@@ -945,8 +948,9 @@ class Judge:
             raise ValueError("independent checks require unique names for their result lists")
         if places is not None and len(places) != len(items):
             raise ValueError(f"{len(places)} places for {len(items)} items: give one place per item")
-        hidden = self._hidden_values(checks, items, shared or {})
-        *items, shared = self._masked_together([*items, shared or {}], hidden)
+        given = _GivenState(tuple(items), shared or {})
+        hidden = self._hidden_values(checks, items, given.shared)
+        *items, shared = self._masked_together([*items, given.shared], hidden)
         plan = _CheckPlan(
             list_name,
             checks,
@@ -960,6 +964,7 @@ class Judge:
             places=places,
             refusals=refusals,
             keep_order=keep_order,
+            given=given,
         )
         groups = _batches(plan)
         for members in groups:
@@ -1011,7 +1016,8 @@ class Judge:
                 asked = f"{check.question_id}#{slot}"
                 questions[asked] = plan.question(check, slot)
                 slots[asked] = position
-                item_keys[self._item_key(check, item, plan.shared, mates)] = asked
+                item_keys[strict_item_key(check, item, plan.shared, mates)] = asked
+                item_keys[relaxed_item_key(check, plan.given.items[position], plan.given.shared)] = asked
                 source = plan.source_of(position)
                 if source:
                     sources[asked] = source
@@ -1069,7 +1075,7 @@ class Judge:
     def _stored_item(self, check: Check, item: Mapping, shared: Mapping, mates: str) -> _ItemAnswer | None:
         if self.store is None or not self._knows_model():
             return None
-        item_key = self._item_key(check, item, shared, mates)
+        item_key = strict_item_key(check, item, shared, mates)
         stored = self.store.by_item(item_key, self._model_filter())
         if stored is None or not isinstance(stored.answer, NoulAnswer):
             return None
@@ -1081,11 +1087,6 @@ class Judge:
         """The question id the stored item was asked under, from its request's record."""
         record = self.store.by_request(stored.request_sha256, stored.model)
         return record.item_keys.get(item_key) if record is not None else None
-
-    def _item_key(self, check: Check, item: Mapping, shared: Mapping, mates: str) -> str:
-        """Item content, the shared state the question refers to, the question with its wording, and
-        the batch the item was asked in."""
-        return f"{content_hash(item)}|{content_hash(shared)}|{check.question_id}|{mates}"
 
     def _stored_request(self, request_hash: str) -> AnswerRecord | None:
         """The stored record this judge may replay for one request: none while its served model is
@@ -1234,6 +1235,15 @@ class _Batch:
     extras: Mapping[str, Mapping]
 
 
+@dataclass(frozen=True)
+class _GivenState:
+    """The items and shared state as the caller gave them, before masking: what an item's relaxed
+    store key hashes (see ``item_keys``). Never sent and never stored."""
+
+    items: tuple[Mapping, ...]
+    shared: Mapping
+
+
 @dataclass
 class _CheckPlan:
     """The requests one judging call sends: each carries a batch of items and the questions still
@@ -1259,6 +1269,7 @@ class _CheckPlan:
     places: Sequence[Item] | None = None
     refusals: list[Refusal] | None = None
     keep_order: bool = False
+    given: _GivenState = field(kw_only=True)
     _questions: dict[tuple[str, int], dict] = field(default_factory=dict, init=False)
 
     def open_at(self, position: int) -> Mapping[str, Check]:

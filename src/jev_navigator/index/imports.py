@@ -9,6 +9,7 @@ is build output and resolves to the source it is built from."""
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -156,14 +157,22 @@ def resolve_import(
     return _resolve_script(specifier, importer, scope, script_paths, packages)
 
 
+def resolve_python_module(module: str, scope: frozenset[str]) -> str | None:
+    """The scope file an absolute Python module name names, under the repository root or ``src/``:
+    ``app/jobs.py`` or ``app/jobs/__init__.py`` for ``app.jobs``. None when neither is in scope."""
+    return _python_module_file(module.replace(".", "/"), _PYTHON_ROOTS, scope)
+
+
 def _resolve_python(specifier: str, importer: str, scope: frozenset[str]) -> str | None:
     dots = len(specifier) - len(specifier.lstrip("."))
-    module_path = specifier.lstrip(".").replace(".", "/")
-    if dots:
-        base = PurePosixPath(importer).parents[dots - 1]
-        roots = [f"{base}/" if str(base) != "." else ""]
-    else:
-        roots = list(_PYTHON_ROOTS)
+    if not dots:
+        return resolve_python_module(specifier, scope)
+    base = PurePosixPath(importer).parents[dots - 1]
+    root = f"{base}/" if str(base) != "." else ""
+    return _python_module_file(specifier.lstrip(".").replace(".", "/"), (root,), scope)
+
+
+def _python_module_file(module_path: str, roots: Sequence[str], scope: frozenset[str]) -> str | None:
     for root in roots:
         for candidate in (f"{root}{module_path}.py", f"{root}{module_path}/__init__.py"):
             if candidate in scope:
