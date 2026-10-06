@@ -133,11 +133,12 @@ Needs Python 3.11 or newer, and `ast-grep`, `rg` (ripgrep) and `git` on the PATH
 the official SDK for live calls; set `TYPESAFE_API_KEY`. Everything else, including the tests, runs
 offline.
 
-JVN limits its own memory, for the command and for every program that imports the library. Each
-process may grow by 1,024 MB, its ast-grep, ripgrep and git processes included, and all JVN processes
-on a machine share 8,192 MB; a process waits up to two minutes for room, then stops with
-`MemoryLimitReachedError`. See [Memory limit](docs/cli.md#memory-limit) for what a refusal does and
-the settings.
+JVN limits the child processes it starts. Each host reserves 1,024 MB for its ast-grep, ripgrep,
+git and command-line connector processes together, with an 8,192 MB shared child-process ceiling.
+It waits up to two minutes for room, then raises `MemoryLimitReachedError`. The embedding host or
+CLI launcher owns the Python process's total memory, including indexes and other caches. JVN cannot
+attribute a shared process's footprint to individual libraries. See
+[Memory limit](docs/cli.md#memory-limit) for the settings and refusal behavior.
 
 ## Live evidence-pack command
 

@@ -219,18 +219,15 @@ flags when auditing bytes.
 
 ## Memory limit
 
-Every JVN process has a memory allowance, and all JVN processes on one machine share a ceiling. This
-covers the `jvn` command and every program that imports `jev_navigator`.
+Each host reserves a memory allowance for JVN-owned child processes; all such reservations on a
+machine share a ceiling. This covers both the `jvn` command and library consumers.
 
-- **Allowance:** a process may grow by 1,024 MB past the memory it held when its JVN work began,
-  counting the ast-grep, ripgrep and git processes it runs. JVN's work begins when it first starts a
-  tool, and again whenever it starts work while no code index of it is alive, so a program that
-  imports JVN and grows between two searches is not charged for that growth. An index a failed search
-  left behind is freed by Python's cycle collector, which JVN runs once before it treats any index as
-  alive. While an index is alive the growth counts everything the process gains, JVN's or not. Over it, JVN stops those processes and
-  raises `MemoryLimitReachedError`, which names the allowance, the memory in use and that baseline.
-- **What it does not cover:** the model command a command-line connector runs (`CommandConnector`) is a
-  separate program the user names, so JVN neither counts nor stops its memory.
+- **Allowance:** ast-grep, ripgrep, git and command-line connector processes started by one host may
+  hold 1,024 MB together. Over it, JVN stops those children and raises `MemoryLimitReachedError`,
+  naming their measured footprints. It never charges the host's Python heap against this allowance.
+- **Host ownership:** the embedding application or CLI launcher must budget the entire Python
+  process, including JVN's indexes, cached facts and its other libraries. A process footprint has no
+  reliable library attribution. Keeping an index alive does not make unrelated allocations JVN's.
 - **One parse at a time:** a process runs one ast-grep scan at a time, and ast-grep parses only as
   many files at once as the allowance affords: 3 at the default. Scans started in parallel threads
   take turns instead of outgrowing the allowance together. A file too big to parse beside others is
@@ -248,8 +245,8 @@ covers the `jvn` command and every program that imports `jev_navigator`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `JEV_NAVIGATOR_MEMORY_ALLOWANCE_MB` | `1024` | What one JVN process may grow by, its tools included. |
-| `JEV_NAVIGATOR_MEMORY_CEILING_MB` | `8192` | What all JVN processes on the machine may hold; slots are ceiling divided by allowance. |
+| `JEV_NAVIGATOR_MEMORY_ALLOWANCE_MB` | `1024` | What one host's JVN child processes may hold together. |
+| `JEV_NAVIGATOR_MEMORY_CEILING_MB` | `8192` | Shared child-process reservations; slots are ceiling divided by allowance. |
 | `JEV_NAVIGATOR_MEMORY_WAIT_SECONDS` | `120` | How long a process waits for a free slot. |
 | `JEV_NAVIGATOR_MEMORY_SLOTS_DIR` | `/tmp/jev-navigator-memory-<uid>` | The slot folder. It must be a folder of this user, never a link. |
 

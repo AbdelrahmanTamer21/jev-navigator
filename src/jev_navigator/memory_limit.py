@@ -8,21 +8,15 @@ the lock then, however the process ends, so no slot outlives its holder. The cei
 ``ceiling_mb // allowance_mb`` slots, one ``flock``-ed file each, in a folder that no HOME setting
 moves.
 
-While a started process runs, a watchdog thread measures, every ``SAMPLE_SECONDS``, how far this process
-has grown past its baseline (below), plus the footprint of every process it started. Over the allowance
-it kills those processes, and each ``started`` block whose process it killed raises
-``MemoryLimitReachedError``. Growth while no process runs is refused at the next ``check``: before any
-process starts and while cached facts load.
+While a started process runs, a watchdog thread measures the physical footprint of every process
+JVN started, every ``SAMPLE_SECONDS``. Over the allowance it kills those processes, and each affected
+``started`` block raises ``MemoryLimitReachedError``.
 
-Growth is measured from a baseline, so a host that embeds JVN, such as a long-lived server or a test
-runner, is not charged for what it held before. While no ``CodeIndex`` is alive the process holds nothing
-of JVN's, so the baseline moves to the footprint at every ``check`` made then and when the first index
-opens: what a host grows between two searches is never charged to the second. While an index is alive,
-what the process grows by counts against the allowance, whoever caused it. A host that keeps a search
-result keeps its index alive through the result's own places, so counting that memory is correct. A
-failed search leaves its dropped index in a reference cycle, its failure's traceback holding the frames
-that hold the index, so before an index counts as alive where that decides, the cycle collector runs
-once.
+The allowance and shared slots cover JVN's child processes. The embedding host owns its Python
+process's total memory, including JVN's indexes and the host's other caches, and must enforce that
+budget at its job or process boundary. Process footprint cannot distinguish those allocations.
+An index's lifetime does not make unrelated host growth JVN's. The same division applies to the
+standalone command: its launcher owns the Python process budget.
 
 The footprint is the operating system's physical footprint: libproc's ``ri_phys_footprint`` on macOS,
 which counts compressed pages that the resident size leaves out, and resident plus swapped memory on
@@ -34,27 +28,22 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import fcntl
-import gc
 import os
 import stat
 import subprocess
 import sys
 import threading
 import time
-import weakref
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO
+from typing import BinaryIO
 
 from .index.file_shape import MAX_PARSE_PEAK_MB
 
-if TYPE_CHECKING:
-    from .index.code_index import CodeIndex
-
 ALLOWANCE_MB = 1024
-"""What one JVN process may grow by, its children included. Measured on 04.10.2026 with the streaming
+"""What the child processes of one JVN host may hold together. Measured on 04.10.2026 with the streaming
 parser (#50) and the declaration-rule fix (#72), parsing every file of an app-sized scope: the largest
 measured, saleor/graphql with 15.6 MB of code, peaked at 333 MB, and the worst, Heedvane's
 packages/protocol with generated bundles parsed side by side, at 471 MB."""
@@ -165,26 +154,6 @@ def check() -> None:
     process_guard().check()
 
 
-def index_opened(index: CodeIndex) -> None:
-    """Counts ``index`` as JVN's until it is freed. The first index to open while none is alive moves
-    every guard's baseline to the footprint now."""
-    if _LIVE_INDEXES:
-        _free_indexes_in_cycles()
-    with _LIVE_INDEXES_LOCK:
-        if not _LIVE_INDEXES:
-            with _GUARDS_LOCK:
-                guards = tuple(_GUARDS.values())
-            for guard in guards:
-                guard.rebaseline()
-        _LIVE_INDEXES.add(index)
-
-
-def _free_indexes_in_cycles() -> None:
-    """Frees the indexes only a reference cycle keeps alive. It runs without the live-index lock, since
-    a finalizer the collection runs may open or check JVN work."""
-    gc.collect()
-
-
 @contextmanager
 def parsing() -> Iterator[None]:
     """This process's one parse at a time. ``parse_threads`` and ``single_parse_mb`` each spend the
@@ -201,21 +170,12 @@ class MemoryGuard:
         self._lock = threading.Lock()
         self._slot_lock = threading.Lock()
         self._slot: _Slot | None = None
-        self._baseline: int | None = None
         self._children: set[subprocess.Popen] = set()
         self._stopped: dict[subprocess.Popen, str] = {}
 
     def check(self) -> None:
-        """Takes this process's slot if it holds none, then refuses if the process has grown past its
-        allowance. With no index alive, nothing the process holds is JVN's, so its growth starts now."""
+        """Reserve this host's child-process allowance in the shared ceiling."""
         self._hold_slot()
-        self._rebaseline_while_no_index()
-        if self._growth() > self._allowance_bytes:
-            _free_indexes_in_cycles()
-            self._rebaseline_while_no_index()
-        growth = self._growth()
-        if growth > self._allowance_bytes:
-            raise MemoryLimitReachedError(self._over_allowance(growth, {}))
 
     @contextmanager
     def started(self, arguments: Sequence[str], **options) -> Iterator[subprocess.Popen]:
@@ -237,24 +197,13 @@ class MemoryGuard:
             if reason is not None:
                 raise MemoryLimitReachedError(reason)
 
-    def rebaseline(self) -> None:
-        """Growth counts from the footprint now."""
-        self._baseline = footprint(os.getpid())
-
-    def _rebaseline_while_no_index(self) -> None:
-        with _LIVE_INDEXES_LOCK:
-            if not _LIVE_INDEXES:
-                self.rebaseline()
-
     @property
     def _allowance_bytes(self) -> int:
         return self.limit.allowance_mb * _MB
 
     def _hold_slot(self) -> None:
-        """Takes a slot when this process holds none, and again when its slot's file was deleted, since
-        another process may hold that slot now. The first slot sets the baseline; only ``rebaseline``
-        moves it. Waiting for a slot holds only the slot lock, so the watchdog keeps watching running
-        children."""
+        """Take a slot, replacing a deleted slot file. Waiting holds only the slot lock, so the
+        watchdog keeps watching running children."""
         with self._slot_lock:
             if self._slot is not None and self._slot.still_ours():
                 return
@@ -262,11 +211,6 @@ class MemoryGuard:
                 self._slot.file.close()
                 self._slot = None
             self._slot = _take_slot(self.directory, self.limit)
-            if self._baseline is None:
-                self._baseline = footprint(os.getpid())
-
-    def _growth(self) -> int:
-        return max(0, footprint(os.getpid()) - (self._baseline or 0))
 
     def _watch(self, process: subprocess.Popen) -> threading.Event:
         with self._lock:
@@ -285,14 +229,13 @@ class MemoryGuard:
         while not done.wait(SAMPLE_SECONDS):
             with self._lock:
                 children = tuple(self._children)
-            growth = self._growth()
             sizes = {child: footprint(child.pid) for child in children}
-            if growth + sum(sizes.values()) > self._allowance_bytes:
-                self._stop(growth, sizes)
+            if sum(sizes.values()) > self._allowance_bytes:
+                self._stop(sizes)
                 return
 
-    def _stop(self, growth: int, sizes: Mapping[subprocess.Popen, int]) -> None:
-        reason = self._over_allowance(growth, sizes)
+    def _stop(self, sizes: Mapping[subprocess.Popen, int]) -> None:
+        reason = self._over_allowance(sizes)
         with self._lock:
             stopping = [child for child in sizes if child in self._children]
             for child in stopping:
@@ -300,20 +243,16 @@ class MemoryGuard:
         for child in stopping:
             child.kill()
 
-    def _over_allowance(self, growth: int, sizes: Mapping[subprocess.Popen, int]) -> str:
-        used = growth + sum(sizes.values())
-        grew = f"process {os.getpid()} grew {_mb(growth)} past the {_mb(self._baseline or 0)} it held"
-        held = [
-            f"{grew} when its JVN work began",
-            *(f"{_name(child)} (process {child.pid}) held {_mb(size)}" for child, size in sizes.items()),
-        ]
+    def _over_allowance(self, sizes: Mapping[subprocess.Popen, int]) -> str:
+        held = ", ".join(
+            f"{_name(child)} (process {child.pid}) held {_mb(size)}" for child, size in sizes.items()
+        )
         names = ", ".join(_name(child) for child in sizes)
-        stopped = f"; it stopped {names}" if sizes else "; it starts no more work"
         return (
-            f"JVN reached its memory allowance of {self.limit.allowance_mb:,} MB with {_mb(used)} in use: "
-            f"{', '.join(held)}{stopped}. The growth counts everything this process gained since, JVN's or "
-            f"not. Narrow the scope, run fewer searches in this process at once, or raise "
-            f"{ENVIRONMENT_NAMES['allowance_mb']}, then resume"
+            f"JVN reached its child-process memory allowance of {self.limit.allowance_mb:,} MB "
+            f"with {_mb(sum(sizes.values()))} in use: {held}; it stopped {names}. "
+            f"The host's Python process is outside this allowance; its launcher owns that budget. "
+            f"Narrow the scope or raise {ENVIRONMENT_NAMES['allowance_mb']}, then resume"
         )
 
 
@@ -472,5 +411,3 @@ else:
 _GUARDS: dict[tuple[MemoryLimit, Path], MemoryGuard] = {}
 _GUARDS_LOCK = threading.Lock()
 _ONE_PARSE = threading.Lock()
-_LIVE_INDEXES: weakref.WeakSet[CodeIndex] = weakref.WeakSet()
-_LIVE_INDEXES_LOCK = threading.Lock()
