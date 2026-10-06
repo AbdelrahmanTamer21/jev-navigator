@@ -25,6 +25,7 @@ from .secret_shapes import (
 )
 
 _SHORT_NUMBER = re.compile(r"[\d.,:_+-]{1,4}")
+COPY_MIN_CHARS = 4
 _CHOICE_QUESTION = "choice"
 
 __all__ = [
@@ -71,8 +72,9 @@ class SecretMasker:
     secret-named calls, and high-entropy quoted values in assignments. A value that is a reference
     (an identifier, dotted path, call, env lookup or interpolation) is code and stays.
 
-    ``masked_values`` lists every masked value but a short number (``"1.5"``, ``"0"``), so request masking
-    hides each copy elsewhere too: anywhere for a value of ``BY_CONTENT_MIN_CHARS`` or more characters,
+    ``masked_values`` lists every masked value of ``COPY_MIN_CHARS`` or more characters but a short number
+    (``"1234"``), so request masking hides each copy elsewhere too; a shorter value (``"x"``) is too short
+    to identify a secret and is hidden only where a rule finds it: anywhere for a value of ``BY_CONTENT_MIN_CHARS`` or more characters,
     as a whole word for a shorter one (see ``copy_pattern``).
 
     ``path`` is the file the text comes from. In a config file, or in text from no file, an unquoted value
@@ -196,9 +198,13 @@ def _holds_copy(text: _RequestText, value: str, copy: re.Pattern[str]) -> bool:
 
 
 def _is_copied(value: str) -> bool:
-    """A masked value is hidden everywhere else too, unless it is a number of at most four characters or
-    holds no letter or digit (``"<"``)."""
-    return any(character.isalnum() for character in value) and not _SHORT_NUMBER.fullmatch(value)
+    """A masked value is hidden everywhere else too, unless it is shorter than ``COPY_MIN_CHARS``, a number
+    of at most four characters, or holds no letter or digit (``"<"``)."""
+    return (
+        len(value) >= COPY_MIN_CHARS
+        and any(character.isalnum() for character in value)
+        and not _SHORT_NUMBER.fullmatch(value)
+    )
 
 
 def _wording_keys(mapping: Mapping, questions: bool) -> frozenset[str]:

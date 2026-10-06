@@ -28,6 +28,7 @@ import os
 import re
 import sqlite3
 import threading
+import weakref
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -104,10 +105,11 @@ class AnswerStore(Protocol):
 
 
 class JsonlAnswerStore:
-    """Append-only JSON lines. ``item_keys`` maps an item key (item content hash, shared-state hash,
-    question id with its wording hash, batch membership hash) to the question id that answered it;
-    lookups also match the served model recorded with the answer. Input-size refusals are kept as
-    ``input_budget_refusal`` lines keyed by request hash, route and the input box in force."""
+    """Append-only JSON lines. ``item_keys`` maps each item's two keys (see ``item_keys``: the strict
+    one with its batch mates, which production lookups use, and the relaxed one without them) to the
+    question id that answered it; lookups also match the served model recorded with the answer.
+    Input-size refusals are kept as ``input_budget_refusal`` lines keyed by request hash, route and the
+    input box in force."""
 
     def __init__(self, path: Path, *, keep_requests: bool = False) -> None:
         self.path = Path(path)
@@ -234,6 +236,7 @@ class SqliteAnswerStore:
         self.path = Path(path)
         self._lock = threading.Lock()
         self._db = open_shared_database(self.path, _SCHEMA, SHARED_STORE_VERSION)
+        weakref.finalize(self, self._db.close)
         self._refuse_another_layout()
 
     def _refuse_another_layout(self) -> None:

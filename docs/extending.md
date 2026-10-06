@@ -13,7 +13,8 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `index.units` | the units a search judges (functions, methods, Prisma schema blocks, each file's top-level code; in a text reading, the text units of the files JVN does not parse), cut into 60-line pieces only when larger than their room in a request, and the one resolver of lines and line ranges to units |
 | `index.text_blocks` | how a file JVN does not parse splits into blocks without a parser: Markdown by heading section, YAML, JSON and TOML by top-level key, anything else whole |
 | `index.prisma_schema` | a Prisma schema's model, view, enum and composite type blocks with their lines, and the client accessor a model or view is queried through (`model WebsiteEvent` is `prisma.websiteEvent`) |
-| `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc |
+| `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc, files a text names by path or runs as a module (`files_named_by`) |
+| `mentions` | what a text mentions, one owner each: the path tokens it spells out (`paths_in`), the modules a `python -m` command runs (`python_modules_in`), whether a span names a file rather than code (`is_file_path`), the code names it spells out (`code_names_in`, which `code_named_in_doc` reads), and the members a symbol list names (`member_names`) |
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
 | `find_code` | a best-first search that opens places until the code a description names is found |
@@ -186,6 +187,18 @@ becomes range anchors, and the population is every file in scope, so a seed-sear
 the whole scope. Use `jvn findall "functions that enforce the order item limit"` or
 `jvn --json '{"command":"findall","target":"functions that enforce the order item limit"}'`.
 The evidence pack retains the seed search, per-unit answers and raw request identities.
+
+A population can start from the files a text names by path. `operations.files_named_by(index,
+texts, anchor_files)` reads `texts` and the whole text of each anchor file for path tokens
+(`mentions.paths_in`: a file name with a suffix, perhaps under folders, without a leading `./`, `../`
+or `/`). A token names each scope file whose path is the token or ends with `/` and the token, so
+`jobs/sweep.py` names `web/jobs/sweep.py` but never `xjobs/sweep.py`, and a bare `ci.yml` names every
+`ci.yml`. A module a `python -m` command runs (`mentions.python_modules_in`) names the file Python
+runs, resolved like an import from the repository root or `src/`: `uv run python -m app.jobs` names
+`src/app/jobs.py`, and a package names its `__main__.py`. Options before `-m` are skipped, also
+those with a value (`python -W ignore -m app.jobs`, `python -X dev -m app.jobs`). Anchor files are never named, an anchor file
+outside the scope is never read, and a named file is not read for further names. The result splits `code` files, for `find_all`'s `files`, from
+`text` files, and `named_by` keeps the token that named each one. No model is called.
 
 ### Find one location
 
