@@ -384,6 +384,7 @@ class Judge:
         cancelled: Callable[[], bool] | None = None,
         places: Sequence[Item] | None = None,
         refusals: list[Refusal] | None = None,
+        keep_order: bool = False,
     ) -> Iterator[tuple[str, CheckResult]]:
         """Every check asked about every item, yielded per answered question as batches complete.
 
@@ -395,8 +396,10 @@ class Judge:
         every other batch is still sent; without ``refusals`` it raises like a call-cap failure.
         Cancellation is checked before each live request, including between split halves; cached and
         already answered results still yield in full. It does not cancel a request already in flight.
+        With ``keep_order`` the batches form in the order the items are given instead of by place
+        (see ``_CheckPlan.batch_order``).
         """
-        plan = self._check_plan(checks, items, shared, list_name, thresholds, places, refusals)
+        plan = self._check_plan(checks, items, shared, list_name, thresholds, places, refusals, keep_order)
         names = {check.question_id: check.name for check in checks}
         for (position, question_id), answer in sorted(plan.answered.items()):
             yield names[question_id], plan.result(position, answer)
@@ -458,12 +461,14 @@ class Judge:
         thresholds: Thresholds | None = None,
         places: Sequence[Item] | None = None,
         refusals: list[Refusal] | None = None,
+        keep_order: bool = False,
     ) -> AsyncIterator[tuple[str, CheckResult]]:
         """``iter_check_every`` sent as ``check_every_async`` sends: cached answers first, then each
         wave's answers as the wave settles, each under the name of the check that asked for it. A
         failure, a call cap included, raises after every batch its wave answered has yielded, so a
-        caller keeps them all; a refused batch goes into ``refusals`` as on the sync path."""
-        plan = self._check_plan(checks, items, shared, list_name, thresholds, places, refusals)
+        caller keeps them all; a refused batch goes into ``refusals`` and ``keep_order`` keeps the
+        given order as on the sync path."""
+        plan = self._check_plan(checks, items, shared, list_name, thresholds, places, refusals, keep_order)
         names = {check.question_id: check.name for check in checks}
         for (position, question_id), answer in sorted(plan.answered.items()):
             yield names[question_id], plan.result(position, answer)
@@ -799,7 +804,7 @@ class Judge:
         with at most ``max_concurrency`` worker threads; their sends share the judge-wide send slots.
         Answers are applied by the caller, on its
         own thread. Under a call cap, batches go in waves no larger than the calls left, in their
-        stable order, so a capped call always answers the same batches. A batch refused for its size
+        batch order, so a capped call always answers the same batches. A batch refused for its size
         comes back as its halves, which are sent one per wave before any other batch (see
         ``_WaveQueue``), so they never take a call from their own wave. The first failure stops
         every batch that has not started, and raises after every batch already started has yielded
@@ -922,6 +927,7 @@ class Judge:
         thresholds: Thresholds | None,
         places: Sequence[Item] | None = None,
         refusals: list[Refusal] | None = None,
+        keep_order: bool = False,
     ) -> _CheckPlan:
         """Mask the whole candidate set once, before packing, so copied secret values stay hidden
         across batches. A value found in any check's wording is hidden in the items and shared state
@@ -930,9 +936,9 @@ class Judge:
         answered or not, so they do not depend on the store. Each per-item store key includes its
         masked item, the shared state, the question and the batch it was asked in.
 
-        ``places``, one per item, are where each item's code comes from: they order the batches and
-        go into the record (its sources and skeleton), never into the state, so the state carries
-        only the items' own fields.
+        ``places``, one per item, are where each item's code comes from: they order the batches (unless
+        ``keep_order`` keeps the given order) and go into the record (its sources and skeleton), never
+        into the state, so the state carries only the items' own fields.
         """
         if len({check.name for check in checks}) != len(checks):
             raise ValueError("independent checks require unique names for their result lists")
@@ -952,6 +958,7 @@ class Judge:
             masker=self.masker,
             places=places,
             refusals=refusals,
+            keep_order=keep_order,
         )
         groups = _batches(plan)
         for members in groups:
@@ -1181,7 +1188,7 @@ class _BatchStop:
 
 
 class _WaveQueue:
-    """The batches still to send, in stable order. The halves of a batch refused for its size are
+    """The batches still to send, in the plan's batch order. The halves of a batch refused for its size are
     sent one per wave, before any other batch and depth first, as a sequential split would send
     them: so they never share a wave, and a call cap, with other batches, and a half that no split
     can answer stops its sibling from being sent."""
@@ -1250,6 +1257,7 @@ class _CheckPlan:
     masker: Masker | None = None
     places: Sequence[Item] | None = None
     refusals: list[Refusal] | None = None
+    keep_order: bool = False
     _questions: dict[tuple[str, int], dict] = field(default_factory=dict, init=False)
 
     def open_at(self, position: int) -> Mapping[str, Check]:
@@ -1258,6 +1266,12 @@ class _CheckPlan:
 
     def __post_init__(self) -> None:
         self.item_ids = [content_hash(item) for item in self.items]
+
+    def batch_order(self) -> list[int]:
+        """The order batches form in: the given order with ``keep_order``, so a caller that ranks its
+        items decides which batches a call cap answers, else the stable order. The store keys hold
+        each answer's batch mates, so answers stored under one order are asked again under the other."""
+        return list(range(len(self.items))) if self.keep_order else self.stable_order()
 
     def stable_order(self) -> list[int]:
         """Every item position ordered by the unit's place (file, then lines) where the item has one,
@@ -1386,7 +1400,7 @@ def _at_least_one(setting: str, value: int) -> int:
 
 def _completed_wave(futures: list[Future]) -> Generator[tuple[_Batch, JevResponse], None, list[_Batch]]:
     """Yield a wave's answers as its batches complete, then return the halves its refused batches
-    split into, in the wave's stable order; after every batch settled, ``_wave_failure`` decides
+    split into, in the wave's batch order; after every batch settled, ``_wave_failure`` decides
     what is raised."""
     for future in as_completed(futures):
         yield from future.result().answered
@@ -1517,11 +1531,11 @@ def _argument_id(operation: str, offer: CallOffer) -> str:
 
 
 def _batches(plan: _CheckPlan) -> list[list[int]]:
-    """Every item, in the stable order, in batches of at most ``items_per_request``; a batch closes
-    early when the request carrying the next item would not fit the character boxes."""
+    """Every item, in the plan's batch order, in batches of at most ``items_per_request``; a batch
+    closes early when the request carrying the next item would not fit the character boxes."""
     batches: list[list[int]] = []
     current: list[int] = []
-    for position in plan.stable_order():
+    for position in plan.batch_order():
         if current and (
             len(current) == plan.items_per_request or not _fits_in_batch(plan, [*current, position])
         ):
