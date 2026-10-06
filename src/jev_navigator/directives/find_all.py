@@ -480,6 +480,7 @@ class _Search:
         self.room = _room(judge, index, self.checks, self.shared)
         self.reader = UnitReader(index, self.room, listed_only=True, reading=reading)
         self.delivered = _lines_by_file(delivered)
+        self.delivered_units: set[str] = set()
         self.cancelled = cancelled
         self.answered: set[tuple[str, str]] = set()
         self.judged: dict[str, list[CheckResult]] = {target: [] for target in targets}
@@ -571,7 +572,7 @@ class _Search:
         searched_literals: set[str] = set()
         while not self.stopped():
             yield from _chunks(pending, size)
-            judged = {
+            judged = self.delivered_units | {
                 self.unit_of_place[answer.place.id]
                 for answers in self.judged.values()
                 for answer in answers
@@ -870,6 +871,10 @@ class _Search:
         return places
 
     def _pending_places(self, unit: Unit) -> list[Item]:
+        if self.policy.expands and unit.ranges:
+            delivered = self.delivered.get(unit.path, frozenset())
+            if all(line in delivered for first, last in unit.ranges for line in range(first, last + 1)):
+                self.delivered_units.add(unit.id)
         for piece in unit.too_large_pieces:
             self.not_judged[unit.piece_id(piece)] = TOO_LARGE
         pending = []

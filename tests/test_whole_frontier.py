@@ -7,6 +7,7 @@ import pytest
 from shop_search import shop_index
 
 from jev_navigator.composition import FrontierConfiguration
+from jev_navigator.index.units import RangeAnchor
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.secrets import SecretMasker
 from jev_navigator.sources import (
@@ -265,3 +266,44 @@ def test_frontier_uses_judge_concurrency_with_sixteen_items_per_request(tmp_path
     assert len(result.judged["p"]) == 64
     assert client.peak == 2
     assert [len(state["items"]) for state, _ in client.requests] == [16, 16, 16, 16]
+
+
+def test_already_delivered_code_expands_without_paying_to_judge_it_again(tmp_path: Path) -> None:
+    index = shop_index(
+        tmp_path,
+        {"app.py": "def run():\n    return 'FEATURE_LIMIT'\n", "config.toml": "FEATURE_LIMIT = 7\n"},
+    )
+    client = ScriptedJevClient()
+    result = asyncio.run(
+        FrontierConfiguration(sources=(FILES,), hops=(LITERALS,)).search(
+            index,
+            Judge(client),
+            {"p": "configuration"},
+            files=["app.py"],
+            delivered=[RangeAnchor("app.py", 1, 2)],
+        )
+    )
+    assert result.stopped_by == "scope_examined", result.failure
+    assert {unit.path for unit in result.units} == {"app.py", "config.toml"}
+    assert [item["file"] for state, _ in client.requests for item in state["items"]] == ["config.toml"]
+
+
+def test_same_callee_name_on_different_owners_follows_both_definitions(tmp_path: Path) -> None:
+    index = shop_index(
+        tmp_path,
+        {
+            "app.py": (
+                "import worker\nimport guard\n\ndef run():\n    worker.decide()\n    return guard.decide()\n"
+            ),
+            "worker.py": "def decide():\n    return 1\n",
+            "guard.py": "def decide():\n    return 2\n",
+            "unrelated.py": "def decide():\n    return 3\n",
+        },
+    )
+    result = asyncio.run(
+        FrontierConfiguration(sources=(FILES,), hops=(CALLEES,)).search(
+            index, Judge(ScriptedJevClient()), {"p": "run"}, files=["app.py"]
+        )
+    )
+    assert result.stopped_by == "scope_examined", result.failure
+    assert {unit.path for unit in result.units} == {"app.py", "worker.py", "guard.py"}

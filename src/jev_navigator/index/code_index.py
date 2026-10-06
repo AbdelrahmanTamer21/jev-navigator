@@ -526,12 +526,10 @@ class CodeIndex:
             for call in self._facts_in(function.file).calls
             if function.start <= call.line <= function.end
         ]
-        edges: dict[str, CallEdge] = {}
-        for call in calls:
-            if call.name not in edges:
-                binding = self.binding_of(call.file, call.line, call.name, call.receiver)
-                edges[call.name] = CallEdge(call.name, call.line, binding)
-        return tuple(edges.values())
+        return tuple(
+            CallEdge(call.name, call.line, self.binding_of(call.file, call.line, call.name, call.receiver))
+            for call in calls
+        )
 
     def find_references(self, name: str) -> tuple[Reference, ...]:
         """Uses of ``name`` that are not calls: arguments, collection entries, assignments,
