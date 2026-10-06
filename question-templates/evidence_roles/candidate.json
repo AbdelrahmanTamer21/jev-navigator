@@ -1,7 +1,7 @@
 {
   "case_id": "evidence-roles:containment",
   "group_id": "evidence-roles",
-  "revision_id": "proposal-v1",
+  "revision_id": "proposal-v2",
   "request": {
     "model": "jev-latest",
     "state": {
@@ -60,15 +60,15 @@
           }
         }
       },
-      "forward": {
+      "delegates": {
         "type": "noul",
-        "instructions": "Does `unit.code` only pass along the call or value relevant to `point`?",
+        "instructions": "Does `unit.code` delegate the call or transport the value relevant to `point`?",
         "criteria": {
           "true": {
-            "what": "For the described behavior the unit delegates or transports without deciding, guarding, establishing the dependent value or performing the effect itself."
+            "what": "The unit passes the relevant call to another unit or carries the relevant value onward. It may also decide, guard, establish a value or perform an effect locally."
           },
           "false": {
-            "what": "It owns any of those responsibilities for the described behavior, or it does not pass that behavior along."
+            "what": "The unit does not pass the relevant call or value onward. Mentioning a call or value without transporting it does not count."
           }
         }
       },
@@ -91,7 +91,7 @@
     "guard": "Keep this raw probability for this point and unit. Rank per role and retain the best unit for each caller-required role; role coverage is a separate prerequisite for settling.",
     "value": "Keep this raw probability for this point and unit. Rank per role and retain the best unit for each caller-required role; role coverage is a separate prerequisite for settling.",
     "effect": "Keep this raw probability for this point and unit. Rank per role and retain the best unit for each caller-required role; role coverage is a separate prerequisite for settling.",
-    "forward": "Keep this raw probability for this point and unit. Route to further code only when forward >= 0.80 and every deciding role <= 0.20.",
-    "satisfied": "Keep this raw probability for this point and unit. Rank search answers; this is not a verdict about the point being true."
+    "satisfied": "Keep this raw probability for this point and unit. Rank search answers; this is not a verdict about the point being true.",
+    "delegates": "Keep this raw probability for this point and unit. Route to further code only when delegates >= 0.80 and every deciding role <= 0.20."
   }
 }

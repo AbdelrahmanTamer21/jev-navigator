@@ -7,10 +7,10 @@ answers, history, other units or verdicts enter state. All six questions run tog
 that same state. The candidate contains the exact instructions and opposing criteria.
 
 The questions are whether the unit makes the decision, restricts the behavior with a guard,
-establishes a dependent value, performs the effect, only forwards the call or value, and answers
+establishes a dependent value, performs the effect, delegates the call or transports the value, and answers
 the caller's search. A guard may prevent the behavior described by the point and still be useful
-search evidence. Roles overlap deliberately. A check can both decide and guard. Forwarding means
-the unit owns none of the other responsibilities for this point. Satisfying the search is separate
+search evidence. Roles overlap deliberately. A check can both decide and guard. Delegation can coexist with any local role. Code derives forwarding-only when delegation is high
+and all four local role probabilities are low. Satisfying the search is separate
 from the truth of any statement. Neither a Noul nor the reducer returns that truth.
 
 The host composes raw answers in code, after inference:
@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
 
 ROLES = ("decide", "guard", "value", "effect")
+
 
 @dataclass(frozen=True)
 class EvidenceAnswers:
@@ -31,9 +32,9 @@ class EvidenceAnswers:
         return max(self.probabilities[role] for role in (*ROLES, "satisfied"))
 
     @property
-    def follow(self) -> bool:
+    def forwarding_only(self) -> bool:
         return (
-            self.probabilities["forward"] >= 0.80
+            self.probabilities["delegates"] >= 0.80
             and max(self.probabilities[role] for role in ROLES) <= 0.20
         )
 
@@ -41,23 +42,21 @@ class EvidenceAnswers:
 def compose(answers: Sequence[EvidenceAnswers], required: Sequence[str]):
     # Bands below are proposed experimental settings, not calibrated acceptance rules.
     best = {
-        role: max(answers, key=lambda answer: answer.probabilities[role], default=None)
-        for role in required
+        role: max(answers, key=lambda answer: answer.probabilities[role], default=None) for role in required
     }
     covered = {
-        role for role, answer in best.items()
-        if answer is not None and answer.probabilities[role] >= 0.80
+        role for role, answer in best.items() if answer is not None and answer.probabilities[role] >= 0.80
     }
     return {
         "best_by_role": best,
         "uncovered_roles": set(required) - covered,
         "ranked": sorted(answers, key=lambda answer: -answer.relevance),
-        "follow_units": [answer.unit_id for answer in answers if answer.follow],
+        "follow_units": [answer.unit_id for answer in answers if answer.forwarding_only],
     }
 ```
 
 Retain the best candidate for every required role, even when it remains uncertain. Do not let
-forwarding demote a unit that scored for a deciding role. Only a confident forwarding-only answer
+forwarding demote a unit that scored for a deciding role. Only code-composed forwarding-only evidence
 routes to the next code operation. It does not prove the forwarded implementation absent. Settling
 requires no uncovered role and no pending expansion. A weighted aggregate never hides an uncovered
 role. Unknown or refused answers remain unknown. Parsing whether a unit declares a named symbol
@@ -71,6 +70,17 @@ role questions in one request, rather than six requests. Freeze the units, quest
 revision and selection rule before any trial. Measure deciding-line recall and per-role retention,
 along with raw answers, price and latency. Historical multi-unit match probabilities are not an
 accuracy control for these new isolated requests. No documenso data enters the comparison.
+
+Revision `proposal-v2` replaces the combined `forward` question with the independent `delegates`
+question. A wrapper that validates input and then delegates a write can score high for both `guard`
+and `delegates`. Code keeps its guard evidence and does not classify it as forwarding-only.
+The reducer example is executed by the offline regression test with the candidate's question ids.
+
+The new candidate file SHA-256 is
+`d1b1d84d125b65e361a56d69386836eccbb2e490ff0906103ac83555d9132a2f`.
+The canonical request SHA-256 is
+`56b6db1a7eeaf728881b354919e196deacde6d24752edebd8e2c871d7a0936fc`.
+Earlier prepared packets and review receipts describe the earlier candidate, not this revision.
 
 `prepare-summary.json` records Meta Builder 0.6.0's free prepare output identities and resolved
 state paths. Six question packets and one workflow packet were prepared. Atomicity pairs and

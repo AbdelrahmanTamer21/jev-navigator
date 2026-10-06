@@ -1,8 +1,8 @@
 {
   "tool_version": "0.6.0",
-  "candidate_file_sha256": "023c3a6852843d2d8238eb1057b681046513c413550228e8b9537cbd0ae79f86",
-  "candidate_request_sha256": "dc6ddf9fb7d52ed7ad239a082d28ef958c99e4c6be3c9961a38c497652c70ce5",
-  "prepared_file_sha256": "cb7d8cb7c8810cc6a470a054861d4ad688bb703db7bd4529a946d76c3f33b6f0",
+  "candidate_file_sha256": "d1b1d84d125b65e361a56d69386836eccbb2e490ff0906103ac83555d9132a2f",
+  "candidate_request_sha256": "56b6db1a7eeaf728881b354919e196deacde6d24752edebd8e2c871d7a0936fc",
+  "prepared_file_sha256": "091390257342688b39e687cd170d748e05cfba455ef9512ed8f3a443b0eec545",
   "prepared_requests": [
     {
       "question": "decide",
@@ -93,9 +93,9 @@
       }
     },
     {
-      "question": "forward",
+      "question": "delegates",
       "scope": "question",
-      "review_fingerprint": "7c326a00ecf473effd899986296432c98e5cb40e0c3eaa2827d4c2cf9bd0eba5",
+      "review_fingerprint": "3867903190eb61317f53fbf212364eec0b6a167e332532c80f52f17b96c0cdef",
       "state_path_coverage": {
         "review_question_unresolved_paths": [],
         "selected_paths": [
