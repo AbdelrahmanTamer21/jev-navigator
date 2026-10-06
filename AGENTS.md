@@ -20,6 +20,9 @@ which blocks are built or being built, lives in the README's
 - **No caller domain.** Nothing finding-, theme- or Engine-specific lives in JVN.
 - **Time is never a budget (André, 06.10.2026).** Only the runaway guards in `runaway_guards.py` stop
   work, and what they cut is counted. Detail: [Optional search controls](README.md#optional-search-controls).
+- **Cache location and pruning.** `JEV_NAVIGATOR_CACHE_HOME` names the cache folder and
+  `JEV_NAVIGATOR_DISK_BUDGET` its budget; a library host prunes with `jvn cache prune`. Detail:
+  [Where JVN keeps runs and caches](README.md#where-jvn-keeps-runs-and-caches).
 - **Experiments** compare named configurations, never tweaks inside one call.
 - **Checks (André, 05.10.2026).** Locally run only the tests that cover or import changed files and ruff;
   never the whole suite on this Mac. The full suite runs on GitHub Actions (`gh workflow run tests.yml`
