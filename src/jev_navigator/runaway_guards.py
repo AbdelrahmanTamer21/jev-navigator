@@ -2,7 +2,8 @@
 
 André ruled on 06.10.2026 at 10:28 that a search is not limited by time: "if search finds the right
 goddamn thing and takes a minute thats fine. I do not want arbitrary guards at this point killing our
-results. I want to prevent hanging infinite spend infinite search but nothing else." So each value sits
+results. I want to prevent hanging infinite spend infinite search but nothing else." At 11:08 the same day
+he set the values: 30 s for one file's parse and 7 minutes for one search. So each value sits
 far above a slow but good run, and what a guard cuts is always counted, never dropped silently:
 
 - ``PARSE_GUARD_SECONDS``: one file's parse. Normal files parse in well under a second; a file over
@@ -13,8 +14,8 @@ far above a slow but good run, and what a guard cuts is always counted, never dr
 
 from __future__ import annotations
 
-PARSE_GUARD_SECONDS = 60.0
-SEARCH_CEILING_SECONDS = 600.0
+PARSE_GUARD_SECONDS = 30.0
+SEARCH_CEILING_SECONDS = 420.0
 
 
 def parse_guard_reason(guard_seconds: float) -> str:

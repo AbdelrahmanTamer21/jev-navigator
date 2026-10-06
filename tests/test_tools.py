@@ -14,7 +14,7 @@ from git_repos import git
 from jev_navigator import memory_limit
 from jev_navigator.index import file_shape, tools
 from jev_navigator.index.file_shape import Placement
-from jev_navigator.runaway_guards import parse_guard_reason
+from jev_navigator.runaway_guards import PARSE_GUARD_SECONDS, parse_guard_reason
 
 MISSING_OBJECT = "0" * 40
 
@@ -317,7 +317,11 @@ def test_a_parse_within_the_guard_is_never_cut(tmp_path: Path) -> None:
     refused: dict[str, str] = {}
 
     # Act
-    matches = list(tools.ast_grep_rules(VALID_RULE, ["slow.py"], tmp_path, refused=refused, guard_seconds=60))
+    matches = list(
+        tools.ast_grep_rules(
+            VALID_RULE, ["slow.py"], tmp_path, refused=refused, guard_seconds=PARSE_GUARD_SECONDS
+        )
+    )
 
     # Assert
     assert [match["file"] for match in matches] == ["slow.py"]

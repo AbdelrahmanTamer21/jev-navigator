@@ -290,9 +290,9 @@ schema. Agents can also pass an inline JSON object: `jvn --json '{"target":"the 
 These controls are optional tuning, not prerequisites.
 
 Time is never a budget. Two runaway guards, set in `runaway_guards.py` (André, 06.10.2026), stop only a
-search that would otherwise hang: a file whose parse runs past 60 s is read as text instead (see
+search that would otherwise hang: a file whose parse runs past 30 s is read as text instead (see
 [Choosing the files a search covers](#choosing-the-files-a-search-covers)), and a `find_code` search
-still running after 10 minutes ends `runaway`, with every unopened place listed and resumable like
+still running after 7 minutes ends `runaway`, with every unopened place listed and resumable like
 `budget`. A library caller can pass its own `ceiling_seconds` to `find_code` and `find_code_async`.
 
 An explicitly selected output directory must be new or empty. Each evidence pack contains:
@@ -516,7 +516,7 @@ to measure it. `CodeIndex.refused_files` and `unavailable_files` give the reason
 peak, the limit it is over, and the longest line in bytes. A file that ast-grep itself skips without
 parsing (it prints nothing for a file that is not valid UTF-8, or for one of more than 3,000,000
 bytes and 200,000 lines, which a file parsed alone can be) is refused too, as `not parsed`, and is
-never taken for a file without functions. So is a file whose parse runs past the 60 s runaway guard
+never taken for a file without functions. So is a file whose parse runs past the 30 s runaway guard
 (`runaway_guards.PARSE_GUARD_SECONDS`): tree-sitter-python takes quadratic time on a long run of `#`
 comment lines after a statement (66 s in ast-grep at 40,000 lines), while normal files parse in well under a second.
 An ast-grep run of files side by side that passes the guard is stopped, and each of its files that had
