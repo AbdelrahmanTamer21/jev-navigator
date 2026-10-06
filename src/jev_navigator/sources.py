@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import ClassVar, Protocol
 
 from . import operations
@@ -237,6 +238,35 @@ class NamedFileSource:
 
 
 @dataclass(frozen=True)
+class TextFileNameSource:
+    """Text files named by basename or stem, independent of whether their contents repeat the name.
+
+    Case is ignored, and ambiguous basenames keep every match. Lockfiles require a whole filename
+    or path, just as named-file search does.
+    """
+
+    name: ClassVar[str] = "text_file_name"
+    label: ClassVar[str] = "text files named by name"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        names = {name.casefold(): name for name in seeds.names}
+        reached = []
+        for file in index.files:
+            if language_read(file):
+                continue
+            path = PurePosixPath(file)
+            keys = (file.casefold(), path.name.casefold())
+            if not is_lockfile(file):
+                keys += (path.stem.casefold(),)
+            for key in keys:
+                if key in names:
+                    name = names[key]
+                    reached.append(Reach(file, self.name, name, 1, frozenset({name})))
+                    break
+        return reached
+
+
+@dataclass(frozen=True)
 class ModelSource:
     """The Prisma schema's model and view blocks each seed unit queries through Prisma Client
     (``operations.queried_models``), at distance 1."""
@@ -281,6 +311,7 @@ IMPORTS = ImportSource()
 IMPORTERS = ImporterSource()
 NAMED_FILES = NamedFileSource()
 TEXT_NAMED_FILES = NamedFileSource(text_files=True)
+TEXT_FILE_NAMES = TextFileNameSource()
 MODELS = ModelSource()
 CLIENT_CALLS = ClientCallSource()
 

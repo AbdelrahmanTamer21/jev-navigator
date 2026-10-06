@@ -12,7 +12,7 @@ from .index.code_index import CodeIndex
 from .index.units import Anchor, RangeAnchor
 from .judgments.judge import Judge
 from .mentions import names_from_text
-from .sources import ANCHORS, FILES, NAMES, TEXT_NAMED_FILES, TEXT_NAMES, Source
+from .sources import ANCHORS, FILES, NAMES, TEXT_FILE_NAMES, TEXT_NAMED_FILES, TEXT_NAMES, Source
 
 
 def reserve_calls(judge: Judge, allowances: Mapping[str, int]) -> dict[str, Judge]:
@@ -47,7 +47,7 @@ class SearchConfiguration:
     text_calls: int
     policy: Policy = STAGE_ORDER
     code_sources: tuple[Source, ...] = (ANCHORS, FILES, NAMES)
-    text_sources: tuple[Source, ...] = (ANCHORS, FILES, TEXT_NAMED_FILES, TEXT_NAMES)
+    text_sources: tuple[Source, ...] = (ANCHORS, FILES, TEXT_FILE_NAMES, TEXT_NAMED_FILES, TEXT_NAMES)
 
     async def search(
         self,

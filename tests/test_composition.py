@@ -52,3 +52,15 @@ def test_continuation_gets_its_reserved_calls_after_discovery_exhausts_its_share
     assert judge.calls == 2
     with pytest.raises(ValueError, match="remaining"):
         reserve_calls(judge, {"another": 1})
+
+
+def test_text_named_by_stem_reaches_the_file_without_a_content_match(tmp_path: Path) -> None:
+    index = shop_index(tmp_path, {"docs/Policy.md": "# Rules\nKeep every answer.\n"})
+    _, text = asyncio.run(
+        SearchConfiguration("named-evidence", 0, 1).search(
+            index,
+            Judge(ScriptedJevClient(), max_calls=1),
+            {"p": "read `Policy`"},
+        )
+    )
+    assert [score.unit.path for score in text.scores("p")] == ["docs/Policy.md"]
