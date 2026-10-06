@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from git_repos import commit_all, git, refuse_ownership, write_files
 
+from jev_navigator.index import code_index as code_index_module
 from jev_navigator.index import tools
 from jev_navigator.index.code_index import (
     CodeIndex,
@@ -134,6 +135,33 @@ def test_imports_and_dependents_resolve_to_scope_files(sample_index: CodeIndex) 
     # Assert
     assert python_imports == ("app/validation.py",)
     assert script_dependents == ("web/routes.ts",)
+
+
+def test_each_files_imports_are_read_once_for_every_dependents_lookup(
+    sample_index: CodeIndex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every lookup of a file's importers reads the imports of every scope file. Read again on each
+    lookup, a search asking for the importers of a few dozen files decoded the whole scope that often
+    and grew a 1,363-file index past 1.5 GB (Analysis Engine, 06.10.2026)."""
+    # Arrange
+    read: list[str] = []
+    real = code_index_module.imported_modules
+
+    def counted(source: str, file: str):
+        read.append(file)
+        return real(source, file)
+
+    monkeypatch.setattr(code_index_module, "imported_modules", counted)
+
+    # Act
+    first = sample_index.dependents("web/handlers.ts")
+    reads_after_first = len(read)
+    second = (sample_index.dependents("app/validation.py"), sample_index.dependents("web/handlers.ts"))
+
+    # Assert
+    assert first == ("web/routes.ts",)
+    assert second == (("app/orders.py",), ("web/routes.ts",))
+    assert len(read) == reads_after_first == len(set(read))
 
 
 def test_co_changed_files_counts_commits_shared_with_the_file(sample_index: CodeIndex) -> None:
