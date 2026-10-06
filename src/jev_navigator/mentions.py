@@ -29,7 +29,9 @@ _SNAKE_CASE = re.compile(r"\b([a-z]+(?:_[a-z0-9]+)+)\b")
 BARE_NAME_RULES = (_CALL, _CAMEL_CASE, _SCREAMING_CASE, _SNAKE_CASE)
 """The shapes of a word a text names code by without backticks; snake_case is its own rule."""
 _DOTTED_MODULE = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
-_PYTHON_MODULE_RUN = re.compile(rf"\bpython[\d.]*(?:\s+-[A-Za-z]\w*)*\s+-m\s+({_DOTTED_MODULE})")
+_INTERPRETER_OPTION = r"-(?:[WX]\s*[^\s-]\S*|[A-Za-z]\w*)"
+"""An option before ``-m``: ``-u``, or ``-W`` and ``-X`` with their value (``-W ignore``, ``-X dev``)."""
+_PYTHON_MODULE_RUN = re.compile(rf"\bpython[\d.]*(?:\s+{_INTERPRETER_OPTION})*\s+-m\s*({_DOTTED_MODULE})")
 _IDENTIFIER = re.compile(r"[A-Za-z_$][\w$]*")
 _MEMBER_SEPARATOR = re.compile(r"[.#:]")
 _SYMBOL_SEPARATOR = re.compile(r"[/,|]")
@@ -44,7 +46,8 @@ def paths_in(text: str) -> list[str]:
 
 def python_modules_in(text: str) -> list[str]:
     """The modules ``text`` runs with ``python -m``, each once, in order of first mention:
-    ``uv run python3 -u -m app.jobs --all`` runs ``app.jobs``. A dotted word no command runs is none."""
+    ``uv run python3 -u -m app.jobs --all`` and ``python -W ignore -mapp.jobs`` run ``app.jobs``. A
+    dotted word no command runs is none."""
     return list(dict.fromkeys(_PYTHON_MODULE_RUN.findall(text)))
 
 
@@ -57,7 +60,9 @@ def is_file_path(span: str) -> bool:
 def code_names_in(text: str) -> list[str]:
     """The code names ``text`` spells out, each once, in order of first mention: backticked spans
     that are not file paths, and words shaped as a call, camelCase or PascalCase, SCREAMING_CASE or
-    snake_case. A dotted or qualified name gives its last member: ``Store.flush()`` names ``flush``."""
+    snake_case. A dotted or qualified name gives its last member: ``Store.flush()`` names ``flush``.
+    The word rules read a path too, so a path whose stem has such a shape names it, as a file often
+    defines its stem: ``jobs/run_all.py`` names ``run_all``, while ``pyproject.toml`` names nothing."""
     mentions = sorted([*_backticked_names(text), *_bare_names(text)], key=itemgetter(0))
     return list(dict.fromkeys(name for _, name in mentions))
 

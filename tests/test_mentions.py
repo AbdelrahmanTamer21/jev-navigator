@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from jev_navigator.mentions import code_names_in, is_file_path, member_names, paths_in
+from jev_navigator.mentions import code_names_in, is_file_path, member_names, paths_in, python_modules_in
 
 
 def test_a_path_token_loses_its_leading_relative_part_and_its_trailing_punctuation() -> None:
@@ -38,6 +38,7 @@ def test_a_path_is_given_once_in_order_of_first_mention_and_a_word_without_a_suf
     ("span", "names_a_file"),
     [
         ("pyproject.toml", True),
+        ("schema.prisma", True),
         ("jobs/run", True),
         ("res.json", True),
         ("Store.flush", False),
@@ -67,6 +68,33 @@ def test_a_text_names_code_by_backticks_calls_and_identifier_shapes_in_order_of_
 
     # Assert
     assert names == ["flush", "audit", "retry_limit", "MAX_RETRIES", "placeOrder", "OrderBook", "send"]
+
+
+@pytest.mark.parametrize(
+    ("command", "module"),
+    [
+        ("uv run python3 -u -m app.jobs --all", "app.jobs"),
+        ("python -W ignore -m app.jobs", "app.jobs"),
+        ("python -W error::DeprecationWarning -m app.jobs", "app.jobs"),
+        ("python -Werror -m app.jobs", "app.jobs"),
+        ("python -X dev -m app.cli", "app.cli"),
+        ("python -mapp.cli", "app.cli"),
+    ],
+)
+def test_a_python_command_runs_the_module_after_its_interpreter_options(command: str, module: str) -> None:
+    # Act
+    modules = python_modules_in(f"run: {command}")
+
+    # Assert
+    assert modules == [module]
+
+
+def test_a_path_names_its_stem_only_when_the_stem_has_a_names_shape() -> None:
+    # Act
+    names = code_names_in("see `jobs/run_all.py`, `src/userService.ts` and `pyproject.toml`")
+
+    # Assert
+    assert names == ["run_all", "userService"]
 
 
 def test_a_bare_snake_case_word_is_its_own_rule() -> None:
