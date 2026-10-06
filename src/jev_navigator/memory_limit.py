@@ -1,4 +1,4 @@
-"""JVN's memory limit: an allowance for each JVN process, and one ceiling for all of them on a machine.
+"""JVN child-process allowances and their shared machine ceiling.
 
 Every process JVN starts is started through ``started``: the index's ast-grep, ripgrep and git, the
 git call that records a pack's source revision (``cli``), and a model step's command-line connector
@@ -49,7 +49,7 @@ measured, saleor/graphql with 15.6 MB of code, peaked at 333 MB, and the worst, 
 packages/protocol with generated bundles parsed side by side, at 471 MB."""
 
 CEILING_MB = 8192
-"""What all JVN processes on one machine may hold together: eight slots at the default allowance. All
+"""The shared ceiling of JVN child-process reservations: eight slots at the default allowance. All
 agent work on the machine shares 10 to 15 GB, and André chose 8 GB for JVN (04.10.2026) because a slot
 is a reservation: with four, a fifth run waited while four runs of about 300 MB used only 1.2 GB."""
 
@@ -62,9 +62,9 @@ process overshoots its allowance by about 40 MB before it is stopped."""
 
 SLOT_POLL_SECONDS = 0.2
 
-PYTHON_SHARE_MB = 270
-"""Python's measured share of the largest scope (261 MB for saleor/graphql). The rest of the allowance
-pays for ast-grep: files side by side, each up to the parse guard's bound, or one file alone."""
+PARSE_HEADROOM_MB = 270
+"""Conservative headroom when sizing ast-grep concurrency and individual files. Originally based on
+Python's 261 MB share for saleor/graphql, it remains parser sizing slack, not a host-heap charge."""
 
 ENVIRONMENT_NAMES = {
     "allowance_mb": "JEV_NAVIGATOR_MEMORY_ALLOWANCE_MB",
@@ -114,16 +114,16 @@ class MemoryLimit:
 
     @property
     def parse_threads(self) -> int:
-        """How many files ast-grep may parse at once: the allowance less Python's share, divided by the
+        """How many files ast-grep may parse at once: the allowance less parser headroom, divided by the
         largest parse the guard admits; at least one. It assumes one parse per process, which
         ``parsing`` keeps."""
-        return max(1, int((self.allowance_mb - PYTHON_SHARE_MB) // MAX_PARSE_PEAK_MB))
+        return max(1, int((self.allowance_mb - PARSE_HEADROOM_MB) // MAX_PARSE_PEAK_MB))
 
     @property
     def single_parse_mb(self) -> int:
         """The largest estimated parse peak of a file ast-grep parses alone, on one thread with no other
-        file beside it: the allowance less Python's share. The parse guard refuses any file above it."""
-        return self.allowance_mb - PYTHON_SHARE_MB
+        file beside it: the allowance less parser headroom. The parse guard refuses any file above it."""
+        return self.allowance_mb - PARSE_HEADROOM_MB
 
 
 def slots_directory(environment: Mapping[str, str] | None = None) -> Path:
