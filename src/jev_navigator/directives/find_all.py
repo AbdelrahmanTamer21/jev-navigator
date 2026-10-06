@@ -635,8 +635,15 @@ class _Search:
                 continue
             clearing = self._clearing(target)
             self._push_hops(frontier, target, sorted(clearing - self.expanded[target]))
-            if not clearing or self._awaiting(target):
-                drawing[target] = bool(clearing)
+            coverage = self.policy.role_coverage
+            judged_units = {
+                self.unit_of_place[answer.place.id]
+                for answer in self.judged[target]
+                if answer.place is not None and answer.place.id in self.unit_of_place
+            }
+            roles_complete = coverage is None or coverage.complete(target, judged_units)
+            if not clearing or self._awaiting(target) or not roles_complete:
+                drawing[target] = bool(clearing) and roles_complete
             else:
                 self.settled.append(target)
         return drawing
