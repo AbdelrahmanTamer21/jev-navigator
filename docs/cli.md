@@ -280,7 +280,10 @@ function, method, Prisma schema block and file's top-level code, with the units 
 wave of requests;
 a unit larger than its room in a request is judged by its 60-line pieces and scored by its best one.
 The call allowance is shared across seed discovery and enumeration. A budget stop writes completed
-judgments and the units not yet judged to a partial evidence pack.
+judgments and the units not yet judged to a partial evidence pack. Find All judges code only: a file
+JVN does not parse, such as YAML, JSON or Markdown, is unlisted as `language not supported`. The
+library's `find_all_text` searches those files when a caller asks for them
+([extending.md](extending.md#text-units)).
 
 The result includes `seed_search`, and `search` records the `found`, `unsure` and `searched` units
 (each with its kind, name, file and runs of lines, the piece judged when it was cut, its answer and

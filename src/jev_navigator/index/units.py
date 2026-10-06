@@ -2,14 +2,20 @@
 
 A unit is one function, one method, one block of a Prisma schema (a model, view, enum or composite
 type, header to closing brace), or one file's top-level code: its lines outside every function,
-method and block, class bodies included, kept as runs of lines in order. A function's or method's
+method and block, class bodies included, kept as runs of lines in order. That is a code reading
+(``Reading.CODE``), what find and find_all judge. A text reading (``Reading.TEXT``), what a text search
+judges, reads only the files JVN does not parse, as plain text: one unit of kind ``text`` per block its
+format gives (``text_blocks``), unless ``scope.text_files_left_out`` leaves the file out. Neither
+reading ever lists the other's units. A function's or method's
 unit starts at its first decorator, so a route travels with its handler, while its id stays the
 index's span key. A stub, a function whose body only declares a shape (``CodeIndex.stubs_in``), is
 no unit: its lines are top-level code. A record carries the unit's identity, kind, qualified symbol
 and the hash of its own text. Only a unit larger than its room in a request (``box_chars``) is cut, into
-pieces of up to 60 lines with no overlap; a piece never spans two runs. The unit stays one unit,
-scored by its best piece. A piece still over that room is too large to judge: it is named with its
-range and size and never judged.
+pieces of up to 60 lines with no overlap; a piece never spans two runs. A YAML or JSON text block is cut
+at its value's keys instead (``text_blocks.child_blocks``), so a key that fits stays whole in one piece:
+neighbouring keys are packed together while they fit 60 lines and the room, and a key over the room is
+cut by lines. The unit stays one unit, scored by its best piece. A piece still over that room is too
+large to judge: it is named with its range and size and never judged.
 
 Spans are lines, so functions on the same lines have the same text and are one unit, named by the
 first named of them. A function nested in another is a unit of its own (``nested_in`` names the
@@ -32,13 +38,15 @@ from functools import cached_property
 from ..judgments.questions import serialized_chars
 from .code_index import CodeIndex
 from .imports import import_lines, without_comments
-from .languages import is_schema_file, language_of, language_read
+from .languages import TEXT_LANGUAGE, is_schema_file, language_of, language_read
 from .scope import is_test_file
 from .spans import Span, holder_of
+from .text_blocks import TextBlock, child_blocks
 
 PIECE_LINES = 60
 TOP_LEVEL_SYMBOL = "<top level>"
 UNSUPPORTED_LANGUAGE = "language not supported"
+CODE_FILE = "code, which a text search leaves to find_all"
 OUTSIDE_SCOPE = "not in the index scope"
 _UNLISTED_TOP_LEVEL = (
     "top-level code of only imports, comments, directives and brackets, which a listing leaves out"
@@ -54,6 +62,14 @@ class UnitKind(StrEnum):
     METHOD = "method"
     SCHEMA_BLOCK = "schema_block"
     TOP_LEVEL = "top_level"
+    TEXT = "text"
+
+
+class Reading(StrEnum):
+    """Which files a listing reads, and how: code through its parser, or the rest as plain text."""
+
+    CODE = "code"
+    TEXT = "text"
 
 
 @dataclass(frozen=True)
@@ -114,24 +130,27 @@ class UnitListing:
     unlisted: Mapping[str, str]
 
 
-def list_units(index: CodeIndex, files: Sequence[str], *, box_chars: int) -> UnitListing:
+def list_units(
+    index: CodeIndex, files: Sequence[str], *, box_chars: int, reading: Reading = Reading.CODE
+) -> UnitListing:
     """The functions and methods of ``files`` that no other function holds, the blocks of each Prisma
     schema, and each file's top-level code, in file order and then by position, parsing every source
-    file in one batched scan. Every line of code is in a listed unit. A file whose top-level code is
-    only imports, comments, directives (``"use client"``), lines of closing brackets and blank lines
-    lists no top-level unit. A file in a language JVN does not read, gone since the inventory, or
-    outside the index's scope is named in ``unlisted``, the last with the index's own reason where it
-    has one. ``box_chars`` is the room one unit's text has in a request, as ``serialized_chars``
-    counts it: the client's box (``InputLimits.box_chars``) less what the request carries beside the
-    unit."""
+    file in one batched scan; with ``reading`` TEXT, the text units of the files JVN does not parse
+    instead. Every line of code is in a listed unit. A file whose top-level code is only imports,
+    comments, directives (``"use client"``), lines of closing brackets and blank lines lists no
+    top-level unit. A file the reading leaves out (see ``_left_out``), a file gone since the inventory,
+    and a file outside the index's scope are named in ``unlisted``, the last with the index's own
+    reason where it has one. ``box_chars`` is the room one unit's text has in a request, as
+    ``serialized_chars`` counts it: the client's box (``InputLimits.box_chars``) less what the request
+    carries beside the unit."""
     files = tuple(dict.fromkeys(files))
     in_scope = frozenset(index.files)
     not_indexed = index.not_indexed_files
     unlisted = {file: not_indexed.get(file, OUTSIDE_SCOPE) for file in files if file not in in_scope}
-    read_files = tuple(file for file in files if file in in_scope and language_read(file))
+    unlisted |= _left_out(index, [file for file in files if file in in_scope], reading)
+    read_files = tuple(file for file in files if file in in_scope and file not in unlisted)
     index.functions_in_files(tuple(file for file in read_files if language_of(file)))
     units = tuple(unit for file in read_files for unit in _file_units(index, file, box_chars).listed)
-    unlisted |= {file: UNSUPPORTED_LANGUAGE for file in files if file in in_scope and not language_read(file)}
     unlisted |= {file: reason for file, reason in index.unavailable_files.items() if file in files}
     return UnitListing(units, unlisted)
 
@@ -207,18 +226,23 @@ class AnchorResolution:
 
 
 def resolve_anchors(
-    index: CodeIndex, anchors: Iterable[Anchor], *, box_chars: int, listed_only: bool = False
+    index: CodeIndex,
+    anchors: Iterable[Anchor],
+    *,
+    box_chars: int,
+    listed_only: bool = False,
+    reading: Reading = Reading.CODE,
 ) -> AnchorResolution:
     """The units ``anchors`` name. A line names the innermost unit holding it: a function, decorators
     included, or the file's top-level code outside every function, stubs included, even top-level
     code the listing leaves out. A range names each unit its non-blank lines touch, leaving out units
     nested in another it names. With ``listed_only`` every unit named is one ``list_units`` lists: a
     nested function gives way to the outermost function holding it, and top-level code the listing
-    leaves out names nothing. Nothing is guessed: a file outside the scope or in a language JVN does
-    not parse, a line outside its file, a reversed range, a blank line in a file with no top-level
-    code, and with ``listed_only`` lines of only unlisted top-level code are reported, and a file is
-    parsed only after its anchor is known to point inside it. ``box_chars`` is ``list_units``'."""
-    resolver = _AnchorResolver(index, box_chars, listed_only)
+    leaves out names nothing. Nothing is guessed: a file outside the scope or one ``reading`` leaves
+    out, a line outside its file, a reversed range, a blank line in a file with no top-level code, and
+    with ``listed_only`` lines of only unlisted top-level code are reported, and a file is parsed only
+    after its anchor is known to point inside it. ``box_chars`` and ``reading`` are ``list_units``'."""
+    resolver = _AnchorResolver(index, box_chars, listed_only, reading)
     found: dict[str, Unit] = {}
     unresolved = []
     for anchor in anchors:
@@ -230,8 +254,22 @@ def resolve_anchors(
     return AnchorResolution(tuple(found.values()), tuple(unresolved))
 
 
+def _left_out(index: CodeIndex, files: Sequence[str], reading: Reading) -> dict[str, str]:
+    """The ``files`` in scope that ``reading`` leaves out, each with the reason: a code reading leaves
+    out every file JVN does not parse, and a text reading every file it does, and the text files
+    ``CodeIndex.text_files_left_out`` names."""
+    if reading is Reading.CODE:
+        return {file: UNSUPPORTED_LANGUAGE for file in files if not language_read(file)}
+    code = {file: CODE_FILE for file in files if language_read(file)}
+    return code | index.text_files_left_out([file for file in files if file not in code])
+
+
 def _file_units(index: CodeIndex, file: str, box_chars: int) -> _FileUnits:
-    return (_SchemaFile if is_schema_file(file) else _SourceFile)(index, file, box_chars)
+    if is_schema_file(file):
+        return _SchemaFile(index, file, box_chars)
+    if language_of(file):
+        return _SourceFile(index, file, box_chars)
+    return _TextFile(index, file, box_chars)
 
 
 class _FileUnits:
@@ -309,7 +347,7 @@ class _FileUnits:
             ranges,
             kind,
             symbol,
-            language_read(self._file) or "",
+            language_read(self._file) or TEXT_LANGUAGE,
             is_test_file(self._file),
             self._index.read_slice(Span(self._file, *ranges[0])).commit,
             _sha256(text),
@@ -318,12 +356,14 @@ class _FileUnits:
         )
 
     def _pieces(self, ranges: Sequence[LineRange]) -> tuple[Piece, ...]:
-        cuts = [
-            (first, min(first + PIECE_LINES - 1, end))
-            for start, end in ranges
-            for first in range(start, end + 1, PIECE_LINES)
-        ]
+        cuts = self._piece_cuts(ranges)
         return tuple(self._piece(number, start, end) for number, (start, end) in enumerate(cuts))
+
+    def _piece_cuts(self, ranges: Sequence[LineRange]) -> list[LineRange]:
+        return [cut for start, end in ranges for cut in _line_cuts(start, end)]
+
+    def _over_box(self, start: int, end: int) -> bool:
+        return serialized_chars(read_ranges(self._index, self._file, ((start, end),))) > self._box_chars
 
     def _piece(self, number: int, start: int, end: int) -> Piece:
         text = read_ranges(self._index, self._file, ((start, end),))
@@ -389,11 +429,53 @@ class _SchemaFile(_FileUnits):
         )
 
 
+class _TextFile(_FileUnits):
+    """A file JVN does not parse, read as plain text: one unit per block its format gives
+    (``CodeIndex.text_blocks_in``), named by the block's heading or key path, without the blank lines at
+    its edges. Its blocks cover every line, so it has no top-level code."""
+
+    @cached_property
+    def _blocks(self) -> tuple[TextBlock, ...]:
+        return self._index.text_blocks_in(self._file)
+
+    def _inner_units(self) -> tuple[Unit, ...]:
+        runs = ((block, self._without_blank_edges((block.start, block.end))) for block in self._blocks)
+        return tuple(
+            self._unit(Span(self._file, *run).key, (run,), UnitKind.TEXT, block.name or TOP_LEVEL_SYMBOL)
+            for block, run in runs
+            if run is not None
+        )
+
+    def _piece_cuts(self, ranges: Sequence[LineRange]) -> list[LineRange]:
+        """A YAML or JSON block cuts at its value's keys (``child_blocks``), any other in line cuts."""
+        [(start, end)] = ranges
+        block = next(block for block in self._blocks if block.start <= start <= block.end)
+        children = [
+            (max(child.start, start), min(child.end, end))
+            for child in child_blocks(self._file, self._lines, block)
+        ]
+        return self._packed(children) if children else super()._piece_cuts(ranges)
+
+    def _packed(self, children: Sequence[LineRange]) -> list[LineRange]:
+        """Cuts at the children's edges: neighbours packed together while they fit ``PIECE_LINES``
+        lines and the box, a longer child whole, and a child over the box in line cuts."""
+        cuts: list[LineRange] = []
+        for start, end in children:
+            if self._over_box(start, end):
+                cuts += _line_cuts(start, end)
+            elif cuts and end - cuts[-1][0] < PIECE_LINES and not self._over_box(cuts[-1][0], end):
+                cuts[-1] = (cuts[-1][0], end)
+            else:
+                cuts.append((start, end))
+        return cuts
+
+
 class _AnchorResolver:
-    def __init__(self, index: CodeIndex, box_chars: int, listed_only: bool) -> None:
+    def __init__(self, index: CodeIndex, box_chars: int, listed_only: bool, reading: Reading) -> None:
         self._index = index
         self._box_chars = box_chars
         self._listed_only = listed_only
+        self._reading = reading
         self._sources: dict[str, _FileUnits] = {}
 
     def resolve(self, anchor: Anchor) -> tuple[tuple[Unit, ...], str]:
@@ -438,9 +520,7 @@ class _AnchorResolver:
     def _file_problem(self, file: str) -> str:
         if file not in self._index.files:
             return f"{file} is not in scope"
-        if not language_read(file):
-            return UNSUPPORTED_LANGUAGE
-        return ""
+        return _left_out(self._index, [file], self._reading).get(file, "")
 
     def _source(self, file: str) -> _FileUnits:
         if file not in self._sources:
@@ -470,6 +550,10 @@ def _one_per_range(spans: Iterable[Span]) -> tuple[Span, ...]:
 
 def _lines_of(units: Iterable[Unit]) -> frozenset[int]:
     return frozenset(line for unit in units for start, end in unit.ranges for line in range(start, end + 1))
+
+
+def _line_cuts(start: int, end: int) -> list[LineRange]:
+    return [(first, min(first + PIECE_LINES - 1, end)) for first in range(start, end + 1, PIECE_LINES)]
 
 
 def _runs(lines: Iterable[int]) -> list[LineRange]:

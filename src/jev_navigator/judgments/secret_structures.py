@@ -2,7 +2,8 @@
 
 A nested value under a secret key is hidden whole when it holds a literal (a quoted string, or a
 scalar that is not a reference, under a key that does not name something), so a Kubernetes
-``secret:`` volume or ``{ type: String, required: true }`` stays code. Each region is scanned once:
+``secret:`` volume or ``{ type: String, required: true }`` stays code. A sentence under a message key
+(``help: 'Key for REST calls'``) describes the option and is not a literal. Each region is scanned once:
 a start inside a region already scanned is skipped, and a flow value that never closes is hidden to
 the end of the text when it holds a literal, since a clipped window may cut it.
 """
@@ -12,7 +13,15 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 
-from .secret_values import CALL_OR_INDEX, CODE_REFERENCE, KEY, SEPARATOR, is_plain_words, key_kind
+from .secret_values import (
+    CALL_OR_INDEX,
+    CODE_REFERENCE,
+    KEY,
+    SEPARATOR,
+    is_message_key,
+    is_plain_words,
+    key_kind,
+)
 
 Span = tuple[int, int]
 
@@ -26,7 +35,7 @@ _YAML_BLOCK_SCALAR = re.compile(r"(?:(?:&[^\s|>]+|!(?:<[^>\r\n]+>|[^\s|>]*))[ \t
 _NESTED_COMMENT = re.compile(r"(?://|(?:^|(?<=\s))#)[^\n]*+")
 _NESTED_QUOTED = re.compile(r"(?P<quote>[\"'`])(?:\\.|(?!(?P=quote)).)*+(?:(?P=quote)|\Z)", re.S)
 _NESTED_LEAF = re.compile(r"(?<![\w$.-])(?P<key>[\w$.-]++)[\"']?[ \t]*:(?![:=])[ \t]*(?P<value>[^,;}\]\n]*+)")
-_KEY_BEFORE = re.compile(r"(?P<key>[\w$.-]+)[\"']?[ \t]*:[ \t]*$")
+_KEY_BEFORE = re.compile(r"(?P<key>[\w$.-]+)[\"']?[ \t]*:[ \t]*(?:\r?\n[ \t]*)?$")
 _KEY_BEFORE_WINDOW = 200
 # A nested key that names or describes something holds metadata, not a secret value.
 _NAMING_KEY = re.compile(
@@ -54,10 +63,7 @@ def flow_spans(text: str) -> list[Span]:
 def holds_literal_leaf(content: str) -> bool:
     """Whether nested content under a secret key holds a literal, as the module docstring says."""
     content = _NESTED_COMMENT.sub("", content)
-    quoted = any(
-        not _under_naming_key(content, match.start()) and not _is_subscript(content, match)
-        for match in _NESTED_QUOTED.finditer(content)
-    )
+    quoted = any(_is_literal_quote(content, match) for match in _NESTED_QUOTED.finditer(content))
     unquoted = _NESTED_QUOTED.sub("", content)
     return quoted or any(_is_literal_leaf(leaf) for leaf in _NESTED_LEAF.finditer(unquoted))
 
@@ -67,9 +73,22 @@ def _is_subscript(content: str, match: re.Match[str]) -> bool:
     return content[match.start() - 1 : match.start()] == "[" and content[match.end() : match.end() + 1] == "]"
 
 
-def _under_naming_key(content: str, position: int) -> bool:
+def _is_literal_quote(content: str, match: re.Match[str]) -> bool:
+    """A quoted value is a literal unless it is a subscript, stands under a naming key, or is a sentence
+    under a message key."""
+    if _is_subscript(content, match):
+        return False
+    key = _key_before(content, match.start())
+    if key is None:
+        return True
+    sentence = any(character.isspace() for character in match.group().strip("\"'`"))
+    return not (_NAMING_KEY.search(key) or (sentence and is_message_key(key)))
+
+
+def _key_before(content: str, position: int) -> str | None:
+    """The key a value at ``position`` stands under, on its line or at the end of the line before."""
     key = _KEY_BEFORE.search(content[max(0, position - _KEY_BEFORE_WINDOW) : position])
-    return key is not None and bool(_NAMING_KEY.search(key["key"]))
+    return key["key"] if key is not None else None
 
 
 def _is_literal_leaf(leaf: re.Match[str]) -> bool:

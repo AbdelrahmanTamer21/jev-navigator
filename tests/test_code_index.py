@@ -1153,6 +1153,45 @@ def test_functions_a_constant_builds_on_one_line_go_by_the_first_and_list_every_
     assert index.module_names("api.ts") == ("api", "first", "second")
 
 
+def test_a_function_in_a_declaration_no_call_builds_takes_no_earlier_constants_name(tmp_path: Path) -> None:
+    """Only the constant a call builds names the functions inside it: an object literal or an array
+    declared after `userRouter` keeps its functions out of `userRouter`'s names."""
+    # Arrange
+    (tmp_path / "built.ts").write_text(
+        "export const userRouter = createWebRouter({\n"
+        "  list: procedure.query(({ ctx }) => ctx.users),\n"
+        "});\n"
+        "export const handlers = {\n  remove: procedure.mutation(async ({ input }) => input),\n};\n"
+        "export const later = [\n  middleware((ctx) => ctx),\n];\n"
+        "export const plain = { go: (ctx) => ctx };\n"
+    )
+    index = CodeIndex(tmp_path, ("built.ts",), fact_cache_dir=tmp_path / "cache")
+
+    # Act
+    names = sorted((span.start, name) for span, name in index.constant_function_names("built.ts").items())
+
+    # Assert
+    assert names == [(2, "userRouter.list")]
+
+
+def test_a_quoted_key_names_a_function_without_its_quotes(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "built.ts").write_text(
+        "export const userRouter = createWebRouter({\n"
+        '  "list": procedure.query(({ ctx }) => ctx.users),\n'
+        "  'remove': procedure.mutation(async ({ input }) => input),\n"
+        "  plain: procedure.query(({ ctx }) => ctx),\n"
+        "});\n"
+    )
+    index = CodeIndex(tmp_path, ("built.ts",), fact_cache_dir=tmp_path / "cache")
+
+    # Act
+    names = sorted((span.start, name) for span, name in index.constant_function_names("built.ts").items())
+
+    # Assert
+    assert names == [(2, "userRouter.list"), (3, "userRouter.remove"), (4, "userRouter.plain")]
+
+
 def test_a_rendered_component_is_a_call_and_a_platform_element_is_not(tmp_path: Path) -> None:
     (tmp_path / "notices.tsx").write_text("export function LoadFailed() {\n  return <p>Not loaded</p>;\n}\n")
     (tmp_path / "basket.tsx").write_text(

@@ -149,6 +149,11 @@ SECRET_VALUES = {
     "dollar sign inside a password": ('password = "my$ecret"', "ecret"),
     "dollar sign inside a token": ('token: "a$b1234567"', "b1234567"),
     "unquoted generated value": ("webhook_secret_v1=whsec_" + "a1B2" * 8, "a1B2" * 8),
+    "nested quoted words under a key that describes nothing": (
+        "password: {\n  value: 'correct horse battery staple',\n}",
+        "correct horse battery staple",
+    ),
+    "nested single word under a key that describes": ("password: {\n  hint: 'hunter22x',\n}", "hunter22x"),
     "high-entropy value under an ordinary name": (
         'const signingKey = "Zq8vT2mN4xR7pL1wK9sD3fH6";',
         "Zq8vT2mN4xR7pL1wK9sD3fH6",
@@ -235,6 +240,12 @@ CODE_REFERENCES = [
     "` -e HEEDVANE_ENROLLMENT_TOKEN=${shellQuote(input.enrollmentToken)}` +",
     "  ? `never cached (${row.prefixTokens ?? '?'}-token prefix, likely below)`",
     'lines = [line for line in values if line.startswith("DB_PASSWORD: ")]',
+    "  restAPIKey: {\n    env: 'PARSE_SERVER_REST_API_KEY',\n    help: 'Key for REST calls',\n  },",
+    "  proxyPassword: {\n    env: 'PARSE_SERVER_DATABASE_PROXY_PASSWORD',\n    help:\n"
+    "      'The MongoDB driver option to configure a Socks5 proxy password when the proxy requires "
+    "username/password authentication.',\n  },",
+    "      password: {\n        descriptions: 'New password of the user',\n"
+    "        type: new GraphQLNonNull(GraphQLString),\n      },",
 ]
 
 
@@ -658,14 +669,30 @@ def test_a_short_number_masked_at_its_key_stays_elsewhere() -> None:
 def test_a_short_masked_value_inside_a_longer_word_does_not_refuse_the_request() -> None:
     # Arrange
     state, questions, masked = mask_request(
-        {"slice": {"file": "app/a.py", "code": 'db_pass = "pw"\n'}, "pwd_hint": "x"}, {}, SecretMasker()
+        {"slice": {"file": "app/a.py", "code": 'db_pass = "pwd1"\n'}, "pwd1_hint": "x"}, {}, SecretMasker()
     )
 
     # Act
     refuse_if_secret(state, questions, SecretScanner(), masked)
 
     # Assert
-    assert "pw" in masked
+    assert "pwd1" in masked
+
+
+def test_a_value_too_short_to_identify_a_secret_is_masked_only_at_its_key() -> None:
+    # Arrange
+    state = {
+        "slice": {"file": "tests/fixture.ts", "code": 'const secret = "ghp_" + "x" * 36;\n'},
+        "other": {"file": "src/loop.ts", "code": "for (const x of xs) { use(x); }\n"},
+    }
+
+    # Act
+    masked_state, questions, values = mask_request(state, {}, SecretMasker())
+    refuse_if_secret(masked_state, questions, SecretScanner(), values)
+
+    # Assert
+    assert masked_state["slice"]["code"] == 'const secret = "[MASKED]" + "[MASKED]" * 36;\n'
+    assert masked_state["other"]["code"] == "for (const x of xs) { use(x); }\n"
 
 
 VALUE = "hunter2hunter2"
@@ -885,7 +912,7 @@ def test_a_copy_pattern_finds_a_long_value_anywhere_and_a_short_one_as_a_whole_w
     [
         ('RUNS_REST_TOKEN_HEADER = "x-heedvane-runs-rest-token"\n', "enginepy/hub/auth.py", "token"),
         ('RUNS_REST_TOKEN_HEADER = "x-heedvane-runs-rest-token"\n', "enginepy/hub/auth.py", "heedvane"),
-        ('TOKEN_STORE = "/var/lib/app/tokens"\n', "app/settings.py", "app"),
+        ('TOKEN_STORE = "/var/lib/app/tokens"\n', "app/settings.py", "tokens"),
         ('TOKEN_ENDPOINT = "https://auth.example.com/oauth/token"\n', "app/settings.py", "oauth"),
     ],
 )

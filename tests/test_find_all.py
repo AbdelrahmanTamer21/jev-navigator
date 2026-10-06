@@ -19,14 +19,19 @@ from jev_navigator.directives.find_all import (
     NameHits,
     find_all,
     find_all_async,
+    find_all_text,
+    find_all_text_async,
+    find_text,
     match_check,
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.prisma_schema import schema_blocks
-from jev_navigator.index.units import OUTSIDE_SCOPE, UNSUPPORTED_LANGUAGE, RangeAnchor, UnitKind
+from jev_navigator.index.scope import ENV_FILE
+from jev_navigator.index.units import CODE_FILE, OUTSIDE_SCOPE, UNSUPPORTED_LANGUAGE, RangeAnchor, UnitKind
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputBudgetExceededError, InputLimits
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
+from jev_navigator.judgments.secrets import MASK
 from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 LIMIT = {"limit": "the check that limits the items of an order"}
@@ -690,3 +695,168 @@ def test_find_all_async_sends_no_further_wave_once_the_host_cancels(tmp_path: Pa
 
     # Assert
     assert (result.stopped_by, len(provider.requests), len(result.judged["limit"])) == ("cancelled", 1, 1)
+
+
+SETTINGS = {
+    "rules.py": ORDERS["rules.py"],
+    "settings.yaml": "database:\n  host: db.internal\n  database_password: hunter2abcdef\nretry_limit: 4\n",
+    "app.conf": "DATABASE_HOST=db.internal\nDATABASE_PASSWORD=hunter2abcdef\nRETRY_LIMIT=4\n",
+    ".env": "DATABASE_PASSWORD=hunter2abcdef\nRETRY_LIMIT=4\n",
+    ".env.example": "DATABASE_PASSWORD=hunter2abcdef\nAPI_TOKEN = tok3nvalue9\nRETRY_LIMIT=4\n",
+}
+
+
+def test_a_name_reaches_a_yaml_key_block_whose_secret_is_masked_in_the_request(tmp_path: Path) -> None:
+    # Arrange
+    index = repository(tmp_path, SETTINGS)
+    provider = labelled({("limit", "host: db.internal"): 0.9})
+
+    # Act
+    result = find_all_text(index, Judge(provider), LIMIT, names=["database_password"])
+
+    # Assert
+    [unit] = result.units
+    assert (unit.path, unit.symbol, unit.kind, unit.ranges) == (
+        "settings.yaml",
+        "database",
+        UnitKind.TEXT,
+        ((1, 3),),
+    )
+    [code] = sent_code(provider)
+    assert "host: db.internal" in code and MASK in code and "hunter2abcdef" not in code
+    assert [score.probability for score in result.scores("limit")] == [0.9]
+
+
+def test_a_secret_in_an_env_style_config_file_is_masked_in_the_request(tmp_path: Path) -> None:
+    # Arrange
+    index = repository(tmp_path, SETTINGS)
+    provider = labelled({})
+
+    # Act
+    find_all_text(index, Judge(provider), LIMIT, files=["app.conf"])
+
+    # Assert
+    [code] = sent_code(provider)
+    assert "DATABASE_HOST=db.internal" in code and MASK in code and "hunter2abcdef" not in code
+
+
+def test_an_env_file_is_never_listed_named_or_reached_while_an_env_template_is_read_masked(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    index = repository(tmp_path, SETTINGS)
+    provider = labelled({})
+
+    # Act
+    result = find_all_text(index, Judge(provider), LIMIT, files=[".env"], names=["RETRY_LIMIT"])
+
+    # Assert
+    assert [unit.path for unit in result.units] == [".env.example", "app.conf"]
+    assert result.unlisted == {".env": ENV_FILE}
+    assert result.names == {"RETRY_LIMIT": NameHits(3, 3, 1)}
+    sent = {item["file"]: item["code"] for state, _ in provider.requests for item in state[ITEMS]}
+    assert ".env" not in sent
+    assert sent[".env.example"].count(MASK) == 2
+    assert "hunter2abcdef" not in sent[".env.example"] and "tok3nvalue9" not in sent[".env.example"]
+
+
+LOCKED = {
+    "deps.yaml": "pinned:\n  left-pad: 1.3.0\n",
+    "pad.py": 'PACKAGE = "left-pad"\n',
+    "package-lock.json": (
+        '{\n  "name": "shop",\n  "packages": {"node_modules/left-pad": {"version": "1.3.0"}}\n}\n'
+    ),
+}
+
+
+def test_a_name_hit_in_a_lockfile_is_skipped_unless_the_caller_names_the_lockfile(tmp_path: Path) -> None:
+    # Arrange
+    index = repository(tmp_path, LOCKED)
+
+    # Act
+    by_name = find_all_text(index, Judge(labelled({})), LIMIT, names=["left-pad"])
+    named = find_all_text(index, Judge(labelled({})), LIMIT, files=["package-lock.json"], names=["left-pad"])
+
+    # Assert
+    assert [unit.path for unit in by_name.units] == ["deps.yaml"]
+    assert by_name.names == {"left-pad": NameHits(1, 1, 0)}
+    assert {unit.path for unit in named.units} == {"deps.yaml", "package-lock.json"}
+
+
+def test_a_yaml_name_hit_never_enters_find_alls_population(tmp_path: Path) -> None:
+    # Arrange
+    index = repository(tmp_path, SETTINGS)
+    provider = labelled({})
+
+    # Act
+    result = find_all(index, Judge(provider), LIMIT, names=["database_password"])
+
+    # Assert
+    assert (result.units, provider.requests) == ((), [])
+    assert result.names == {"database_password": NameHits(1, 1, 1)}
+
+
+def test_a_text_search_leaves_code_to_find_all_and_find_all_never_judges_text(tmp_path: Path) -> None:
+    # Arrange
+    index = repository(tmp_path)
+
+    # Act
+    text = find_all_text(index, Judge(labelled({})), LIMIT, files=index.files)
+    code = find_all(index, Judge(labelled({})), LIMIT, files=index.files)
+
+    # Assert
+    assert [(unit.path, unit.kind) for unit in text.units] == [("notes.md", UnitKind.TEXT)]
+    assert text.unlisted == {file: CODE_FILE for file in ("api.py", "rules.py", "web.ts")}
+    assert UnitKind.TEXT not in {unit.kind for unit in code.units}
+    assert code.unlisted == {"notes.md": UNSUPPORTED_LANGUAGE}
+
+
+def test_find_all_text_async_judges_exactly_what_find_all_text_judges(tmp_path: Path) -> None:
+    # Arrange
+    index = repository(tmp_path, {**SETTINGS, **LOCKED})
+    labels = {("limit", "retry"): 0.7}
+    population = {"files": ["app.conf", "package-lock.json"], "names": ["left-pad", "RETRY_LIMIT"]}
+
+    # Act
+    sync = find_all_text(index, Judge(labelled(labels), items_per_request=2), LIMIT, **population)
+    concurrent = asyncio.run(
+        find_all_text_async(
+            index, Judge(AsyncScriptedJevClient(labelled(labels)), items_per_request=2), LIMIT, **population
+        )
+    )
+
+    # Assert
+    assert judged_shape(concurrent) == judged_shape(sync)
+    assert {unit.path for unit in sync.units} == {
+        ".env.example",
+        "app.conf",
+        "package-lock.json",
+        "deps.yaml",
+    }
+
+
+GUIDES = {
+    "a.md": "# Setup\nInstall the shop.\n",
+    "b.md": "# Limits\nAn order holds at most four items.\n",
+    "c.md": "# Limits\nThe warehouse packs four items a box.\n",
+}
+
+
+def test_find_text_stops_after_the_first_wave_holding_a_confident_yes(tmp_path: Path) -> None:
+    # Arrange
+    index = repository(tmp_path, GUIDES)
+    provider = labelled({("target", "at most four items"): 0.95})
+
+    # Act
+    result = find_text(
+        index,
+        Judge(provider, items_per_request=1),
+        "the rule that limits the items of an order",
+        files=index.files,
+        batches_per_wave=1,
+    )
+
+    # Assert
+    assert result.stopped_by == "found"
+    assert [score.unit.path for score in result.scores("target")] == ["a.md", "b.md"]
+    assert result.not_judged == {"c.md:1-2": NOT_REACHED}
