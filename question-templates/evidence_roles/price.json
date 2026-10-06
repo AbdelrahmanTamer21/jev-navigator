@@ -1,0 +1,21 @@
+{
+  "unit_point_pairs": 47410,
+  "requests_two_arms": 94820,
+  "recorded_input_tokens": 20891038,
+  "price_usd_per_million_input_tokens": 0.042,
+  "input_chars_old": 122982965,
+  "input_chars_roles": 233163805,
+  "estimate_old_usd": [
+    1.6937853219000003,
+    2.0553552390000003
+  ],
+  "estimate_roles_usd": [
+    2.7581322363000003,
+    3.4436338230000003
+  ],
+  "estimate_total_usd": [
+    4.451917558200001,
+    5.498989062
+  ],
+  "caveat": "Measured historical density 0.23 to 0.30 tokens per body byte plus 254 fixed tokens per request. New criteria may have different density. One point and unit per request, no batch mates. Both arms rerun. Output free. Meta guard excluded. No calls made."
+}

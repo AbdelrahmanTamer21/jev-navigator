@@ -1,0 +1,151 @@
+{
+  "tool_version": "0.6.0",
+  "candidate_file_sha256": "023c3a6852843d2d8238eb1057b681046513c413550228e8b9537cbd0ae79f86",
+  "candidate_request_sha256": "dc6ddf9fb7d52ed7ad239a082d28ef958c99e4c6be3c9961a38c497652c70ce5",
+  "prepared_file_sha256": "cb7d8cb7c8810cc6a470a054861d4ad688bb703db7bd4529a946d76c3f33b6f0",
+  "prepared_requests": [
+    {
+      "question": "decide",
+      "scope": "question",
+      "review_fingerprint": "b3cad62f7a329bb6c4bc8cf74caced0cfd955ee374dd33d84cbd2182a91fddae",
+      "state_path_coverage": {
+        "review_question_unresolved_paths": [],
+        "selected_paths": [
+          "unit.code",
+          "point"
+        ],
+        "unresolved_backticked_paths": []
+      },
+      "atomicity_pair_coverage": {
+        "pairs": [],
+        "status": "not_reviewed"
+      },
+      "semantic_term_contrast_coverage": {
+        "contrasts": [],
+        "policy_role": "advisory_unvalidated",
+        "status": "not_reviewed"
+      }
+    },
+    {
+      "question": "guard",
+      "scope": "question",
+      "review_fingerprint": "87577b4c91f095ac24902ded01530003720818163fb1b911abb1cf81c319d3a2",
+      "state_path_coverage": {
+        "review_question_unresolved_paths": [],
+        "selected_paths": [
+          "unit.code",
+          "point"
+        ],
+        "unresolved_backticked_paths": []
+      },
+      "atomicity_pair_coverage": {
+        "pairs": [],
+        "status": "not_reviewed"
+      },
+      "semantic_term_contrast_coverage": {
+        "contrasts": [],
+        "policy_role": "advisory_unvalidated",
+        "status": "not_reviewed"
+      }
+    },
+    {
+      "question": "value",
+      "scope": "question",
+      "review_fingerprint": "311ac6875564e5064d1302156bf356cad216ee05e877587b03d5105d9852b98c",
+      "state_path_coverage": {
+        "review_question_unresolved_paths": [],
+        "selected_paths": [
+          "unit.code",
+          "point"
+        ],
+        "unresolved_backticked_paths": []
+      },
+      "atomicity_pair_coverage": {
+        "pairs": [],
+        "status": "not_reviewed"
+      },
+      "semantic_term_contrast_coverage": {
+        "contrasts": [],
+        "policy_role": "advisory_unvalidated",
+        "status": "not_reviewed"
+      }
+    },
+    {
+      "question": "effect",
+      "scope": "question",
+      "review_fingerprint": "7338eac9166c9f630255f7a7254fb9882558d6e7d7e263e751b5f4e3fcd0325f",
+      "state_path_coverage": {
+        "review_question_unresolved_paths": [],
+        "selected_paths": [
+          "unit.code",
+          "point"
+        ],
+        "unresolved_backticked_paths": []
+      },
+      "atomicity_pair_coverage": {
+        "pairs": [],
+        "status": "not_reviewed"
+      },
+      "semantic_term_contrast_coverage": {
+        "contrasts": [],
+        "policy_role": "advisory_unvalidated",
+        "status": "not_reviewed"
+      }
+    },
+    {
+      "question": "forward",
+      "scope": "question",
+      "review_fingerprint": "7c326a00ecf473effd899986296432c98e5cb40e0c3eaa2827d4c2cf9bd0eba5",
+      "state_path_coverage": {
+        "review_question_unresolved_paths": [],
+        "selected_paths": [
+          "unit.code",
+          "point"
+        ],
+        "unresolved_backticked_paths": []
+      },
+      "atomicity_pair_coverage": {
+        "pairs": [],
+        "status": "not_reviewed"
+      },
+      "semantic_term_contrast_coverage": {
+        "contrasts": [],
+        "policy_role": "advisory_unvalidated",
+        "status": "not_reviewed"
+      }
+    },
+    {
+      "question": "satisfied",
+      "scope": "question",
+      "review_fingerprint": "59ce6f08ecdaa481edd4679360e00b0b389e294eaa948018262b8bbf2fe15bda",
+      "state_path_coverage": {
+        "review_question_unresolved_paths": [],
+        "selected_paths": [
+          "unit.code",
+          "point"
+        ],
+        "unresolved_backticked_paths": []
+      },
+      "atomicity_pair_coverage": {
+        "pairs": [],
+        "status": "not_reviewed"
+      },
+      "semantic_term_contrast_coverage": {
+        "contrasts": [],
+        "policy_role": "advisory_unvalidated",
+        "status": "not_reviewed"
+      }
+    },
+    {
+      "question": null,
+      "scope": "workflow",
+      "review_fingerprint": null,
+      "state_path_coverage": null,
+      "atomicity_pair_coverage": null,
+      "semantic_term_contrast_coverage": null
+    }
+  ],
+  "paid_calls": 0,
+  "guard_run": false,
+  "candidate_run": false
+}
