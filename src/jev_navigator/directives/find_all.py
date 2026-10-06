@@ -508,6 +508,7 @@ class _Search:
         self.room = _room(judge, index, self.checks, self.shared)
         self.delivered = _lines_by_file(delivered)
         self.cancelled = cancelled
+        self.observation_order: dict[str, int] = {}
         self.answered: set[tuple[str, str]] = set()
         self.judged: dict[str, list[CheckResult]] = {target: [] for target in targets}
         self.units: dict[str, Unit] = {}
@@ -551,6 +552,7 @@ class _Search:
             places, entries = wave
             if self.stopped():
                 return
+            self._remember_places(places)
             async for name, answer in self.judge.iter_check_every_async(
                 self.checks,
                 entries,
@@ -848,9 +850,14 @@ class _Search:
         lines = self.delivered.get(place.file, frozenset())
         return all(line in lines for first, last in place.ranges for line in range(first, last + 1))
 
+    def _remember_places(self, places: Sequence[Item]) -> None:
+        for place in places:
+            self.observation_order.setdefault(place.id, len(self.observation_order))
+
     def _judge(self, places: Sequence[Item]) -> None:
         if not places or self.stopped():
             return
+        self._remember_places(places)
         for name, answer in self.judge.iter_check_every(
             self.checks,
             self._entries(places),
@@ -875,6 +882,7 @@ class _Search:
             raise ValueError("a Find All answer names its place")
         if (target, answer.place.id) in self.answered:
             return
+        self._remember_places([answer.place])
         self.answered.add((target, answer.place.id))
         self.judged[target].append(answer)
         self.found_one |= self.stops_when_found and answer.verdict is NoulVerdict.YES
@@ -898,7 +906,7 @@ class _Search:
             tuple(sorted(self.units.values(), key=_unit_order)),
             {
                 target: (
-                    tuple(answers)
+                    tuple(sorted(answers, key=lambda answer: self.observation_order[answer.place.id]))
                     if self.question_profile != MATCH
                     else tuple(sorted(answers, key=_answer_order))
                 )

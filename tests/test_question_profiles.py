@@ -131,3 +131,37 @@ def test_role_profile_keeps_todays_settling_when_local_roles_are_uncovered(tmp_p
     assert result.failure is None
     assert result.stopped_by == "settled"
     assert len(provider.requests) == 1
+
+
+def test_role_ties_follow_search_order_when_later_batch_finishes_first(tmp_path: Path):
+    from threading import Event
+    from time import sleep
+
+    for number in range(32):
+        (tmp_path / f"unit{number:02d}.py").write_text(f"def unit{number}():\n    return {number}\n")
+    commit_all(tmp_path)
+    index = CodeIndex.from_git(tmp_path)
+    later_finished = Event()
+
+    class DelayedFirstBatch(ScriptedJevClient):
+        def send(self, state, questions):
+            if state["items"][0]["file"] == "unit00.py":
+                assert later_finished.wait(5), "both batches must be sent concurrently"
+                sleep(0.05)
+            response = super().send(state, questions)
+            if state["items"][0]["file"] == "unit16.py":
+                later_finished.set()
+            return response
+
+    provider = DelayedFirstBatch(default_noul=0.6)
+    result = find_all(
+        index,
+        Judge(provider, masker=None, scanner=None, max_concurrency=2),
+        {"p0": "the requested behavior"},
+        files=index.files,
+        question_profile=ROLES_V2,
+        required_roles=LOCAL_ROLES,
+    )
+    assert result.failure is None
+    assert provider.requests[0][0]["items"][0]["file"] == "unit16.py"
+    assert [score.unit.path for score in result.ranked("p0")] == list(index.files)

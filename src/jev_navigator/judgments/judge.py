@@ -866,7 +866,7 @@ class Judge:
                 wave = queue.next_wave(self._next_wave_size)
                 with defer_keyboard_interrupts():
                     futures = [pool.submit(self._send_batch, plan, batch, stop) for batch in wave]
-                queue.put_halves((yield from _completed_wave(futures)))
+                queue.put_halves((yield from _completed_wave(futures, keep_order=plan.keep_order)))
         except KeyboardInterrupt:
             stop.halted.set()
             self.abort_sends(futures)
@@ -1453,11 +1453,14 @@ def _at_least_one(setting: str, value: int) -> int:
     return value
 
 
-def _completed_wave(futures: list[Future]) -> Generator[tuple[_Batch, JevResponse], None, list[_Batch]]:
-    """Yield a wave's answers as its batches complete, then return the halves its refused batches
+def _completed_wave(
+    futures: list[Future], *, keep_order: bool = False
+) -> Generator[tuple[_Batch, JevResponse], None, list[_Batch]]:
+    """Yield a wave's answers in input order when requested, otherwise as batches complete. Return
+    the halves its refused batches
     split into, in the wave's batch order; after every batch settled, ``_wave_failure`` decides
     what is raised."""
-    for future in as_completed(futures):
+    for future in futures if keep_order else as_completed(futures):
         yield from future.result().answered
     sent = [future.result() for future in futures]
     failure = _wave_failure([batch.error for batch in sent if batch.error is not None])
