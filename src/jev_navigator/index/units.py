@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import cached_property
@@ -242,16 +242,32 @@ def resolve_anchors(
     out, a line outside its file, a reversed range, a blank line in a file with no top-level code, and
     with ``listed_only`` lines of only unlisted top-level code are reported, and a file is parsed only
     after its anchor is known to point inside it. ``box_chars`` and ``reading`` are ``list_units``'."""
-    resolver = _AnchorResolver(index, box_chars, listed_only, reading)
     found: dict[str, Unit] = {}
     unresolved = []
-    for anchor in anchors:
-        units, problem = resolver.resolve(anchor)
+    for anchor, units, problem in resolve_each(
+        index, anchors, box_chars=box_chars, listed_only=listed_only, reading=reading
+    ):
         if problem:
             unresolved.append(UnresolvedAnchor(anchor, problem))
         for unit in units:
             found.setdefault(unit.id, unit)
     return AnchorResolution(tuple(found.values()), tuple(unresolved))
+
+
+def resolve_each(
+    index: CodeIndex,
+    anchors: Iterable[Anchor],
+    *,
+    box_chars: int,
+    listed_only: bool = False,
+    reading: Reading = Reading.CODE,
+) -> Iterator[tuple[Anchor, tuple[Unit, ...], str]]:
+    """Each anchor with the units it names and its problem (empty when it named one), in the anchors'
+    order, as ``resolve_anchors`` names them; each file is read once for all of them."""
+    resolver = _AnchorResolver(index, box_chars, listed_only, reading)
+    for anchor in anchors:
+        units, problem = resolver.resolve(anchor)
+        yield anchor, units, problem
 
 
 def _left_out(index: CodeIndex, files: Sequence[str], reading: Reading) -> dict[str, str]:

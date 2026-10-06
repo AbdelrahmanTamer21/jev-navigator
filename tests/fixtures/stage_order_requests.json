@@ -1,0 +1,92 @@
+{
+  "uncapped": [
+    [
+      [
+        "billing/invoice.py",
+        "def invoice(order):"
+      ],
+      [
+        "orders/api.ts",
+        "export function submitOrder(order) {"
+      ]
+    ],
+    [
+      [
+        "orders/api.ts",
+        "export function cancelOrder(id) {"
+      ],
+      [
+        "orders/service.py",
+        "def place_order(order):"
+      ]
+    ],
+    [
+      [
+        "billing/invoice.py",
+        "def refund(order):"
+      ],
+      [
+        "orders/limits.py",
+        "def check_limit(order):"
+      ]
+    ],
+    [
+      [
+        "orders/limits.py",
+        "def round_total(order):"
+      ],
+      [
+        "tests/test_limits.py",
+        "def test_check_limit_refuses_one_item_over(order_factory):"
+      ]
+    ],
+    [
+      [
+        "orders/copy.py",
+        "def cancel_order(order):"
+      ],
+      [
+        "orders/limits.py",
+        "MAX_ITEMS = 4"
+      ]
+    ],
+    [
+      [
+        "orders/service.py",
+        "def cancel_order(order):"
+      ]
+    ]
+  ],
+  "three_calls": [
+    [
+      [
+        "billing/invoice.py",
+        "def invoice(order):"
+      ],
+      [
+        "orders/api.ts",
+        "export function submitOrder(order) {"
+      ]
+    ],
+    [
+      [
+        "orders/api.ts",
+        "export function cancelOrder(id) {"
+      ],
+      [
+        "orders/service.py",
+        "def place_order(order):"
+      ]
+    ],
+    [
+      [
+        "billing/invoice.py",
+        "def refund(order):"
+      ],
+      [
+        "orders/limits.py",
+        "def check_limit(order):"
+      ]
+    ]
+  ]
+}

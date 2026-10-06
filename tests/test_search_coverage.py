@@ -12,15 +12,15 @@ from jev_navigator.directives.find_all import (
     NOT_REACHED,
     REFUSED,
     TOO_LARGE,
-    Source,
     find_all,
     match_check,
 )
-from jev_navigator.directives.search_coverage import Outcome, PointCoverage, Round, point_results
+from jev_navigator.directives.search_coverage import Outcome, Round, point_results
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.units import LineAnchor, RangeAnchor
 from jev_navigator.judgments.client import InputLimits
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.sources import ANCHORS, CALLEES, FILES, NAMES
 from jev_navigator.testing import ScriptedJevClient
 
 SHOP = {
@@ -108,10 +108,10 @@ def test_units_a_spent_budget_leaves_unjudged_are_counted_by_the_source_that_lis
     # Assert
     entered = {result_unit.symbol: result.entered_by[result_unit.id] for result_unit in result.units}
     assert entered == {
-        "accept": Source.ANCHOR,
-        "submit": Source.FILE,
-        "cancel": Source.FILE,
-        "reject": Source.NAME,
+        "accept": ANCHORS.name,
+        "submit": FILES.name,
+        "cancel": FILES.name,
+        "reject": NAMES.name,
     }
     assert (audit.coverage.considered, audit.coverage.judged) == (4, 1)
     assert audit.render(BAR) == (
@@ -208,10 +208,10 @@ def test_a_caller_names_the_source_of_a_round_it_composed(tmp_path: Path) -> Non
     )
 
     # Act
-    [audit] = point_results([Round(first), Round(callees, Source.CALLEE)], BAR)
+    [audit] = point_results([Round(first), Round(callees, CALLEES)], BAR)
 
     # Assert
-    assert audit.coverage.cut == {(Source.FILE, NOT_REACHED): 2, (Source.CALLEE, NOT_REACHED): 2}
+    assert audit.coverage.cut == {(FILES.name, NOT_REACHED): 2, (CALLEES.name, NOT_REACHED): 2}
     assert audit.render(BAR) == "audit: unknown, no unit judged; 4 not reached (2 from files, 2 callees)"
 
 
@@ -225,7 +225,7 @@ def test_a_refused_unit_is_counted_refused_not_unreached(tmp_path: Path) -> None
     [audit] = point_results([Round(result)], BAR)
 
     # Assert
-    assert audit.coverage.cut == {(Source.FILE, REFUSED): 1}
+    assert audit.coverage.cut == {(FILES.name, REFUSED): 1}
     assert audit.render(BAR) == (
         "audit: none at the bar 0.80 among 4 unit(s) judged, best P=0.100; 0 not reached; 1 refused "
         "(not negative proof)"
@@ -241,10 +241,11 @@ def test_a_unit_judged_in_an_earlier_round_is_not_cut_by_a_later_round_listing_i
     again = find_all(index, Judge(answering(), max_calls=0), AUDIT, anchors=[LineAnchor("rules.py", 1)])
 
     # Act
-    [audit] = point_results([Round(first), Round(again, Source.CALLEE)], BAR)
+    [audit] = point_results([Round(first), Round(again, CALLEES)], BAR)
 
     # Assert
-    assert audit.coverage == PointCoverage(considered=2, judged=2, cut={})
+    coverage = audit.coverage
+    assert (coverage.considered, coverage.judged, coverage.cut) == (2, 2, {})
     assert audit.render(BAR) == (
         "audit: none at the bar 0.80 among 2 unit(s) judged, best P=0.100; 0 not reached (not negative proof)"
     )
@@ -265,11 +266,12 @@ def test_a_unit_two_rounds_leave_unjudged_counts_once_under_its_first_source_and
     )
 
     # Act
-    [audit] = point_results([Round(first), Round(again, Source.CALLEE)], BAR)
+    [audit] = point_results([Round(first), Round(again, CALLEES)], BAR)
 
     # Assert
     assert list(again.not_judged.values()) == [DELIVERED]
-    assert audit.coverage == PointCoverage(considered=2, judged=0, cut={(Source.FILE, NOT_REACHED): 2})
+    coverage = audit.coverage
+    assert (coverage.considered, coverage.judged, coverage.cut) == (2, 0, {(FILES.name, NOT_REACHED): 2})
 
 
 def test_a_unit_too_large_for_one_request_is_counted_apart_from_the_units_not_reached(tmp_path: Path) -> None:
@@ -282,7 +284,7 @@ def test_a_unit_too_large_for_one_request_is_counted_apart_from_the_units_not_re
     [audit] = point_results([Round(result)], BAR)
 
     # Assert
-    assert audit.coverage.cut == {(Source.FILE, TOO_LARGE): 1}
+    assert audit.coverage.cut == {(FILES.name, TOO_LARGE): 1}
     assert audit.render(BAR) == (
         "audit: none at the bar 0.80 among 4 unit(s) judged, best P=0.100; 0 not reached; "
         "1 too large to judge (not negative proof)"
@@ -296,7 +298,7 @@ def test_a_later_round_that_failed_makes_the_point_unknown(tmp_path: Path) -> No
     callees = find_all(index, one_at_a_time(FailsAfter(0)), AUDIT, files=["api.py"], batches_per_wave=1)
 
     # Act
-    [audit] = point_results([Round(first), Round(callees, Source.CALLEE)], BAR)
+    [audit] = point_results([Round(first), Round(callees, CALLEES)], BAR)
 
     # Assert
     assert audit.outcome is Outcome.UNKNOWN
@@ -346,11 +348,11 @@ def test_a_unit_two_rounds_leave_unjudged_for_neighbouring_reasons_counts_under_
 ) -> None:
     # Arrange
     index = shop(tmp_path, {**SHOP, **BIG})
-    rounds = [Round(weightier(index), Source.FILE), Round(lighter(index), Source.FILE)]
+    rounds = [Round(weightier(index), FILES), Round(lighter(index), FILES)]
 
     # Act
     [audit] = point_results(rounds[::-1] if lighter_first else rounds, BAR)
 
     # Assert: each round left the unit for its own reason, and the unit counts once, under the weightier.
     assert tuple(reason for round_ in rounds for reason in round_.result.not_judged.values()) == reasons
-    assert audit.coverage.cut == {(Source.FILE, reasons[0]): 1}
+    assert audit.coverage.cut == {(FILES.name, reasons[0]): 1}

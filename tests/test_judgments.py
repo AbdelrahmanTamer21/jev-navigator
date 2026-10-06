@@ -216,6 +216,33 @@ def test_items_judged_at_places_are_sent_in_line_order_whatever_order_they_came_
     assert state["items"] == by_line
 
 
+@pytest.mark.parametrize("sending", ["sync", "async"])
+def test_items_kept_in_their_given_order_are_batched_in_that_order_not_by_line(
+    tmp_path: Path, sending: str
+) -> None:
+    # Arrange: the units in line order, the first moved to the end
+    _, places, entries = _judged_places(tmp_path)
+    in_line_order = sorted(zip(places, entries, strict=True), key=lambda pair: pair[0].ranges[0][0])
+    given = [*in_line_order[1:], in_line_order[0]]
+    given_places, given_entries = [place for place, _ in given], [entry for _, entry in given]
+    client = ScriptedJevClient(default_noul=0.9)
+    sender = client if sending == "sync" else AsyncScriptedJevClient(client)
+    judge = Judge(sender, items_per_request=1, max_concurrency=1)
+
+    # Act
+    if sending == "sync":
+        list(judge.iter_check_every([ADMITS], given_entries, places=given_places, keep_order=True))
+    else:
+        asyncio.run(
+            _collected(
+                judge.iter_check_every_async([ADMITS], given_entries, places=given_places, keep_order=True)
+            )
+        )
+
+    # Assert
+    assert [state["items"][0] for state, _ in client.requests] == given_entries
+
+
 def test_items_judged_before_with_the_same_batch_mates_are_answered_from_the_store(tmp_path: Path) -> None:
     # Arrange
     store = JsonlAnswerStore(tmp_path / "answers.jsonl")
