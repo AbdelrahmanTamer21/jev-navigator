@@ -153,5 +153,4 @@ class FrontierConfiguration:
             hops=self.hops,
             reading=Reading.MIXED,
             policy=WHOLE_FRONTIER,
-            batches_per_wave=1,
         )

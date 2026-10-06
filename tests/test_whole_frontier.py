@@ -19,7 +19,7 @@ from jev_navigator.sources import (
     NAMED_FILES,
     TEXT_NAMED_FILES,
 )
-from jev_navigator.testing import ScriptedJevClient
+from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 
 def test_budget_keeps_the_entire_reached_population_and_preserves_file_first_batches(tmp_path: Path) -> None:
@@ -235,3 +235,33 @@ def test_literal_hops_search_fresh_values_once_while_following_a_cycle(
     assert result.stopped_by == "scope_examined", result.failure
     assert {unit.path for unit in result.units} == {"app.py", "config.py", "other.py"}
     assert searched == ["FEATURE_KEY", "OTHER_KEY"]
+
+
+def test_frontier_uses_judge_concurrency_with_sixteen_items_per_request(tmp_path: Path) -> None:
+    index = shop_index(
+        tmp_path, {"app.py": "\n".join(f"def task_{i}():\n    return {i}\n" for i in range(64))}
+    )
+
+    class TrackingClient(AsyncScriptedJevClient):
+        active = 0
+        peak = 0
+
+        async def send(self, state, questions):
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            try:
+                await asyncio.sleep(0)
+                return await super().send(state, questions)
+            finally:
+                self.active -= 1
+
+    client = TrackingClient()
+    result = asyncio.run(
+        FrontierConfiguration(sources=(FILES,), hops=()).search(
+            index, Judge(client, max_concurrency=2), {"p": "tasks"}, files=["app.py"]
+        )
+    )
+    assert result.stopped_by == "scope_examined", result.failure
+    assert len(result.judged["p"]) == 64
+    assert client.peak == 2
+    assert [len(state["items"]) for state, _ in client.requests] == [16, 16, 16, 16]
