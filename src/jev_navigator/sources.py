@@ -15,12 +15,16 @@ bar expands through, the frontier's policy and shares, and Jev judging in queue 
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import ClassVar, Protocol
 
+from . import operations
 from .index.code_index import CodeIndex
-from .index.units import Anchor, Unit
+from .index.languages import language_read
+from .index.scope import is_lockfile
+from .index.spans import Span, TextHit
+from .index.units import Anchor, LineAnchor, Unit, UnitKind
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,124 @@ class Source(Protocol):
     def label(self) -> str: ...
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> Iterable[Reach]:
-        """Every place reachable from ``seeds``, in the order the source ranks them; a lazy iterable
-        is read only as far as the search needs."""
+        """Every place reachable from ``seeds``, in the order the source ranks them."""
         ...
+
+
+@dataclass(frozen=True)
+class AnchorSource:
+    """The units the caller's anchors name, at distance 0."""
+
+    name: ClassVar[str] = "anchor"
+    label: ClassVar[str] = "from anchors"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [Reach(anchor, self.name, anchor_text(anchor), 0) for anchor in seeds.anchors]
+
+
+@dataclass(frozen=True)
+class FileSource:
+    """Every unit of the caller's files: at distance 1 for a file near the anchors (an anchor's own
+    file, or a file it imports where the index reads that language), 2 for any other."""
+
+    name: ClassVar[str] = "file"
+    label: ClassVar[str] = "from files"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        near = near_files(index, seeds.anchors)
+        return [Reach(file, self.name, file, 1 if file in near else 2) for file in dict.fromkeys(seeds.files)]
+
+
+@dataclass(frozen=True)
+class NameSource:
+    """The units holding each line a request name occurs on, at distance 3, the rarest name first, so
+    a common word never decides which hits of a rare name are seen. With ``text_files`` only the hits
+    in files JVN does not parse are kept, never a lockfile's, so a common word never floods a text
+    search with a lockfile's pieces."""
+
+    text_files: bool = False
+    name: ClassVar[str] = "name"
+    label: ClassVar[str] = "from name hits"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        hits = {name: self._hits(index, name) for name in dict.fromkeys(seeds.names)}
+        return [
+            Reach(LineAnchor(hit.file, hit.line), self.name, name, 3, frozenset({name}))
+            for name in sorted(hits, key=lambda name: (len(hits[name]), name))
+            for hit in hits[name]
+        ]
+
+    def _hits(self, index: CodeIndex, name: str) -> tuple[TextHit, ...]:
+        hits = index.search_text(name)
+        if not self.text_files:
+            return hits
+        return tuple(hit for hit in hits if not language_read(hit.file) and not is_lockfile(hit.file))
+
+
+@dataclass(frozen=True)
+class CallerSource:
+    """The functions calling each seed unit that is a named function or method, where the index reads
+    the calls, at distance 1."""
+
+    name: ClassVar[str] = "caller"
+    label: ClassVar[str] = "callers"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [
+            Reach(LineAnchor(caller.file, caller.start), self.name, unit.id, 1)
+            for unit in seeds.units
+            if (function := function_span(index, unit)) is not None and function.is_named
+            for caller, _ in operations.caller_functions(index, function)
+        ]
+
+
+@dataclass(frozen=True)
+class CalleeSource:
+    """The functions each seed unit that is a function or method calls, where the index reads the
+    calls, at distance 1."""
+
+    name: ClassVar[str] = "callee"
+    label: ClassVar[str] = "callees"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [
+            Reach(LineAnchor(callee.file, callee.start), self.name, unit.id, 1)
+            for unit in seeds.units
+            if (function := function_span(index, unit)) is not None
+            for callee, _ in operations.callee_functions(index, function)
+        ]
+
+
+ANCHORS = AnchorSource()
+FILES = FileSource()
+NAMES = NameSource()
+TEXT_NAMES = NameSource(text_files=True)
+CALLERS = CallerSource()
+CALLEES = CalleeSource()
+
+
+def anchor_text(anchor: Anchor) -> str:
+    """``file:line`` for a line, ``file:start-end`` for a range."""
+    if isinstance(anchor, LineAnchor):
+        return f"{anchor.file}:{anchor.line}"
+    return f"{anchor.file}:{anchor.start}-{anchor.end}"
+
+
+def near_files(index: CodeIndex, anchors: Sequence[Anchor]) -> frozenset[str]:
+    """The anchors' files in scope and the files they import, where the index reads the language."""
+    scope = frozenset(index.files)
+    anchored = {anchor.file for anchor in anchors if anchor.file in scope}
+    imported = {
+        file
+        for anchored_file in anchored
+        if language_read(anchored_file)
+        for file in index.imports(anchored_file)
+    }
+    return frozenset(anchored | imported)
+
+
+def function_span(index: CodeIndex, unit: Unit) -> Span | None:
+    """The function or method span a unit is, or None for any other unit."""
+    if unit.kind not in (UnitKind.FUNCTION, UnitKind.METHOD):
+        return None
+    return next((span for span in index.functions_in(unit.path) if span.key == unit.id), None)

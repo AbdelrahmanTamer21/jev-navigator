@@ -15,19 +15,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from ..index.units import Unit
+from ..sources import Source
 from .find_all import DELIVERED, NOT_REACHED, REFUSED, TOO_LARGE, FindAllResult
-from .frontier import Source
 
 UNJUDGED_PRECEDENCE = (NOT_REACHED, REFUSED, TOO_LARGE, DELIVERED)
 """The reason a unit left unjudged at several places or in several rounds counts under: the first
 here, since a place not reached could still change the answer and one refused might on a retry."""
-_SOURCE_LABELS = {
-    Source.ANCHOR: "from anchors",
-    Source.FILE: "from files",
-    Source.NAME: "from name hits",
-    Source.CALLER: "callers",
-    Source.CALLEE: "callees",
-}
 _CUT_LABELS = ((REFUSED, "refused"), (TOO_LARGE, "too large to judge"))
 
 
@@ -40,7 +33,8 @@ class Outcome(StrEnum):
 @dataclass(frozen=True)
 class Round:
     """One find_all search of a composed search. With ``source``, every unit the round lists first
-    counts under the source the caller fed it as; without it, under the source find_all recorded."""
+    counts under the source the caller fed it as, such as ``sources.CALLEES`` for a round fed the
+    callees of an earlier round's units; without it, under the source find_all recorded."""
 
     result: FindAllResult
     source: Source | None = None
@@ -49,13 +43,15 @@ class Round:
 @dataclass(frozen=True)
 class PointCoverage:
     """The units a search ``considered``, the ones it ``judged`` for the point, and the rest ``cut``,
-    counted by the source that listed them and the reason they stayed unjudged."""
+    counted by the name of the source that listed them and the reason they stayed unjudged.
+    ``labels`` gives each source's label, in the order the rounds used the sources."""
 
     considered: int
     judged: int
-    cut: Mapping[tuple[Source, str], int]
+    cut: Mapping[tuple[str, str], int]
+    labels: Mapping[str, str]
 
-    def unjudged(self, reason: str) -> Counter[Source]:
+    def unjudged(self, reason: str) -> Counter[str]:
         return Counter({source: count for (source, why), count in self.cut.items() if why == reason})
 
 
@@ -100,26 +96,30 @@ def point_results(rounds: Sequence[Round], bar: float) -> tuple[PointResult, ...
 
 @dataclass(frozen=True)
 class _Search:
-    """``sources`` holds each unit the rounds listed, under its first source; ``reasons`` each unit
-    left unjudged at some place, under the reason that takes precedence."""
+    """``sources`` holds each unit the rounds listed, under its first source's name; ``reasons`` each
+    unit left unjudged at some place, under the reason that takes precedence; ``labels`` each source's
+    label."""
 
     rounds: Sequence[Round]
-    sources: Mapping[str, Source]
+    sources: Mapping[str, str]
     reasons: Mapping[str, str]
     failure: str
+    labels: Mapping[str, str]
 
     @classmethod
     def of(cls, rounds: Sequence[Round]) -> _Search:
-        return cls(rounds, _first_sources(rounds), _unjudged_reasons(rounds), _failure(rounds))
+        return cls(
+            rounds, _first_sources(rounds), _unjudged_reasons(rounds), _failure(rounds), _labels(rounds)
+        )
 
     def point_result(self, point: str, bar: float) -> PointResult:
         best_of = self._best_per_unit(point)
         best = max(best_of.values(), default=None)
-        coverage = PointCoverage(len(self.sources), len(best_of), self._cut(best_of))
+        coverage = PointCoverage(len(self.sources), len(best_of), self._cut(best_of), self.labels)
         outcome = _outcome(best, coverage.judged, self.failure, bar)
         return PointResult(point, outcome, best, coverage, self.failure)
 
-    def _cut(self, judged: Mapping[str, float]) -> dict[tuple[Source, str], int]:
+    def _cut(self, judged: Mapping[str, float]) -> dict[tuple[str, str], int]:
         unjudged = (unit_id for unit_id in self.reasons if unit_id not in judged)
         return dict(Counter((self.sources[unit_id], self.reasons[unit_id]) for unit_id in unjudged))
 
@@ -139,12 +139,24 @@ def _outcome(best: float | None, judged: int, failure: str, bar: float) -> Outco
     return Outcome.NONE_AMONG_JUDGED
 
 
-def _first_sources(rounds: Iterable[Round]) -> dict[str, Source]:
-    sources: dict[str, Source] = {}
+def _first_sources(rounds: Iterable[Round]) -> dict[str, str]:
+    sources: dict[str, str] = {}
     for round_ in rounds:
         for unit in round_.result.units:
-            sources.setdefault(unit.id, round_.source or round_.result.entered_by[unit.id])
+            fed_as = round_.source.name if round_.source is not None else None
+            sources.setdefault(unit.id, fed_as or round_.result.entered_by[unit.id])
     return sources
+
+
+def _labels(rounds: Iterable[Round]) -> dict[str, str]:
+    """Each source's label, in the order the rounds used the sources: a round's own sources, then the
+    source the caller fed it as."""
+    labels: dict[str, str] = {}
+    for round_ in rounds:
+        used = (*round_.result.sources, *(() if round_.source is None else (round_.source,)))
+        for source in used:
+            labels.setdefault(source.name, source.label)
+    return labels
 
 
 def _unjudged_reasons(rounds: Iterable[Round]) -> dict[str, str]:
@@ -169,15 +181,15 @@ def _failure(rounds: Iterable[Round]) -> str:
 
 def _cuts_text(coverage: PointCoverage) -> str:
     unreached = coverage.unjudged(NOT_REACHED)
-    text = f"{sum(unreached.values())} not reached{_split(unreached)}"
+    text = f"{sum(unreached.values())} not reached{_split(unreached, coverage.labels)}"
     for reason, label in _CUT_LABELS:
         if count := sum(coverage.unjudged(reason).values()):
             text += f"; {count} {label}"
     return text
 
 
-def _split(unreached: Counter[Source]) -> str:
-    present = [source for source in Source if unreached[source]]
+def _split(unreached: Counter[str], labels: Mapping[str, str]) -> str:
+    present = [source for source in labels if unreached[source]]
     if len(present) < 2:
         return ""
-    return " (" + ", ".join(f"{unreached[source]} {_SOURCE_LABELS[source]}" for source in present) + ")"
+    return " (" + ", ".join(f"{unreached[source]} {labels[source]}" for source in present) + ")"

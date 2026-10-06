@@ -15,7 +15,6 @@ from jev_navigator.directives.frontier import (
     STAGE_ORDER,
     VALUE,
     Features,
-    Source,
     Weights,
     features_of,
     name_rarities,
@@ -24,6 +23,7 @@ from jev_navigator.directives.search_coverage import Outcome, Round, point_resul
 from jev_navigator.index.units import list_units, read_ranges
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.sources import CALLEES, CALLERS, NAMES
 from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 PRODUCTION_WITHOUT_NAMES = [
@@ -85,7 +85,7 @@ def test_a_units_features_count_whole_word_names_and_its_own_and_its_files_name(
     rarities = name_rarities({"invoice": 2, "refunds": 6})
 
     # Act
-    features = features_of(refund, read_ranges(index, refund.path, refund.ranges), Source.FILE, (), rarities)
+    features = features_of(refund, read_ranges(index, refund.path, refund.ranges), 2, rarities)
 
     # Assert
     assert features == Features(
@@ -265,7 +265,7 @@ def test_a_target_settles_only_after_the_callers_and_callees_its_clearing_unit_p
     )
     assert result.ranked("limit")[0].unit == enforce
     assert result.pushed == {checkout.id: (post_order.id, enforce.id)}
-    assert (result.entered_by[post_order.id], result.entered_by[enforce.id]) == (Source.NAME, Source.CALLEE)
+    assert (result.entered_by[post_order.id], result.entered_by[enforce.id]) == (NAMES.name, CALLEES.name)
     assert "orders/limits.py" not in {unit.path for unit in result.units}
     assert (result.stopped_by, result.settled) == ("settled", ("limit",))
     assert result.not_judged == {refund.id: NOT_REACHED}
@@ -341,7 +341,7 @@ def test_a_coverage_record_counts_the_callers_and_callees_a_spent_budget_left_un
     # Assert
     assert result.stopped_by == "budget"
     assert limit.outcome is Outcome.FOUND
-    assert refund.coverage.cut == {(Source.CALLER, NOT_REACHED): 1, (Source.CALLEE, NOT_REACHED): 1}
+    assert refund.coverage.cut == {(CALLERS.name, NOT_REACHED): 1, (CALLEES.name, NOT_REACHED): 1}
     assert "2 not reached (1 callers, 1 callees)" in refund.render(0.8)
 
 

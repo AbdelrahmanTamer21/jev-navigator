@@ -1,20 +1,22 @@
-"""The frontier: the order in which a search judges the units of its population.
+"""The frontier: the order in which a search judges the units its sources reached.
 
 Under any call cap, whatever is ranked last is what gets lost, so the order is a policy, named and
-compared. ``STAGE_ORDER`` is the order find_all always had: the units the anchors name, then the units
-of the files, then the units holding each name's hits, rarest name first, each wave's batches sorted
-by place. ``VALUE`` (B1) scores every unit by code before any call and judges the best first, batches
-in that order. Its features are facts any language has: which of the request's names a unit's code
-contains and how rare each is, whether the unit is named like one, whether its file is, how far its
-source lies from the anchors, and whether it is a test. A test is ranked by the same score, never
-dropped. Ties go to the unit's content hash, never to its path, and code that repeats a unit already in
-the queue is judged once.
+compared. ``STAGE_ORDER`` is the order find_all always had: each source's units in the order the
+search lists its sources (by default the units the anchors name, then the units of the files, then
+the units holding each name's hits, rarest name first), each wave's batches sorted by place.
+``VALUE`` (B1) scores every unit by code before any call and judges the best first, batches in that
+order. Its features are facts any language has: which of the request's names a unit's code contains
+and how rare each is, whether the unit is named like one, whether its file is, how far the source
+that reached it puts it from the anchors (``sources.Reach.distance``), and whether it is a test. A
+test is ranked by the same score, never dropped. Ties go to the unit's content hash, never to its
+path, and code that repeats a unit already in the queue is judged once.
 
 Under ``VALUE`` each target has its own queue (B3), ranked by the names its description spells out,
 and a share of the item slots in every batch: equal by default, set by the caller. A target settles
-once a unit clears the Judge's yes bar for it and the callers and callees that unit pushed, one step
-deep, have been judged; a settled target draws no more slots, so its share flows to the targets still
-open, and the search stops when every target has settled.
+once a unit clears the Judge's yes bar for it and the units the search's hop sources reach from that
+unit (by default its callers and callees), one step deep, have been judged; a settled target draws no
+more slots, so its share flows to the targets still open, and the search stops when every target has
+settled.
 """
 
 from __future__ import annotations
@@ -24,27 +26,9 @@ import re
 from collections import deque
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from enum import StrEnum
 from pathlib import PurePosixPath
 
 from ..index.units import Item, Unit
-
-
-class Source(StrEnum):
-    """How a unit entered a population: find_all lists the units of the caller's anchors (``ANCHOR``),
-    then of its files (``FILE``), then of each name's hits (``NAME``). A settling search adds the
-    callers (``CALLER``) and callees (``CALLEE``) of a unit that cleared the bar; a caller composing
-    searches may name a round it fed as anchors the same way."""
-
-    ANCHOR = "anchor"
-    FILE = "file"
-    NAME = "name"
-    CALLER = "caller"
-    CALLEE = "callee"
-
-
-HOPS = frozenset({Source.CALLER, Source.CALLEE})
-"""The sources a unit enters by when another unit pushed it; such a unit never pushes in turn."""
 
 
 @dataclass(frozen=True)
@@ -63,8 +47,9 @@ class Weights:
 class Policy:
     """``ranked`` False keeps the stage order. True gives each target a queue ordered by value under
     ``weights``, keeps that order in the batches, splits each batch's slots by the targets' shares, and
-    judges repeated code once. ``settles`` (ranked only) lets a target settle and its units push their
-    callers and callees (see the module docstring); without it every unit is judged until the call cap."""
+    judges repeated code once. ``settles`` (ranked only) lets a target settle and its units push the
+    places a search's hop sources reach from them (see the module docstring); without it every unit is
+    judged until the call cap."""
 
     name: str
     ranked: bool
@@ -83,9 +68,9 @@ VALUE = Policy("value", ranked=True, settles=True)
 @dataclass(frozen=True)
 class Features:
     """A unit's code features for one target. ``names`` are the target's names its code contains,
-    ``rarity`` their sum of ``1 / log2(2 + hits)``, ``defines`` whether the unit is named like one,
-    ``file_named`` whether its file is, ``distance`` how far its source lies from the anchors (see
-    ``distance``), ``test`` whether its file is a test."""
+    ``rarity`` their sum of ``1 / log2(2 + places)``, ``defines`` whether the unit is named like one,
+    ``file_named`` whether its file is, ``distance`` the smallest distance a source reached it at,
+    ``test`` whether its file is a test."""
 
     names: tuple[str, ...]
     rarity: float
@@ -104,9 +89,10 @@ class Features:
         )
 
 
-def name_rarities(hit_counts: Mapping[str, int]) -> dict[str, float]:
-    """What each name adds to a unit whose code contains it: a name with fewer hits is rarer and adds more."""
-    return {name: 1 / math.log2(2 + count) for name, count in hit_counts.items()}
+def name_rarities(place_counts: Mapping[str, int]) -> dict[str, float]:
+    """What each name adds to a unit whose code contains it: a name the sources reached fewer places
+    by is rarer and adds more."""
+    return {name: 1 / math.log2(2 + count) for name, count in place_counts.items()}
 
 
 def target_rarities(description: str, rarities: Mapping[str, float]) -> dict[str, float]:
@@ -116,30 +102,18 @@ def target_rarities(description: str, rarities: Mapping[str, float]) -> dict[str
     return own or dict(rarities)
 
 
-def features_of(
-    unit: Unit, code: str, source: Source, near_files: Collection[str], rarities: Mapping[str, float]
-) -> Features:
-    """``unit``'s features, from its ``code``, the ``source`` it entered by, the files near the anchors
-    and each name's rarity. A name counts only as a whole word: ``limit`` is not in ``limits``."""
+def features_of(unit: Unit, code: str, distance: int, rarities: Mapping[str, float]) -> Features:
+    """``unit``'s features, from its ``code``, the ``distance`` a source reached it at and each name's
+    rarity. A name counts only as a whole word: ``limit`` is not in ``limits``."""
     names = tuple(name for name in rarities if _holds_word(code, name))
     return Features(
         names=names,
         rarity=sum(rarities[name] for name in names),
         defines=_last_part(unit.symbol) in rarities,
         file_named=_normalised(PurePosixPath(unit.path).stem) in {_normalised(name) for name in rarities},
-        distance=distance(unit, source, near_files),
+        distance=distance,
         test=unit.test,
     )
-
-
-def distance(unit: Unit, source: Source, near_files: Collection[str]) -> int:
-    """0 for a unit an anchor names, 1 for a caller or callee of a unit that cleared the bar or a unit
-    of a file near the anchors (an anchor's own file, or a file it imports, where the index resolves
-    that language's imports), 2 for a unit of any other file, and 3 for a unit only a name's hit
-    reached."""
-    if source is Source.FILE:
-        return 1 if unit.path in near_files else 2
-    return _DISTANCE[source]
 
 
 def value_key(unit: Unit, features: Features, weights: Weights) -> tuple[float, str, str]:
@@ -211,9 +185,6 @@ def checked_shares(shares: Mapping[str, float], targets: Collection[str], policy
     if bad := sorted(target for target, share in shares.items() if not (math.isfinite(share) and share > 0)):
         raise ValueError(f"a share must be a positive number: {bad}")
     return dict(shares)
-
-
-_DISTANCE = {Source.ANCHOR: 0, Source.CALLER: 1, Source.CALLEE: 1, Source.NAME: 3}
 
 
 def _holds_word(code: str, name: str) -> bool:
