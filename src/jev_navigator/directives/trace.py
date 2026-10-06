@@ -116,8 +116,8 @@ class TraceObligation:
 
     ``evidence_backed`` means Jev supported at least one supplied source item. It is semantic model
     evidence, never a promotion of candidate or unresolved links to static proof. ``examined`` says
-    whether every span of the walked component was judged for this obligation; when a budget stop
-    left spans unjudged, the obligation stays ``unresolved`` instead of becoming a gap.
+    whether every span of the walked component was judged for this obligation; when a budget stop or
+    a refused request left spans unjudged, the obligation stays ``unresolved`` instead of becoming a gap.
     """
 
     name: str

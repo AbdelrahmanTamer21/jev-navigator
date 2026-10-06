@@ -501,8 +501,8 @@ for obligation in result.obligations:
 An evidence-backed obligation has at least one positive judgment; it does not prove the whole path
 or every relevant branch is present. Negative judgments mean no evidence in the supplied component.
 Uncertain and unexamined items remain unresolved. A span whose request is refused stays unjudged
-(`result.refusals` keeps it with its error), so every obligation stays unexamined, and the trace goes
-on. `result.graph` retains every walked function and
+(`result.refusals` keeps it with its error, and the pack's `trace.refused` and report.md name it), so
+every obligation stays unexamined, and the trace goes on. `result.graph` retains every walked function and
 link, including uncertain bindings; `included` is only a presentation backbone, not a deletion of
 the remaining component.
 

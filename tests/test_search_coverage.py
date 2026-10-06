@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
 from conftest import BudgetedClient
 
 from jev_navigator.directives.find_all import (
@@ -18,6 +19,7 @@ from jev_navigator.directives.find_all import (
 from jev_navigator.directives.search_coverage import Outcome, PointCoverage, Round, point_results
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.units import LineAnchor, RangeAnchor
+from jev_navigator.judgments.client import InputLimits
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import ScriptedJevClient
 
@@ -302,3 +304,53 @@ def test_a_later_round_that_failed_makes_the_point_unknown(tmp_path: Path) -> No
         "audit: unknown, the search failed (ConnectionError: provider unreachable) after 2 unit(s) judged, "
         "best P=0.100; 2 not reached"
     )
+
+
+BIG = {"big.py": "def big():\n    return '" + "x" * 3_000 + "'\n"}
+
+
+def big_unit_not_reached(index: CodeIndex):
+    return find_all(index, Judge(answering(), max_calls=0), AUDIT, files=["big.py"])
+
+
+def big_unit_refused(index: CodeIndex):
+    """Jev's box holds the unit, but the provider's budget of 2,500 characters refuses its request."""
+    return find_all(index, Judge(BudgetedClient(2_500, default_noul=0.1)), AUDIT, files=["big.py"])
+
+
+def big_unit_too_large(index: CodeIndex):
+    """A box of 2,000 characters holds no request for the unit's one long line."""
+    client = answering()
+    client.input_limits = InputLimits(2_000)
+    return find_all(index, Judge(client), AUDIT, files=["big.py"])
+
+
+def big_unit_delivered(index: CodeIndex):
+    delivered = [RangeAnchor("big.py", 1, 2)]
+    return find_all(
+        index, Judge(answering(), max_calls=0), AUDIT, anchors=[LineAnchor("big.py", 1)], delivered=delivered
+    )
+
+
+@pytest.mark.parametrize(
+    ("weightier", "lighter", "reasons"),
+    [
+        (big_unit_not_reached, big_unit_refused, (NOT_REACHED, REFUSED)),
+        (big_unit_refused, big_unit_too_large, (REFUSED, TOO_LARGE)),
+        (big_unit_too_large, big_unit_delivered, (TOO_LARGE, DELIVERED)),
+    ],
+)
+@pytest.mark.parametrize("lighter_first", [True, False])
+def test_a_unit_two_rounds_leave_unjudged_for_neighbouring_reasons_counts_under_the_weightier(
+    tmp_path: Path, weightier, lighter, reasons: tuple[str, str], lighter_first: bool
+) -> None:
+    # Arrange
+    index = shop(tmp_path, {**SHOP, **BIG})
+    rounds = [Round(weightier(index), Source.FILE), Round(lighter(index), Source.FILE)]
+
+    # Act
+    [audit] = point_results(rounds[::-1] if lighter_first else rounds, BAR)
+
+    # Assert: each round left the unit for its own reason, and the unit counts once, under the weightier.
+    assert tuple(reason for round_ in rounds for reason in round_.result.not_judged.values()) == reasons
+    assert audit.coverage.cut == {(Source.FILE, reasons[0]): 1}

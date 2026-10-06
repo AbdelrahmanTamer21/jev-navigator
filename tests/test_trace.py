@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import BudgetedClient
+from conftest import BudgetedClient, RefusingClient
 
 from jev_navigator.directives.trace import (
     TRACE_EVIDENCE_CHECKS,
@@ -13,7 +13,7 @@ from jev_navigator.directives.trace import (
 )
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.spans import CodeSlice, Span
-from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputBudgetExceededError
+from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.store import JsonlAnswerStore
 from jev_navigator.testing import ScriptedJevClient
@@ -244,26 +244,12 @@ def test_name_only_and_missing_targets_remain_unresolved_static_links(tmp_path: 
     assert missing.binding is not None and missing.binding.status == "unresolved"
 
 
-class _RefusingClient:
-    """A provider that refuses, for its input size, every request holding ``marker``."""
-
-    def __init__(self, scripted: ScriptedJevClient, marker: str) -> None:
-        self.scripted = scripted
-        self.marker = marker
-        self.model = scripted.model
-
-    def ask(self, state, questions):
-        if self.marker in json.dumps(state):
-            raise InputBudgetExceededError("max_tokens_exceeded")
-        return self.scripted.ask(state, questions)
-
-
 def test_a_refused_item_leaves_every_obligation_unexamined_and_the_trace_goes_on(tmp_path: Path) -> None:
     # Arrange
     index = _workflow_index(tmp_path)
     root = index.find_definition("handle_order")[0]
     [reject] = index.find_definition("reject")
-    provider = _RefusingClient(_evidence_client(), marker="422")
+    provider = RefusingClient(_evidence_client(), marker="422", list_name="trace")
 
     # Act
     result = trace_workflow(

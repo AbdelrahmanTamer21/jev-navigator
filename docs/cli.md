@@ -288,8 +288,9 @@ library's `find_all_text` searches those files when a caller asks for them
 The result includes `seed_search`, and `search` records the `found`, `unsure` and `searched` units
 (each with its kind, name, file and runs of lines, the piece judged when it was cut, its answer and
 request identity), `room_chars`, `not_judged` (each unit or piece left unjudged, with the reason),
-`refused` (each unit or piece whose request was refused, with the error: the provider refused it for its
-size and no smaller split exists, or the final secret scan refused it; the search goes on past it) and
+`refused` (each unit or piece whose request was refused, with the error's type and message: the provider
+refused it for its size and no smaller split exists, or the final secret scan refused it; the search goes
+on past it, report.md lists each one, and stdout prints how many) and
 coverage gaps: `unlisted_files`, `unresolved_seeds`, `unparsed_files` and `not_indexed_files`.
 `units_examined` means every unit was judged; it does not prove the model found every behavior.
 `scope_incomplete` retains files JVN does not parse or could not read, unparsed files, pieces too
@@ -342,7 +343,9 @@ JSON stdout contains `output_directory`, `manifest`, `report`, `trace`, `provide
 (`null` for trace). Progress and requests stay on stderr. See `trace.outcome`, its obligations and
 `unresolved_links` before interpreting coverage; `trace.unavailable_files` names, with the reason, each
 file the index has no facts for (gone or changed on disk, or refused by the parser), and report.md lists
-them. `trace.not_indexed_files` names each file or folder the listing left out, such as an ignored one, and report.md counts them by reason and top folder. Ctrl-C stops the command with exit 130; an abrupt
+them. `trace.refused` names each span whose request was refused, with the error's type and message; the
+trace goes on past it, its obligations stay unexamined, report.md lists each one and stdout prints how
+many. `trace.not_indexed_files` names each file or folder the listing left out, such as an ignored one, and report.md counts them by reason and top folder. Ctrl-C stops the command with exit 130; an abrupt
 interruption can leave the journal and answer store without a final manifest. The library also
 offers cooperative cancellation between traversal steps and model batches that writes a partial
 pack.

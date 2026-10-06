@@ -104,6 +104,11 @@ def error_message(error: BaseException) -> str:
     return str(error)
 
 
+def error_fields(error: BaseException, *, keep_text: bool = True) -> dict:
+    """An error as a run file stores it: its type and its message as ``message_fields`` keeps it."""
+    return {"type": type(error).__name__, **message_fields(error_message(error), keep_text=keep_text)}
+
+
 def message_fields(message: str, *, keep_text: bool) -> dict:
     """An error message as a run file stores it: the text only when ``keep_text``, otherwise its
     length and SHA-256, so a reader can still match two records of one error without the text."""
