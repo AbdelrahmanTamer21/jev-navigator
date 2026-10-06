@@ -466,37 +466,59 @@ def contents_with_calls(prefix: str, count: int, rows: int) -> dict[str, scope_s
     }
 
 
-def _begin_a_write_while_another_writes(path: str, started, outcome) -> None:
-    started.wait()
-    time.sleep(0.2)
-    with closing(sqlite3.connect(path, timeout=1)) as database:
+def _write_once_signalled(path: str, signalled, outcome) -> None:
+    """Waits as long as JVN does for the write lock, then reports how many rows it saw."""
+    signalled.wait(timeout=60)
+    with closing(sqlite3.connect(path, timeout=30)) as database:
         try:
             database.execute("begin immediate")
+            (seen,) = database.execute("select count(*) from names").fetchone()
             database.commit()
-            outcome.put("written")
+            outcome.put(seen)
         except sqlite3.OperationalError as error:
             outcome.put(str(error))
 
 
-def test_a_second_process_writes_while_a_large_scope_is_added(private_cache_root: Path) -> None:
-    # Arrange: 300,000 rows to add; another process may wait one second for the write lock (JVN
-    # waits 30), so it fails if one transaction held the lock for the whole add
-    table = name_table.NameTable()
+def test_a_second_process_writes_between_the_transactions_of_a_large_add(
+    private_cache_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: 300,000 rows to add. When the add begins its second transaction, its first has
+    # committed and released the write lock, so another process writes and sees only part of the
+    # rows. One transaction for the whole add would let it write only after every row.
     large = contents_with_calls("large", 60, 5_000)
     context = multiprocessing.get_context("spawn")
-    started, outcome = context.Event(), context.Queue()
-    other = context.Process(
-        target=_begin_a_write_while_another_writes, args=(str(table.path), started, outcome)
-    )
+    signalled, outcome = context.Event(), context.Queue()
+    seen: list[int | str] = []
+    begins = Counter()
+    real_open = name_table.open_shared_database
+
+    def let_the_other_process_write_at_the_second_transaction(statement: str) -> None:
+        begins[statement] += 1
+        if statement == "begin immediate" and begins[statement] == 2:
+            signalled.set()
+            seen.append(outcome.get(timeout=60))
+
+    def traced_open(*arguments):
+        database = real_open(*arguments)
+        database.set_trace_callback(let_the_other_process_write_at_the_second_transaction)
+        return database
+
+    monkeypatch.setattr(name_table, "open_shared_database", traced_open)
+    table = name_table.NameTable()
+    other = context.Process(target=_write_once_signalled, args=(str(table.path), signalled, outcome))
     other.start()
 
     # Act
-    started.set()
     table.add(large)
+    if not seen:
+        signalled.set()
+        seen.append(outcome.get(timeout=60))
     other.join(timeout=60)
 
     # Assert
-    assert outcome.get(timeout=5) == "written"
+    [rows_seen] = seen
+    assert isinstance(rows_seen, int), rows_seen
+    assert 0 < rows_seen < 60 * 5_000
     assert len(table.rows("name0")) == 60 * 2
 
 

@@ -31,7 +31,8 @@ def pytest_configure(config: pytest.Config) -> None:
     if config.getoption("without_typesafe") and _installed(TYPESAFE_PACKAGE):
         raise pytest.UsageError(
             f"--without-typesafe was given, but {TYPESAFE_PACKAGE} is installed, so this run would not show "
-            "that JVN works without it. Run it as `uv run --no-dev --with pytest pytest --without-typesafe`."
+            "that JVN works without it. Run it as "
+            "`uv run --no-dev --with pytest --with pytest-timeout pytest --without-typesafe`."
         )
 
 
