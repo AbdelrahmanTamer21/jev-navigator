@@ -566,14 +566,15 @@ def _job(name: str, steps: int) -> str:
 
 
 JOBS_WORKFLOW = (
-    "name: ci\njobs:\n" + _job("build", 30) + _job("lint", 2) + _job("test", 35) + _job("deploy", 90)
+    "name: ci\njobs:\n" + _job("build", 30) + _job("lint", 2) + _job("test", 35) + _job("deploy", 90) + "\n\n"
 )
 
 
 def test_a_yaml_block_over_the_box_is_cut_at_its_jobs_packing_small_ones_and_cutting_one_over_the_box(
     tmp_path: Path,
 ) -> None:
-    # Arrange: build is lines 3 to 33, lint 34 to 36, test 37 to 72, and deploy, alone over the box, 73 to 163
+    # Arrange: build is lines 3 to 33, lint 34 to 36, test 37 to 72, deploy, alone over the box, 73 to 163,
+    # and two blank lines end the file
     root = tmp_path / "repo"
     write_files(root, {".github/workflows/ci.yml": JOBS_WORKFLOW})
     commit_all(root)

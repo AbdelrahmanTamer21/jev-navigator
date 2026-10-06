@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -121,8 +121,7 @@ def _fence_after(line: str, fence: str | None) -> str | None:
 
 
 def _yaml_starts(lines: Sequence[str]) -> list[Start]:
-    keys = ((number, _YAML_KEY.match(line)) for number, line in enumerate(lines, 1))
-    return [(_with_comments_above(lines, number), _unquoted(key[1])) for number, key in keys if key]
+    return _yaml_keys(lines, range(1, len(lines) + 1), "")
 
 
 def _yaml_keys_inside(lines: Sequence[str], block: TextBlock) -> list[Start]:
@@ -131,9 +130,12 @@ def _yaml_keys_inside(lines: Sequence[str], block: TextBlock) -> list[Start]:
     header = next(number for number in lines_of_block if _YAML_KEY.match(lines[number - 1]))
     body = range(header + 1, block.end + 1)
     indent = next((_INDENT.match(lines[n - 1])[0] for n in body if _is_content(lines[n - 1])), "")
-    if not indent:
-        return []
-    keys = ((number, _YAML_KEY.match(lines[number - 1].removeprefix(indent))) for number in body)
+    return _yaml_keys(lines, body, indent) if indent else []
+
+
+def _yaml_keys(lines: Sequence[str], numbers: Iterable[int], indent: str) -> list[Start]:
+    """The keys at ``indent`` among lines ``numbers``, each at its first comment line right above."""
+    keys = ((number, _YAML_KEY.match(lines[number - 1].removeprefix(indent))) for number in numbers)
     return [(_with_comments_above(lines, number), _unquoted(key[1])) for number, key in keys if key]
 
 
