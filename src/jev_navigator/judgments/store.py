@@ -28,6 +28,7 @@ import os
 import re
 import sqlite3
 import threading
+import weakref
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -234,6 +235,7 @@ class SqliteAnswerStore:
         self.path = Path(path)
         self._lock = threading.Lock()
         self._db = open_shared_database(self.path, _SCHEMA, SHARED_STORE_VERSION)
+        weakref.finalize(self, self._db.close)
         self._refuse_another_layout()
 
     def _refuse_another_layout(self) -> None:

@@ -20,6 +20,7 @@ import json
 import logging
 import sqlite3
 import threading
+import weakref
 from collections.abc import Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from functools import cache
@@ -70,6 +71,7 @@ class NameTable:
         self.path = table_path(root)
         self._lock = threading.Lock()
         self._db = open_shared_database(self.path, _SCHEMA)
+        weakref.finalize(self, self._db.close)
 
     def entries(self, blobs: Collection[str]) -> dict[str, FileEntry]:
         """The entries of those ``blobs`` whose rows the table holds, each confirmed today. An entry
