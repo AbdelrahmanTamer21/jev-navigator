@@ -357,6 +357,7 @@ index = CodeIndex.from_directory(repo_root, prefixes=("app/", "web/"))  # tracke
 index.not_indexed_files  # {"node_modules/": "ignored", ...}: every file or folder left out, with the reason
 tracked = CodeIndex.from_git(repo_root, ["app/orders.py"])  # only what git tracks; the rest is not_indexed
 old = CodeIndex.at_commit(repo_root, "abc123", prefixes=("app/",))  # from git objects, checkout untouched
+old.close()  # removes at_commit's private copy; `with CodeIndex.at_commit(...) as old:` closes it too
 index.find_definition("LIMITS_KEY")  # functions, classes, constants, assignments, types, enums
 index.find_callers("validate_order")  # CallSite(file, line, caller, binding), found by name
 index.callee_edges(span)  # CallEdge(name, line, binding); find_callees gives names only
@@ -835,7 +836,7 @@ on its own scope, so searches sharing one judge never use up each other's budget
   likewise keeps the body as handed to the client (`body_base64`) and the wire bytes when captured
   (`sent_body_base64`), and `export_for_review` keeps the order the request is sent in. By default the store keeps
   hashes, question wording, and each item's ids, file, lines, commit and names, or its place's file
-  and runs, so `rebuild_request(record, CodeIndex.at_commit(...), shared)` rebuilds a request from
+  and runs, so `rebuild_request(record, old, shared)`, with `old` an open `CodeIndex.at_commit(...)`, rebuilds a request from
   the code at that commit and proves it matches, or names the part that differs. A request whose items carried a
   field that can quote code, such as a Trace link line or a Find signature, keeps that field withheld,
   so it does not rebuild exactly; the mismatch then names the withheld fields first.
