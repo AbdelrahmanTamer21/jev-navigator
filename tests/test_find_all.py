@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from conftest import WEBSITE_QUERIES, AsyncBudgetedClient, BudgetedClient
+from conftest import WEBSITE_QUERIES, AsyncBudgetedClient, BudgetedClient, labelled
 from short_secrets import ShortSecretMasker, numbered_secret
 
 from jev_navigator.directives.find_all import (
@@ -52,23 +52,6 @@ def repository(root: Path, files: Mapping[str, str] = ORDERS) -> CodeIndex:
     for name, source in files.items():
         (root / name).write_text(source)
     return CodeIndex(root, files)
-
-
-def labelled(labels: Mapping[tuple[str, str], float], default: float = 0.05) -> ScriptedJevClient:
-    """A provider fixture: P(yes) by target and a marker in the unit's code. The real listing,
-    resolution, batching and composition run; this proves execution, not Jev's accuracy."""
-
-    def answer(question_id: str, question: Mapping, state: Mapping) -> float:
-        code = state[ITEMS][int(question_id.rsplit("#", 1)[1])]["code"]
-        asked = question_id.split("@", 1)[0]
-        matches = (
-            p
-            for (target, marker), p in labels.items()
-            if match_check(target).name == asked and marker in code
-        )
-        return next(matches, default)
-
-    return ScriptedJevClient(nouls=answer)
 
 
 def sent_code(provider: ScriptedJevClient) -> list[str]:

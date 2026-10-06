@@ -104,12 +104,12 @@ def callers_of_file(index: CodeIndex, path: str) -> tuple[CallSite, ...]:
 
 def trace_callers(index: CodeIndex, symbol: str, depth: int | None = None) -> tuple[TraceStep, ...]:
     """Functions calling ``symbol``, then their callers, to a fixed point or explicit depth."""
-    return _trace(index, symbol, depth, _caller_functions)
+    return _trace(index, symbol, depth, caller_functions)
 
 
 def trace_callees(index: CodeIndex, symbol: str, depth: int | None = None) -> tuple[TraceStep, ...]:
     """In-scope callees of ``symbol``, then theirs, to a fixed point or explicit depth."""
-    return _trace(index, symbol, depth, _callee_functions)
+    return _trace(index, symbol, depth, callee_functions)
 
 
 def trace_graph(
@@ -443,7 +443,8 @@ def _link_key(link: TraceLink) -> tuple:
     )
 
 
-def _caller_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Binding | None]]:
+def caller_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Binding | None]]:
+    """Each function holding a call that may reach ``function`` itself, with the call's binding."""
     return [
         (site.caller, site.binding)
         for site in index.find_callers(function.name)
@@ -451,7 +452,7 @@ def _caller_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Bind
     ]
 
 
-def _callee_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Binding | None]]:
+def callee_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Binding | None]]:
     """Each callee definition, with the call's binding; when the binding names its target, only that one."""
     linked = []
     for edge in index.callee_edges(function):

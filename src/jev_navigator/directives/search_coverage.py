@@ -25,6 +25,7 @@ _SOURCE_LABELS = {
     Source.ANCHOR: "from anchors",
     Source.FILE: "from files",
     Source.NAME: "from name hits",
+    Source.CALLER: "callers",
     Source.CALLEE: "callees",
 }
 _CUT_LABELS = ((REFUSED, "refused"), (TOO_LARGE, "too large to judge"))

@@ -19,7 +19,7 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
 | `find_code` | a best-first search that opens places until the code a description names is found |
 | `find_all` | judges every unit of a population (anchored lines, files, and each hit of named texts) against described targets, one question per unit per target, in the order a `frontier` policy gives |
-| `frontier` | the order a search judges its population in: `STAGE_ORDER` (anchors, files, name hits) or `VALUE` (code features first, ties by content hash) |
+| `frontier` | the order a search judges its population in: `STAGE_ORDER` (anchors, files, name hits) or `VALUE` (each target's own queue by code features, ties by content hash, an equal or caller-set share of every batch, and a target settling once a unit clears its bar and that unit's callers and callees are judged) |
 | `find_all_text`, `find_text` | the same for text units only, the files JVN does not parse: judge every one, or stop once one is found |
 | `places.MOVES` | the ways a search lists the neighbours of an opened place; pick a subset or add your own |
 | `StopRule`, `History` | your own stop check over a search's history, reading only the sections you select |
@@ -153,7 +153,8 @@ async client, such as a host's orchestrator; it lists and reads code in a worker
 bar belong to the caller:
 `scores(target)` gives every judged unit's answer, and `names` each name's hits found, reached and
 naming no unit. `entered_by` gives the source each unit entered the population by
-(`frontier.Source.ANCHOR`, `FILE` or `NAME`, the first when several listed it).
+(`frontier.Source.ANCHOR`, `FILE` or `NAME`, the first when several listed it; `CALLER` or `CALLEE`
+for a unit a settling search pushed).
 
 `policy` (`frontier`) decides the order, and under a call cap whatever is ranked last is what gets
 lost. `STAGE_ORDER`, the default, is the order above: anchors, files, then name hits rarest name first,
@@ -171,6 +172,20 @@ its reasons in `not_judged`. `ranked(target)` gives the answers best first, a ti
 worth more by code, then to the content hash. Under `VALUE` every unit is admitted before the first
 wave, so the units never reached are counted, and the answer store's keys follow the new batches, so
 answers stored under the stage order are asked again once.
+
+Under `VALUE` each target has its own queue: its features count the names its description spells out
+as whole words (all the request's names when it spells out none), so `features` is kept per target.
+Each batch's item slots go to the targets in proportion to their shares, by smooth weighted round
+robin: equal by default, set with `shares={"limit": 3}` (a target not named has 1). A unit drawn for
+one target is asked every target's question. A unit clears a target's bar when its answer is yes by the
+Judge's thresholds; it then pushes its callers and callees (`operations.caller_functions` and
+`callee_functions`, a function or method only), which that target judges before anything else, and a
+pushed unit pushes nothing, so the hops go one step deep. The target settles once none of its pushed
+units is left to judge (a refused, too large or delivered one counts as done), draws no more slots, and
+its share flows to the targets still open. `pushed` names what each clearing unit pushed and `settled`
+the targets that settled; when every target has, the search ends `settled`. `STAGE_ORDER` has one
+queue and judges every unit until the call cap, so `shares` with it is refused. A `Policy` with
+`ranked=True` and `settles=False` keeps the queues and shares and judges every unit.
 
 `search_coverage.point_results(rounds, bar)` turns one search's rounds into each point's result:
 `found` when a unit's answer reaches the bar, `none_among_judged` over the units judged, or `unknown`

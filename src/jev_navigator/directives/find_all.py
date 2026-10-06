@@ -4,7 +4,8 @@ The population is units (``index/units.py``), each one a listing lists: the unit
 and range anchors name, the units of the named files, and the units holding each hit of the named
 texts. A policy (``frontier``) orders them: ``STAGE_ORDER``, the default, judges them in that order,
 names with fewer hits first, so a common word never decides which hits of a rare name are seen;
-``VALUE`` judges the units worth most by code first. Code finds the units; Jev judges each one whole,
+``VALUE`` judges the units worth most by code first, each target from its own queue and share, and stops
+spending on a target once it has settled. Code finds the units; Jev judges each one whole,
 or a unit larger than its room in a request by its pieces. The Judge's call cap is the only budget: no
 code step is capped. The result keeps every raw answer with its place; any bar belongs to the caller.
 
@@ -22,10 +23,11 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TypeVar
 
+from .. import operations
 from ..index.code_index import CodeIndex
 from ..index.languages import language_read
 from ..index.scope import is_lockfile
-from ..index.spans import TextHit
+from ..index.spans import Span, TextHit
 from ..index.units import (
     Anchor,
     AnchorResolution,
@@ -35,6 +37,7 @@ from ..index.units import (
     RangeAnchor,
     Reading,
     Unit,
+    UnitKind,
     UnresolvedAnchor,
     best_piece,
     items_to_judge,
@@ -46,7 +49,19 @@ from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
 from ..judgments.questions import Check, item_path, serialized_chars
 from ..judgments.thresholds import NoulVerdict
 from .find_code import search_failure
-from .frontier import STAGE_ORDER, Features, Policy, Source, features_of, name_rarities, value_key
+from .frontier import (
+    HOPS,
+    STAGE_ORDER,
+    Features,
+    Frontier,
+    Policy,
+    Source,
+    checked_shares,
+    features_of,
+    name_rarities,
+    target_rarities,
+    value_key,
+)
 
 ITEMS = "items"
 TARGETS = "targets"
@@ -55,6 +70,7 @@ TOO_LARGE = "too large to judge"
 NOT_REACHED = "not reached: the search stopped first"
 REFUSED = "refused: the provider or the final secret scan refused its request, so its answer is unknown"
 FOUND = "found"
+SETTLED = "settled"
 FIND_TEXT_TARGET = "target"
 BATCHES_PER_WAVE = 16
 """How many requests' worth of places one wave hands the Judge, in the population's order. The Judge
@@ -108,8 +124,11 @@ class FindAllResult:
     anchors named none. ``refusals`` keeps each refused place's error; the place is ``not_judged``
     as ``REFUSED`` and the search goes on past it. ``entered_by`` gives the source each unit entered
     the population by, the first when several listed it. ``policy`` ordered the population; under a
-    ranked policy ``features`` holds each unit's code features, and ``repeat_of`` names, for a unit whose
-    code repeats another's, the unit judged in its place, whose answers and reasons it shares."""
+    ranked policy ``features`` holds each target's code features of each unit, and ``repeat_of`` names,
+    for a unit whose code repeats another's, the unit judged in its place, whose answers and reasons it
+    shares. Under a settling policy ``pushed`` gives each unit that cleared a target's bar the callers
+    and callees it pushed (none for a unit that is not a function or method), and ``settled`` the
+    targets that settled, in the order they did."""
 
     targets: Mapping[str, str]
     room: int | None
@@ -127,8 +146,10 @@ class FindAllResult:
     refusals: tuple[Refusal, ...] = ()
     entered_by: Mapping[str, Source] = field(default_factory=dict)
     policy: Policy = STAGE_ORDER
-    features: Mapping[str, Features] = field(default_factory=dict)
+    features: Mapping[str, Mapping[str, Features]] = field(default_factory=dict)
     repeat_of: Mapping[str, str] = field(default_factory=dict)
+    pushed: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    settled: tuple[str, ...] = ()
 
     @classmethod
     def not_started(cls, targets: Mapping[str, str], stopped_by: str) -> FindAllResult:
@@ -162,11 +183,12 @@ class FindAllResult:
     def ranked(self, target: str) -> tuple[UnitScore, ...]:
         """Every judged unit's answer for ``target``, best first. A tie goes to the unit worth more by
         code under a ranked policy, then to the content hash, never to the path."""
-        return tuple(sorted(self.scores(target), key=self._rank))
+        features = self.features.get(target, {})
+        return tuple(sorted(self.scores(target), key=lambda score: self._rank(score, features)))
 
-    def _rank(self, score: UnitScore) -> tuple[float, float, str, str]:
-        features = self.features.get(score.unit.id)
-        value = 0.0 if features is None else features.value(self.policy.weights)
+    def _rank(self, score: UnitScore, features: Mapping[str, Features]) -> tuple[float, float, str, str]:
+        unit_features = features.get(score.unit.id)
+        value = 0.0 if unit_features is None else unit_features.value(self.policy.weights)
         return -score.probability, -value, score.unit.content_sha256, score.unit.id
 
     @property
@@ -193,6 +215,7 @@ def find_all(
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
     policy: Policy = STAGE_ORDER,
+    shares: Mapping[str, float] | None = None,
 ) -> FindAllResult:
     """Judge the units ``anchors`` name, the units of ``files`` and the units holding each hit of
     ``names``, in the order ``policy`` gives (see ``frontier``), in waves of ``batches_per_wave``
@@ -205,9 +228,16 @@ def find_all(
     target is not asked again. A failed request ends the search ``failed`` with ``failure`` holding
     the error (see ``search_failure``), Ctrl-C ends it ``cancelled``, and either way ``judged`` keeps
     every answer that arrived.
+
+    Under a ranked policy ``shares`` sets each target's share of the item slots in every batch (a
+    target it does not name has 1). Under a settling policy (``VALUE``) a unit clears a target's bar
+    when its answer is yes by the Judge's thresholds; that target then draws only the callers and
+    callees the unit pushed, and settles once none of them is left to judge. Every unit drawn is still
+    asked every target's question, so a settled target spends no call of its own. Once every target
+    has settled the search ends ``settled``, with the units it never reached ``not_judged``.
     """
     search = _begin(
-        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE, policy
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE, policy, shares
     )
     return _finished(search, anchors, files, names)
 
@@ -225,13 +255,14 @@ def find_all_text(
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
     policy: Policy = STAGE_ORDER,
+    shares: Mapping[str, float] | None = None,
 ) -> FindAllResult:
     """``find_all`` over text units (``Reading.TEXT``): the files JVN does not parse, each in the blocks
     its format gives, a code file named ``unlisted``. A name's hits in code and in lockfiles are left
     out, so a common word never floods the search with a lockfile's pieces; a lockfile ``files`` or
     ``anchors`` name is judged."""
     search = _begin(
-        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT, policy
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT, policy, shares
     )
     return _finished(search, anchors, files, names)
 
@@ -252,7 +283,9 @@ def find_text(
     """``find_all_text`` for the one target ``description``, named ``FIND_TEXT_TARGET``, ending
     ``found`` after the first wave in which a unit's answer is yes by the judge's thresholds."""
     targets = {FIND_TEXT_TARGET: description}
-    search = _begin(index, judge, targets, delivered, None, cancelled, batches_per_wave, Reading.TEXT, policy)
+    search = _begin(
+        index, judge, targets, delivered, None, cancelled, batches_per_wave, Reading.TEXT, policy, None
+    )
     search.stops_when_found = True
     return _finished(search, anchors, files, names)
 
@@ -280,13 +313,14 @@ async def find_all_async(
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
     policy: Policy = STAGE_ORDER,
+    shares: Mapping[str, float] | None = None,
 ) -> FindAllResult:
     """``find_all`` with each wave's requests sent concurrently through the Judge's async form, for an
     async client. Listing, resolving and reading code run in a worker thread, so the event loop stays
     free. ``cancelled`` is read before each parse and between waves, since the Judge's async form
     reads none; a cancelled task's ``CancelledError`` is never caught."""
     search = _begin(
-        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE, policy
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE, policy, shares
     )
     return await _finished_async(search, anchors, files, names)
 
@@ -304,10 +338,11 @@ async def find_all_text_async(
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
     policy: Policy = STAGE_ORDER,
+    shares: Mapping[str, float] | None = None,
 ) -> FindAllResult:
     """``find_all_text`` the way ``find_all_async`` runs ``find_all``."""
     search = _begin(
-        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT, policy
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT, policy, shares
     )
     return await _finished_async(search, anchors, files, names)
 
@@ -332,11 +367,15 @@ def _begin(
     batches_per_wave: int,
     reading: Reading,
     policy: Policy,
+    shares: Mapping[str, float] | None,
 ) -> _Search:
     _require_identifiers(targets)
     if batches_per_wave < 1:
         raise ValueError("batches_per_wave must be at least 1")
-    search = _Search(index, judge.scope(), targets, delivered, cancelled, batches_per_wave, reading, policy)
+    slots = checked_shares(shares or {}, targets, policy)
+    search = _Search(
+        index, judge.scope(), targets, delivered, cancelled, batches_per_wave, reading, policy, slots
+    )
     search.resume(completed or {})
     return search
 
@@ -372,10 +411,12 @@ class _Search:
         batches_per_wave: int,
         reading: Reading,
         policy: Policy,
+        shares: Mapping[str, float],
     ) -> None:
         self.index = index
         self.reading = reading
         self.policy = policy
+        self.shares = shares
         self.stops_when_found = False
         self.found_one = False
         self.batches_per_wave = batches_per_wave
@@ -391,9 +432,17 @@ class _Search:
         self.judged: dict[str, list[CheckResult]] = {target: [] for target in targets}
         self.units: dict[str, Unit] = {}
         self.entered_by: dict[str, Source] = {}
-        self.features: dict[str, Features] = {}
+        self.features: dict[str, dict[str, Features]] = {target: {} for target in targets}
         self.repeat_of: dict[str, str] = {}
         self.first_with_content: dict[str, str] = {}
+        self.unit_of_place: dict[str, str] = {}
+        self.places_of: dict[str, list[Item]] = {}
+        self.near_files: frozenset[str] = frozenset()
+        self.rarities: dict[str, dict[str, float]] = {}
+        self.pushed: dict[str, tuple[str, ...]] = {}
+        self.expanded: dict[str, set[str]] = {target: set() for target in targets}
+        self.awaiting: dict[str, set[str]] = {target: set() for target in targets}
+        self.settled: list[str] = []
         self.not_judged: dict[str, str] = {}
         self.unlisted: dict[str, str] = {}
         self.unresolved: list[UnresolvedAnchor] = []
@@ -439,14 +488,21 @@ class _Search:
             stop = "cancelled"
         elif error is None and self.found_one:
             stop = FOUND
+        elif error is None and self._settled_early():
+            stop = SETTLED
         return self.result(stop, failure)
+
+    def _settled_early(self) -> bool:
+        """Every target settled while units were still waiting to be judged."""
+        return len(self.settled) == len(self.targets) and NOT_REACHED in self.not_judged.values()
 
     def _waves(
         self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
     ) -> Iterator[list[Item]]:
-        return _chunks(
-            self._population(anchors, files, names), self.judge.items_per_request * self.batches_per_wave
-        )
+        size = self.judge.items_per_request * self.batches_per_wave
+        if self.policy.ranked:
+            return self._ranked_waves(anchors, files, names, size)
+        return _chunks(self._staged_population(anchors, files, names), size)
 
     def _next_wave(self, waves: Iterator[list[Item]]) -> tuple[list[Item], list[dict]] | None:
         """The next wave's places and the entries Jev reads for them; None when the population is spent."""
@@ -458,13 +514,6 @@ class _Search:
             {"file": place.file, "code": read_ranges(self.index, place.file, place.ranges)}
             for place in places
         ]
-
-    def _population(
-        self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
-    ) -> Iterator[Item]:
-        if self.policy.ranked:
-            return self._ranked_population(anchors, files, names)
-        return self._staged_population(anchors, files, names)
 
     def _staged_population(
         self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
@@ -487,25 +536,137 @@ class _Search:
                 return
             yield from self._admitted(self._units_of(chunk), Source.NAME)
 
-    def _ranked_population(
-        self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
-    ) -> Iterator[Item]:
-        """Every place still to judge, the units worth most by code first (see ``frontier``). Every
-        source is listed, every name's hits resolved and every unit admitted before the first wave, so a
-        unit the search never reaches is still counted; a unit whose code repeats one already admitted
-        shares that unit's answers instead of being judged."""
+    def _ranked_waves(
+        self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str], size: int
+    ) -> Iterator[list[Item]]:
+        """Waves of ``size`` places drawn from the targets' queues (``frontier.Frontier``). Every source
+        is listed, every name's hits resolved and every unit admitted before the first wave, so a unit
+        the search never reaches is still counted; a unit whose code repeats one already admitted shares
+        that unit's answers instead of being judged. Before each wave the targets settle."""
         if self.stopped():
             return
-        candidates = self._candidates(anchors, files, names)
-        if self.stopped():
-            return
-        near_files = self._near_files(anchors)
+        frontier = self._frontier(self._candidates(anchors, files, names), anchors)
+        while not self.stopped() and (drawing := self._drawing(frontier)):
+            wave = frontier.wave(size, drawing)
+            if not wave:
+                return
+            yield wave
+
+    def _frontier(self, candidates: Sequence[tuple[Unit, Source]], anchors: Sequence[Anchor]) -> Frontier:
+        """Each target's queue: every admitted place, its unit's value for that target first."""
+        self.near_files = self._near_files(anchors)
         rarities = name_rarities(self.found)
+        self.rarities = {target: target_rarities(text, rarities) for target, text in self.targets.items()}
         for unit, source in candidates:
-            code = read_ranges(self.index, unit.path, unit.ranges)
-            self.features[unit.id] = features_of(unit, code, source, near_files, rarities)
-        ranked = sorted(candidates, key=self._value_key)
-        yield from [place for unit, source in ranked for place in self._admitted_once(unit, source)]
+            self._add_features(unit, source)
+        for unit, source in sorted(candidates, key=lambda candidate: self._admission_key(candidate[0])):
+            self.places_of[unit.id] = self._admitted_once(unit, source)
+        queues = {
+            target: [
+                place
+                for unit, _ in sorted(candidates, key=lambda candidate: self._value_key(target, candidate[0]))
+                for place in self.places_of[unit.id]
+            ]
+            for target in self.targets
+        }
+        return Frontier(queues, self.shares)
+
+    def _add_features(self, unit: Unit, source: Source) -> None:
+        code = read_ranges(self.index, unit.path, unit.ranges)
+        for target in self.targets:
+            self.features[target][unit.id] = features_of(
+                unit, code, source, self.near_files, self.rarities[target]
+            )
+
+    def _admission_key(self, unit: Unit) -> tuple[float, str, str]:
+        """Of units with the same code, the one worth most to any target is judged for all of them."""
+        best = max(self.features[target][unit.id].value(self.policy.weights) for target in self.targets)
+        return -best, unit.content_sha256, unit.id
+
+    def _value_key(self, target: str, unit: Unit) -> tuple[float, str, str]:
+        return value_key(unit, self.features[target][unit.id], self.policy.weights)
+
+    def _drawing(self, frontier: Frontier) -> dict[str, bool]:
+        """Each target still drawing, mapped to whether it draws only its hops. Under a settling policy
+        a target with a unit that cleared its bar first gets that unit's hops, and settles once none of
+        its hops is left to judge."""
+        if not self.policy.settles:
+            return dict.fromkeys(self.targets, False)
+        drawing = {}
+        for target in self.targets:
+            if target in self.settled:
+                continue
+            clearing = self._clearing(target)
+            self._push_hops(frontier, target, sorted(clearing - self.expanded[target]))
+            if not clearing or self._awaiting(target):
+                drawing[target] = bool(clearing)
+            else:
+                self.settled.append(target)
+        return drawing
+
+    def _clearing(self, target: str) -> set[str]:
+        """The units whose answer for ``target`` is yes by the Judge's thresholds."""
+        return {
+            self.unit_of_place[answer.place.id]
+            for answer in self.judged[target]
+            if answer.verdict is NoulVerdict.YES and answer.place.id in self.unit_of_place
+        }
+
+    def _push_hops(self, frontier: Frontier, target: str, unit_ids: Sequence[str]) -> None:
+        """Gives ``target`` the callers and callees of each clearing unit, worth most to it first; a
+        unit a push brought in pushes nothing, so hops go one step deep."""
+        for unit_id in unit_ids:
+            self.expanded[target].add(unit_id)
+            if self.entered_by[unit_id] in HOPS:
+                continue
+            hops = sorted(self._hops_of(unit_id), key=lambda hop: self._value_key(target, self.units[hop]))
+            places = [place for hop in hops for place in self._still_pending(hop)]
+            frontier.push_hops(target, places)
+            self.awaiting[target].update(place.id for place in places)
+
+    def _hops_of(self, unit_id: str) -> tuple[str, ...]:
+        """The units holding the callers and callees of ``unit_id``, each admitted on first sight."""
+        if unit_id not in self.pushed:
+            hops: dict[str, tuple[Unit, Source]] = {}
+            for source, spans in self._call_neighbours(self.units[unit_id]):
+                anchors = [LineAnchor(span.file, span.start) for span in spans]
+                for hop in self._resolved(anchors).units:
+                    if hop.id != unit_id:
+                        hops.setdefault(hop.id, (hop, source))
+            for hop, source in hops.values():
+                if hop.id not in self.units:
+                    self._add_features(hop, source)
+                    self.places_of[hop.id] = self._admitted_once(hop, source)
+            self.pushed[unit_id] = tuple(hops)
+        return self.pushed[unit_id]
+
+    def _call_neighbours(self, unit: Unit) -> list[tuple[Source, list[Span]]]:
+        """The functions calling ``unit`` and those it calls, where the index reads the calls; a unit
+        that is not a function or method has none."""
+        if unit.kind not in (UnitKind.FUNCTION, UnitKind.METHOD):
+            return []
+        span = next((span for span in self.index.functions_in(unit.path) if span.key == unit.id), None)
+        if span is None:
+            return []
+        callers = operations.caller_functions(self.index, span) if span.is_named else []
+        callees = operations.callee_functions(self.index, span)
+        return [
+            (Source.CALLER, [caller for caller, _ in callers]),
+            (Source.CALLEE, [callee for callee, _ in callees]),
+        ]
+
+    def _still_pending(self, unit_id: str) -> list[Item]:
+        """The places of the unit judged for ``unit_id`` (itself, or the copy it repeats) still waiting."""
+        judged_as = self.repeat_of.get(unit_id, unit_id)
+        return [place for place in self.places_of.get(judged_as, []) if self._waiting(place.id)]
+
+    def _awaiting(self, target: str) -> bool:
+        return any(self._waiting(place_id) for place_id in self.awaiting[target])
+
+    def _waiting(self, place_id: str) -> bool:
+        """Still to judge: neither answered nor cut (too large, delivered or refused)."""
+        refused = any(refusal.place is not None and refusal.place.id == place_id for refusal in self.refusals)
+        return self.not_judged.get(place_id) == NOT_REACHED and not refused
 
     def _candidates(
         self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
@@ -531,10 +692,6 @@ class _Search:
             file for anchor in anchored if language_read(anchor) for file in self.index.imports(anchor)
         }
         return frozenset(anchored | imported)
-
-    def _value_key(self, candidate: tuple[Unit, Source]) -> tuple[float, str, str]:
-        unit, _ = candidate
-        return value_key(unit, self.features[unit.id], self.policy.weights)
 
     def _admitted_once(self, unit: Unit, source: Source) -> list[Item]:
         """``unit``'s places to judge, or none when its code repeats a unit already admitted."""
@@ -584,6 +741,7 @@ class _Search:
             if unit.id not in self.units:
                 self.units[unit.id] = unit
                 self.entered_by[unit.id] = source
+                self.unit_of_place.update((place.id, unit.id) for place in items_to_judge(unit))
                 places += self._pending_places(unit)
         return places
 
@@ -669,8 +827,10 @@ class _Search:
             tuple(self.refusals),
             dict(self.entered_by),
             self.policy,
-            dict(self.features),
+            {target: dict(features) for target, features in self.features.items() if features},
             dict(self.repeat_of),
+            dict(self.pushed),
+            tuple(self.settled),
         )
 
     def _repeats_left(self, not_judged: Mapping[str, str]) -> dict[str, str]:

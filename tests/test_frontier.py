@@ -6,9 +6,11 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+from conftest import RefusingClient, labelled
 from shop_search import FROZEN, REQUEST, SHOP, TARGETS, sent_requests, shop_index
 
-from jev_navigator.directives.find_all import NOT_REACHED, find_all, find_all_async
+from jev_navigator.directives.find_all import NOT_REACHED, REFUSED, find_all, find_all_async
 from jev_navigator.directives.frontier import (
     STAGE_ORDER,
     VALUE,
@@ -18,6 +20,7 @@ from jev_navigator.directives.frontier import (
     features_of,
     name_rarities,
 )
+from jev_navigator.directives.search_coverage import Outcome, Round, point_results
 from jev_navigator.index.units import list_units, read_ranges
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
@@ -206,3 +209,191 @@ def _first_line(index, unit) -> str:
 
 def _unit_at(result, path: str, symbol: str):
     return next(unit for unit in result.units if unit.path == path and unit.symbol == symbol)
+
+
+CHAIN = {
+    "orders/checkout.py": (
+        "from orders.rules import enforce\n\n\ndef checkout(order):\n    enforce(order)\n    return order\n"
+    ),
+    "orders/rules.py": (
+        "from orders.limits import over_limit\n\n\n"
+        "def enforce(order):\n    if over_limit(order):\n        raise ValueError('too many items')\n"
+    ),
+    "orders/limits.py": "def over_limit(order):\n    return len(order.items) > 4\n",
+    "web/routes.py": (
+        "from orders.checkout import checkout\n\n\n"
+        "def post_order(request):\n    return checkout(request.order)\n"
+    ),
+    "billing/refund.py": "def refund(order):\n    return -order.total\n",
+}
+LIMIT_ONLY = {"limit": TARGETS["limit"]}
+LIMIT_ANSWERS = {
+    ("limit", "enforce(order)\n    return"): 0.85,
+    ("limit", "raise ValueError"): 0.93,
+    ("limit", "> 4"): 0.9,
+}
+
+
+def settling_search(root: Path, client=None, targets=LIMIT_ONLY, **settings):
+    """One unit per request, one request at a time: checkout clears the limit at 0.85, the callee it
+    pushes, enforce, scores 0.93, and enforce's own callee, over_limit, would score 0.9."""
+    index = shop_index(root, CHAIN)
+    judge = Judge(client or labelled(LIMIT_ANSWERS), items_per_request=1, max_concurrency=1)
+    request = {"files": ["orders/checkout.py", "billing/refund.py"], "names": ["checkout"]}
+    return index, find_all(index, judge, targets, **request, batches_per_wave=1, policy=VALUE, **settings)
+
+
+def test_a_target_settles_only_after_the_callers_and_callees_its_clearing_unit_pushed_are_judged(
+    tmp_path: Path,
+) -> None:
+    # Act
+    index, result = settling_search(tmp_path)
+
+    # Assert: the callee pushed one step deep is the best answer; its own callee is never listed.
+    checkout, post_order, enforce, refund = (
+        _unit_at(result, path, symbol)
+        for path, symbol in [
+            ("orders/checkout.py", "checkout"),
+            ("web/routes.py", "post_order"),
+            ("orders/rules.py", "enforce"),
+            ("billing/refund.py", "refund"),
+        ]
+    )
+    judged = [_first_line(index, score.unit) for score in result.scores("limit")]
+    assert sorted(judged) == sorted(
+        ["def checkout(order):", "def post_order(request):", "def enforce(order):"]
+    )
+    assert result.ranked("limit")[0].unit == enforce
+    assert result.pushed == {checkout.id: (post_order.id, enforce.id)}
+    assert (result.entered_by[post_order.id], result.entered_by[enforce.id]) == (Source.NAME, Source.CALLEE)
+    assert "orders/limits.py" not in {unit.path for unit in result.units}
+    assert (result.stopped_by, result.settled) == ("settled", ("limit",))
+    assert result.not_judged == {refund.id: NOT_REACHED}
+
+
+def test_a_refused_hop_does_not_hold_its_target_open(tmp_path: Path) -> None:
+    # Arrange: the provider refuses the request holding enforce
+    client = RefusingClient(labelled(LIMIT_ANSWERS), "raise ValueError", list_name="items")
+
+    # Act
+    _, result = settling_search(tmp_path, client)
+
+    # Assert
+    enforce = _unit_at(result, "orders/rules.py", "enforce")
+    assert result.not_judged[enforce.id] == REFUSED
+    assert (result.stopped_by, result.settled) == ("settled", ("limit",))
+
+
+def test_the_async_search_settles_as_the_sync_search_does(tmp_path: Path) -> None:
+    # Arrange
+    index, sync = settling_search(tmp_path)
+    judge = Judge(AsyncScriptedJevClient(labelled(LIMIT_ANSWERS)), items_per_request=1, max_concurrency=1)
+    request = {"files": ["orders/checkout.py", "billing/refund.py"], "names": ["checkout"]}
+
+    # Act
+    concurrent = asyncio.run(
+        find_all_async(index, judge, LIMIT_ONLY, **request, batches_per_wave=1, policy=VALUE)
+    )
+
+    # Assert
+    assert concurrent.judged == sync.judged
+    assert (concurrent.pushed, concurrent.settled, concurrent.stopped_by) == (
+        sync.pushed,
+        sync.settled,
+        sync.stopped_by,
+    )
+
+
+def test_a_coverage_record_counts_the_callers_and_callees_a_spent_budget_left_unjudged(
+    tmp_path: Path,
+) -> None:
+    # Arrange: both population units go in the first request; checkout clears the limit, and the call
+    # cap stops the request that would judge its caller and its callee
+    index = shop_index(tmp_path, CHAIN)
+    judge = Judge(labelled(LIMIT_ANSWERS), items_per_request=2, max_concurrency=1, max_calls=1)
+
+    # Act
+    result = find_all(
+        index,
+        judge,
+        TARGETS,
+        files=["orders/checkout.py", "billing/refund.py"],
+        batches_per_wave=1,
+        policy=VALUE,
+    )
+    [limit, refund] = point_results([Round(result)], 0.8)
+
+    # Assert
+    assert result.stopped_by == "budget"
+    assert limit.outcome is Outcome.FOUND
+    assert refund.coverage.cut == {(Source.CALLER, NOT_REACHED): 1, (Source.CALLEE, NOT_REACHED): 1}
+    assert "2 not reached (1 callers, 1 callees)" in refund.render(0.8)
+
+
+SPLIT = {
+    "pkg/alpha.py": "".join(f"def alpha_{n}():\n    return alpha({n})\n\n\n" for n in range(4)),
+    "pkg/beta.py": "".join(f"def beta_{n}():\n    return beta({n})\n\n\n" for n in range(4)),
+}
+SPLIT_TARGETS = {"a": "the code that calls `alpha`", "b": "the code that calls `beta`"}
+
+
+def split_requests(root: Path, client, **settings) -> list[list[str]]:
+    """Each request's units, as alpha or beta, for a search over four units holding each name."""
+    index = shop_index(root, SPLIT)
+    judge = Judge(client, items_per_request=settings.pop("per_request", 2), max_concurrency=1)
+    find_all(
+        index, judge, SPLIT_TARGETS, names=["alpha", "beta"], batches_per_wave=1, policy=VALUE, **settings
+    )
+    return [
+        [item["file"].removeprefix("pkg/").removesuffix(".py") for item in state["items"]]
+        for state, _ in client.requests
+    ]
+
+
+def test_each_target_draws_its_equal_share_of_every_batch_from_its_own_queue(tmp_path: Path) -> None:
+    # Act
+    requests = split_requests(tmp_path, ScriptedJevClient(default_noul=0.1))
+
+    # Assert
+    assert requests == [["alpha", "beta"]] * 4
+
+
+def test_a_caller_sets_the_shares(tmp_path: Path) -> None:
+    # Act: three slots of four for a, one for b
+    requests = split_requests(tmp_path, ScriptedJevClient(default_noul=0.1), per_request=4, shares={"a": 3})
+
+    # Assert
+    assert sorted(requests[0]) == ["alpha", "alpha", "alpha", "beta"]
+
+
+def test_a_settled_targets_share_flows_to_the_target_still_open(tmp_path: Path) -> None:
+    # Arrange: every unit holding alpha clears a in the first request; nothing ever clears b
+    client = labelled({("a", "alpha("): 0.9})
+
+    # Act
+    requests = split_requests(tmp_path, client)
+
+    # Assert: after the first request every slot is b's, whose queue holds beta first
+    assert requests[0] == ["alpha", "beta"]
+    assert [unit for request in requests[1:] for unit in request] == ["beta"] * 3 + ["alpha"] * 3
+
+
+@pytest.mark.parametrize(
+    ("shares", "policy", "error"),
+    [
+        ({"c": 1.0}, VALUE, "targets the search does not have"),
+        ({"a": 0.0}, VALUE, "positive number"),
+        ({"a": 2.0}, STAGE_ORDER, "ranked policy"),
+    ],
+)
+def test_shares_name_targets_of_a_ranked_search_and_are_positive(
+    tmp_path: Path, shares: dict, policy, error: str
+) -> None:
+    # Arrange
+    index = shop_index(tmp_path, SPLIT)
+
+    # Act and Assert
+    with pytest.raises(ValueError, match=error):
+        find_all(
+            index, Judge(ScriptedJevClient()), SPLIT_TARGETS, names=["alpha"], policy=policy, shares=shares
+        )

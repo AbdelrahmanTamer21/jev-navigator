@@ -46,6 +46,7 @@ configuration: a recipe the caller passes as data names them, never an environme
 | Index, operations, units and scope (`CodeIndex`, `operations`, `index.units`, `resolve_scope`) | built |
 | Jev judgments (`Check`, `Pick`, `Rate`, asked through `Judge`) | built |
 | Mini-workflows `find_code`, `find_all` and `trace` | built |
+| The frontier: `find_all`'s order as a named policy, `STAGE_ORDER` or `VALUE` (per-target queues and shares, settling after one step of callers and callees) | built |
 | `LlmStep` | built |
 | Text search: the mini-workflows `find_text` and `find_all_text` | built |
 | The spelling map | being built |
