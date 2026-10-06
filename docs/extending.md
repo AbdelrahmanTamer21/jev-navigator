@@ -10,12 +10,16 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `resolve_scope` | the files a search covers from folders, patterns, languages and a git ref, with tests, generated, vendored code and docs left out by default; a file only its shape marks as possibly generated is set aside under an output folder (`dist`, `build`, `generated`), and otherwise awaits Jev's generated judgment with its measured facts; a scope over its cap is refused with counts per folder and language (README, "Choosing the files a search covers") |
 | `judge_generated_files` | Jev's generated-file judgment for the files a scope left undecided: one question per file over its path, measured facts, up to 10 importers and up to 5 files naming its path, each with their true count, and two excerpts; a file the secret scan refuses is named as not judged (README, "Choosing the files a search covers") |
 | `CodeIndex` | mechanical lookups over a narrowed scope: definitions, callers, callees, references, text, imports, git history |
-| `index.units` | the units a search judges (functions, methods, each file's top-level code), cut into 60-line pieces only when larger than their room in a request, and the one resolver of lines and line ranges to units |
-| `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc |
+| `index.units` | the units a search judges (functions, methods, Prisma schema blocks, each file's top-level code; in a text reading, the text units of the files JVN does not parse), cut into 60-line pieces only when larger than their room in a request, and the one resolver of lines and line ranges to units |
+| `index.text_blocks` | how a file JVN does not parse splits into blocks without a parser: Markdown by heading section, YAML, JSON and TOML by top-level key, anything else whole |
+| `index.prisma_schema` | a Prisma schema's model, view, enum and composite type blocks with their lines, and the client accessor a model or view is queried through (`model WebsiteEvent` is `prisma.websiteEvent`) |
+| `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc, files a text names by path or runs as a module (`files_named_by`) |
+| `mentions` | what a text mentions, one owner each: the path tokens it spells out (`paths_in`), the modules a `python -m` command runs (`python_modules_in`), whether a span names a file rather than code (`is_file_path`), the code names it spells out (`code_names_in`, which `code_named_in_doc` reads), and the members a symbol list names (`member_names`) |
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
 | `find_code` | a best-first search that opens places until the code a description names is found |
-| `find_all` | seed-first function search: expand the static component, batch containment judgments, then examine disconnected functions |
+| `find_all` | judges every unit of a population (anchored lines, files, and each hit of named texts, rarest name first) against described targets, one question per unit per target |
+| `find_all_text`, `find_text` | the same for text units only, the files JVN does not parse: judge every one, or stop once one is found |
 | `places.MOVES` | the ways a search lists the neighbours of an opened place; pick a subset or add your own |
 | `StopRule`, `History` | your own stop check over a search's history, reading only the sections you select |
 | `LlmStep` | an opt-in LLM call for the cases where Jev's answer is not clear enough |
@@ -103,51 +107,98 @@ Test it offline with `ScriptedJevClient` and AAA tests, including the unsure pat
 
 ## Searching instead of listing
 
-### Compose a seed-first Find All search
+### Judge every unit with Find All
 
-This is an ordinary function composition, not a workflow interpreter. Obtain concrete seeds from
-`find_code` or a symbol lookup, follow relationships with `operations.trace_graph`, and judge each
-candidate body with the existing containment question. `find_all` combines the latter two pieces:
+This is an ordinary function composition, not a workflow interpreter. `find_all` judges each unit of
+a population against one or more described targets: one question per unit per target, all targets
+asked in the same request. The population is the units the caller's line and range anchors name,
+then the units of the named files, then the units holding each hit of the named texts, names with
+fewer hits first, so a common word never decides which hits of a rare name are seen:
 
 ```python
 from jev_navigator.directives.find_all import find_all
+from jev_navigator.index.units import RangeAnchor
 
-seeds = index.find_definition("check_limits")
-result = find_all(index, judge, "the check that limits items per order", seeds)
-for match in result.matched:
-    print(match.item["file"], match.item["lines"], match.probability)
+seed = index.find_definition("check_limits")[0]
+result = find_all(
+    index,
+    judge,
+    {"limit": "the check that limits items per order"},
+    files=index.files,
+    anchors=[RangeAnchor(seed.file, seed.start, seed.end)],
+    names=["max_items"],
+)
+for score in result.scores("limit"):
+    print(score.unit.path, score.unit.ranges, score.probability)
 ```
 
-The seed is a candidate, not an assumed match. Connected functions are examined first; the fallback
-then enumerates every other in-scope function, even with unrelated names. Both phases batch atomic
-questions through `Judge`; code deduplicates by source span. Entire bodies and source hashes are
-retained. `CodeIndex.functions_in_files` batches fact collection instead of launching a parser scan
-for each file. No default file or live-call cap is added by this composition.
+Each item Jev reads holds only the unit's file and code. The targets sit in the shared state, and each
+question reads "Look only at `items[n]`. Does that code match the description in `targets.<name>`?"
+(`match_check`). A unit larger than its room in a request (`result.room`) is judged by its pieces and
+scored by its best one; a piece still too large is named in `not_judged`, and so is a unit or piece
+whose request asking every target does not fit the client's limits once masked, since masking can
+lengthen code past the room (`Judge.fits_alone`). A unit or piece whose request is refused anyway, by
+the provider for its size with no smaller split or by the final secret scan, is named `REFUSED` in
+`not_judged`, its error is kept in `refusals`, and the search goes on. One unit never fails the
+search. Every unit is one a listing lists, so a hit inside a nested function names the function
+holding it. No code step is capped: the Judge's call cap is the only budget. The population goes to the Judge in waves of `batches_per_wave`
+requests' worth (16 by default). Its order holds between waves, and exactly only at one batch per
+wave. Like `items_per_request`, the wave size shapes the batches and so the answer store's keys.
+`delivered` names the line ranges the caller already shows: a unit or piece whose every line lies
+in them is named `already delivered by the caller` and not judged, while one with a line outside them
+is judged. `find_all_async` takes the same arguments for an
+async client, such as a host's orchestrator; it lists and reads code in a worker thread, reads
+`cancelled` between waves, and keeps every answer a wave received before a failure. Ranking and any
+bar belong to the caller:
+`scores(target)` gives every judged unit's answer, and `names` each name's hits found, reached and
+naming no unit. `entered_by` gives the source each unit entered the population by
+(`Source.ANCHOR`, `FILE` or `NAME`, the first when several listed it).
 
-Pass `include_disconnected=False` for a deliberately partial, component-only search. Supply a `Check`
-through `check=` to examine another concrete property of each body; use `{item}.code` and the shared
-`target.description`. Independent additional properties belong in `Judge.check_every`, which asks
-them together and keeps the answers separate. The engineer authors the branches and stopping rule;
-Jev does not decide whether to invent a workflow or declare the repository fully understood.
-Checks in one batch need distinct names because each name identifies its returned result list.
+`search_coverage.point_results(rounds, bar)` turns one search's rounds into each point's result:
+`found` when a unit's answer reaches the bar, `none_among_judged` over the units judged, or `unknown`
+when no unit was judged or a round failed, never "none". Its coverage counts units once over the
+rounds: the units considered, the ones judged for the point, and the rest cut by source and reason. A
+unit left unjudged for several reasons counts under the first of not reached, refused, too large and
+delivered. A caller composing rounds names the source of a round it fed, such as
+`Round(callees, Source.CALLEE)`. `PointResult.render(bar)` gives the fact line, for example
+`audit: none at the bar 0.80 among 16 unit(s) judged, best P=0.100; 284 not reached (not negative proof)`.
 
-`functions_examined` means the function inventory was examined, not that every semantic answer is
-correct. Module-level statements, declarations and multi-function behaviors require a different
-unit/composition. `uncertain`, parser failures, unavailable files and unsupported grammars remain
-visible. A graph link marked candidate never becomes a proven call because its body matched.
-Pass `completed=previous.judged` to continue enumeration with a fresh Judge allowance. Reuse is valid
-only for the same source bytes, scope, target, Check and thresholds; the CLI verifies those identities
-in its saved pack. Completed positive, negative and uncertain judgments retain their original
-request hashes and are not sent again. Static graph reconstruction does not consume model calls.
-Cancellation keeps coverage partial and reporting does not trigger scans of untouched files.
-Ctrl-C during judging ends it `cancelled`, and a failed request ends it `failed` with `failure` holding
-the same error; both keep every answer that arrived in `judged`, so `completed=` resumes it. Retained
-journal receipts describe the work actually performed.
+`units_examined` means every unit of the population was judged, not that every semantic answer is
+correct. Uncertain answers, parser failures, unlisted files and unresolved anchors remain visible.
+Pass `completed=previous.judged` to continue with a fresh Judge allowance: a place answered for every
+target is not asked again. Reuse is valid only for the same source bytes, scope, targets and
+thresholds; the CLI verifies those identities in its saved pack. Cancellation keeps coverage partial
+and parses nothing it has not reached. Ctrl-C during judging ends it `cancelled`, and a failed request
+ends it `failed` with `failure` holding the same error; both keep every answer that arrived in
+`judged`, so `completed=` resumes it. Retained journal receipts describe the work actually performed.
 
-The CLI composes entry selection and `find_code` with this function. A seed-search miss still permits
-the disconnected fallback. Use `jvn findall "functions that enforce the order item limit"` or
+`find_all` judges code units only, and `find_all_text` (with `find_all_text_async`) judges only the
+text units of the files JVN does not parse, with the same arguments, question, masker and request
+guard. A caller decides when to include text and gives a text search its own Judge, so it never
+spends code search's budget. A name's hits in code files and lockfiles are left out of a text
+search, so a common word never floods it with a lockfile's pieces; a lockfile named in `files` or
+`anchors` is judged. A code file named in a text search, like a text file named in `find_all`, is
+named in `unlisted`. `find_text(index, judge, description, files=..., names=...)` searches the same
+population for one target, `FIND_TEXT_TARGET`, and ends `found` after the first wave in which a
+unit's answer is yes by the Judge's thresholds. See [Text units](#text-units).
+
+The CLI composes entry selection and `find_code` with this function: the seed search's found code
+becomes range anchors, and the population is every file in scope, so a seed-search miss still judges
+the whole scope. Use `jvn findall "functions that enforce the order item limit"` or
 `jvn --json '{"command":"findall","target":"functions that enforce the order item limit"}'`.
-The evidence pack retains the seed search, per-function answers and raw request identities.
+The evidence pack retains the seed search, per-unit answers and raw request identities.
+
+A population can start from the files a text names by path. `operations.files_named_by(index,
+texts, anchor_files)` reads `texts` and the whole text of each anchor file for path tokens
+(`mentions.paths_in`: a file name with a suffix, perhaps under folders, without a leading `./`, `../`
+or `/`). A token names each scope file whose path is the token or ends with `/` and the token, so
+`jobs/sweep.py` names `web/jobs/sweep.py` but never `xjobs/sweep.py`, and a bare `ci.yml` names every
+`ci.yml`. A module a `python -m` command runs (`mentions.python_modules_in`) names the file Python
+runs, resolved like an import from the repository root or `src/`: `uv run python -m app.jobs` names
+`src/app/jobs.py`, and a package names its `__main__.py`. Options before `-m` are skipped, also
+those with a value (`python -W ignore -m app.jobs`, `python -X dev -m app.jobs`). Anchor files are never named, an anchor file
+outside the scope is never read, and a named file is not read for further names. The result splits `code` files, for `find_all`'s `files`, from
+`text` files, and `named_by` keeps the token that named each one. No model is called.
 
 ### Find one location
 
@@ -197,9 +248,10 @@ wire captures or re-encoded SDK data.
 ## Choosing how the search moves
 
 A move is a plain function of the index and the opened code that returns places. `places.MOVES` maps
-each built-in move's name to its function (callers, callees, references, code passed on, imported
-modules, the same file, quoted keys and environment variables, co-changed files, the lines before
-and after) and is read-only. Pass `moves=` to `find_code`, `find_code_async` or
+each built-in move's name to its function (callers, the code querying a Prisma model through its
+client, callees, the Prisma models the code queries, references, code passed on, imported modules, the
+same file, quoted keys and environment variables, co-changed files, the lines before and after) and is
+read-only. Pass `moves=` to `find_code`, `find_code_async` or
 `context_for_comment` to use a subset,
 for example `{name: MOVES[name] for name in ("callers", "callees")}`, or add a function of your own.
 `FindResult.moves` and the final `stop` step of the history name the moves the search used, so every
@@ -267,8 +319,8 @@ Name lookups read `name_table.NameTable`: one SQLite file per `table_identity()`
 blob id of the file content, and hold names, kinds, lines, roles and receivers as the facts hold them:
 `scope_scan.receiver_of` keeps a receiver only as a plain chain of names and records anything else,
 which could quote a string literal, as `OPAQUE_RECEIVER`. `CodeIndex` records the files navigation
-reaches apart from the table's coverage, and `parsed_files`, `parser_scans_pending` and
-`observed_unparsed_files` read only the reached files. Two processes may write the table at once: a new file is created whole and
+reaches apart from the table's coverage (a Prisma schema is reached once `schema_blocks_in` reads it),
+and `parsed_files`, `parser_scans_pending` and `observed_unparsed_files` read only the reached files. Two processes may write the table at once: a new file is created whole and
 linked into place (`shared_database.open_shared_database`), and each content's rows are written in
 one transaction. A bidirectional
 trace prepares the scoped fact inventory in one batch before walking incoming and outgoing links;
@@ -309,7 +361,14 @@ than AST parent identities. The `jvn stats` CLI writes these measurements as JSO
 model:
 
 ```python
-from jev_navigator.index.units import LineAnchor, RangeAnchor, items_to_judge, list_units, read_ranges, resolve_anchors
+from jev_navigator.index.units import (
+    LineAnchor,
+    RangeAnchor,
+    items_to_judge,
+    list_units,
+    read_ranges,
+    resolve_anchors,
+)
 
 room = judge.input_limits.box_chars - beside_the_unit  # the characters one unit's text may take in a request
 listing = list_units(index, index.files, box_chars=room)
@@ -319,7 +378,9 @@ print(listing.unlisted)  # files that gave no units, each with its reason
 for item in items_to_judge(listing.units[0]):  # the unit, or its pieces that fit the box
     print(item.id, item.ranges, read_ranges(index, item.file, item.ranges)[:60])
 
-resolved = resolve_anchors(index, [LineAnchor("app/routes.py", 21), RangeAnchor("app/orders.py", 5, 7)], box_chars=room)
+resolved = resolve_anchors(
+    index, [LineAnchor("app/routes.py", 21), RangeAnchor("app/orders.py", 5, 7)], box_chars=room
+)
 print([unit.id for unit in resolved.units], resolved.unresolved)
 ```
 
@@ -329,12 +390,17 @@ print([unit.id for unit in resolved.units], resolved.unresolved)
 longest question. Passing the whole box would let a unit just under it through, and the request
 carrying it would be refused.
 
-A unit is one function, one method, or one file's top-level code. Its id is the location
-`path:start-end`; top-level code is `path:top`. `list_units` lists the functions and methods no
-other function holds, and each file's top-level code, so every line of code sits in a listed unit
-once: a nested function or callback is inside its holder's text and is not listed. A unit's
+A unit is one function, one method, one Prisma schema block, or one file's top-level code, in a code
+reading (`Reading.CODE`, the default); a text reading lists [text units](#text-units). Its id is
+the location `path:start-end`; top-level code is `path:top`. `list_units` lists the functions and
+methods no other function holds, the blocks of each schema, and each file's top-level code, so every
+line of code sits in a listed unit once: a nested function or callback is inside its holder's text and is not listed. A unit's
 `symbol` names every holder, `OrderService.place`, and names an anonymous function by the line it
-starts on, `<anonymous:4>`. `content_sha256` hashes the unit's own text, so
+starts on, `<anonymous:4>`. A function a module-level constant's call builds goes by the name the
+entry text gives it, `CodeIndex.constant_function_names`: `run` for `export const run =
+Effect.fn("run")(function* ...)` and `userRouter.list` for a router's procedure, so a callback inside
+one is `run.<anonymous:2>`. A callback that builds data, as in `items.map((item) => item.id)` or
+`new Map(...)`, gets no constant's name. `content_sha256` hashes the unit's own text, so
 an unchanged function keeps its hash when other lines of its file change. The record holds locations
 and hashes, never code; its `ranges` are its (start, end) line pairs in file order, one for a
 function and one per run for top-level code. `read_ranges(index, file, ranges)` is the one reader of
@@ -350,14 +416,32 @@ function whose body is only `...`, `pass`, a docstring or `raise NotImplementedE
 (`CodeIndex.stubs_in`), is no unit of its own: its lines are top-level code, so a Protocol is judged
 whole.
 
-Top-level code is a file's lines outside every function and method, class bodies included, kept as
-runs of lines in order (`ranges`) without the blank lines at their edges. A file whose top-level code
-is only imports, comments, directives such as `"use client"`, lines of closing brackets and blank
-lines lists no top-level unit. A file in a language JVN does not parse gives no units and is named
-in `unlisted` with `language not supported`, as is a file that disappeared after the inventory.
+A `.prisma` file has no parser grammar, so `index.prisma_schema.schema_blocks` scans it: each `model`,
+`view`, `enum` and `type` block is one unit of kind `schema_block`, from its header line to the line of
+the brace that closes it, named `model Website`. Braces in strings and after `//` never count, and a
+header whose brace never closes is no block. A `generator` or `datasource` block holds settings, so
+its lines are the schema's top-level code. `CodeIndex.schema_blocks_in(file)` gives a schema's blocks
+and `CodeIndex.schema_files` the schemas in scope. A scope keeps schemas under the language `prisma`
+(`languages.language_read`). A model's code lives where it is queried, so a caller that starts at a
+schema adds each block's `client_call_text` as a name (`.website.` for `model Website`, from its
+`client_accessor`) to reach the functions that read and write it. Find follows the same link both
+ways: a line in a block opens the whole block, the same-file move offers a schema's other blocks,
+`client_calls` offers the code holding a model's client call text, and `queried_models` offers the
+blocks of the models opened code queries. Both are text matches: `.website.` also matches a
+`session.website.domain` relation read.
+
+Top-level code is a file's lines outside every function, method and schema block, class bodies
+included, kept as runs of lines in order (`ranges`) without the blank lines at their edges. A file
+whose top-level code is only imports, comments, directives such as `"use client"`, lines of closing
+brackets and blank lines lists no top-level unit. In a code reading, a file JVN does not parse gives
+no units and is named in `unlisted` with `language not supported`; in a text reading a code file is
+named with `code, which a text search leaves to find_all`, and a text file left out with its reason.
+So is a file that disappeared after the inventory, and a file outside the index's scope with the
+index's own reason (`no file at this path`) or `not in the index scope`.
 
 A unit whose text fits `box_chars` is one item, whatever its length. Only a larger unit is cut into
-`pieces` of at most 60 lines, in order, with no overlap and never across two runs of top-level code;
+`pieces` of at most 60 lines (a YAML or JSON text block at its keys, see below), in order, with no
+overlap and never across two runs of top-level code;
 each piece has its own range, hash and size. A piece still larger than `box_chars` is
 `too_large_to_judge`: it keeps its range and size, and `judged_pieces` leaves it out. A cut unit
 stays one unit: `unit_score` gives it its best piece's score, and `best_piece` names that piece's
@@ -378,9 +462,39 @@ another one it names. Each unit comes back once, in the order first named. With 
 every unit named is one `list_units` lists, for a caller that judges only listed units: a nested
 function gives way to the outermost function holding it, and lines of only top-level code the
 listing leaves out (imports, comments, directives, brackets) are reported. A file outside the scope,
-a file in a language JVN does not parse, a line outside its file, a reversed range, and a blank line
-in a file with no top-level code are reported in `unresolved` with their problem, and a file is
-parsed only after its anchor is known to point inside it.
+a file the reading leaves out, a line outside its file, a reversed range, and a blank line in a
+file with no top-level code are reported in `unresolved` with their problem, and a file is parsed
+only after its anchor is known to point inside it.
+
+### Text units
+
+A text reading (`list_units(..., reading=Reading.TEXT)`, and the same argument to `resolve_anchors`)
+lists only the files JVN does not parse, and a code reading never lists them, so find and find_all
+never see a text unit. A text file splits into blocks by its format (`index.text_blocks`), each one
+unit of kind `text` in the language `text`, its id the block's lines `path:start-end` without the
+blank lines at its edges:
+
+- Markdown (`.md`, `.mdx`, `.markdown`) at each `#` heading outside a code fence and front matter, named
+  by its heading path (`Install > macOS`); the lines before the first heading are a block of their own.
+- YAML at each top-level key, JSON at each top-level key of an object whose keys start on lines of
+  their own, and TOML at each root key and table header, named by the key path (`tool.ruff`). The
+  lines before the first key belong to the first block, and comment lines right above a key to its
+  block. A minified or invalid JSON file, or a list, is one block.
+- Any other file is one block, named `<top level>`.
+
+A block larger than its room is cut into 60-line pieces like any unit, except a YAML or JSON block,
+which is cut one level deeper, at its value's keys (`text_blocks.child_blocks`), so one CI job stays in
+one piece. Neighbouring keys are packed together while they fit 60 lines and the room, a longer key that
+fits the room is one piece, and a key over the room is cut into 60-line pieces. A value without keys,
+such as a list, is cut into 60-line pieces. `scope.text_files_left_out`
+leaves out an env file (`.env`, `.env.*`, `*.env`) whatever its content, a binary file (a NUL byte in
+its first 8,000 bytes, as git decides), and a vendored or generated file by the rules a scope applies
+by default. An env template (`.env.example`, `.env.sample`, `.env.template`) is read, masked like a
+config file, and a lockfile (`scope.is_lockfile`) is never left out as generated. `CodeIndex` decides each
+file once (`text_files_left_out`) and reads its blocks once (`text_blocks_in`). A text unit is masked
+like any request: YAML, TOML, `.conf`, `.ini`, `.properties` and Dockerfiles count as config, so an
+unquoted value under a secret key is hidden too. `resolve_scope` still keeps only files JVN parses,
+plus markup with `with_docs`.
 
 ## Trace a workflow and retain its evidence
 
@@ -404,7 +518,9 @@ for obligation in result.obligations:
 
 An evidence-backed obligation has at least one positive judgment; it does not prove the whole path
 or every relevant branch is present. Negative judgments mean no evidence in the supplied component.
-Uncertain and unexamined items remain unresolved. `result.graph` retains every walked function and
+Uncertain and unexamined items remain unresolved. A span whose request is refused stays unjudged
+(`result.refusals` keeps it with its error, and the pack's `trace.refused` and report.md name it), so
+every obligation stays unexamined, and the trace goes on. `result.graph` retains every walked function and
 link, including uncertain bindings; `included` is only a presentation backbone, not a deletion of
 the remaining component.
 

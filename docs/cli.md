@@ -13,8 +13,9 @@ that are absent from the source?” rather than “find everything important”.
 - [Continue after a call limit](#continue-after-a-call-limit)
 - [JSON requests](#json-requests)
 - [Results, progress and exit status](#results-progress-and-exit-status)
+- [Memory limit](#memory-limit)
 - [Agent workflow](#agent-workflow)
-- [Find All function search](#find-all-function-search)
+- [Find All unit search](#find-all-unit-search)
 - [Workflow trace](#workflow-trace)
 - [Structural measurements](#structural-measurements)
 - [Disk use and housekeeping](#disk-use-and-housekeeping)
@@ -194,7 +195,7 @@ Check the command's exit status before reading a result file:
 | Exit code | Meaning |
 |---|---|
 | `0` | A search finished and wrote its result. Read `search.outcome`; this does not guarantee a match. |
-| `1` | Search, configuration, filesystem or provider failure. Read stderr. When a request of a Find or Find All search failed, the pack is written first: `search.outcome` is `failed`, `search.failure` holds the error's type, its causes, the journal `request_id`, the HTTP `status` when known and the `message` (only `message_length` and `message_sha256` with `--no-error-text`), and stderr shows the whole message and names the `--resume` path. |
+| `1` | Search, configuration, filesystem or provider failure. Read stderr. When a request of a Find or Find All search failed, the pack is written first: `search.outcome` is `failed`, `search.failure` holds the error's type, its causes, the journal `request_id`, the HTTP `status` when known and the `message` (only `message_length` and `message_sha256` with `--no-error-text`), and stderr shows the whole message and names the `--resume` path. JVN's memory limit stopping a search is reported the same way; see [Memory limit](#memory-limit). |
 | `2` | Invalid command or request. Read stderr. |
 | `130` | Cancelled with Ctrl-C. Existing journal records remain available. A failure that arrives while the command is cancelling exits `1` with that failure instead, with the same resume state. |
 
@@ -216,6 +217,45 @@ with error text off, the earlier pack's error messages and error bodies are rewr
 journal the exact request body, and every run file the error text; inspect the journal's exact-capture
 flags when auditing bytes.
 
+## Memory limit
+
+Every JVN process has a memory allowance, and all JVN processes on one machine share a ceiling. This
+covers the `jvn` command and every program that imports `jev_navigator`.
+
+- **Allowance:** a process may grow by 1,024 MB past the memory it held when its JVN work began,
+  counting the ast-grep, ripgrep and git processes it runs. JVN's work begins when it first starts a
+  tool, and again whenever it starts work while no code index of it is alive, so a program that
+  imports JVN and grows between two searches is not charged for that growth. An index a failed search
+  left behind is freed by Python's cycle collector, which JVN runs once before it treats any index as
+  alive. While an index is alive the growth counts everything the process gains, JVN's or not. Over it, JVN stops those processes and
+  raises `MemoryLimitReachedError`, which names the allowance, the memory in use and that baseline.
+- **What it does not cover:** the model command a command-line connector runs (`CommandConnector`) is a
+  separate program the user names, so JVN neither counts nor stops its memory.
+- **One parse at a time:** a process runs one ast-grep scan at a time, and ast-grep parses only as
+  many files at once as the allowance affords: 3 at the default. Scans started in parallel threads
+  take turns instead of outgrowing the allowance together. A file too big to parse beside others is
+  parsed alone on one thread, up to the allowance less Python's 270 MB share (754 MB at the default);
+  a file estimated above that is refused and named.
+- **Ceiling:** 8,192 MB, so eight slots of 1,024 MB. A process takes a slot when it first starts a
+  tool and keeps it until it exits. When every slot is held, it waits up to 120 seconds for one, then
+  raises `MemoryLimitReachedError`, which names the processes holding the slots. The slots are files
+  in `/tmp/jev-navigator-memory-<uid>`, and the operating system frees a slot when its process ends,
+  however it ends.
+- **What a refusal does:** during a Find, its entry selection or Find All's enumeration, the search
+  ends `failed` with resume state, and `--resume` continues it once there is room. A refusal before
+  any search starts, such as a full ceiling at the first file listing, exits `1` having done no work:
+  run the command again later.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `JEV_NAVIGATOR_MEMORY_ALLOWANCE_MB` | `1024` | What one JVN process may grow by, its tools included. |
+| `JEV_NAVIGATOR_MEMORY_CEILING_MB` | `8192` | What all JVN processes on the machine may hold; slots are ceiling divided by allowance. |
+| `JEV_NAVIGATOR_MEMORY_WAIT_SECONDS` | `120` | How long a process waits for a free slot. |
+| `JEV_NAVIGATOR_MEMORY_SLOTS_DIR` | `/tmp/jev-navigator-memory-<uid>` | The slot folder. It must be a folder of this user, never a link. |
+
+The defaults are measured (04.10.2026): parsing every file of an app-sized scope, the largest measured
+(15.6 MB of code) peaked at 333 MB, and the worst, a folder of generated bundles, at 471 MB.
+
 ## Agent workflow
 
 1. Read `jvn schema find` to discover accepted fields and defaults.
@@ -229,19 +269,33 @@ Schema discovery and structured calls take inspiration from the
 [Google Workspace CLI's agent guidance](https://github.com/googleworkspace/cli/blob/main/CONTEXT.md).
 The Python library remains the interface for composing a custom planner or a broader workflow.
 
-## Find All function search
+## Find All unit search
 
 Use `jvn findall "functions enforcing the order item limit"` with the same scope, output and
 request-display options as `find`. `jvn schema findall` describes the JSON input. Find All defaults
 to 48 live model calls, twice the 24-call `find` default. Use `--max-calls N` to change it or
-`--max-calls none` (JSON `null`) to remove it. Parsing, graph traversal and cached answers are free. Depth/step/neighbour and preview options affect seed discovery only; the
-function enumeration reads complete bodies. The call allowance is shared across seed discovery and enumeration. A budget stop writes completed
-judgments and remaining coverage to a partial evidence pack.
+`--max-calls none` (JSON `null`) to remove it. Parsing and cached answers are free. Depth/step/neighbour
+and preview options affect seed discovery only. Find All then judges every unit in scope, each
+function, method, Prisma schema block and file's top-level code, with the units that hold the seed's found code in its first
+wave of requests;
+a unit larger than its room in a request is judged by its 60-line pieces and scored by its best one.
+The call allowance is shared across seed discovery and enumeration. A budget stop writes completed
+judgments and the units not yet judged to a partial evidence pack. Find All judges code only: a file
+JVN does not parse, such as YAML, JSON or Markdown, is unlisted as `language not supported`. The
+library's `find_all_text` searches those files when a caller asks for them
+([extending.md](extending.md#text-units)).
 
-The result includes `seed_search`, and `search` records `found`, `unsure`, `searched`, source hashes,
-request identities, the static graph and coverage gaps. `functions_examined` means every enumerated
-function was judged; it does not prove the model found every behavior. `scope_incomplete` retains
-unsupported, unparsed or unavailable files; a file too large to parse safely is unavailable, and report.md names each unavailable file with its reason. See the library composition in [extending.md](extending.md#compose-a-seed-first-find-all-search).
+The result includes `seed_search`, and `search` records the `found`, `unsure` and `searched` units
+(each with its kind, name, file and runs of lines, the piece judged when it was cut, its answer and
+request identity), `room_chars`, `not_judged` (each unit or piece left unjudged, with the reason),
+`refused` (each unit or piece whose request was refused, with the error's type and message: the provider
+refused it for its size and no smaller split exists, or the final secret scan refused it; the search goes
+on past it, report.md lists each one, and stdout prints how many) and
+coverage gaps: `unlisted_files`, `unresolved_seeds`, `unparsed_files` and `not_indexed_files`.
+`units_examined` means every unit was judged; it does not prove the model found every behavior.
+`scope_incomplete` retains files JVN does not parse or could not read, unparsed files, pieces too
+large to judge and refused requests; a file too large to parse safely is unlisted, and report.md names each unlisted file
+with its reason. See the library composition in [extending.md](extending.md#judge-every-unit-with-find-all).
 
 `seed_search.calls` counts seed discovery; `search.enumeration_calls` counts the following enumeration.
 Their sum is `search.calls`, the whole workflow's actual model-request count.
@@ -254,9 +308,9 @@ jvn --json '{"command":"findall","target":"functions enforcing the order item li
 
 A stop during seed selection resumes that stage first. Once enumeration has begun, continuation
 restores the seed and all completed judgments, including negative and uncertain answers, and
-examines only the outstanding functions. Static graph reconstruction reuses parser caches; it is
-not a paid call. `calls_this_invocation` shows new calls; `calls` and `enumeration_calls` are cumulative.
-Source, scope, target, thresholds, model and containment-question identity must still match.
+judges only the outstanding units. `calls_this_invocation` shows new calls; `calls` and
+`enumeration_calls` are cumulative. Source, scope, target, thresholds, model and the Find All
+question must still match.
 
 ## Workflow trace
 
@@ -289,7 +343,9 @@ JSON stdout contains `output_directory`, `manifest`, `report`, `trace`, `provide
 (`null` for trace). Progress and requests stay on stderr. See `trace.outcome`, its obligations and
 `unresolved_links` before interpreting coverage; `trace.unavailable_files` names, with the reason, each
 file the index has no facts for (gone or changed on disk, or refused by the parser), and report.md lists
-them. `trace.not_indexed_files` names each file or folder the listing left out, such as an ignored one, and report.md counts them by reason and top folder. Ctrl-C stops the command with exit 130; an abrupt
+them. `trace.refused` names each span whose request was refused, with the error's type and message; the
+trace goes on past it, its obligations stay unexamined, report.md lists each one and stdout prints how
+many. `trace.not_indexed_files` names each file or folder the listing left out, such as an ignored one, and report.md counts them by reason and top folder. Ctrl-C stops the command with exit 130; an abrupt
 interruption can leave the journal and answer store without a final manifest. The library also
 offers cooperative cancellation between traversal steps and model batches that writes a partial
 pack.

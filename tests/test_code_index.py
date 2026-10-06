@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
-from git_repos import commit_all, git, write_files
+from git_repos import commit_all, git, refuse_ownership, write_files
 
 from jev_navigator.index import tools
 from jev_navigator.index.code_index import (
@@ -941,6 +941,24 @@ def test_an_index_at_a_commit_reads_a_file_whose_name_holds_a_newline(tmp_path: 
     assert (historical.root / "app/plain.py").read_text().endswith("return 2\n")
 
 
+def test_search_text_returns_every_hit_in_file_and_line_order_unless_the_caller_bounds_it(
+    tmp_path: Path,
+) -> None:
+    # Arrange: 27 hits, the last two past the 20 the search once kept by default
+    (tmp_path / "a.py").write_text("".join(f"x{n} = TOKEN\n" for n in range(25)))
+    (tmp_path / "b.py").write_text("y = TOKEN\nz = 1\nw = TOKEN\n")
+    index = CodeIndex(tmp_path, ["a.py", "b.py"])
+
+    # Act
+    every = index.search_text("TOKEN")
+    bounded = index.search_text("TOKEN", max_hits=3)
+
+    # Assert
+    expected = [("a.py", n) for n in range(1, 26)] + [("b.py", 1), ("b.py", 3)]
+    assert [(hit.file, hit.line) for hit in every] == expected
+    assert [(hit.file, hit.line) for hit in bounded] == expected[:3]
+
+
 def test_search_text_reads_a_line_that_is_not_utf8_as_the_index_does(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "labels.py").write_bytes(b'LABEL = "caf\xe9"\nLIMIT = 5\n')
@@ -1038,13 +1056,140 @@ def test_a_scope_path_that_leaves_the_root_is_refused(tmp_path: Path, scope_path
         CodeIndex(root, [scope_path])
 
 
-def test_top_level_symbols_are_the_functions_and_classes_no_other_symbol_contains(
-    sample_index: CodeIndex,
-) -> None:
-    top_level = [span.name for span in sample_index.top_level_symbols("app/orders.py")]
+def test_a_module_names_its_functions_and_classes_but_not_their_methods(sample_index: CodeIndex) -> None:
+    names = sample_index.module_names("app/orders.py")
 
-    assert top_level == ["OrderService", "cancel"]
+    assert names == ("OrderService", "cancel")
     assert "place" in [span.name for span in sample_index.symbols_in("app/orders.py")]
+
+
+def test_module_names_list_what_the_module_names_or_exports_before_its_objects_members(
+    tmp_path: Path,
+) -> None:
+    """A one-line function keeps its place beside the named arrow its default value holds, and a
+    CommonJS export is the module's own. A method of an object literal is the object's, so it follows
+    under the object's name; a method of an object a module-level call is passed belongs to no
+    variable, so it follows under its own, never under the object variable named before it."""
+    # Arrange
+    (tmp_path / "retry.js").write_text(
+        "function retry(again = () => 1) { return attempt(); }\n"
+        "function attempt() {\n  return 1;\n}\n"
+        "const api = {\n  list() { return []; },\n};\n"
+        "const t = create({\n  format() { return 1; },\n});\n"
+        "exports.run = function () {\n  return 0;\n};\n"
+    )
+    index = CodeIndex(tmp_path, ("retry.js",), fact_cache_dir=tmp_path / "cache")
+
+    # Act
+    names = index.module_names("retry.js")
+
+    # Assert
+    assert names == ("retry", "attempt", "run", "api.list", "format")
+
+
+def test_a_function_a_module_level_constant_builds_goes_by_the_constant_and_its_keys(tmp_path: Path) -> None:
+    """A function no other one holds, inside the call that is a module-level constant's value, goes by
+    the constant's name and then the key of every pair around it: `run` for an Effect.fn, also when
+    the generator names only itself, `userRouter.list` for a router's procedure, and
+    `auth.hooks.before` beside `auth.session.before` for a nested config. Several functions with the
+    same name are told apart by their first line; each declarator of one statement names its own.
+    A callback inside one of them, or in a later statement (`app.get(...)` after `const app =
+    express()`), is none of the constant's. Spans are lines, so each function has lines of its own."""
+    # Arrange
+    (tmp_path / "built.ts").write_text(
+        'export const run = Effect.fn("run")(function* (ids: string[]) {\n'
+        "  return yield* Effect.forEach(\n    ids,\n    (id) => load(id),\n  );\n});\n"
+        'export const named = Effect.fn("named")(function* named() {\n  return 1;\n});\n'
+        "export const userRouter = createWebRouter({\n"
+        "  list: procedure.query(({ ctx }) => ctx.users),\n"
+        "  remove: procedure.mutation(async ({ input }) => input),\n"
+        "});\n"
+        "export const auth = betterAuth({\n"
+        "  hooks: { before: middleware((ctx) => ctx) },\n"
+        "  session: { before: middleware((ctx) => ctx) },\n"
+        "});\n"
+        "export const pair = combine(\n  () => 1,\n  () => 2,\n);\n"
+        "const first = wrap(() => 1),\n  second = wrap(() => 2);\n"
+        "export const app = express();\n"
+        'app.get("/", (request) => request);\n'
+    )
+    index = CodeIndex(tmp_path, ("built.ts",), fact_cache_dir=tmp_path / "cache")
+
+    # Act
+    names = sorted((span.start, name) for span, name in index.constant_function_names("built.ts").items())
+
+    # Assert
+    assert names == [
+        (1, "run"),
+        (7, "named"),
+        (11, "userRouter.list"),
+        (12, "userRouter.remove"),
+        (15, "auth.hooks.before"),
+        (16, "auth.session.before"),
+        (19, "pair.<anonymous:19>"),
+        (20, "pair.<anonymous:20>"),
+        (22, "first"),
+        (23, "second"),
+    ]
+
+
+def test_functions_a_constant_builds_on_one_line_go_by_the_first_and_list_every_constant(
+    tmp_path: Path,
+) -> None:
+    """Spans are lines, so functions on one line are one span with one name, the first function's:
+    `api.list`, never `api.remove`. Each constant on such a line is still a name of the module."""
+    # Arrange
+    (tmp_path / "api.ts").write_text(
+        "export const api = router({ list: procedure.query(() => 1), remove: procedure.query(() => 2) });\n"
+        "export const first = wrap(() => 1), second = wrap(() => 2);\n"
+    )
+    index = CodeIndex(tmp_path, ("api.ts",), fact_cache_dir=tmp_path / "cache")
+
+    # Act
+    names = sorted((span.start, name) for span, name in index.constant_function_names("api.ts").items())
+
+    # Assert
+    assert names == [(1, "api.list"), (2, "first")]
+    assert index.module_names("api.ts") == ("api", "first", "second")
+
+
+def test_a_function_in_a_declaration_no_call_builds_takes_no_earlier_constants_name(tmp_path: Path) -> None:
+    """Only the constant a call builds names the functions inside it: an object literal or an array
+    declared after `userRouter` keeps its functions out of `userRouter`'s names."""
+    # Arrange
+    (tmp_path / "built.ts").write_text(
+        "export const userRouter = createWebRouter({\n"
+        "  list: procedure.query(({ ctx }) => ctx.users),\n"
+        "});\n"
+        "export const handlers = {\n  remove: procedure.mutation(async ({ input }) => input),\n};\n"
+        "export const later = [\n  middleware((ctx) => ctx),\n];\n"
+        "export const plain = { go: (ctx) => ctx };\n"
+    )
+    index = CodeIndex(tmp_path, ("built.ts",), fact_cache_dir=tmp_path / "cache")
+
+    # Act
+    names = sorted((span.start, name) for span, name in index.constant_function_names("built.ts").items())
+
+    # Assert
+    assert names == [(2, "userRouter.list")]
+
+
+def test_a_quoted_key_names_a_function_without_its_quotes(tmp_path: Path) -> None:
+    # Arrange
+    (tmp_path / "built.ts").write_text(
+        "export const userRouter = createWebRouter({\n"
+        '  "list": procedure.query(({ ctx }) => ctx.users),\n'
+        "  'remove': procedure.mutation(async ({ input }) => input),\n"
+        "  plain: procedure.query(({ ctx }) => ctx),\n"
+        "});\n"
+    )
+    index = CodeIndex(tmp_path, ("built.ts",), fact_cache_dir=tmp_path / "cache")
+
+    # Act
+    names = sorted((span.start, name) for span, name in index.constant_function_names("built.ts").items())
+
+    # Assert
+    assert names == [(2, "userRouter.list"), (3, "userRouter.remove"), (4, "userRouter.plain")]
 
 
 def test_a_rendered_component_is_a_call_and_a_platform_element_is_not(tmp_path: Path) -> None:
@@ -1071,7 +1216,7 @@ def test_working_tree_metadata_raises_when_git_refuses_the_repository(tmp_path: 
     # Arrange
     write_files(tmp_path, {"a.py": "x = 1\n"})
     commit_all(tmp_path)
-    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    refuse_ownership(monkeypatch)
 
     # Act and assert: a refused repository is never read as a plain folder with no revision
     with pytest.raises(tools.ToolFailedError, match="dubious ownership"):

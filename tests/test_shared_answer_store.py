@@ -417,7 +417,8 @@ def test_a_reused_answer_stays_and_an_unused_one_goes_with_its_item_answers_and_
     assert replay.requests == []
     assert forgotten == 1
     assert _rows_for(shared, unused) == {"answers": 0, "item_answers": 0, "refusals": 0, "confirmations": 0}
-    assert _rows_for(shared, reused) == {"answers": 1, "item_answers": 2, "refusals": 1, "confirmations": 1}
+    # Two items, each stored under its strict and its relaxed key
+    assert _rows_for(shared, reused) == {"answers": 1, "item_answers": 4, "refusals": 1, "confirmations": 1}
     again = Judge(ScriptedJevClient(), store=SqliteAnswerStore(shared), served_model="jev-scripted")
     assert [result.probability for result in again.check_each(DESCRIBES, reused_items, SHARED)] == [0.9] * 2
 

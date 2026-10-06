@@ -237,7 +237,6 @@ class HangingClient:
         self.released.set()
 
 
-@pytest.mark.usefixtures("python_sigint_handler")
 def test_an_interrupt_with_requests_in_flight_cancels_them_and_sends_nothing_new() -> None:
     # Arrange
     client = HangingClient(in_flight_before_interrupt=2)
@@ -256,7 +255,6 @@ class ProviderError(RuntimeError):
     """A failure the provider reports, such as a 503, as opposed to a send the caller aborted."""
 
 
-@pytest.mark.usefixtures("python_sigint_handler")
 def test_a_provider_error_during_an_interrupt_comes_out_as_that_error() -> None:
     # Arrange
     cause = ConnectionResetError("connection reset by peer")
@@ -275,6 +273,60 @@ def test_a_provider_error_during_an_interrupt_comes_out_as_that_error() -> None:
     assert client.cancelled and not client.timed_out
     assert raised is error
     assert raised.__cause__ is cause
+
+
+@dataclass
+class FailsAsCtrlCArrives:
+    """Stands in for the provider: the first request hangs until the judge cancels it; the second
+    sends SIGINT to this process, as a terminal does on Ctrl-C, and fails with ``error``."""
+
+    error: Exception
+    script: ScriptedJevClient = field(default_factory=ScriptedJevClient)
+    released: threading.Event = field(default_factory=threading.Event)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    @property
+    def model(self) -> str:
+        return self.script.model
+
+    @property
+    def requests(self) -> list:
+        return self.script.requests
+
+    def send(self, state: Mapping, questions: Mapping) -> RawResponse:
+        with self._lock:
+            self.script.requests.append((state, questions))
+            first = len(self.script.requests) == 1
+        if first:
+            self.released.wait(timeout=5)
+            raise CancelledError
+        _interrupt()
+        raise self.error
+
+    def parse(self, raw: RawResponse):
+        return self.script.parse(raw)
+
+    def cancel(self) -> None:
+        self.released.set()
+
+
+@pytest.mark.usefixtures("python_sigint_handler")
+@pytest.mark.parametrize("attempt", range(20))
+def test_a_provider_error_as_ctrl_c_arrives_while_a_wave_is_sent_comes_out_as_that_error(
+    attempt: int,
+) -> None:
+    # Arrange
+    error = ProviderError("Jev answered 503")
+    judge = Judge(FailsAsCtrlCArrives(error), max_concurrency=2)
+
+    # Act: the interrupt is caught too, so losing the error fails this test instead of ending the session
+    try:
+        list(judge.iter_check_each(DESCRIBES, _items(2), SHARED))
+    except (ProviderError, KeyboardInterrupt) as stopped:
+        raised = stopped
+
+    # Assert
+    assert raised is error
 
 
 @dataclass

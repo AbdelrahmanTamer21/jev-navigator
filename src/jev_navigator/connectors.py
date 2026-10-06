@@ -13,6 +13,8 @@ import tempfile
 import urllib.request
 from collections.abc import Callable, Sequence
 
+from . import memory_limit
+
 PROMPT_PLACEHOLDER = "{prompt}"
 DEFAULT_TIMEOUT_SECONDS = 180
 HERMES = "hermes"
@@ -23,8 +25,9 @@ class ConnectorError(RuntimeError):
 
 
 class CommandConnector:
-    """Runs ``argv`` in a fresh empty directory. The prompt replaces ``{prompt}`` in an argument, or
-    goes on stdin when no argument holds the placeholder. stdout is the reply."""
+    """Runs ``argv`` in a fresh empty directory under JVN's memory limit. The prompt replaces
+    ``{prompt}`` in an argument, or goes on stdin when no argument holds the placeholder. stdout is the
+    reply."""
 
     def __init__(
         self, argv: Sequence[str], *, name: str, model: str = "", timeout: float = DEFAULT_TIMEOUT_SECONDS
@@ -37,18 +40,21 @@ class CommandConnector:
     def complete(self, prompt: str) -> str:
         on_stdin = not any(PROMPT_PLACEHOLDER in argument for argument in self.argv)
         argv = [argument.replace(PROMPT_PLACEHOLDER, prompt) for argument in self.argv]
-        with tempfile.TemporaryDirectory(prefix="jev-llm-step-") as empty_directory:
-            completed = subprocess.run(
+        with (
+            tempfile.TemporaryDirectory(prefix="jev-llm-step-") as empty_directory,
+            memory_limit.started(
                 argv,
-                input=prompt if on_stdin else None,
-                capture_output=True,
+                stdin=subprocess.PIPE if on_stdin else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.timeout,
                 cwd=empty_directory,
-            )
-        if completed.returncode != 0:
-            raise ConnectorError(f"{self.name} exited {completed.returncode}: {completed.stderr.strip()}")
-        return completed.stdout
+            ) as process,
+        ):
+            reply, error_output = process.communicate(prompt if on_stdin else None, timeout=self.timeout)
+        if process.returncode != 0:
+            raise ConnectorError(f"{self.name} exited {process.returncode}: {error_output.strip()}")
+        return reply
 
 
 def hermes(model: str = "", reasoning: str = "low") -> CommandConnector:

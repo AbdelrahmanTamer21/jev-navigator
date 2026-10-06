@@ -21,6 +21,54 @@ For structural questions, use code directly: `jvn stats --kind function --limit 
 function without model calls. `jvn stats` reports counts and line ranges; see the
 [structural command examples](docs/cli.md#structural-measurements).
 
+## Architecture: blocks, mini-workflows and configurations
+
+JVN is a library of building blocks for searching code. Each level composes the one below it, and
+every use of JVN, the `jvn` command included, is a composition of the same blocks.
+
+1. **Code primitives** establish facts without a model: the files in scope, definitions, callers,
+   callees, references, imports, text hits, units and git history
+   ([Layer 1](#layer-1-index-operations-and-comments-no-model)).
+2. **Mini-workflows** compose primitives and Jev judgments into one kind of search: `find`
+   (`find_code`), `find_all`, `trace`, `find_text` and `find_all_text`
+   ([Layer 3](#layer-3-directives)).
+3. **Configurations** (being built) compose mini-workflows into a larger workflow. A configuration is
+   typed: it names the mini-workflows, their order, their inputs and their budgets. `jvn search`, also
+   being built, is to be the default configuration.
+
+Between two stages a configuration can place a **Jev step**, one bounded decision such as a yes or no
+check or a pick from a list code built ([Layer 2](#layer-2-judgments)), or an **LLM step**, generation
+over an open space ([`LlmStep`](#llmstep-an-llm-call-you-add-yourself)). Which steps run is
+configuration: a recipe the caller passes as data names them, never an environment or deploy flag.
+
+| Block | Status |
+| --- | --- |
+| Index, operations, units and scope (`CodeIndex`, `operations`, `index.units`, `resolve_scope`) | built |
+| Jev judgments (`Check`, `Pick`, `Rate`, asked through `Judge`) | built |
+| Mini-workflows `find_code`, `find_all` and `trace` | built |
+| `LlmStep` | built |
+| Text search: the mini-workflows `find_text` and `find_all_text` | built |
+| The spelling map | being built |
+| Typed configurations | being built |
+| `jvn search` | being built |
+
+The spelling map is an index block. It splits every identifier, file name, config key and string
+literal into word parts and normalises case, separators and plural, so all spellings of one name
+share a key: `Website`, `website`, `websites`, `web_site` and `website.ts` meet. A name lookup then
+returns every real spelling and its locations, rarest first.
+
+Three rules hold for every change:
+
+- A capability that is not about one caller's domain is a block that any caller can use. A caller
+  configures blocks and passes its own inputs; it never reimplements a block.
+- Nothing specific to findings, themes or the Analysis Engine lives in JVN. The Engine's evidence
+  pack, a theme agent's search tool and a coding agent's search are each a configuration plus that
+  caller's inputs.
+- An experiment compares named configurations on an evaluation set, never tweaks inside one call.
+
+Until typed configurations exist, a composition is a plain function of the blocks; see
+[docs/extending.md](docs/extending.md).
+
 ## Trace a known workflow
 
 ```sh
@@ -43,18 +91,22 @@ jvn help findall
 jvn schema findall
 ```
 
-`find` locates an implementation; `findall` finds a seed, examines related functions, then checks
-remaining function bodies for disconnected implementations. It uses batched Jev judgments and
-defaults to 48 live model calls (twice `find`); `--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
-[run folder](#where-jvn-keeps-runs-and-caches). `functions_examined` describes coverage of function bodies, not a proof
-of semantic equivalence or completeness across arbitrary code fragments. Uncertain answers and
+`find` locates an implementation; `findall` finds a seed, then judges every unit in scope (each
+function, method, Prisma schema block and file's top-level code), the units holding the seed's found code in its first
+wave of requests. It uses batched Jev judgments and defaults to 48 live model calls (twice `find`);
+`--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
+[run folder](#where-jvn-keeps-runs-and-caches). `units_examined` describes coverage of the units in
+scope, not a proof of semantic equivalence or completeness. Uncertain answers and
 unreadable or unsupported source stay visible. At a call stop, the terminal offers another allowance.
 For a later invocation or an agent pipeline, pass `--resume` with the folder the earlier run printed, and the same
 Find All query and scope. Completed judgments and the seed are retained; only unfinished work spends
-new model calls.
+new model calls. `findall` judges code only. The files JVN does not parse, such as YAML, JSON,
+Markdown, TOML and config files, are searched only when a caller asks for them, through the library's
+`find_all_text` and `find_text` ([extending.md](docs/extending.md#text-units)); env files are never
+read, though an env template (`.env.example`, `.env.sample`, `.env.template`) is read masked.
 
 For an engineer-authored library composition and its limits, see
-[Extending: seed-first Find All](docs/extending.md#compose-a-seed-first-find-all-search).
+[Extending: judge every unit with Find All](docs/extending.md#judge-every-unit-with-find-all).
 
 ## Install
 
@@ -72,6 +124,12 @@ jvn --help
 Needs Python 3.11 or newer, and `ast-grep`, `rg` (ripgrep) and `git` on the PATH. The `typesafe` extra adds
 the official SDK for live calls; set `TYPESAFE_API_KEY`. Everything else, including the tests, runs
 offline.
+
+JVN limits its own memory, for the command and for every program that imports the library. Each
+process may grow by 1,024 MB, its ast-grep, ripgrep and git processes included, and all JVN processes
+on a machine share 8,192 MB; a process waits up to two minutes for room, then stops with
+`MemoryLimitReachedError`. See [Memory limit](docs/cli.md#memory-limit) for what a refusal does and
+the settings.
 
 ## Live evidence-pack command
 
@@ -194,6 +252,15 @@ file lives elsewhere. Use `--json` on its own; put any search options inside the
 Use `--prefix app/` to narrow the scope, `--start app/orders.py:42` to supply a known caller or entry
 point, and `--out /path/to/new-pack` to select the result directory. Prefixes and starts are repeatable.
 Without a start, `jvn` uses typed Jev judgments to select entry candidates from the source inventory.
+Each file option shows the file's first doc line and up to eight names: the functions and classes the
+module names or exports through CommonJS and each module-level constant whose call or `new` builds a
+function, as `run` in `export const run = Effect.fn("run")(function* ...)` or `userRouter` for a
+router, but not one that builds data through a callback, such as `items.map((item) => item.id)` or
+`new Map(...)`, then each function of an object a module-level variable holds,
+as `api.list`, each function of an object a module-level call or `new` is passed, as `errorFormatter` in
+`create({ errorFormatter() {} })`, and each member of a namespace, in file order within each group. A
+file holding none of these, such as one of types only or one whose functions are all callbacks, shows
+no names.
 
 Every live call is a paid request, so `--max-calls` defaults to 24 for the whole run, choosing an entry
 point included; a search that reaches it ends with outcome `budget` and a resumable `not_inspected`
@@ -293,13 +360,19 @@ index.decorator_starts_in(file)  # each decorated function's span and its first 
 index.stubs_in(file)  # functions whose body is only ..., pass, a docstring or raise NotImplementedError
 index.read_slice(span)
 index.read_window(file, line, radius=10)
-index.search_text("orders.max_items")  # ripgrep over the narrowed files only
+# ripgrep over the narrowed files only, every hit in file and line order
+index.search_text("orders.max_items")
+index.search_text("orders.max_items", max_hits=30)  # only the first 30 hits
 index.imports(file)
 index.dependents(file)
 index.co_changed_files(file)
 
-units.list_units(index, files, box_chars=room)  # outermost functions and methods, top-level code; room: docs/extending.md
-units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=room)  # the units holding lines or line ranges
+# outermost functions and methods, Prisma schema blocks, top-level code; room: docs/extending.md
+units.list_units(index, files, box_chars=room)
+# the text units of the files JVN does not parse
+units.list_units(index, files, box_chars=room, reading=units.Reading.TEXT)
+# the units holding lines or line ranges
+units.resolve_anchors(index, [units.LineAnchor(file, line)], box_chars=room)
 
 operations.slice_around(index, file, line)  # the enclosing function, or a window
 operations.code_described_by_comment(index, file, line)  # the whole next symbol or block
@@ -307,7 +380,9 @@ operations.callers_of_file(index, path)
 operations.trace_callers(index, symbol)  # and trace_callees; optional depth, otherwise fixed point
 operations.trace_graph(index, index.find_definition(symbol))  # calls and non-call references
 operations.similar_functions(index, symbol)
-operations.code_named_in_doc(index, text)
+operations.code_named_in_doc(index, text)  # definitions of the names mentions.code_names_in finds
+# the scope files texts or anchor files name by path or run with python -m: NamedFiles(code, text, named_by)
+operations.files_named_by(index, texts, anchor_files)
 
 comments.find_comments(index, files)  # FoundComments(kept, dropped) of CommentBlock
 comments.comments_in_diff(index, base, head)  # changed comments, and comments above changed code
@@ -420,7 +495,8 @@ parse passes through, estimates each file's parse peak (`index/file_shape.py`): 
 file, every byte counted as code, plus the square of the punctuation `{}();,[]` on each line,
 which a minified bundle of a few tens of kilobytes on one line drives up. Files estimated at up to
 250 MB are parsed side by side. A file over that, but within the single-file limit
-(`tools.single_parse_limit_mb()`), is parsed alone, one at a time, with no other file beside it. A file
+(`MemoryLimit.single_parse_mb`: the memory allowance less Python's 270 MB share, so 754 MB at the
+default), is parsed alone on one thread, one at a time, with no other file beside it. A file
 over the single-file limit is never handed to ast-grep, and neither is a large file that cannot be read
 to measure it. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated
 peak, the limit it is over, and the longest line in bytes. A file that ast-grep itself skips without
@@ -444,20 +520,36 @@ no module-level definition. Lines are the unit, so a use on the namespace's firs
 candidate, and one namespace split over two blocks is not merged. Lines the parser lost inside the
 namespace that mention the name leave the use `unknown`; lost lines elsewhere never pass the member over. A call `jwt.verify()` where module-level
 code binds `jwt` to a whole module of the scope (`import * as jwt`, `const jwt = require('./jwt')`,
-in Python `import app.jwt as jwt`, and `app.jwt.verify()` after `import app.jwt`, all read from the
-syntax tree) binds to the `verify` that module, or one it re-exports from, defines; only that module's
-facts are read. A name a function binds for its own body (a parameter, a local
+in Python `import app.jwt as jwt`, `from app import jwt` and `from . import jwt as tokens`, and
+`app.jwt.verify()` after `import app.jwt`, all read from the syntax tree) binds to the `verify` that
+module, or one it re-exports from, defines; only that module's facts are read. Python's `from app
+import jwt` takes the package's own `jwt` before it imports the module `app.jwt`, so it holds the
+module only when `app/__init__.py` binds nothing named `jwt` (a definition, an assignment, a loop or
+`with` target), imports nothing else under that name,
+has no star import and no lost line that mentions it; otherwise `jwt.verify()` stays a `candidate`.
+In Python the alias must also be its module's one binding of the name: module-level code that
+assigns `jwt`, defines a function or class `jwt`, loops, opens or catches into it, or deletes it, or a
+function that declares it `global`, leaves `jwt.verify()` a `candidate`; after `import app.jwt` the
+name is `app`. A script module alias is held the same way: a second declaration of `jwt` outside every
+function (a `require` inside a block included), a loop over it, a module-level function `jwt`, or an
+assignment to it anywhere leaves the call a `candidate`. A name a function binds for its own body (a parameter, a local
 variable, a caught error or a loop variable) replaces any module-level definition or import of that
 name inside the function: `db.query()` with a parameter `db`, or `stop()` with a parameter `stop`,
-binds to no import; it is a `candidate` whose local value is not resolved. A function counts from its
-first line, so on `stream(c, async (stream) => ...)` the outer call counts as inside the callback.
+binds to no import; it is a `candidate` whose local value is not resolved. The one exception is a
+function's own `const db = require('./db')` when it is the function's only binding of `db`: a `const`
+is never bound again, so there `db.query()` binds through `./db` like a module alias, and `db()` to the
+module's default export (`module.exports = ...`). A `const` is block-scoped, so it holds the module
+from its own line to the end of its block, or of the function when it sits in the function's body;
+before it, after its block, or in a `switch` case, the call stays a `candidate`. A `let` or `var` may
+be bound again and holds no module. A function counts from its first line, so on
+`stream(c, async (stream) => ...)` the outer call counts as inside the callback.
 Types are looked up apart from values, so a local value never replaces a type. A call `halt()` where
 `halt` imports a definition under another name (`import { stop as halt }`, `const { stop: halt } =
 require(...)`, `from m import stop as halt`) binds the same way to `stop`, unless the file defines
 `halt` itself. A default import, under any local name, takes the module's default export; the default's own name is no named export, so `import { make }`, `defaults.make()` and `const { solo } = require(...)` of a default reach nothing. Every import, by name, under another
 name, as a default or through a module alias, is decided the same way from the module it names and
 the modules that one re-exports the name from: one definition proves the target, several leave a
-`candidate`, an exporting module that could not be parsed where it mentions the name, or that
+`candidate`, any of these modules that could not be parsed where it mentions the name, or that
 vanished, leaves it `unknown`, and a module with no definition exported under the name leaves a
 `candidate` that says so. A name a module imports and passes on without an `export ... from`, as a
 Python module's own `from pkg.core import compute`, is not followed. A function or class
@@ -528,8 +620,9 @@ else:
     resolved.counts_by_folder, resolved.counts_by_language  # a ScopeRefusal: over max_files
 ```
 
-- Only files JVN parses (Python, TypeScript, TSX, JavaScript) enter a scope and count toward the cap,
-  plus markup files with `with_docs`; `filters["supported_languages"]` names them.
+- Only files JVN reads (Python, TypeScript, TSX, JavaScript, and Prisma schemas, whose blocks a
+  scanner reads) enter a scope and count toward the cap, plus markup files with `with_docs`;
+  `filters["supported_languages"]` names them.
 - Left out unless asked for: tests (`with_tests`), generated code (`with_generated`: a true
   `linguist-generated` attribute, or a comment line holding `@generated` or `do not edit`, in any case,
   in the first 10 lines), vendored code (`with_vendored`: a true `linguist-vendored` attribute, or a
@@ -603,7 +696,9 @@ judge.choose_call(route, offers, state)  # function calling: operation plus its 
 ```
 
 Every one of these has an async form (`check_each_async`, `pick_async`, `ask_all_async`,
-`choose_call_async`, `ask_async`), and `find_code_async` is the async search. They take any
+`choose_call_async`, `ask_async`, and `iter_check_every_async`, which yields each wave's answers as
+the wave settles), and `find_code_async`, `find_all_async` and `find_all_text_async` are the async
+searches. They take any
 `AsyncJevClient` (an object with `model` and `async ask(state, questions)`, optionally an async
 `send`), such as a host's own orchestrator; a sync client also works there and runs in a worker
 thread. Both paths share one core: masking, the secret scan, the hash, the store lookup, the call
@@ -617,6 +712,11 @@ forms send their batches on a thread pool under the same `max_concurrency` and f
 call cap stays exact under concurrency, and after a failure or cancellation no batch sends a new
 request, while answers already received still yield. A sync method given an async client raises
 `TypeError`. Offline tests use `testing.AsyncScriptedJevClient`.
+
+Places: `check_each`, `check_every` and their `iter_` and async forms take `places`, one
+`index.units.Item` per item, when items are code units. A place orders the batches (file, then
+lines) and goes into the stored record, never into the state, so each item carries only the fields a
+question reads; each `CheckResult` names its `place`.
 
 Budgets: `judge.calls` counts requests sent (store hits are free; `judge.replayed_answers` counts
 the answers the store gave instead). `Judge(max_calls=N)` caps a judge
@@ -726,9 +826,9 @@ on its own scope, so searches sharing one judge never use up each other's budget
   `record.sent_request()`, with a judge that has no store. `JsonlJournal(keep_request_text=True)`
   likewise keeps the body as handed to the client (`body_base64`) and the wire bytes when captured
   (`sent_body_base64`), and `export_for_review` keeps the order the request is sent in. By default the store keeps
-  hashes, question wording, and each item's ids, file, lines, commit and names, so
-  `rebuild_request(record, CodeIndex.at_commit(...), shared)` rebuilds a request from the code at
-  that commit and proves it matches, or names the part that differs. A request whose items carried a
+  hashes, question wording, and each item's ids, file, lines, commit and names, or its place's file
+  and runs, so `rebuild_request(record, CodeIndex.at_commit(...), shared)` rebuilds a request from
+  the code at that commit and proves it matches, or names the part that differs. A request whose items carried a
   field that can quote code, such as a Trace link line or a Find signature, keeps that field withheld,
   so it does not rebuild exactly; the mismatch then names the withheld fields first.
 
@@ -777,7 +877,8 @@ mentions of that text in question IDs or unrelated error messages do not trigger
 A low neighbour score only lowers that neighbour's priority; it is never treated as proof that the code
 is not there. The search runs out of places when no start or pick waits and no neighbour scores
 above the no bar (0.20 by default). It then ends as `nothing_left` only if its own moves parsed every
-code file in scope without a grammar error; otherwise it ends as `scope_incomplete`. The remaining
+code file in scope without a grammar error and read the blocks of every Prisma schema in scope; otherwise
+it ends as `scope_incomplete`. The remaining
 files are never parsed just to choose the label. Of `FindResult.code_files`, `files_judged` counts the
 files in which Jev judged code (the opened places, not whole files) and `files_read` adds the files
 read only to list neighbours; the CLI prints all three, for example `scope_incomplete (not found: Jev
@@ -819,8 +920,9 @@ the judge's masker leaves it (`judge.masked_request_fits`), since masking can ma
 `not_inspected` with reason `budget`; Resume on a route with a larger box inspects that same source.
 `questions=SearchQuestions(found=...,
 could_contain=..., open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
-`places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `imported`,
-`same_file`, `keys_mentioned`, `co_changed`, `lines_before`, `rest_of_file`) to a function of the
+`places.MOVES` maps each move's name (`callers`, `client_calls`, `callees`, `queried_models`,
+`referenced_by`, `passed_on`, `imported`, `same_file`, `keys_mentioned`, `co_changed`, `lines_before`,
+`rest_of_file`) to a function of the
 index and the opened code that returns places. Pass a subset, or add a function of your own; `MOVES`
 itself is read-only. `FindResult.moves` and the final `stop` step name the moves a search used, and
 `context_for_comment` takes `moves=` too. The directives take their check (`check=`) as a parameter too.
@@ -975,12 +1077,19 @@ capability regressions and verifies request/response capture through a real loca
 Plain `uv run pytest` installs the TypeSafe extra with the dev group, so every test runs. A skipped
 test did not run, so a run with a skip fails and names it, unless the test declares a platform it
 cannot run on with a `skipif` condition. To show the core works without the extra, run
-`uv run --no-dev --with pytest pytest --without-typesafe`: only there may the TypeSafe tests skip,
-and it refuses to start when the extra is installed. Run `uv run ruff check src tests` and
-`uv run ruff format --check src tests` before pushing. Local checks are the normal validation
-path for this small library; pushes and pull requests do not launch hosted CI. The `tests`
-workflow is available through GitHub Actions **Run workflow** when an explicit cross-version
-check is needed (Python 3.11 and 3.13, each with and without the TypeSafe extra).
+`uv run --no-dev --with pytest --with pytest-timeout pytest --without-typesafe`: only there may the
+TypeSafe tests skip, and it refuses to start when the extra is installed. Every run needs
+pytest-timeout (`required_plugins`), so a missing plugin stops the run instead of dropping its
+time limits. Run `uv run ruff check src tests` and `uv run ruff format --check src tests` before
+pushing.
+
+Locally, run only the test files that cover or import what you changed (`uv run pytest
+--basetemp=<scratch dir> tests/<file>`); never the whole suite on the shared Mac (André,
+05.10.2026). Pushes and pull requests do not launch hosted CI, so once a head is the one to merge,
+start the `tests` workflow on its branch (`gh workflow run tests.yml -R ajbmachon/jev-navigator
+--ref <branch>`). It runs the whole suite on Python 3.11 and 3.13, each with and without the
+TypeSafe extra; judge it by its log. A whole-suite run that must happen outside CI goes to GX10
+nr3 over SSH with a memory cap, never to this Mac.
 
 ## License
 

@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import pytest
+from conftest import REFUSAL, REFUSAL_DIGEST, RefusingClient
 from git_repos import commit_files
 
 from jev_navigator.cli_trace import SCHEMA_VERSION, create_trace_evidence_pack
@@ -83,6 +84,38 @@ def test_trace_command_writes_a_real_pack_with_default_output(
         assert response["trace"] == manifest["trace"]
     else:
         assert "completed (1 live calls)" in output.out
+
+
+@pytest.mark.parametrize("error_text", [True, False])
+def test_trace_command_names_each_refused_span_and_its_error(
+    tmp_path: Path, monkeypatch, capsys, private_data_root: Path, error_text: bool
+) -> None:
+    # Arrange: the provider refuses the request holding `reject`, the one span returning 422.
+    from jev_navigator import cli
+
+    repository = _workflow_repository(tmp_path)
+    client = RefusingClient(_evidence_client(), marker="422", list_name="trace")
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: client)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
+    monkeypatch.chdir(tmp_path)
+    argv = ["trace", QUESTION, "--repo", str(repository), "--start", "workflow.py:8"]
+
+    # Act
+    status = cli.main(argv if error_text else [*argv, "--no-error-text"])
+
+    # Assert: the pack and stdout name the refusal; without error text only its digest is kept.
+    [pack] = (private_data_root / "runs").glob("*")
+    manifest = json.loads((pack / "manifest.json").read_text())
+    report = (pack / "report.md").read_text()
+    message = {"message": REFUSAL} if error_text else REFUSAL_DIGEST
+    assert status == 0
+    assert manifest["trace"]["refused"] == {
+        "delivery.py:4-5": {"type": "InputBudgetExceededError", **message}
+    }
+    assert "- `delivery.py:4-5`: InputBudgetExceededError" in report
+    assert "Not every span was examined (refused requests: 1)" in report
+    assert (REFUSAL in report, REFUSAL in json.dumps(manifest)) == (error_text, error_text)
+    assert "refused: 1 request, named in report.md" in capsys.readouterr().out
 
 
 def test_trace_schema_and_help_describe_the_real_start_requirement(capsys) -> None:

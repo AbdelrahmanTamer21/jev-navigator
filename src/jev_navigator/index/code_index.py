@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
+from .. import memory_limit
 from . import listing, tools
 from .bindings import (
     Binding,
@@ -35,16 +36,18 @@ from .imports import (
     reexported_names,
     resolve_import,
 )
-from .languages import (
-    language_of,
-)
+from .languages import export_words, is_schema_file, language_of
 from .memo import memoized
 from .name_table import CALL, DEFINITION_KINDS, REFERENCE, FileEntry, NameRow, NameTable, git_blob_id
 from .packages import Packages
+from .prisma_schema import SchemaBlock, schema_blocks
+from .scope import text_files_left_out
 from .scope_scan import (
     CallMatch,
     FileFacts,
     FileStructure,
+    LocalName,
+    ModuleAlias,
     ReferenceMatch,
     Unparsed,
     first_identifier,
@@ -52,10 +55,10 @@ from .scope_scan import (
 )
 from .source_files import DISAPPEARED, SourceFiles
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
+from .text_blocks import TextBlock, text_blocks
 from .tsconfig import ScriptPaths, nearest_script_paths
 
 DEFAULT_WINDOW_RADIUS = 10
-MAX_TEXT_HITS = 20
 # The bytes kept on either side of a text hit, so a hit in a one-line bundle never holds the line.
 TEXT_HIT_CONTEXT_BYTES = 200
 CO_CHANGE_COMMITS = 200
@@ -101,6 +104,7 @@ class CodeIndex:
         blob_ids: Mapping[str, str] | None = None,
         not_indexed: Mapping[str, str] | None = None,
     ) -> None:
+        memory_limit.index_opened(self)
         self.root = Path(root)
         self.git_root = Path(git_root) if git_root is not None else self.root
         self.binding_resolver = binding_resolver
@@ -116,9 +120,11 @@ class CodeIndex:
         _require_inside(self.root, self.files)
         self._scope = frozenset(self.files)
         self._code_files = tuple(path for path in self.files if language_of(path))
+        self.schema_files = tuple(path for path in self.files if is_schema_file(path))
         self._unavailable: dict[str, str] = {}
         self._refused: dict[str, str] = {}
         self._not_indexed = dict(not_indexed or {})
+        self._text_left_out: dict[str, str] = {}
         self._sources = SourceFiles(
             self.root, self._unavailable, LINE_CACHE_FILES, _held_weakly(self._standing_first_read)
         )
@@ -276,10 +282,11 @@ class CodeIndex:
 
     @property
     def parsed_files(self) -> frozenset[str]:
-        """Files navigation has reached so far, through their facts or their name rows, never one it
-        refused to parse; reading it never starts a scan. Covering the scope for the name table
-        reaches no file. A file that changed or vanished after it was reached still counts, since its
-        facts and rows come from the bytes first read, and it is listed in ``unavailable_files`` too."""
+        """Files navigation has reached so far, through their facts, their name rows or a schema's
+        blocks, never one it refused to parse; reading it never starts a scan. Covering the scope for
+        the name table reaches no file. A file that changed or vanished after it was reached still
+        counts, since its facts and rows come from the bytes first read, and it is listed in
+        ``unavailable_files`` too."""
         return frozenset(self._reached - self._refused.keys())
 
     @property
@@ -289,8 +296,9 @@ class CodeIndex:
     @property
     def parser_scans_pending(self) -> tuple[str, ...]:
         """The fact scan is pending until navigation has reached every available code file, through its
-        facts, its name rows or the parser's refusal of it; covering the scope for the table reaches none."""
-        available = set(self._available_files(self._code_files))
+        facts, its name rows or the parser's refusal of it, and every Prisma schema, through its blocks;
+        covering the scope for the table reaches none."""
+        available = set(self._available_files((*self._code_files, *self.schema_files)))
         return () if available <= self._reached else ("facts",)
 
     @property
@@ -396,9 +404,67 @@ class CodeIndex:
         """Functions and classes."""
         return self._file_structure(file).symbols
 
-    def top_level_symbols(self, file: str) -> tuple[Span, ...]:
-        """The functions and classes no other function or class of the file contains, in file order."""
-        return tuple(sorted(_outermost(self.symbols_in(file)), key=lambda span: (span.start, -span.end)))
+    def module_names(self, file: str) -> tuple[str, ...]:
+        """The names a reader finds ``file``'s code by, best first: the functions and classes the
+        module names (see ``FileStructure.module_symbols``) or assigns to its CommonJS exports and
+        each module-level constant a call builds a function for (see ``ConstantFunction``), then
+        each function of an object a module-level variable holds, as `api.list`, each function of an
+        object a module-level call or `new` is passed, and each function or class of a namespace,
+        each group in file order. A file holding none of these has no names."""
+        structure = self._file_structure(file)
+        symbols = set(structure.symbols)
+        own = _named((*structure.module_symbols, *structure.commonjs_exports))
+        own += [(function.span, function.constant) for function in structure.constant_functions]
+        held = [(member.span, f"{member.owner}.{member.span.name}") for member in structure.object_members]
+        held += [(span, span.name) for span in structure.argument_members]
+        held += [
+            (member.span, member.span.name)
+            for member in structure.namespace_members
+            if member.span in symbols
+        ]
+        named_held = [(span, name) for span, name in held if span.is_named]
+        return tuple(dict.fromkeys((*_in_file_order(own), *_in_file_order(named_held))))
+
+    def constant_function_names(self, file: str) -> dict[Span, str]:
+        """The name each function a module-level constant's call holds goes by (see
+        ``ConstantFunction``): the constant's, then the keys around it, `userRouter.list`. Functions on
+        one line share a span, which goes by the first one's name. Functions that would share one
+        name are told apart by their first line, `pair.<anonymous:4>`."""
+        names: dict[Span, str] = {}
+        for function in self._file_structure(file).constant_functions:
+            names.setdefault(function.span, ".".join((function.constant, *function.keys)))
+        counts = Counter(names.values())
+        return {
+            span: f"{name}.<anonymous:{span.start}>" if counts[name] > 1 else name
+            for span, name in names.items()
+        }
+
+    @memoized
+    def schema_blocks_in(self, file: str) -> tuple[SchemaBlock, ...]:
+        """The model, view, enum and type blocks of a Prisma schema in scope, which reach the schema;
+        none for any other file."""
+        self._require_in_scope(file)
+        if not is_schema_file(file):
+            return ()
+        blocks = schema_blocks(self._lines_of(file))
+        self._reached.add(file)
+        return blocks
+
+    @memoized
+    def text_blocks_in(self, file: str) -> tuple[TextBlock, ...]:
+        """The blocks a text search reads ``file`` in, by its format (``text_blocks``)."""
+        return text_blocks(file, self._lines_of(file))
+
+    def text_files_left_out(self, files: Sequence[str]) -> dict[str, str]:
+        """Which of ``files``, none of them a file JVN parses, a text search leaves out instead of
+        reading them as plain text, each with the reason (``scope.text_files_left_out``), decided once
+        per file for the life of the index. A file gone from the disk is named in ``unavailable_files``
+        instead."""
+        undecided = [file for file in self._available_files(files) if file not in self._text_left_out]
+        if undecided:
+            left_out = text_files_left_out(self.root, undecided)
+            self._text_left_out.update({file: left_out.get(file, "") for file in undecided})
+        return {file: reason for file in files if (reason := self._text_left_out.get(file))}
 
     def declarations_in(self, file: str) -> tuple[Span, ...]:
         """Constants, assignments, types, interfaces and enums at module level or directly in a
@@ -505,8 +571,12 @@ class CodeIndex:
             enclosing = self._binding_beyond_the_function(file, line, name, receiver, role)
             if enclosing is not None:
                 return enclosing
-        elif receiver is None:
-            return local_binding(name)
+        else:
+            own_module = self._binding_through_local_module(file, line, name, receiver, role)
+            if own_module is not None:
+                return own_module
+            if receiver is None:
+                return local_binding(name)
         return binding_from_facts(self._call_facts(file, name, receiver, role))
 
     def _binding_beyond_the_function(
@@ -547,9 +617,7 @@ class CodeIndex:
         ]
         if not members:
             return None
-        first, last = max(
-            ((member.first, member.last) for member in members), key=lambda lines: (lines[0], -lines[1])
-        )
+        first, last = _innermost_lines((member.first, member.last) for member in members)
         if self._unread_lines_mention(file, name, first, last):
             return unparsed_binding(name, (file,))
         innermost = [member.span for member in members if (member.first, member.last) == (first, last)]
@@ -567,21 +635,53 @@ class CodeIndex:
     def _binds_locally(self, file: str, line: int, name: str, receiver: str | None, role: str | None) -> bool:
         """Whether a function holding ``line`` binds the name the use looks up first for its own body:
         ``stop`` in ``stop()``, ``db`` in ``db.query()``. That name then holds a local value, never a
-        definition, import or module alias of its module; a method on it is still looked up by its
-        own name. A type is looked up among types, which no local value replaces, and an export names
+        definition, import or module alias of its module (only the module a function's own require
+        binds, see ``_binding_through_local_module``); a method on it is still looked up by its own
+        name. A type is looked up among types, which no local value replaces, and an export names
         module-level code. A function counts from its first line, so a call on that line before the
         function starts counts as inside it."""
         if role in ("type", "export"):
             return False
         looked_up = name if receiver is None else first_identifier(receiver)
-        return any(first <= line <= last for first, last in self._read_local_scopes(file).get(looked_up, ()))
+        return any(
+            local.first <= line <= local.last for local in self._read_local_bindings(file).get(looked_up, ())
+        )
+
+    def _binding_through_local_module(
+        self, file: str, line: int, name: str, receiver: str | None, role: str | None
+    ) -> Binding | None:
+        """The binding of a use of a name that the innermost function around ``line`` binds exactly
+        once, and to a whole module of the scope (``const db = require('./db')``, see ``LocalName``):
+        ``db()`` calls the module's default export, ``db.query()`` the ``query`` it exports. None
+        when that function binds the name more than once or to anything else, or when the receiver is
+        longer than the name."""
+        module = self._local_module(file, line, name if receiver is None else receiver)
+        if module is None:
+            return None
+        return self._binding_through_exporters(file, module, "default" if receiver is None else name, role)
+
+    def _local_module(self, file: str, line: int, name: str) -> str | None:
+        """The module ``name`` holds at ``line`` when the innermost function there that binds it binds
+        it once, to a whole module, and ``line`` lies from that binding to the end of its block."""
+        holding = [
+            local
+            for local in self._read_local_bindings(file).get(name, ())
+            if local.first <= line <= local.last
+        ]
+        if not holding:
+            return None
+        innermost = _innermost_lines((local.first, local.last) for local in holding)
+        own = [local for local in holding if (local.first, local.last) == innermost]
+        if len(own) != 1 or not own[0].line <= line <= own[0].block_end:
+            return None
+        return own[0].module or None
 
     @memoized
-    def _read_local_scopes(self, file: str) -> dict[str, tuple[tuple[int, int], ...]]:
-        scopes: dict[str, list[tuple[int, int]]] = {}
+    def _read_local_bindings(self, file: str) -> dict[str, tuple[LocalName, ...]]:
+        bindings: dict[str, list[LocalName]] = {}
         for local in self._file_structure(file).local_names:
-            scopes.setdefault(local.name, []).append((local.first, local.last))
-        return {name: tuple(lines) for name, lines in scopes.items()}
+            bindings.setdefault(local.name, []).append(local)
+        return {name: tuple(found) for name, found in bindings.items()}
 
     def _load_facts_for_bindings(self, name: str, use_files: Iterable[str]) -> None:
         """Loads, in one scan, the facts that binding the uses of ``name`` reads: the files the uses
@@ -763,13 +863,16 @@ class CodeIndex:
             self._fact_cache.save(file, contents[file], facts)
 
     def _load_cached_facts(self, files: Sequence[str]) -> dict[str, bytes]:
-        """Remembers the persisted facts of ``files``; returns the bytes of those still to parse.
+        """Remembers the persisted facts of ``files``; returns the bytes of those still to parse. Facts
+        loaded from the cache grow the process with no parser running, so each file is first checked
+        against JVN's memory allowance.
 
         The caller holds the facts lock."""
         to_parse: dict[str, bytes] = {}
         for file in files:
             if language_of(file) is None or file in self._facts or file in self._refused:
                 continue
+            memory_limit.check()
             content = self._read_bytes(file)
             if content is None:
                 continue
@@ -824,11 +927,41 @@ class CodeIndex:
         self, file: str, name: str, receiver: str, role: str | None
     ) -> Binding | None:
         """The binding of ``receiver.name`` when ``receiver`` holds a whole module of the scope
-        (``import * as receiver``, ``const receiver = require(...)``), decided like an import of
-        ``name`` from that module (see ``_binding_through_exporters``). None when ``receiver`` holds
-        no module of the scope."""
-        specifier = self._module_alias(file, receiver)
-        return None if specifier is None else self._binding_through_exporters(file, specifier, name, role)
+        (``import * as receiver``, ``const receiver = require(...)``, ``from pkg import receiver``),
+        decided like an import of ``name`` from that module (see ``_binding_through_exporters``).
+        None when ``receiver`` holds no module of the scope, or when its from-import may take the
+        package's own name instead (see ``_package_binds_otherwise``)."""
+        alias = self._module_alias(file, receiver)
+        if alias is None or (alias.from_import and self._package_binds_otherwise(file, alias.specifier)):
+            return None
+        return self._binding_through_exporters(file, alias.specifier, name, role)
+
+    def _package_binds_otherwise(self, file: str, specifier: str) -> bool:
+        """Whether ``from package import module`` may give something other than the module
+        ``specifier`` names: Python takes the package's own name first, so the package's
+        ``__init__`` must not define that name, import anything else under it, star-import, or have
+        lines the index could not read that mention it."""
+        module = self._module_path(file, specifier)
+        if module is None:
+            return False
+        path = PurePosixPath(module)
+        holder, member = (
+            (path.parent.parent, path.parent.name) if path.name == "__init__.py" else (path.parent, path.stem)
+        )
+        init = str(holder / "__init__.py")
+        if init not in self._scope:
+            return False
+        bound = [alias for alias in self._facts_in(init).module_aliases if alias.name in (member, "*")]
+        imports_otherwise = any(
+            alias.name == "*" or self._module_path(init, alias.specifier) != module for alias in bound
+        )
+        return imports_otherwise or self._binds_otherwise(init, member) or init in self._files_hiding(member)
+
+    def _module_path(self, file: str, specifier: str) -> str | None:
+        resolved = resolve_import(
+            specifier, file, self._scope, self._script_paths(file), self._read_packages()
+        )
+        return None if resolved is None else resolved.path
 
     def _binding_through_import(self, file: str, name: str, role: str | None) -> Binding | None:
         """The binding of ``name()`` when ``file`` imports ``name``: by that name or under another
@@ -864,11 +997,12 @@ class CodeIndex:
 
     def _hides(self, exporter: str, name: str) -> bool:
         """Whether ``exporter`` may export ``name`` where the index cannot see it: the parser refused
-        the file, so nothing it exports was read, or its unparsed lines mention ``name`` or the name
-        of a definition it exports as ``name`` (see ``_own_names``), or it vanished."""
+        the file, so nothing it exports was read, or its unparsed lines say a word the export of
+        ``name`` is written with (see ``export_words``) or the name of a definition it exports as
+        ``name`` (see ``_own_names``), or it vanished."""
         if self._refused_parse(exporter):
             return True
-        looked_up = {name, *self._own_names(exporter, name)}
+        looked_up = {*export_words(name), *self._own_names(exporter, name)}
         return any(exporter in self._files_hiding(each) for each in looked_up)
 
     def _refused_parse(self, file: str) -> bool:
@@ -925,7 +1059,7 @@ class CodeIndex:
     @memoized
     def _read_exporters(self, file: str, specifier: str, name: str) -> tuple[ImportFact, ...]:
         """The module ``file``'s import of ``specifier`` resolves to, then each module it re-exports
-        ``name`` from, with the evidence for each."""
+        ``name`` from that exports it or may hide it (see ``_hides``), with the evidence for each."""
         resolved = resolve_import(
             specifier, file, self._scope, self._script_paths(file), self._read_packages()
         )
@@ -957,7 +1091,7 @@ class CodeIndex:
                 if identity in seen:
                     continue
                 seen.add(identity)
-                if self._refused_parse(inherited.path) or name in self._read_export_names(inherited.path):
+                if self._hides(inherited.path, name) or name in self._read_export_names(inherited.path):
                     prior = found.get(inherited.path)
                     if prior is None or inherited.proven:
                         found[inherited.path] = inherited
@@ -972,11 +1106,21 @@ class CodeIndex:
     def _read_imported_names(self, file: str) -> dict[str, ImportedName]:
         return imported_names("\n".join(self._lines_of(file)), file)
 
-    def _module_alias(self, file: str, name: str) -> str | None:
-        """The module ``name`` holds when module-level code binds it to one whole module (see
-        ``ModuleAlias``); None when it binds it to none or to two."""
-        specifiers = {alias.specifier for alias in self._facts_in(file).module_aliases if alias.name == name}
-        return specifiers.pop() if len(specifiers) == 1 else None
+    def _module_alias(self, file: str, name: str) -> ModuleAlias | None:
+        """The alias that binds ``name`` when module-level code binds it to one whole module and in
+        no other way (see ``ModuleAlias`` and ``_binds_otherwise``); None when it binds it to none,
+        to two, or otherwise too."""
+        aliases = {alias for alias in self._facts_in(file).module_aliases if alias.name == name}
+        if len(aliases) != 1 or self._binds_otherwise(file, first_identifier(name)):
+            return None
+        return aliases.pop()
+
+    def _binds_otherwise(self, file: str, name: str) -> bool:
+        """Whether code of ``file`` binds its module-level ``name`` other than by an import: a function
+        or class the module names, or a binding such as `name = make()` (see ``module_bindings``)."""
+        return name in self._facts_in(file).module_bindings or any(
+            span.name == name for span in self._file_structure(file).module_symbols
+        )
 
     def read_slice(self, span: Span, origin: str = "") -> CodeSlice:
         lines = self._lines_of(span.file)
@@ -995,15 +1139,16 @@ class CodeIndex:
         return self.read_slice(span, origin)
 
     def search_text(
-        self, text: str, max_hits: int = MAX_TEXT_HITS, *, whole_word: bool = False
+        self, text: str, max_hits: int | None = None, *, whole_word: bool = False
     ) -> tuple[TextHit, ...]:
-        """Lines holding ``text``, searched once per text for the life of the index. A hit's text is
-        the line up to ``TEXT_HIT_CONTEXT_BYTES`` around its first match; ``whole_word`` keeps only
-        matches no word character touches."""
+        """Every line holding ``text``, in file and line order, or only the first ``max_hits`` when a
+        caller bounds them, searched once per text, bound and word rule for the life of the index. A
+        hit's text is the line up to ``TEXT_HIT_CONTEXT_BYTES`` around its first match; ``whole_word``
+        keeps only matches no word character touches."""
         return self._search_text(text, max_hits, whole_word)
 
     @memoized
-    def _search_text(self, text: str, max_hits: int, whole_word: bool) -> tuple[TextHit, ...]:
+    def _search_text(self, text: str, max_hits: int | None, whole_word: bool) -> tuple[TextHit, ...]:
         found = self._on_available(
             self._available_files(self.files),
             lambda files: tools.ripgrep_fixed(
@@ -1011,7 +1156,7 @@ class CodeIndex:
             ),
         )
         hits = sorted(hit for hit in found if hit.file in self._scope)
-        return tuple(hits[:max_hits])
+        return tuple(hits if max_hits is None else hits[:max_hits])
 
     def imports(self, file: str) -> tuple[str, ...]:
         source = "\n".join(self._lines_of(file))
@@ -1233,15 +1378,25 @@ def _regular_blobs(listing: str) -> dict[str, str]:
     return blobs
 
 
+def _named(spans: Iterable[Span]) -> list[tuple[Span, str]]:
+    return [(span, span.name) for span in spans if span.is_named]
+
+
+def _in_file_order(spans_and_names: Iterable[tuple[Span, str]]) -> tuple[str, ...]:
+    """The names by their spans' order, outer first where spans start together, each name once."""
+    ordered = sorted(spans_and_names, key=lambda entry: (entry[0].start, -entry[0].end))
+    return tuple(dict.fromkeys(name for _, name in ordered))
+
+
 def _commits(log: str) -> list[set[str]]:
     blocks = log.split(_COMMIT_MARK)
     return [{line.strip() for line in block.split("\n") if line.strip()} for block in blocks if block.strip()]
 
 
-def _outermost(symbols: Sequence[Span]) -> list[Span]:
-    return [
-        span for span in symbols if not any(other != span and other.contains(span.start) for other in symbols)
-    ]
+def _innermost_lines(lines: Iterable[tuple[int, int]]) -> tuple[int, int]:
+    """Of the nested scopes around one line, as first and last lines, the innermost: the one that
+    starts last, and of those starting together the one that ends first."""
+    return max(lines, key=lambda scope: (scope[0], -scope[1]))
 
 
 def _innermost(functions: Iterable[Span], line: int) -> Span | None:

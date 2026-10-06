@@ -265,12 +265,7 @@ def _round_robin(queues: list[list[str]]) -> list[str]:
 
 
 def _top_level_names(index: CodeIndex, file: str) -> tuple[str, ...]:
-    names = dict.fromkeys(span.name for span in index.top_level_symbols(file) if _is_named(span.name))
-    return tuple(list(names)[:SYMBOLS_PER_FILE])
-
-
-def _is_named(name: str) -> bool:
-    return bool(name) and not name.startswith("<")
+    return index.module_names(file)[:SYMBOLS_PER_FILE]
 
 
 def _path_description(

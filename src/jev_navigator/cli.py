@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -22,24 +23,26 @@ from .cache_root import cache_root
 from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
-from .cli_trace import create_trace_evidence_pack, not_indexed_lines, unavailable_file_lines
+from .cli_trace import (
+    create_trace_evidence_pack,
+    not_indexed_lines,
+    refused_digested,
+    refused_lines,
+    unavailable_file_lines,
+)
 from .data_root import default_run_folder
 from .directives.entry import EntrySelection, choose_initial_candidates
-from .directives.find_all import CONTAINS_IMPLEMENTATION, FindAllResult, find_all
+from .directives.find_all import FindAllResult, UnitScore, find_all, match_check
 from .directives.find_code import FindResult, Outcome, SearchBudget, Visit, find_code, search_failure
 from .directives.places import Place, place_for_line
 from .environment import checkout_root, load_typesafe_environment
 from .housekeeping import FINISHED_RUN_DAYS, RESUMABLE_RUN_DAYS
+from .index import tools
 from .index.code_index import CodeIndex
-from .index.languages import language_of
+from .index.units import RangeAnchor
 from .judgments.answers import answered_by
 from .judgments.client import JevClient
-from .judgments.journal import (
-    ERROR_TEXT_VARIABLE,
-    error_message,
-    error_text_kept,
-    message_fields,
-)
+from .judgments.journal import ERROR_TEXT_VARIABLE, error_fields, error_text_kept
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import (
     SHARED_STORE_VARIABLE,
@@ -48,8 +51,7 @@ from .judgments.store import (
     run_answer_store,
     shared_store_path,
 )
-from .judgments.thresholds import Thresholds
-from .operations import TraceGraph
+from .judgments.thresholds import NoulVerdict, Thresholds
 from .progress import ProgressJournal, TerminalProgress
 from .run_files import (
     PlaceLabels,
@@ -79,8 +81,11 @@ POSITIVE_BUDGET_FIELDS = ("beam_width", "max_line_chars")
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
 RESUMABLE_OUTCOMES = (Outcome.BUDGET, Outcome.CANCELLED, Outcome.FAILED)
+FIND_ALL_TARGET = "target"
+FIND_ALL_QUESTION = match_check(FIND_ALL_TARGET)
 """A search that stopped before it finished: it saves its frontier, a Find All does not enumerate
 after it, and ``--resume`` continues it."""
+
 OUT_HELP = (
     "New or empty output directory, never pruned (default: a unique run under "
     f"$XDG_DATA_HOME/jev-navigator/runs, pruned after {FINISHED_RUN_DAYS} days, {RESUMABLE_RUN_DAYS} "
@@ -198,6 +203,9 @@ def _run_search(args: argparse.Namespace) -> int:
     else:
         print(f"evidence pack: {output.resolve()}")
         print(f"outcome: {_outcome_summary(result)} ({calls} live calls)")
+        if result.get("refused"):
+            count = len(result["refused"])
+            print(f"refused: {count} request{'' if count == 1 else 's'}, named in report.md")
         if resume_directory is not None:
             print(f"resume: use --resume {output.resolve()} with the same target and repository")
     return 130 if search_outcome == "cancelled" else 0
@@ -312,6 +320,7 @@ def create_evidence_pack(
     repository = repository.resolve()
     output = output.resolve()
     _validate_budget(budget)
+    navigator = _navigator_provenance()
     thresholds = thresholds or Thresholds()
     previous = _previous_pack(resume_from, repository, prefixes, target, starts, thresholds, client, workflow)
     if resume_from is not None:
@@ -345,13 +354,13 @@ def create_evidence_pack(
         if previous is not None:
             if previous["source"]["revision"] != index.commit:
                 raise ValueError("repository revision changed since the evidence pack")
-            checkpoint = load_resume(resume_from.resolve() / "resume.json", index)
+            checkpoint = load_resume(
+                resume_from.resolve() / "resume.json", index, find_all_question=FIND_ALL_QUESTION.question_id
+            )
         labels = PlaceLabels(index, checkpoint.frontier_labels)
         journal.place_label = labels
         resume = checkpoint.result
         resuming_enumeration = checkpoint.completed is not None
-        if resuming_enumeration and checkpoint.check_id != CONTAINS_IMPLEMENTATION.question_id:
-            raise ValueError("Find All question changed since the evidence pack; start a new search")
         judge = Judge(
             client,
             thresholds=thresholds,
@@ -408,14 +417,17 @@ def create_evidence_pack(
         seed_duration_seconds = monotonic() - started
         enumeration = None
         if workflow == "findall" and result.outcome not in RESUMABLE_OUTCOMES:
-            progress.phase("expanding seed and checking remaining functions")
+            progress.phase("judging the found code's units, then every unit in scope")
             enumeration = find_all(
                 index,
                 judge,
-                target,
-                [visit.code.span for visit in result.found],
-                completed=checkpoint.completed or (),
-                check=CONTAINS_IMPLEMENTATION,
+                {FIND_ALL_TARGET: target},
+                files=index.files,
+                anchors=[
+                    RangeAnchor(visit.code.span.file, visit.code.span.start, visit.code.span.end)
+                    for visit in result.found
+                ],
+                completed={FIND_ALL_TARGET: checkpoint.completed or ()},
             )
         duration_seconds = monotonic() - started
         progress.phase("writing evidence pack")
@@ -432,8 +444,8 @@ def create_evidence_pack(
                 result,
                 labels=labels,
                 entry_pending=entry_stop is not None,
-                completed=enumeration.judged if enumeration is not None else None,
-                check_id=CONTAINS_IMPLEMENTATION.question_id if enumeration is not None else None,
+                completed=enumeration.judged[FIND_ALL_TARGET] if enumeration is not None else None,
+                check_id=FIND_ALL_QUESTION.question_id if enumeration is not None else None,
             )
         manifest = _manifest(
             repository,
@@ -444,6 +456,7 @@ def create_evidence_pack(
             thresholds,
             index,
             result,
+            navigator=navigator,
             requested_model=getattr(client, "model", "unknown"),
             judge=judge,
             duration_seconds=seed_duration_seconds,
@@ -456,17 +469,7 @@ def create_evidence_pack(
         )
         manifest["workflow"] = workflow
         if workflow == "findall" and enumeration is None:
-            enumeration = FindAllResult(
-                target,
-                TraceGraph((), (), (), "not_started"),
-                (),
-                tuple(index.files),
-                index.observed_unparsed_files,
-                tuple(file for file in index.files if not language_of(file)),
-                index.unavailable_files,
-                str(result.outcome),
-                0,
-            )
+            enumeration = FindAllResult.not_started({FIND_ALL_TARGET: target}, str(result.outcome))
         if enumeration is not None:
             manifest["seed_search"] = previous["seed_search"] if resuming_enumeration else manifest["search"]
             manifest["search"] = _find_all_summary(
@@ -478,7 +481,7 @@ def create_evidence_pack(
         if not keep_requests:
             _drop_code(manifest, labels)
         if not journal.keeps_error_text:
-            _digest_history_failures(manifest)
+            _digest_error_text(manifest)
         _write_json(output / "manifest.json", manifest)
         (output / "report.md").write_text(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
@@ -518,8 +521,8 @@ def _failure_record(error: BaseException, judge: Judge, journal: ProgressJournal
     request_id = judge.failed_request(error)
     keep = journal.keeps_error_text
     return {
-        **_error_fields(error, keep),
-        "causes": [_error_fields(cause, keep) for cause in _causes(error)],
+        **error_fields(error, keep_text=keep),
+        "causes": [error_fields(cause, keep_text=keep) for cause in _causes(error)],
         "request_id": request_id,
         "route": journal.routes.get(request_id) if request_id is not None else None,
         "status": journal.statuses.get(request_id) if request_id is not None else None,
@@ -545,10 +548,6 @@ def _failure_lines(search: dict, bullet: str) -> list[str]:
         f"{bullet}Failure: {failure['type']}{status}; its message ({failure['message_length']} characters, "
         f"SHA-256 `{failure['message_sha256']}`) was printed to stderr; --no-error-text kept only its digest"
     ]
-
-
-def _error_fields(error: BaseException, keep: bool) -> dict:
-    return {"type": type(error).__name__, **message_fields(error_message(error), keep_text=keep)}
 
 
 def _causes(error: BaseException) -> list[BaseException]:
@@ -1043,6 +1042,7 @@ def _manifest(
     index: CodeIndex,
     result: FindResult,
     *,
+    navigator: dict,
     requested_model: str,
     judge: Judge,
     duration_seconds: float,
@@ -1060,7 +1060,7 @@ def _manifest(
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "navigator": _navigator_provenance(),
+        "navigator": navigator,
         "source": {
             "repository": str(repository),
             "revision": index.commit,
@@ -1125,10 +1125,13 @@ def _manifest(
     }
 
 
-def _digest_history_failures(manifest: dict) -> None:
+def _digest_error_text(manifest: dict) -> None:
+    """Keeps each history failure's and refused request's message only as its digest."""
     for name in ("search", "seed_search"):
         search = manifest.get(name) or {}
         search["history"] = [failure_digested(step) for step in search.get("history", [])]
+        if "refused" in search:
+            search["refused"] = refused_digested(search["refused"])
 
 
 def _drop_code(manifest: dict, labels: PlaceLabels) -> None:
@@ -1170,37 +1173,62 @@ def _find_all_summary(
     result: FindAllResult, calls: int, elapsed: float, previous: dict | None, not_indexed: dict[str, str]
 ) -> dict:
     old_search = previous["search"] if previous else {}
-
-    def answer(value):
-        return {
-            "source": {key: value.item[key] for key in ("file", "lines", "commit", "file_sha256")},
-            "code": value.item["code"],
-            "name": value.item["name"],
-            "probability": value.probability,
-            "verdict": value.verdict,
-            "request_sha256": value.request_sha256,
-            "from_store": value.from_store,
-            **answered_by(value.source()),
-        }
-
+    scores = result.scores(FIND_ALL_TARGET)
     return {
         "outcome": result.stopped_by,
         "coverage": result.coverage,
-        "unit": "function",
+        "unit": "a function, a method, or a file's top-level code",
         "calls": old_search.get("calls", 0) + calls,
         "calls_this_invocation": calls,
         "enumeration_calls": old_search.get("enumeration_calls", 0) + result.calls,
         "duration_seconds": round(old_search.get("duration_seconds", 0) + elapsed, 3),
-        "found": [answer(value) for value in result.matched],
-        "unsure": [answer(value) for value in result.uncertain],
-        "searched": [answer(value) for value in result.negative],
-        "remaining_files": list(result.remaining_files),
+        "room_chars": result.room,
+        **{
+            group: [_unit_shown(score) for score in scores if score.answer.verdict == verdict]
+            for group, verdict in _VERDICT_GROUPS
+        },
+        "not_judged": dict(result.not_judged),
+        "refused": {
+            refusal.place.id: error_fields(refusal.error)
+            for refusal in result.refusals
+            if refusal.place is not None
+        },
+        "unlisted_files": dict(result.unlisted),
+        "unresolved_seeds": [
+            {**asdict(problem.anchor), "problem": problem.problem} for problem in result.unresolved
+        ],
         "unparsed_files": sorted(result.unparsed_files),
-        "unsupported_files": list(result.unsupported_files),
-        "unavailable_files": dict(result.unavailable_files),
         "not_indexed_files": dict(not_indexed),
-        "graph": asdict(result.graph),
     }
+
+
+_VERDICT_GROUPS = (("found", NoulVerdict.YES), ("unsure", NoulVerdict.UNSURE), ("searched", NoulVerdict.NO))
+
+
+def _unit_shown(score: UnitScore) -> dict:
+    """A judged unit as the pack shows it: where it is, the code judged (the unit, or for a cut unit
+    its best piece), and the answer that judged it."""
+    unit, answer = score.unit, score.answer
+    shown = {
+        "unit": unit.id,
+        "kind": str(unit.kind),
+        "name": unit.symbol,
+        "source": {"file": unit.path, "runs": [list(run) for run in unit.ranges], "commit": unit.revision},
+        "unit_sha256": unit.content_sha256,
+        "code": answer.item["code"],
+        "probability": answer.probability,
+        "verdict": answer.verdict,
+        "request_sha256": answer.request_sha256,
+        "from_store": answer.from_store,
+        **answered_by(answer.source()),
+    }
+    if score.piece is not None:
+        shown["piece"] = {
+            "index": score.piece.index,
+            "lines": [score.piece.start, score.piece.end],
+            "of": len(unit.pieces),
+        }
+    return shown
 
 
 def _not_indexed_section(search: dict) -> list[str]:
@@ -1222,34 +1250,47 @@ def _find_all_report(manifest: dict) -> str:
         f"{search['calls']} live requests; "
         f"{search['duration_seconds']:.3f}s for seed search and enumeration.",
         "",
-        "Coverage counts function bodies examined. It does not prove model accuracy, behavioral "
-        "equivalence or absence of other implementations. Uncertain graph bindings remain uncertain.",
+        "Coverage counts the units examined: each function, method and file's top-level code in scope. "
+        "It does not prove model accuracy, behavioral equivalence or absence of other implementations.",
         "",
-        "| Result | P(contains target) | Function | Source |",
+        "| Result | P(matches target) | Unit | Source |",
         "| --- | ---: | --- | --- |",
     ]
-    for group in ("found", "unsure", "searched"):
+    for group, _ in _VERDICT_GROUPS:
         for value in search[group]:
-            source = value["source"]
             lines.append(
-                f"| {group} | {value['probability']:.3f} | `{value['name']}` | "
-                f"`{source['file']}:{source['lines'][0]}-{source['lines'][1]}` |"
+                f"| {group} | {value['probability']:.3f} | `{value['name']}` | `{_judged_location(value)}` |"
             )
     lines += ["", "## Coverage gaps", ""]
-    for field in ("remaining_files", "unparsed_files", "unsupported_files"):
-        lines.append(f"- {field}: {', '.join(search[field]) or 'none'}")
-    lines.append("- unavailable_files:" if search["unavailable_files"] else "- unavailable_files: none")
-    lines += unavailable_file_lines(search["unavailable_files"])
+    lines.append(f"- not_judged: {_reason_counts(search['not_judged']) or 'none'}")
+    lines.append("- refused:" if search["refused"] else "- refused: none")
+    lines += refused_lines(search["refused"])
+    lines.append("- unlisted_files:" if search["unlisted_files"] else "- unlisted_files: none")
+    lines += unavailable_file_lines(search["unlisted_files"])
+    lines.append(f"- unresolved_seeds: {len(search['unresolved_seeds']) or 'none'}")
+    lines.append(f"- unparsed_files: {', '.join(search['unparsed_files']) or 'none'}")
     lines += _not_indexed_section(search)
-    lines += ["", "## Matching bodies", ""]
+    lines += ["", "## Matching units", ""]
     for value in search["found"]:
-        source = value["source"]
-        lines += [f"### {source['file']}:{source['lines'][0]}-{source['lines'][1]}", ""]
+        lines += [f"### {_judged_location(value)}", ""]
         lines += _code_block(value, "")
     return "\n".join(lines) + "\n"
 
 
+def _reason_counts(not_judged: dict[str, str]) -> str:
+    """``2 too large to judge, 5 not reached: ...``: how many units or pieces were left for each reason."""
+    return ", ".join(f"{count} {reason}" for reason, count in sorted(Counter(not_judged.values()).items()))
+
+
+def _judged_location(value: dict) -> str:
+    """``file:first-last, ...``: the runs of the unit, or of the piece of it that was judged."""
+    runs = [value["piece"]["lines"]] if "piece" in value else value["source"]["runs"]
+    return f"{value['source']['file']}:{', '.join(f'{first}-{last}' for first, last in runs)}"
+
+
 def _navigator_provenance() -> dict:
+    """JVN's own build. A run reads it before it searches: its git calls take a memory slot, so read
+    while writing a pack after a memory stop, the limit would refuse them and the pack would be lost."""
     package_root = Path(__file__).resolve().parent
     source_files = sorted(package_root.rglob("*.py"))
     digest = hashlib.sha256()
@@ -1267,32 +1308,33 @@ def _navigator_provenance() -> dict:
 
 def _checkout_revision(checkout: Path | None) -> dict:
     """jvn's own checkout's HEAD and whether it has changes. Without a checkout there is no
-    revision to record; when git cannot answer, its message is kept instead of stopping a search
-    that has already finished."""
+    revision to record; when git cannot answer, its message is kept instead of stopping the run."""
     revision: dict = {"source_revision": None, "source_dirty": None, "source_revision_error": None}
     if checkout is None:
         return revision
     try:
         head = _git(checkout, "rev-parse", "HEAD")
         dirty = bool(_git(checkout, "status", "--porcelain", "--untracked-files=all"))
-    except subprocess.CalledProcessError as error:
-        return revision | {
-            "source_revision_error": f"git {' '.join(error.cmd[1:])} failed: {error.stderr.strip()}"
-        }
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return revision | {"source_revision_error": f"git failed: {error}"}
+    except _CheckoutGitError as error:
+        return revision | {"source_revision_error": str(error)}
     return revision | {"source_revision": head, "source_dirty": dirty}
 
 
+CHECKOUT_GIT_TIMEOUT_SECONDS = 10
+
+
+class _CheckoutGitError(RuntimeError):
+    """A git call about jvn's own checkout that failed, named by its arguments, with git's message."""
+
+
 def _git(repository: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", *args],
-        cwd=repository,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    ).stdout.strip()
+    """The checkout above JVN's own source can be a whole project, when JVN is installed in a virtual
+    environment inside it, so its status may take long. A failure, a timeout or a git that cannot
+    start raises ``_CheckoutGitError``."""
+    try:
+        return tools.git(args, repository, timeout=CHECKOUT_GIT_TIMEOUT_SECONDS).strip()
+    except (tools.ToolFailedError, OSError, subprocess.TimeoutExpired) as error:
+        raise _CheckoutGitError(f"git {' '.join(args)} failed: {error}") from error
 
 
 def _visit(visit: Visit) -> dict:

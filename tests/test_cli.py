@@ -5,12 +5,14 @@ import inspect
 import io
 import json
 import os
+import shutil
 import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+from conftest import REFUSAL, REFUSAL_DIGEST, RefusingClient
 from git_repos import commit_files, git
 from isolated_jvn import JVN
 
@@ -22,6 +24,7 @@ from jev_navigator.cli import (
     create_evidence_pack,
     main,
 )
+from jev_navigator.directives.find_all import REFUSED
 from jev_navigator.directives.find_code import SearchBudget
 from jev_navigator.environment import load_typesafe_environment
 from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
@@ -187,6 +190,43 @@ def test_a_git_failure_in_jvns_checkout_is_recorded_instead_of_raised(
     assert provenance["source_dirty"] is None
     assert provenance["source_revision_error"].startswith("git rev-parse HEAD failed: ")
     assert len(provenance["source_revision_error"]) > len("git rev-parse HEAD failed: ")
+
+
+def test_a_git_call_in_jvns_checkout_past_its_timeout_is_recorded_instead_of_waited_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: a git whose status in jvn's checkout takes five seconds, as in a large project
+    checkout = tmp_path / "jvn-checkout"
+    commit_files(checkout, {"README.md": "jvn\n"})
+    monkeypatch.setattr(cli, "checkout_root", lambda: checkout)
+    monkeypatch.setattr(cli, "CHECKOUT_GIT_TIMEOUT_SECONDS", 1)
+    _put_first_on_path(monkeypatch, tmp_path / "bin", _git_slow_in(checkout, "status"))
+
+    # Act
+    manifest = _small_search_manifest(tmp_path)
+
+    # Assert
+    provenance = manifest["navigator"]
+    assert provenance["source_revision"] is None
+    assert provenance["source_revision_error"].startswith(
+        "git status --porcelain --untracked-files=all failed: "
+    )
+
+
+def _git_slow_in(checkout: Path, command: str) -> str:
+    """A git that sleeps five seconds before ``command`` in ``checkout``, and is the real git
+    otherwise."""
+    return f"""#!/bin/sh
+if [ "$PWD" = "{checkout.resolve()}" ] && [ "$1" = "{command}" ]; then sleep 5; fi
+exec "{shutil.which("git")}" "$@"
+"""
+
+
+def _put_first_on_path(monkeypatch: pytest.MonkeyPatch, folder: Path, git_script: str) -> None:
+    folder.mkdir()
+    (folder / "git").write_text(git_script)
+    (folder / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ['PATH']}")
 
 
 def _small_search_manifest(tmp_path: Path) -> dict:
@@ -513,7 +553,7 @@ def test_findall_pack_composes_seed_search_with_disconnected_enumeration(tmp_pat
     saved = json.loads((output / "manifest.json").read_text())
     assert manifest["search"]["outcome"] == "scope_examined"
     assert saved["workflow"] == "findall"
-    assert saved["search"]["coverage"] == "functions_examined"
+    assert saved["search"]["coverage"] == "units_examined"
     assert {item["name"] for item in saved["search"]["found"]} == {"admit", "fits"}
     assert saved["seed_search"]["outcome"] == "found"
     assert saved["search"]["calls"] == len(client.requests)
@@ -1225,13 +1265,54 @@ def test_findall_budget_stop_writes_partial_pack_with_completed_results(tmp_path
     saved = json.loads((out / "manifest.json").read_text())
     assert saved["search"]["outcome"] == result["search"]["outcome"]
     assert saved["search"]["calls"] <= cap
-    if cap < 3:
+    if cap == 0:
+        assert saved["search"]["outcome"] == "budget"
+        assert saved["search"]["room_chars"] is None, "the seed search stops before Find All starts"
+    elif cap < 3:
         assert saved["search"]["outcome"] == "budget"
         assert saved["search"]["coverage"] == "partial"
-        assert saved["search"]["remaining_files"]
+        assert saved["search"]["not_judged"]
     else:
         assert saved["search"]["found"]
     assert (out / "report.md").is_file()
+
+
+@pytest.mark.parametrize("keep_error_text", [True, False])
+def test_findall_names_a_refused_unit_and_its_error_and_judges_the_rest(
+    tmp_path: Path, keep_error_text: bool
+) -> None:
+    # Arrange
+    repo = tmp_path / "repo"
+    commit_files(
+        repo,
+        {
+            "policy.py": "def admit(item):\n    return len(item) <= 3\n",
+            "other.py": "def refused_here(item):\n    return 'REFUSE-ME'\n",
+        },
+    )
+
+    # Act
+    result = create_evidence_pack(
+        repo,
+        (),
+        "item limit",
+        (),
+        tmp_path / "pack",
+        SearchBudget(max_calls=20),
+        RefusingClient(ScriptedJevClient(default_noul=0.2), "REFUSE-ME", list_name="items"),
+        workflow="findall",
+        keep_error_text=keep_error_text,
+    )
+
+    # Assert: without error text the message is kept only as its digest.
+    search = result["search"]
+    message = {"message": REFUSAL} if keep_error_text else REFUSAL_DIGEST
+    assert search["outcome"] == "scope_examined"
+    assert search["not_judged"] == {"other.py:1-2": REFUSED}
+    assert search["refused"] == {"other.py:1-2": {"type": "InputBudgetExceededError", **message}}
+    assert ("InputBudgetExceededError: max_tokens_exceeded" in (tmp_path / "pack/report.md").read_text()) == (
+        keep_error_text
+    )
 
 
 def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
@@ -1494,7 +1575,8 @@ def test_find_and_findall_reports_name_each_refused_file_with_its_reason(tmp_pat
             workflow=workflow,
             fact_cache_dir=tmp_path / "facts",
         )
-        reports[workflow] = ((output / "report.md").read_text(), manifest["search"]["unavailable_files"])
+        refused = "unlisted_files" if workflow == "findall" else "unavailable_files"
+        reports[workflow] = ((output / "report.md").read_text(), manifest["search"][refused])
 
     # Assert
     for report, unavailable in reports.values():

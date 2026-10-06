@@ -13,7 +13,6 @@ from test_cli_run_logs import TARGET, limit_client, marked_repository
 
 from jev_navigator import cli
 from jev_navigator.cli import create_evidence_pack
-from jev_navigator.directives.find_all import CONTAINS_IMPLEMENTATION
 from jev_navigator.directives.find_code import SearchBudget
 from jev_navigator.judgments.journal import RawAttempt, RawResponse
 from jev_navigator.judgments.questions import request_sha256
@@ -118,7 +117,7 @@ def enumerating(name: str) -> Callable[[int, Mapping], bool]:
 
     def holds(position: int, state: Mapping) -> bool:
         del position
-        return any(item.get("name") == name for item in state.get("items", []))
+        return any(item.get("code", "").startswith(f"def {name}(") for item in state.get("items", []))
 
     return holds
 
@@ -156,9 +155,10 @@ def verdicts(manifest: dict) -> list[tuple[str, str, str]]:
 
 
 def items_asked(requests: list[tuple[Mapping, Mapping]]) -> list[str]:
-    """Each enumerated item once per request that asked it, by span key: batches regroup on Resume,
+    """Each enumerated item once per request that asked it, by its content: batches regroup on Resume,
     so request hashes differ while the items asked must not."""
-    return sorted(item["span_key"] for state, _ in requests for item in state.get("items", []))
+    items = (item for state, _ in requests for item in state.get("items", []))
+    return sorted(json.dumps(item, sort_keys=True) for item in items)
 
 
 def uninterrupted_requests(repository: Path, tmp_path: Path) -> tuple[dict, list[str]]:
@@ -348,21 +348,21 @@ def test_a_find_all_whose_seed_search_fails_never_starts_its_enumeration(
     # Assert
     assert status == 1
     assert manifest_of(tmp_path / "findall")["search"]["outcome"] == "failed"
-    assert not any(map(asks(CONTAINS_IMPLEMENTATION.question_id), failing.received))
+    assert not any(map(asks(cli.FIND_ALL_QUESTION.question_id), failing.received))
     assert (tmp_path / "findall" / "resume.json").is_file()
 
 
 @pytest.mark.parametrize(
-    ("interruption", "status"), [(provider_error(), 1), (KeyboardInterrupt(), 130)], ids=["failure", "ctrl_c"]
+    ("interruption", "status"), [(provider_error, 1), (KeyboardInterrupt, 130)], ids=["failure", "ctrl_c"]
 )
 def test_an_entry_selection_stopped_by_a_failure_or_ctrl_c_resumes_to_the_uninterrupted_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: BaseException, status: int
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: Callable[[], BaseException], status: int
 ) -> None:
     # Arrange
     repository = marked_repository(tmp_path / "repository")
     whole, whole_client = uninterrupted("find", repository, tmp_path)
     store = tmp_path / "answers.sqlite"
-    stopping = FailsOnRequest(limit_client(), first_request, interruption)
+    stopping = FailsOnRequest(limit_client(), first_request, interruption())
     resuming = closable(limit_client())
     use_clients(monkeypatch, iter([stopping, resuming]))
     first, second = tmp_path / "first", tmp_path / "second"
@@ -387,16 +387,16 @@ def test_an_entry_selection_stopped_by_a_failure_or_ctrl_c_resumes_to_the_uninte
 
 
 @pytest.mark.parametrize(
-    ("interruption", "status"), [(provider_error(), 1), (KeyboardInterrupt(), 130)], ids=["failure", "ctrl_c"]
+    ("interruption", "status"), [(provider_error, 1), (KeyboardInterrupt, 130)], ids=["failure", "ctrl_c"]
 )
 def test_a_find_all_enumeration_stopped_by_a_failure_or_ctrl_c_resumes_to_the_uninterrupted_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: BaseException, status: int
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: Callable[[], BaseException], status: int
 ) -> None:
     # Arrange
     repository = many_functions_repository(tmp_path / "repository")
     whole, whole_client = uninterrupted("findall", repository, tmp_path)
     store = tmp_path / "answers.sqlite"
-    stopping = FailsOnRequest(limit_client(), once(enumerating("helper_20")), interruption)
+    stopping = FailsOnRequest(limit_client(), once(enumerating("helper_20")), interruption())
     resuming = closable(limit_client())
     use_clients(monkeypatch, iter([stopping, resuming]))
     first, second = tmp_path / "first", tmp_path / "second"

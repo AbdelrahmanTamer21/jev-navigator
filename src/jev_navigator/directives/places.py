@@ -226,7 +226,7 @@ def place_relationship(place: Place) -> dict | None:
 
 
 def _enclosing_definition(index: CodeIndex, file: str, line: int) -> Span | None:
-    definitions = (*index.symbols_in(file), *index.declarations_in(file))
+    definitions = (*index.symbols_in(file), *index.declarations_in(file), *_schema_block_spans(index, file))
     return min((span for span in definitions if span.contains(line)), key=Span.size, default=None)
 
 
@@ -294,7 +294,7 @@ def _within(inner: Span, outer: Span) -> bool:
 
 
 def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    if not _is_named(opened.span):
+    if not opened.span.is_named:
         return []
     sites = sorted(
         (site for site in index.find_callers(opened.span.name) if falls_inside(site.binding, opened.span)),
@@ -304,6 +304,21 @@ def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
         place_for_line(index, site.file, site.line, f"calls {opened.span.name}", binding=site.binding)
         for site in sites
     ]
+
+
+def _client_calls(index: CodeIndex, opened: CodeSlice) -> list[Place]:
+    """The code that queries a model or view the opened lines of a schema declare, found by the
+    text of its Prisma Client calls (``.website.`` for ``model Website``), tests last."""
+    calls = sorted(
+        (
+            (hit, f"queries {block.keyword} {block.name} by the text `{block.client_call_text}`")
+            for block in index.schema_blocks_in(opened.span.file)
+            if block.client_call_text and opened.span.overlaps(Span(opened.span.file, block.start, block.end))
+            for hit in index.search_text(block.client_call_text)
+        ),
+        key=lambda call: is_test_file(call[0].file),
+    )
+    return [place_for_line(index, hit.file, hit.line, relation) for hit, relation in calls]
 
 
 def _callees(index: CodeIndex, opened: CodeSlice) -> list[Place]:
@@ -325,8 +340,24 @@ def _callee_rank(index: CodeIndex, edge: CallEdge) -> tuple[bool, bool, int]:
     return not edge.binding.proven, only_tests, index.call_site_count(edge.name) if targets else 0
 
 
+def _queried_models(index: CodeIndex, opened: CodeSlice) -> list[Place]:
+    """The model and view blocks whose Prisma Client calls the opened code holds, found by their
+    text: ``.website.`` in ``prisma.client.website.update(...)`` opens ``model Website``."""
+    source = _span_label(opened.span)
+    return [
+        function_place(
+            index,
+            Span(file, block.start, block.end, block.name),
+            f"{block.keyword} {block.name}, which {source} queries by the text `{block.client_call_text}`",
+        )
+        for file in index.schema_files
+        for block in index.schema_blocks_in(file)
+        if block.client_call_text and block.client_call_text in opened.text
+    ]
+
+
 def _referenced_by(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    if not _is_named(opened.span):
+    if not opened.span.is_named:
         return []
     name = opened.span.name
     return [
@@ -387,19 +418,20 @@ def _with_binding(relation: str, binding: Binding | None) -> str:
 
 
 def _same_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
-    """The other functions of the file, nearest to the opened code first; a function nested in
-    another is part of that function. An anonymous function first offers its nearest named
-    container, else its nearest container: a callback in a test's callback offers that test."""
+    """The other functions of the file, or the other blocks of a Prisma schema, nearest to the
+    opened code first; a function nested in another is part of that function. An anonymous function
+    first offers its nearest named container, else its nearest container: a callback in a test's
+    callback offers that test."""
     relation = f"in the same file as {_span_label(opened.span)}"
-    functions = index.functions_in(opened.span.file)
+    functions = (*index.functions_in(opened.span.file), *_schema_block_spans(index, opened.span.file))
     container = None
-    if not _is_named(opened.span):
+    if not opened.span.is_named:
         containers = [
             span
             for span in index.symbols_in(opened.span.file)
             if span != opened.span and span.contains(opened.span.start)
         ]
-        named = [span for span in containers if _is_named(span)]
+        named = [span for span in containers if span.is_named]
         container = min(named or containers, key=Span.size, default=None)
     outermost = [span for span in functions if not any(_encloses(other, span) for other in functions)]
     others = [span for span in outermost if not span.overlaps(opened.span)]
@@ -471,12 +503,13 @@ def _rest_of_file(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     return [range_place(index, span.file, span.end + 1, end, f"the lines after {span.key}")]
 
 
-def _is_named(span: Span) -> bool:
-    return bool(span.name) and not span.name.startswith("<")
+def _schema_block_spans(index: CodeIndex, file: str) -> list[Span]:
+    """A Prisma schema's model, view, enum and type blocks, each named by its name; none elsewhere."""
+    return [Span(file, block.start, block.end, block.name) for block in index.schema_blocks_in(file)]
 
 
 def _span_label(span: Span) -> str:
-    return span.name if _is_named(span) else span.key
+    return span.name if span.is_named else span.key
 
 
 def starting_places(index: CodeIndex, locations: Sequence[tuple[str, int]]) -> list[Place]:
@@ -486,7 +519,9 @@ def starting_places(index: CodeIndex, locations: Sequence[tuple[str, int]]) -> l
 MOVES: Mapping[str, Move] = MappingProxyType(
     {
         "callers": _callers,
+        "client_calls": _client_calls,
         "callees": _callees,
+        "queried_models": _queried_models,
         "referenced_by": _referenced_by,
         "passed_on": _passed_on,
         "imported": _imported,

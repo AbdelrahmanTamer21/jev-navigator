@@ -20,6 +20,7 @@ import json
 import logging
 import sqlite3
 import threading
+import weakref
 from collections.abc import Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from functools import cache
@@ -37,7 +38,6 @@ DECLARATION = "declaration"
 CALL = "call"
 REFERENCE = "reference"
 DEFINITION_KINDS = (SYMBOL, DECLARATION)
-_ANONYMOUS = "<anonymous>"
 _logger = logging.getLogger(__name__)
 _QUERY_CHUNK = 500
 ROWS_PER_TRANSACTION = 10_000
@@ -71,6 +71,7 @@ class NameTable:
         self.path = table_path(root)
         self._lock = threading.Lock()
         self._db = open_shared_database(self.path, _SCHEMA)
+        weakref.finalize(self, self._db.close)
 
     def entries(self, blobs: Collection[str]) -> dict[str, FileEntry]:
         """The entries of those ``blobs`` whose rows the table holds, each confirmed today. An entry
@@ -211,7 +212,7 @@ def _rows(blob: str, facts: FileFacts) -> Iterator[tuple]:
     structure = facts.structure
     for kind, spans in ((SYMBOL, structure.symbols), (DECLARATION, structure.declarations)):
         for position, span in enumerate(spans):
-            if span.name != _ANONYMOUS:
+            if span.is_named:
                 yield span.name, blob, kind, position, span.start, span.end, None, None
     for position, call in enumerate(facts.calls):
         yield call.name, blob, CALL, position, call.line, call.line, None, call.receiver

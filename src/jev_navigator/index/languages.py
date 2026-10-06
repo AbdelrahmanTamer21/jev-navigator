@@ -145,6 +145,9 @@ COMMONJS_EXPORTS_OBJECT = (
     f"has: {{field: left, {_MODULE_EXPORTS}}}}}}}"
 )
 COMMONJS_EXPORT_PAIR = f"{{kind: pair, inside: {COMMONJS_EXPORTS_OBJECT}}}"
+# A `const`, `let` or `var` of the module itself, exported or not, whose object literal value holds
+# functions named after it: `const api = { list() {} }` holds `api.list`.
+MODULE_VARIABLE = f"{{kind: variable_declarator, inside: {{{_ANY_VARIABLES}, {_IN_MODULE}}}}}"
 
 # ast-grep prints every node a rule's relations match, so a relation to a large ancestor (the
 # program, a module statement, an object literal) printed that ancestor once per match, and the
@@ -256,7 +259,8 @@ _SCRIPT_MODULE_ALIASES = (
 )
 # In Python, `import app.jobs as jobs` binds `jobs` to `app.jobs`, and `import app.jobs` makes the
 # dotted name `app.jobs` reach that module, outside any function or class. A plain import captures
-# no `$SPEC`: the name is the module.
+# no `$SPEC`: the name is the module. Every dotted name directly in the statement is one it imports;
+# a relation's `field` would reach only the first (see ``PYTHON_FROM_IMPORT``).
 _PYTHON_OUTSIDE_SCOPES = (
     "not: {inside: {stopBy: end, any: [{kind: function_definition}, {kind: class_definition}]}}"
 )
@@ -270,7 +274,7 @@ _PYTHON_MODULE_ALIASES = (
     f"""  kind: dotted_name
   pattern: $NAME
   all:
-    - not: {{not: {{inside: {{field: name, kind: import_statement}}}}}}
+    - not: {{not: {{inside: {{kind: import_statement}}}}}}
     - {_PYTHON_OUTSIDE_SCOPES}""",
 )
 MODULE_ALIAS_RULES = {
@@ -279,6 +283,32 @@ MODULE_ALIAS_RULES = {
     "tsx": _SCRIPT_MODULE_ALIASES,
     "javascript": _SCRIPT_MODULE_ALIASES,
 }
+
+# In Python, `from pkg import mod` outside any function or class binds `mod` to the attribute `mod`
+# of `pkg`, which is the module `pkg.mod` unless the package's `__init__` binds that name itself. The
+# statement is matched with its package captured as `$FROM`, and each name it takes is matched on
+# its own, quietly, with `$SPEC` as imported and `$NAME` as bound, so a list of a hundred names
+# prints the statement once, not a hundred times. A star import takes the name `*`. A relation's
+# `field` reaches only the first of the names the statement lists under one field, so a plain name is
+# any dotted name directly in the statement other than its module.
+PYTHON_FROM_IMPORT = f"""  kind: import_from_statement
+  has: {{field: module_name, pattern: $FROM}}
+  {_PYTHON_OUTSIDE_SCOPES}"""
+PYTHON_FROM_IMPORT_NAMES = (
+    """  kind: aliased_import
+  all:
+    - has: {field: name, pattern: $SPEC}
+    - has: {field: alias, pattern: $NAME}
+    - not: {not: {inside: {kind: import_from_statement}}}""",
+    """  kind: dotted_name
+  pattern: $NAME
+  all:
+    - not: {not: {inside: {kind: import_from_statement}}}
+    - not: {inside: {field: module_name, kind: import_from_statement}}""",
+    """  kind: wildcard_import
+  pattern: $NAME
+  not: {not: {inside: {kind: import_from_statement}}}""",
+)
 
 # The names a function binds for its own body, one match per name: its parameters, the names its
 # declarations and destructurings bind, a caught error, a loop variable, and in Python each
@@ -315,35 +345,141 @@ def _script_local_names(language: str, exclusions: str) -> str:
 {exclusions}"""
 
 
+# A function's own `const name = require('module')`, declared in a block: the name holds that
+# module from its line to the end of the block, and a `const` is never bound again. The binding
+# itself is one of the function's own names (see ``LOCAL_NAME_RULES``); this rule says which module
+# it holds, joined to it by the name's position. A `let` or `var` may be bound again, a computed
+# module names none, and a `const` in a loop head or a `switch` case holds none here.
+_CONST_DECLARATION = "{kind: lexical_declaration, has: {field: kind, regex: '^const$'}}"
+
+
+def _script_local_modules(language: str) -> str:
+    functions = ", ".join(f"{{kind: {kind}}}" for kind in FUNCTION_KINDS[language])
+    return f"""  pattern: {{context: 'var $NAME = require($SPEC)', selector: variable_declarator}}
+  all:
+    - not: {{not: {{has: {{field: name, kind: identifier}}}}}}
+    - not: {{not: {{has: {{field: value, has: {{field: arguments, has: {{kind: string}}}}}}}}}}
+    - not: {{not: {{inside: {{all: [{_CONST_DECLARATION}, {{inside: {{kind: statement_block}}}}]}}}}}}
+    - not: {{not: {{inside: {{stopBy: end, any: [{functions}]}}}}}}"""
+
+
+# The blocks a function's own `const` require ends in early: a statement block other than a
+# function's body that directly holds a `const` require. A body ends with its function, so it is
+# left out, which keeps the scan from printing every function body.
+_CONST_REQUIRE = (
+    "{kind: lexical_declaration, all: [{has: {field: kind, regex: '^const$'}},"
+    " {has: {kind: variable_declarator, has: {field: value, pattern: 'require($SPEC)'}}}]}"
+)
+
+
+def _script_local_module_blocks(language: str) -> str:
+    functions = ", ".join(f"{{kind: {kind}}}" for kind in FUNCTION_KINDS[language])
+    return f"""  kind: statement_block
+  all:
+    - not: {{not: {{has: {_CONST_REQUIRE}}}}}
+    - not: {{inside: {{any: [{functions}]}}}}
+    - not: {{not: {{inside: {{stopBy: end, any: [{functions}]}}}}}}"""
+
+
+LOCAL_MODULE_RULES = {
+    "typescript": _script_local_modules("typescript"),
+    "tsx": _script_local_modules("tsx"),
+    "javascript": _script_local_modules("javascript"),
+}
+LOCAL_MODULE_BLOCK_RULES = {
+    "typescript": _script_local_module_blocks("typescript"),
+    "tsx": _script_local_module_blocks("tsx"),
+    "javascript": _script_local_module_blocks("javascript"),
+}
+
+
+# The places a Python statement binds a name: an assignment's, an augmented assignment's or a loop's
+# target, a walrus, and a with or except target.
+_PYTHON_ASSIGNED_NAMES = """            - inside:
+                stopBy: end
+                field: left
+                any: [{kind: assignment}, {kind: augmented_assignment}, {kind: for_statement}]
+            - inside: {field: name, kind: named_expression}
+            - inside: {kind: as_pattern_target}"""
+_PYTHON_NOT_A_NAME = "inside: {stopBy: end, any: [{kind: attribute}, {kind: subscript}, {kind: type}]}"
+_PYTHON_PARAMETER_LISTS = "{any: [{kind: parameters}, {kind: lambda_parameters}, {kind: typed_parameter}]}"
+_PYTHON_OWN_SCOPES = "any: [{kind: function_definition}, {kind: class_definition}, {kind: lambda}]"
+
 LOCAL_NAME_RULES = {
-    "python": """  kind: identifier
+    "python": f"""  kind: identifier
   all:
     - not:
         not:
           any:
-            - inside: {any: [{kind: parameters}, {kind: lambda_parameters}, {kind: typed_parameter}]}
+            - inside: {_PYTHON_PARAMETER_LISTS}
             - inside:
                 field: name
-                any: [{kind: default_parameter}, {kind: typed_default_parameter}]
+                any: [{{kind: default_parameter}}, {{kind: typed_default_parameter}}]
             - inside:
-                any: [{kind: list_splat_pattern}, {kind: dictionary_splat_pattern}]
-                inside: {any: [{kind: parameters}, {kind: lambda_parameters}, {kind: typed_parameter}]}
-            - inside:
-                stopBy: end
-                field: left
-                any:
-                  - kind: assignment
-                  - kind: augmented_assignment
-                  - kind: for_statement
-                  - kind: for_in_clause
-            - inside: {field: name, kind: named_expression}
-            - inside: {kind: as_pattern_target}
-    - not: {not: {inside: {stopBy: end, kind: function_definition}}}
+                any: [{{kind: list_splat_pattern}}, {{kind: dictionary_splat_pattern}}]
+                inside: {_PYTHON_PARAMETER_LISTS}
+            - inside: {{stopBy: end, field: left, kind: for_in_clause}}
+{_PYTHON_ASSIGNED_NAMES}
+    - not: {{not: {{inside: {{stopBy: end, kind: function_definition}}}}}}
   not:
-    inside: {stopBy: end, any: [{kind: attribute}, {kind: subscript}, {kind: type}]}""",
+    {_PYTHON_NOT_A_NAME}""",
     "typescript": _script_local_names("typescript", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
     "tsx": _script_local_names("tsx", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
     "javascript": _script_local_names("javascript", _SCRIPT_LOCAL_EXCLUSIONS),
+}
+
+# The names module-level code binds otherwise than by an import or by a function or class it
+# defines (those are ``FileStructure.module_symbols``), one match per binding: in Python a
+# statement's target outside every function, class and lambda (a comprehension's names stay its
+# own), a deletion, and every name a function declares `global`, which it may bind for the module.
+# In a script, a declaration or loop variable outside every function, except the module alias a
+# `const name = require('module')` declares (see ``MODULE_ALIAS_RULES``), and every assignment,
+# since a function assigning a name it does not declare assigns the module's. A block's own
+# `let` or `const` counts too.
+_SCRIPT_REQUIRE_ALIAS = f"""{{field: name, kind: variable_declarator, \
+has: {{field: value, kind: call_expression, all: [{{has: {{field: function, regex: '^require$'}}}}, \
+{{has: {{field: arguments, has: {{kind: string}}}}}}]}}, inside: {{{_ANY_VARIABLES}, {_IN_MODULE}}}}}"""
+
+
+def _script_module_bindings(language: str, exclusions: str) -> str:
+    functions = ", ".join(f"{{kind: {kind}}}" for kind in FUNCTION_KINDS[language])
+    return f"""  any: [{_SCRIPT_NAME_KINDS}]
+  all:
+    - not:
+        not:
+          any:
+            - inside:
+                stopBy: end
+                field: left
+                any: [{{kind: assignment_expression}}, {{kind: augmented_assignment_expression}}]
+            - all:
+                - any:
+                    - inside: {{stopBy: end, field: name, kind: variable_declarator}}
+                    - inside: {{stopBy: end, field: left, kind: for_in_statement}}
+                - not: {{inside: {{stopBy: end, any: [{functions}]}}}}
+    - not: {{inside: {_SCRIPT_REQUIRE_ALIAS}}}
+  not:
+    any:
+{exclusions}"""
+
+
+MODULE_BINDING_RULES = {
+    "python": f"""  kind: identifier
+  all:
+    - not:
+        not:
+          any:
+{_PYTHON_ASSIGNED_NAMES}
+            - inside: {{stopBy: end, kind: delete_statement}}
+            - inside: {{kind: global_statement}}
+    - any:
+        - not: {{inside: {{stopBy: end, {_PYTHON_OWN_SCOPES}}}}}
+        - not: {{not: {{inside: {{kind: global_statement}}}}}}
+  not:
+    {_PYTHON_NOT_A_NAME}""",
+    "typescript": _script_module_bindings("typescript", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
+    "tsx": _script_module_bindings("tsx", _TYPED_SCRIPT_LOCAL_EXCLUSIONS),
+    "javascript": _script_module_bindings("javascript", _SCRIPT_LOCAL_EXCLUSIONS),
 }
 
 # A Python function's node starts at `def`: its decorators sit before it, beside it inside
@@ -380,6 +516,10 @@ STUB_RULES = {
                   - {kind: call, has: {field: function, kind: identifier, regex: ^NotImplementedError$}}""",
 }
 
+SCHEMA_SUFFIX = ".prisma"
+SCHEMA_LANGUAGE = "prisma"
+TEXT_LANGUAGE = "text"
+
 # The installed ast-grep supports tsx but not Flow. Route marked files through tsx;
 # unsupported Flow constructs remain visible through ERROR nodes.
 FLOW_LANGUAGE = "flow"
@@ -393,6 +533,9 @@ TYPE_AND_VALUE_DECLARATIONS[FLOW_LANGUAGE] = _SCRIPT_ENUMS
 DECLARED_NAME_RULES[FLOW_LANGUAGE] = _TYPED_SCRIPT_DECLARED_NAMES
 MODULE_ALIAS_RULES[FLOW_LANGUAGE] = _SCRIPT_MODULE_ALIASES
 LOCAL_NAME_RULES[FLOW_LANGUAGE] = LOCAL_NAME_RULES["tsx"]
+LOCAL_MODULE_RULES[FLOW_LANGUAGE] = LOCAL_MODULE_RULES["tsx"]
+LOCAL_MODULE_BLOCK_RULES[FLOW_LANGUAGE] = LOCAL_MODULE_BLOCK_RULES["tsx"]
+MODULE_BINDING_RULES[FLOW_LANGUAGE] = MODULE_BINDING_RULES["tsx"]
 DECORATED_KINDS[FLOW_LANGUAGE] = DECORATED_KINDS["tsx"]
 
 # ast-grep reads `languageGlobs` only from a config file: a scan of flow files passes this sgconfig,
@@ -414,9 +557,24 @@ def sgconfig_of(language: str) -> str | None:
 def language_of(path: str) -> str | None:
     """The language of ``path``'s suffix, read from the string because the index asks for every
     file many times: a name's last dot after its first character starts the suffix."""
+    return LANGUAGE_BY_SUFFIX.get(_suffix(path))
+
+
+def is_schema_file(path: str) -> bool:
+    """A Prisma schema, which no parser grammar reads: ``index.prisma_schema`` scans its blocks."""
+    return _suffix(path) == SCHEMA_SUFFIX
+
+
+def language_read(path: str) -> str | None:
+    """The language JVN reads ``path`` in: its parser's (``language_of``), or ``prisma`` for a
+    Prisma schema; None for a file a listing reads only as plain text (``TEXT_LANGUAGE``), if at all."""
+    return language_of(path) or (SCHEMA_LANGUAGE if is_schema_file(path) else None)
+
+
+def _suffix(path: str) -> str:
     name = path.rpartition("/")[2]
     dot = name.rfind(".")
-    return LANGUAGE_BY_SUFFIX.get(name[dot:]) if dot > 0 else None
+    return name[dot:] if dot > 0 else ""
 
 
 def parse_language(path: str, content: bytes) -> str | None:
@@ -664,6 +822,13 @@ DEFAULT_EXPORTS = {
     "tsx": _TYPED_DEFAULT_EXPORTS,
     "javascript": (_DEFAULT_VALUE, f"  kind: identifier\n{_DEFAULT_DECLARATION_NAME}"),
 }
+
+
+def export_words(name: str) -> frozenset[str]:
+    """The words an export of ``name`` is written with, so lines the parser lost that say none of
+    them cannot export it: the name itself, and for the default export also ``exports``, since
+    `module.exports = build` (see ``DEFAULT_EXPORTS``) never says ``default``."""
+    return frozenset((name, "exports")) if name == "default" else frozenset((name,))
 
 
 # The entries of a module's own `export { ... }` lists, quietly (see the double negation above):

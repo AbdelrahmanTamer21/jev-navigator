@@ -338,9 +338,10 @@ def judge_sections(
     exhausted: bool = False,
 ) -> dict[str, HistoryJudgment]:
     """Several history checks: those selecting the same sections share one request, and different
-    selections are asked in parallel. Each answer is kept in ``history.previous_judgments``."""
+    selections are asked in parallel, at most ``judge.max_concurrency`` at once. Each answer is kept in
+    ``history.previous_judgments``."""
     groups = _grouped(judge, history, checks, shared or {})
-    with ThreadPoolExecutor(max_workers=len(groups) or 1) as pool:
+    with ThreadPoolExecutor(max_workers=min(len(groups), judge.max_concurrency) or 1) as pool:
         responses = list(pool.map(lambda group: _ask_group(judge, group), groups))
     return _judged(judge, history, groups, responses, exhausted)
 
@@ -354,7 +355,13 @@ async def judge_sections_async(
     exhausted: bool = False,
 ) -> dict[str, HistoryJudgment]:
     groups = _grouped(judge, history, checks, shared or {})
-    responses = await asyncio.gather(*(_ask_group_async(judge, group) for group in groups))
+    slots = asyncio.Semaphore(judge.max_concurrency)
+
+    async def ask(group: _Group):
+        async with slots:
+            return await _ask_group_async(judge, group)
+
+    responses = await asyncio.gather(*(ask(group) for group in groups))
     return _judged(judge, history, groups, list(responses), exhausted)
 
 

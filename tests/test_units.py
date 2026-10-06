@@ -9,18 +9,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
+from conftest import WEBSITE_QUERIES
 from git_repos import commit_all, git, write_files
 
 from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.index.scope import BINARY, ENV_FILE, VENDORED
 from jev_navigator.index.spans import Span
 from jev_navigator.index.units import (
+    CODE_FILE,
+    UNSUPPORTED_LANGUAGE,
     Item,
     LineAnchor,
     RangeAnchor,
+    Reading,
     Unit,
     UnitKind,
     UnresolvedAnchor,
@@ -407,6 +413,56 @@ def test_unit_ids_are_unique_when_two_functions_share_their_lines(shop: CodeInde
     assert [unit.symbol for unit in listed if unit.path == "web/pick.ts"] == ["pick"]
 
 
+LIVE = """\
+export const run = Effect.fn("run")(function* (ids: string[]) {
+  return yield* Effect.forEach(ids, (id) => {
+    return load(id);
+  });
+});
+export const userRouter = router({
+  list: procedure.query(({ ctx }) => {
+    return ctx.users;
+  }),
+  remove: procedure.mutation(({ input }) => {
+    return input;
+  }),
+});
+export const StoreLive = Layer.effect(
+  Store,
+  Effect.gen(function* () {
+    return {};
+  }),
+);
+"""
+
+
+def test_a_function_a_module_level_constant_builds_is_named_as_the_entry_names_it(tmp_path: Path) -> None:
+    """A unit and the entry text read one naming owner, so they never disagree about a function a
+    module-level constant's call builds: `run` for an Effect.fn, `userRouter.list` for a router's
+    procedure, `StoreLive` for a layer, while the entry lists each constant once. A callback inside
+    one goes by it and its first line, `run.<anonymous:2>`."""
+    # Arrange
+    root = tmp_path / "repo"
+    write_files(root, {"src/live.ts": LIVE})
+    commit_all(root)
+    index = CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    listed = list_units(index, ("src/live.ts",), box_chars=JEV_BOX).units
+    callback = resolve_anchors(index, [LineAnchor("src/live.ts", 3)], box_chars=JEV_BOX).units
+
+    # Assert
+    functions = [(unit.start, unit.symbol) for unit in listed if unit.kind == UnitKind.FUNCTION]
+    owned = sorted((span.start, name) for span, name in index.constant_function_names("src/live.ts").items())
+    assert (
+        functions
+        == owned
+        == [(1, "run"), (7, "userRouter.list"), (10, "userRouter.remove"), (16, "StoreLive")]
+    )
+    assert index.module_names("src/live.ts") == ("run", "userRouter", "StoreLive")
+    assert [(unit.symbol, unit.nested_in) for unit in callback] == [("run.<anonymous:2>", "src/live.ts:1-5")]
+
+
 def test_a_test_file_marks_its_units_as_tests(shop: CodeIndex) -> None:
     # Act
     units = _units_by_id(shop, ("tests/test_routes.py", "app/routes.py"))
@@ -426,6 +482,212 @@ def test_files_the_parser_cannot_read_are_named_with_their_reason(shop: CodeInde
         "README.md": "language not supported",
         "config.json": "language not supported",
     }
+
+
+REPLICAS = "".join(
+    f"  region_{number}: the replicas of the region numbered {number}\n" for number in range(1, 131)
+)
+TEXT_FILES = {
+    "deploy/values.yaml": "# Replicas per region.\nreplicas:\n" + REPLICAS + "image: shop:1.0\n",
+    "docs/limits.md": "# Limits\n\nAt most four items.\n\n## Why\n\nThe warehouse packs four.\n",
+    "deploy/blank.yaml": "\n\n",
+    "notes/regions.jsonc": "// eu-west-1 only, for the data residency rule\n",
+    "package-lock.json": '{\n  "name": "shop",\n  "lockfileVersion": 3\n}\n',
+    "assets/logo.png": "\x89PNG\r\n\x1a\n\0\0\0\rIHDR\n",
+    "vendor/data.json": '{"a": 1}\n',
+    ".env": "API_KEY=placeholder\n",
+    "app/orders.py": "def accept(order):\n    return order\n",
+}
+
+
+@pytest.fixture
+def text_index(tmp_path: Path) -> CodeIndex:
+    root = tmp_path / "repo"
+    write_files(root, TEXT_FILES)
+    commit_all(root)
+    return CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+
+def _text_units(index: CodeIndex, files: Iterable[str], box: int = JEV_BOX) -> list[Unit]:
+    return list(list_units(index, tuple(files), box_chars=box, reading=Reading.TEXT).units)
+
+
+def test_a_text_reading_lists_one_text_unit_per_block_its_format_gives(text_index: CodeIndex) -> None:
+    # Act
+    units = _text_units(
+        text_index, ("docs/limits.md", "deploy/values.yaml", "notes/regions.jsonc", "package-lock.json")
+    )
+
+    # Assert: blank edges are left out, and every line of a text file counts, even a script comment
+    assert [(unit.id, unit.symbol, unit.ranges) for unit in units] == [
+        ("docs/limits.md:1-3", "Limits", ((1, 3),)),
+        ("docs/limits.md:5-7", "Limits > Why", ((5, 7),)),
+        ("deploy/values.yaml:1-132", "replicas", ((1, 132),)),
+        ("deploy/values.yaml:133-133", "image", ((133, 133),)),
+        ("notes/regions.jsonc:1-1", "<top level>", ((1, 1),)),
+        ("package-lock.json:1-2", "name", ((1, 2),)),
+        ("package-lock.json:3-4", "lockfileVersion", ((3, 4),)),
+    ]
+    assert {(unit.kind, unit.language) for unit in units} == {(UnitKind.TEXT, "text")}
+
+
+def test_a_yaml_block_over_the_box_is_cut_at_its_keys_packed_into_pieces_that_fit_the_box(
+    text_index: CodeIndex,
+) -> None:
+    # Act: 130 one-line keys of about 50 characters, so 60 of them would be over the box
+    replicas = _text_units(text_index, ("deploy/values.yaml",), box=SMALL_BOX)[0]
+
+    # Assert
+    assert [(piece.start, piece.end) for piece in replicas.pieces] == [(1, 58), (59, 114), (115, 132)]
+    assert not replicas.too_large_pieces
+
+
+def test_a_text_block_over_the_box_without_keys_inside_is_cut_into_pieces_of_sixty_lines(
+    tmp_path: Path,
+) -> None:
+    # Arrange: a YAML list, which has no keys one level deeper
+    items = "".join(f"  - deploy the service to the region numbered {number}\n" for number in range(1, 131))
+    root = tmp_path / "repo"
+    write_files(root, {"deploy/regions.yaml": "regions:\n" + items})
+    commit_all(root)
+    index = CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    [regions] = _text_units(index, ("deploy/regions.yaml",), box=SMALL_BOX)
+
+    # Assert
+    assert [(piece.start, piece.end) for piece in regions.pieces] == [(1, 60), (61, 120), (121, 131)]
+
+
+def _job(name: str, steps: int) -> str:
+    return f"  {name}:\n" + "".join(
+        f"      - run: make step {number:02} of {name}\n" for number in range(1, steps + 1)
+    )
+
+
+JOBS_WORKFLOW = (
+    "name: ci\njobs:\n" + _job("build", 30) + _job("lint", 2) + _job("test", 35) + _job("deploy", 90) + "\n\n"
+)
+
+
+def test_a_yaml_block_over_the_box_is_cut_at_its_jobs_packing_small_ones_and_cutting_one_over_the_box(
+    tmp_path: Path,
+) -> None:
+    # Arrange: build is lines 3 to 33, lint 34 to 36, test 37 to 72, deploy, alone over the box, 73 to 163,
+    # and two blank lines end the file
+    root = tmp_path / "repo"
+    write_files(root, {".github/workflows/ci.yml": JOBS_WORKFLOW})
+    commit_all(root)
+    index = CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    jobs = _text_units(index, (".github/workflows/ci.yml",), box=SMALL_BOX)[1]
+
+    # Assert: no piece splits a job that fits the box, and every piece fits it
+    assert [(piece.start, piece.end) for piece in jobs.pieces] == [(2, 36), (37, 72), (73, 132), (133, 163)]
+    assert not jobs.too_large_pieces
+
+
+def test_a_text_reading_names_code_binary_vendored_and_env_files_and_a_blank_file_lists_nothing(
+    text_index: CodeIndex,
+) -> None:
+    # Act
+    listing = list_units(text_index, tuple(TEXT_FILES), box_chars=JEV_BOX, reading=Reading.TEXT)
+
+    # Assert
+    assert "deploy/blank.yaml" not in {unit.path for unit in listing.units}
+    assert listing.unlisted == {
+        "assets/logo.png": BINARY,
+        "vendor/data.json": VENDORED,
+        ".env": ENV_FILE,
+        "app/orders.py": CODE_FILE,
+    }
+
+
+def test_a_line_of_a_text_file_names_its_block_and_a_line_of_an_env_file_names_its_reason(
+    text_index: CodeIndex,
+) -> None:
+    # Arrange
+    replicas = _text_units(text_index, ("deploy/values.yaml",), box=SMALL_BOX)[0]
+
+    # Act
+    resolution = resolve_anchors(
+        text_index,
+        [LineAnchor("deploy/values.yaml", 70), LineAnchor(".env", 1)],
+        box_chars=SMALL_BOX,
+        listed_only=True,
+        reading=Reading.TEXT,
+    )
+
+    # Assert
+    assert resolution.units == (replicas,)
+    assert resolution.unresolved == (UnresolvedAnchor(LineAnchor(".env", 1), ENV_FILE),)
+
+
+def test_a_code_reading_never_resolves_a_line_of_a_text_file(text_index: CodeIndex) -> None:
+    # Act
+    resolution = resolve_anchors(text_index, [LineAnchor("deploy/values.yaml", 70)], box_chars=JEV_BOX)
+
+    # Assert
+    assert resolution.units == ()
+    assert resolution.unresolved == (
+        UnresolvedAnchor(LineAnchor("deploy/values.yaml", 70), UNSUPPORTED_LANGUAGE),
+    )
+
+
+SCHEMA = "prisma/schema.prisma"
+
+
+@pytest.fixture
+def schema_index(tmp_path: Path, umami_schema: str) -> CodeIndex:
+    root = tmp_path / "umami"
+    write_files(root, {SCHEMA: umami_schema, "src/queries/website.ts": WEBSITE_QUERIES})
+    commit_all(root)
+    return CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+
+def test_a_prisma_schema_lists_each_block_as_a_unit_and_its_settings_as_top_level_code(
+    schema_index: CodeIndex, umami_schema: str
+) -> None:
+    # Act
+    listing = list_units(schema_index, ("src/queries/website.ts", SCHEMA), box_chars=JEV_BOX)
+
+    # Assert: the schema's 26 models, each whole, then its generator and datasource as top-level
+    # code, after the units of the file listed before it.
+    assert listing.unlisted == {}
+    assert [unit.symbol for unit in listing.units[:2]] == ["updateWebsite", "getWebsiteCount"]
+    schema_units = listing.units[2:]
+    assert [unit.kind for unit in schema_units] == [UnitKind.SCHEMA_BLOCK] * 26 + [UnitKind.TOP_LEVEL]
+    website = next(unit for unit in schema_units if unit.symbol == "model Website")
+    assert (website.id, website.ranges, website.language, website.nested_in, website.pieces) == (
+        "prisma/schema.prisma:98-131",
+        ((98, 131),),
+        "prisma",
+        None,
+        (),
+    )
+    assert website.content_sha256 == _sha256(_lines(umami_schema, 98, 131))
+    assert (schema_units[-1].id, schema_units[-1].ranges) == ("prisma/schema.prisma:top", ((1, 10),))
+    covered = Counter(
+        line for unit in schema_units for start, end in unit.ranges for line in range(start, end + 1)
+    )
+    code_lines = [number for number, text in enumerate(umami_schema.split("\n"), 1) if text.strip()]
+    assert [covered[number] for number in code_lines] == [1] * len(code_lines)
+
+
+def test_a_line_of_a_schema_names_the_block_holding_it_and_a_settings_line_its_top_level_code(
+    schema_index: CodeIndex,
+) -> None:
+    # Arrange: a field of `Website`, a generator setting, and a range from `Website`'s last lines
+    # into `WebsiteEvent`.
+    anchors = (LineAnchor(SCHEMA, 120), LineAnchor(SCHEMA, 2), RangeAnchor(SCHEMA, 130, 134))
+
+    # Act
+    resolved = resolve_anchors(schema_index, anchors, box_chars=JEV_BOX, listed_only=True)
+
+    # Assert
+    assert [unit.symbol for unit in resolved.units] == ["model Website", "<top level>", "model WebsiteEvent"]
+    assert resolved.unresolved == ()
 
 
 def test_a_files_top_level_code_is_one_unit_without_function_bodies(shop: CodeIndex) -> None:
@@ -483,6 +745,23 @@ def test_a_file_gone_after_the_inventory_is_named_not_listed(tmp_path: Path) -> 
     # Assert
     assert [unit.id for unit in listing.units] == ["app/kept.py:1-2"]
     assert listing.unlisted == {"app/gone.py": "disappeared after inventory"}
+
+
+def test_a_file_the_index_never_held_is_named_with_the_index_reason_not_raised(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    write_files(root, {"app/kept.py": "def kept():\n    return 1\n"})
+    commit_all(root)
+    index = CodeIndex.from_git(root, ["app/kept.py", "app/removed.py"], fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    listing = list_units(index, ["app/kept.py", "app/removed.py", "app/never_asked.py"], box_chars=JEV_BOX)
+
+    # Assert: the index's own reason where it has one, else that the file is outside its scope.
+    assert [unit.id for unit in listing.units] == ["app/kept.py:1-2"]
+    assert listing.unlisted == {
+        "app/removed.py": "no file at this path",
+        "app/never_asked.py": "not in the index scope",
+    }
 
 
 def test_top_level_code_over_the_box_is_cut_into_pieces(shop: CodeIndex) -> None:
