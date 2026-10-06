@@ -314,7 +314,9 @@ folder with `--out`. Without `--out`, a run's evidence pack goes to its own run 
 unset), and the run prints that path.
 
 Caches live in `$XDG_CACHE_HOME/jev-navigator` (`~/.cache` when unset): the fact cache (`facts/`), the
-name table (`names/`) and the shared answer store (`answers-v2.sqlite`). Caches are the data JVN
+name table (`names/`) and the shared answer store (`answers-v2.sqlite`). A host that keeps each
+tenant's caches apart sets `JEV_NAVIGATOR_CACHE_HOME` to that tenant's folder, which then holds
+them directly; a relative path in either variable is ignored. Caches are the data JVN
 values most, but only while they represent real files, so JVN cleans up after itself:
 
 - Facts or a name table another JVN version wrote, which this version can never read, go once no
