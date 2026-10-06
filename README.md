@@ -322,7 +322,9 @@ folder with `--out`. Without `--out`, a run's evidence pack goes to its own run 
 unset), and the run prints that path.
 
 Caches live in `$XDG_CACHE_HOME/jev-navigator` (`~/.cache` when unset): the fact cache (`facts/`), the
-name table (`names/`) and the shared answer store (`answers-v2.sqlite`). Caches are the data JVN
+name table (`names/`) and the shared answer store (`answers-v2.sqlite`). A host that keeps each
+tenant's caches apart sets `JEV_NAVIGATOR_CACHE_HOME` to that tenant's folder, which then holds
+them directly; a relative path in either variable is ignored. Caches are the data JVN
 values most, but only while they represent real files, so JVN cleans up after itself:
 
 - Facts or a name table another JVN version wrote, which this version can never read, go once no
@@ -345,6 +347,17 @@ run, and Ctrl-C during the cleanup, which starts only once the run has ended, st
 notice and exit status 130. Nothing outside these two folders is ever deleted, and links are never followed.
 `jvn cache status` shows what each store holds and what each rule would remove; `jvn cache prune`
 applies every rule now.
+
+A program that uses JVN as a library (`CodeIndex`, `find_code` and the other blocks) fills the same
+caches but never cleans them up, because only a CLI run ends with housekeeping. Such a host runs
+`jvn cache prune` itself on its own schedule. A host serving several tenants composes the two
+variables: it gives each tenant's searches `JEV_NAVIGATOR_CACHE_HOME=<that tenant's folder>`, and
+prunes each folder with the same variable and the share of disk it allows that tenant in
+`JEV_NAVIGATOR_DISK_BUDGET`:
+
+```bash
+JEV_NAVIGATOR_CACHE_HOME=/volume/jvn-cache/tenant-a JEV_NAVIGATOR_DISK_BUDGET=10GB jvn cache prune
+```
 
 ## Layer 1: index, operations and comments (no model)
 
