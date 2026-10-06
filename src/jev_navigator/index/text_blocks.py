@@ -7,14 +7,15 @@ JSON at each top-level key of an object whose keys start on lines of their own, 
 root key and table header, each block named by its key path (``tool.ruff``). There the lines before
 the first key belong to the first block, and comment lines right above a key belong to its block.
 Any other file, and a file whose format gives no block, is one block. A block with no name has
-``name`` None.
+``name`` None. A keyed YAML or JSON block splits one level deeper at its value's keys
+(``child_blocks``), for a unit too large to judge whole.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -29,6 +30,7 @@ _TOML_TABLE = re.compile(rf"^\[\[?[ \t]*({_TOML_KEY})[ \t]*\]\]?[ \t]*(?:#.*)?$"
 _TOML_ROOT_KEY = re.compile(rf"^({_TOML_KEY})[ \t]*=")
 _TOML_MULTILINE_QUOTES = ('"""', "'''")
 _COMMENT = re.compile(r"^[ \t]*#")
+_INDENT = re.compile(r"[ \t]*")
 _HEADING_PATH = " > "
 
 Start = tuple[int, str]
@@ -54,6 +56,19 @@ def text_blocks(path: str, lines: Sequence[str]) -> tuple[TextBlock, ...]:
     return _blocks(starts, len(lines), leading_block=False)
 
 
+def child_blocks(path: str, lines: Sequence[str], block: TextBlock) -> tuple[TextBlock, ...]:
+    """The blocks one level inside a keyed YAML or JSON ``block`` of ``path``'s ``lines``: one per key
+    of its value, named by its key path (``jobs.build``), with the block's own first lines part of the
+    first and a comment right above a key part of its block. None for another format, or for a value
+    without keys of its own, such as a list or a scalar."""
+    keys_inside = _CHILD_STARTS.get(PurePosixPath(path).suffix.lower())
+    starts = keys_inside(lines, block) if keys_inside and block.name is not None else []
+    if not starts:
+        return ()
+    named = [(start, f"{block.name}.{key}") for start, key in starts]
+    return _covering([(block.start, named[0][1]), *named[1:]], block.end)
+
+
 def _blocks(starts: Sequence[Start], line_count: int, *, leading_block: bool) -> tuple[TextBlock, ...]:
     """Blocks from their first lines: each ends where the next starts. The lines before the first
     start are a block of their own, or with ``leading_block`` False part of the first block."""
@@ -62,7 +77,12 @@ def _blocks(starts: Sequence[Start], line_count: int, *, leading_block: bool) ->
         named = [(1, None)]
     elif named[0][0] > 1:
         named = [(1, None), *named] if leading_block else [(1, named[0][1]), *named[1:]]
-    ends = [start - 1 for start, _ in named[1:]] + [line_count]
+    return _covering(named, line_count)
+
+
+def _covering(named: Sequence[tuple[int, str | None]], last: int) -> tuple[TextBlock, ...]:
+    """Blocks from their first lines up to line ``last``: each ends where the next starts."""
+    ends = [start - 1 for start, _ in named[1:]] + [last]
     return tuple(TextBlock(name, start, end) for (start, name), end in zip(named, ends, strict=True))
 
 
@@ -101,8 +121,26 @@ def _fence_after(line: str, fence: str | None) -> str | None:
 
 
 def _yaml_starts(lines: Sequence[str]) -> list[Start]:
-    keys = ((number, _YAML_KEY.match(line)) for number, line in enumerate(lines, 1))
+    return _yaml_keys(lines, range(1, len(lines) + 1), "")
+
+
+def _yaml_keys_inside(lines: Sequence[str], block: TextBlock) -> list[Start]:
+    """The keys of ``block``'s value: the lines after its key line at the indent of the first of them."""
+    lines_of_block = range(block.start, block.end + 1)
+    header = next(number for number in lines_of_block if _YAML_KEY.match(lines[number - 1]))
+    body = range(header + 1, block.end + 1)
+    indent = next((_INDENT.match(lines[n - 1])[0] for n in body if _is_content(lines[n - 1])), "")
+    return _yaml_keys(lines, body, indent) if indent else []
+
+
+def _yaml_keys(lines: Sequence[str], numbers: Iterable[int], indent: str) -> list[Start]:
+    """The keys at ``indent`` among lines ``numbers``, each at its first comment line right above."""
+    keys = ((number, _YAML_KEY.match(lines[number - 1].removeprefix(indent))) for number in numbers)
     return [(_with_comments_above(lines, number), _unquoted(key[1])) for number, key in keys if key]
+
+
+def _is_content(line: str) -> bool:
+    return bool(line.strip()) and not _COMMENT.match(line)
 
 
 def _json_starts(lines: Sequence[str]) -> list[Start]:
@@ -114,13 +152,22 @@ def _json_starts(lines: Sequence[str]) -> list[Start]:
         return []
     if not isinstance(value, dict):
         return []
-    starts = _object_keys(lines)
-    distinct = len({number for number, _ in starts}) == len(starts)
-    return starts if distinct else []
+    return _on_lines_of_their_own(_object_keys(lines, 1))
 
 
-def _object_keys(lines: Sequence[str]) -> list[Start]:
-    """A JSON string never spans lines, so each line's tokens are read on their own."""
+def _json_keys_inside(lines: Sequence[str], block: TextBlock) -> list[Start]:
+    """The keys of ``block``'s value when it is an object, each on a line of its own."""
+    keys = [(number, key) for number, key in _object_keys(lines, 2) if block.start <= number <= block.end]
+    return _on_lines_of_their_own(keys)
+
+
+def _on_lines_of_their_own(keys: list[Start]) -> list[Start]:
+    return keys if len({number for number, _ in keys}) == len(keys) else []
+
+
+def _object_keys(lines: Sequence[str], level: int) -> list[Start]:
+    """The keys of objects nested ``level`` deep, at the lines they start on. A JSON string never spans
+    lines, so each line's tokens are read on their own."""
     tokens = [
         (number, token[0]) for number, line in enumerate(lines, 1) for token in _JSON_TOKEN.finditer(line)
     ]
@@ -131,7 +178,7 @@ def _object_keys(lines: Sequence[str]) -> list[Start]:
             depth += 1
         elif token in "}]":
             depth -= 1
-        elif depth == 1 and token.startswith('"') and following == ":":
+        elif depth == level and token.startswith('"') and following == ":":
             keys.append((number, json.loads(token)))
     return keys
 
@@ -184,4 +231,9 @@ _KEYED_STARTS: dict[str, Callable[[Sequence[str]], list[Start]]] = {
     ".yaml": _yaml_starts,
     ".json": _json_starts,
     ".toml": _toml_starts,
+}
+_CHILD_STARTS: dict[str, Callable[[Sequence[str], TextBlock], list[Start]]] = {
+    ".yml": _yaml_keys_inside,
+    ".yaml": _yaml_keys_inside,
+    ".json": _json_keys_inside,
 }

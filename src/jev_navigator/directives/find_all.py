@@ -398,8 +398,6 @@ class _Search:
                 self.checks, entries, self.shared, list_name=ITEMS, places=places, refusals=self.refusals
             ):
                 self._record(self.target_of[name], answer)
-            if self.found_one:
-                return
 
     def ended(self, error: KeyboardInterrupt | Exception | None) -> FindAllResult:
         stop, failure = _stop_by(error)

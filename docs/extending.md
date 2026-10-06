@@ -306,8 +306,8 @@ Name lookups read `name_table.NameTable`: one SQLite file per `table_identity()`
 blob id of the file content, and hold names, kinds, lines, roles and receivers as the facts hold them:
 `scope_scan.receiver_of` keeps a receiver only as a plain chain of names and records anything else,
 which could quote a string literal, as `OPAQUE_RECEIVER`. `CodeIndex` records the files navigation
-reaches apart from the table's coverage, and `parsed_files`, `parser_scans_pending` and
-`observed_unparsed_files` read only the reached files. Two processes may write the table at once: a new file is created whole and
+reaches apart from the table's coverage (a Prisma schema is reached once `schema_blocks_in` reads it),
+and `parsed_files`, `parser_scans_pending` and `observed_unparsed_files` read only the reached files. Two processes may write the table at once: a new file is created whole and
 linked into place (`shared_database.open_shared_database`), and each content's rows are written in
 one transaction. A bidirectional
 trace prepares the scoped fact inventory in one batch before walking incoming and outgoing links;
@@ -427,7 +427,8 @@ So is a file that disappeared after the inventory, and a file outside the index'
 index's own reason (`no file at this path`) or `not in the index scope`.
 
 A unit whose text fits `box_chars` is one item, whatever its length. Only a larger unit is cut into
-`pieces` of at most 60 lines, in order, with no overlap and never across two runs of top-level code;
+`pieces` of at most 60 lines (a YAML or JSON text block at its keys, see below), in order, with no
+overlap and never across two runs of top-level code;
 each piece has its own range, hash and size. A piece still larger than `box_chars` is
 `too_large_to_judge`: it keeps its range and size, and `judged_pieces` leaves it out. A cut unit
 stays one unit: `unit_score` gives it its best piece's score, and `best_piece` names that piece's
@@ -468,7 +469,11 @@ blank lines at its edges:
   block. A minified or invalid JSON file, or a list, is one block.
 - Any other file is one block, named `<top level>`.
 
-A block larger than its room is cut into 60-line pieces like any unit. `scope.text_files_left_out`
+A block larger than its room is cut into 60-line pieces like any unit, except a YAML or JSON block,
+which is cut one level deeper, at its value's keys (`text_blocks.child_blocks`), so one CI job stays in
+one piece. Neighbouring keys are packed together while they fit 60 lines and the room, a longer key that
+fits the room is one piece, and a key over the room is cut into 60-line pieces. A value without keys,
+such as a list, is cut into 60-line pieces. `scope.text_files_left_out`
 leaves out an env file (`.env`, `.env.*`, `*.env`) whatever its content, a binary file (a NUL byte in
 its first 8,000 bytes, as git decides), and a vendored or generated file by the rules a scope applies
 by default. An env template (`.env.example`, `.env.sample`, `.env.template`) is read, masked like a
