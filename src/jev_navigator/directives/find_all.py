@@ -626,7 +626,8 @@ class _Search:
     def _drawing(self, frontier: Frontier) -> dict[str, bool]:
         """Each target still drawing, mapped to whether it draws only its hops. Under a settling policy
         a target with a unit that cleared its bar first gets that unit's hops, and settles once none of
-        its hops is left to judge."""
+        its hops is left to judge and its required roles are covered. Without role observations it
+        keeps drawing the ordinary queue as well as hops."""
         if not self.policy.settles:
             return dict.fromkeys(self.targets, False)
         drawing = {}

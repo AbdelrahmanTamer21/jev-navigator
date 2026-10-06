@@ -49,7 +49,8 @@ class Policy:
     ``weights``, keeps that order in the batches, splits each batch's slots by the targets' shares, and
     judges repeated code once. ``settles`` (ranked only) lets a target settle and its units push the
     places a search's hop sources reach from them (see the module docstring); without it every unit is
-    judged until the call cap."""
+    judged until the call cap. ``role_coverage`` adds a caller-owned prerequisite: every required
+    role must be observed among the target's judged units before it can settle."""
 
     name: str
     ranked: bool
