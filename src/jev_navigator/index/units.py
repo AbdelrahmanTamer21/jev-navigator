@@ -11,9 +11,11 @@ unit starts at its first decorator, so a route travels with its handler, while i
 index's span key. A stub, a function whose body only declares a shape (``CodeIndex.stubs_in``), is
 no unit: its lines are top-level code. A record carries the unit's identity, kind, qualified symbol
 and the hash of its own text. Only a unit larger than its room in a request (``box_chars``) is cut, into
-pieces of up to 60 lines with no overlap; a piece never spans two runs. The unit stays one unit,
-scored by its best piece. A piece still over that room is too large to judge: it is named with its
-range and size and never judged.
+pieces of up to 60 lines with no overlap; a piece never spans two runs. A YAML or JSON text block is cut
+at its value's keys instead (``text_blocks.child_blocks``), so a key that fits stays whole in one piece:
+neighbouring keys are packed together while they fit 60 lines and the room, and a key over the room is
+cut by lines. The unit stays one unit, scored by its best piece. A piece still over that room is too
+large to judge: it is named with its range and size and never judged.
 
 Spans are lines, so functions on the same lines have the same text and are one unit, named by the
 first named of them. A function nested in another is a unit of its own (``nested_in`` names the
@@ -39,6 +41,7 @@ from .imports import import_lines, without_comments
 from .languages import TEXT_LANGUAGE, is_schema_file, language_of, language_read
 from .scope import is_test_file
 from .spans import Span, holder_of
+from .text_blocks import TextBlock, child_blocks
 
 PIECE_LINES = 60
 TOP_LEVEL_SYMBOL = "<top level>"
@@ -353,12 +356,14 @@ class _FileUnits:
         )
 
     def _pieces(self, ranges: Sequence[LineRange]) -> tuple[Piece, ...]:
-        cuts = [
-            (first, min(first + PIECE_LINES - 1, end))
-            for start, end in ranges
-            for first in range(start, end + 1, PIECE_LINES)
-        ]
+        cuts = self._piece_cuts(ranges)
         return tuple(self._piece(number, start, end) for number, (start, end) in enumerate(cuts))
+
+    def _piece_cuts(self, ranges: Sequence[LineRange]) -> list[LineRange]:
+        return [cut for start, end in ranges for cut in _line_cuts(start, end)]
+
+    def _over_box(self, start: int, end: int) -> bool:
+        return serialized_chars(read_ranges(self._index, self._file, ((start, end),))) > self._box_chars
 
     def _piece(self, number: int, start: int, end: int) -> Piece:
         text = read_ranges(self._index, self._file, ((start, end),))
@@ -429,14 +434,40 @@ class _TextFile(_FileUnits):
     (``CodeIndex.text_blocks_in``), named by the block's heading or key path, without the blank lines at
     its edges. Its blocks cover every line, so it has no top-level code."""
 
+    @cached_property
+    def _blocks(self) -> tuple[TextBlock, ...]:
+        return self._index.text_blocks_in(self._file)
+
     def _inner_units(self) -> tuple[Unit, ...]:
-        blocks = self._index.text_blocks_in(self._file)
-        runs = ((block, self._without_blank_edges((block.start, block.end))) for block in blocks)
+        runs = ((block, self._without_blank_edges((block.start, block.end))) for block in self._blocks)
         return tuple(
             self._unit(Span(self._file, *run).key, (run,), UnitKind.TEXT, block.name or TOP_LEVEL_SYMBOL)
             for block, run in runs
             if run is not None
         )
+
+    def _piece_cuts(self, ranges: Sequence[LineRange]) -> list[LineRange]:
+        """A YAML or JSON block cuts at its value's keys (``child_blocks``), any other in line cuts."""
+        [(start, end)] = ranges
+        block = next(block for block in self._blocks if block.start <= start <= block.end)
+        children = [
+            (max(child.start, start), min(child.end, end))
+            for child in child_blocks(self._file, self._lines, block)
+        ]
+        return self._packed(children) if children else super()._piece_cuts(ranges)
+
+    def _packed(self, children: Sequence[LineRange]) -> list[LineRange]:
+        """Cuts at the children's edges: neighbours packed together while they fit ``PIECE_LINES``
+        lines and the box, a longer child whole, and a child over the box in line cuts."""
+        cuts: list[LineRange] = []
+        for start, end in children:
+            if self._over_box(start, end):
+                cuts += _line_cuts(start, end)
+            elif cuts and end - cuts[-1][0] < PIECE_LINES and not self._over_box(cuts[-1][0], end):
+                cuts[-1] = (cuts[-1][0], end)
+            else:
+                cuts.append((start, end))
+        return cuts
 
 
 class _AnchorResolver:
@@ -519,6 +550,10 @@ def _one_per_range(spans: Iterable[Span]) -> tuple[Span, ...]:
 
 def _lines_of(units: Iterable[Unit]) -> frozenset[int]:
     return frozenset(line for unit in units for start, end in unit.ranges for line in range(start, end + 1))
+
+
+def _line_cuts(start: int, end: int) -> list[LineRange]:
+    return [(first, min(first + PIECE_LINES - 1, end)) for first in range(start, end + 1, PIECE_LINES)]
 
 
 def _runs(lines: Iterable[int]) -> list[LineRange]:
