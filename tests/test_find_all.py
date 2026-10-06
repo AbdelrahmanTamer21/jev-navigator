@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from jev_navigator.directives.find_all import (
     find_text,
     match_check,
 )
+from jev_navigator.directives.frontier import STAGE_ORDER, VALUE
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.prisma_schema import schema_blocks
 from jev_navigator.index.scope import ENV_FILE
@@ -42,6 +44,7 @@ from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
 from jev_navigator.judgments.secrets import MASK
 from jev_navigator.judgments.thresholds import NoulVerdict
+from jev_navigator.sources import DEFINITIONS, NAMES
 from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 LIMIT = {"limit": "the check that limits the items of an order"}
@@ -196,6 +199,60 @@ def test_a_name_no_source_reaches_is_counted_as_measured_zero(tmp_path: Path) ->
 
     # Assert
     assert result.names == {"absent_name": NameHits(0, 0, 0)}
+
+
+@pytest.mark.parametrize("policy", [STAGE_ORDER, VALUE])
+def test_each_name_place_is_counted_once_when_name_and_definition_sources_reach_it(
+    tmp_path: Path,
+    policy,
+) -> None:
+    # Arrange: the only occurrence is the definition, reached by both real start sources.
+    index = repository(tmp_path, {"rules.py": "def accept(order):\n    return len(order.items) <= 4\n"})
+    provider = labelled({})
+
+    # Act
+    result = find_all(
+        index, Judge(provider), LIMIT, names=["accept"], sources=(NAMES, DEFINITIONS), policy=policy
+    )
+
+    # Assert
+    assert result.names["accept"].found == 1
+    assert result.names["accept"].reached == 1
+    assert result.names["accept"].without_unit == 0
+    [unit] = result.units
+    assert unit.symbol == "accept"
+    assert len(sent_code(provider)) == 1
+    assert result.entered_by[unit.id] == ("definition" if policy.ranked else "name")
+    if policy.ranked:
+        assert result.features["limit"][unit.id].rarity == pytest.approx(1 / math.log2(3))
+        assert result.features["limit"][unit.id].distance == 1
+
+
+@pytest.mark.parametrize("policy", [STAGE_ORDER, VALUE])
+def test_each_name_place_without_a_unit_is_counted_once_across_resolution_chunks(
+    tmp_path: Path,
+    policy,
+) -> None:
+    # Arrange: two lines in one unit and one unsupported file are reached twice each.
+    index = repository(
+        tmp_path,
+        {"rules.py": "def accept(order):\n    return accept(order)\n", "notes.md": "accept orders\n"},
+    )
+    provider = labelled({})
+
+    # Act
+    result = find_all(
+        index,
+        Judge(provider, items_per_request=1),
+        LIMIT,
+        names=["accept"],
+        sources=(NAMES, NAMES),
+        policy=policy,
+    )
+
+    # Assert: count places rather than units, even when separate chunks resolve the same place.
+    assert result.names == {"accept": NameHits(3, 3, 1)}
+    assert len(result.units) == len(sent_code(provider)) == 1
 
 
 MANY_HITS = {

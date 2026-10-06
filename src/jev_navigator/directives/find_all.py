@@ -19,7 +19,7 @@ spends code search's budget.
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
+from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import groupby
@@ -96,8 +96,8 @@ def match_check(target: str) -> Check:
 
 @dataclass(frozen=True)
 class NameHits:
-    """A request name's places: how many the search's sources reached by the name, how many of them the
-    search resolved into units before it stopped, and how many of those named no listed unit (a line
+    """A request name's distinct places: how many the search's sources reached by the name, how many
+    the search resolved into units before it stopped, and how many of those named no listed unit (a line
     of a file the reading leaves out, or of top-level code a listing leaves out, such as imports)."""
 
     found: int
@@ -484,9 +484,9 @@ class _Search:
         self.unlisted: dict[str, str] = {}
         self.unresolved: list[UnresolvedAnchor] = []
         self.refusals: list[Refusal] = []
-        self.found: dict[str, int] = {}
-        self.reached: Counter[str] = Counter()
-        self.without_unit: Counter[str] = Counter()
+        self.found: dict[str, set[str | Anchor]] = {}
+        self.reached: defaultdict[str, set[Anchor]] = defaultdict(set)
+        self.without_unit: defaultdict[str, set[Anchor]] = defaultdict(set)
 
     def stopped(self) -> bool:
         return self.cancelled is not None and self.cancelled()
@@ -565,12 +565,12 @@ class _Search:
 
     def _start_reaches(self) -> list[list[Reach]]:
         """Each start source's places, in the order the search lists the sources. Every request name
-        is counted over all of them, so a name no source reached counts 0."""
+        counts distinct places over all of them, so a name no source reached counts 0."""
         reaches = [list(source.reach(self.index, self.seeds)) for source in self.sources]
-        self.found = dict.fromkeys(self.seeds.names, 0)
+        self.found = {name: set() for name in self.seeds.names}
         for reach in (reach for source_reaches in reaches for reach in source_reaches):
             for name in reach.names:
-                self.found[name] = self.found.get(name, 0) + 1
+                self.found.setdefault(name, set()).add(reach.at)
         return reaches
 
     def _resolution_groups(self, reaches: Sequence[Reach]) -> Iterator[list[Reach]]:
@@ -594,7 +594,7 @@ class _Search:
 
     def _frontier(self, candidates: Sequence[tuple[Unit, Reach]]) -> Frontier:
         """Each target's queue: every admitted place, its unit's value for that target first."""
-        rarities = name_rarities(self.found)
+        rarities = name_rarities({name: len(places) for name, places in self.found.items()})
         self.rarities = {target: target_rarities(text, rarities) for target, text in self.targets.items()}
         for unit, reach in candidates:
             self._add_features(unit, reach)
@@ -745,8 +745,9 @@ class _Search:
         units = []
         for reach, (anchor, named, problem) in zip(reaches, resolved, strict=True):
             for name in reach.names:
-                self.reached[name] += 1
-                self.without_unit[name] += bool(problem)
+                self.reached[name].add(anchor)
+                if problem:
+                    self.without_unit[name].add(anchor)
             if problem and not reach.names:
                 self.unresolved.append(UnresolvedAnchor(anchor, problem))
             units += [(unit, reach) for unit in named]
@@ -836,8 +837,8 @@ class _Search:
             dict(self.unlisted),
             tuple(self.unresolved),
             {
-                name: NameHits(found, self.reached[name], self.without_unit[name])
-                for name, found in self.found.items()
+                name: NameHits(len(places), len(self.reached[name]), len(self.without_unit[name]))
+                for name, places in self.found.items()
             },
             self.index.observed_unparsed_files,
             stop,

@@ -152,10 +152,10 @@ is judged. `find_all_async` takes the same arguments for an
 async client, such as a host's orchestrator; it lists and reads code in a worker thread, reads
 `cancelled` between waves, and keeps every answer a wave received before a failure. Ranking and any
 bar belong to the caller:
-`scores(target)` gives every judged unit's answer, and `names` each request name's places: how many
+`scores(target)` gives every judged unit's answer, and `names` each request name's distinct places: how many
 the sources reached by the name, how many the search resolved before it stopped, and how many named no
-unit. `sources` lists the sources the search used, its hop sources last, and `entered_by` gives the
-name of the source each unit entered the population by (`anchor`, `file` or `name` by default, the
+unit. A place counts once per name even when several sources reach it. `sources` lists the sources the
+search used, its hop sources last, and `entered_by` gives the name of the source each unit entered the population by (`anchor`, `file` or `name` by default, the
 first when several reached it; `caller` or `callee` for a unit a settling search pushed).
 
 The population comes from sources (`jev_navigator/sources.py`): `sources=` names the ones that start
