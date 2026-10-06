@@ -340,6 +340,17 @@ notice and exit status 130. Nothing outside these two folders is ever deleted, a
 `jvn cache status` shows what each store holds and what each rule would remove; `jvn cache prune`
 applies every rule now.
 
+A program that uses JVN as a library (`CodeIndex`, `find_code` and the other blocks) fills the same
+caches but never cleans them up, because only a CLI run ends with housekeeping. Such a host runs
+`jvn cache prune` itself on its own schedule. A host serving several tenants composes the two
+variables: it gives each tenant's searches `JEV_NAVIGATOR_CACHE_HOME=<that tenant's folder>`, and
+prunes each folder with the same variable and the share of disk it allows that tenant in
+`JEV_NAVIGATOR_DISK_BUDGET`:
+
+```bash
+JEV_NAVIGATOR_CACHE_HOME=/volume/jvn-cache/tenant-a JEV_NAVIGATOR_DISK_BUDGET=10GB jvn cache prune
+```
+
 ## Layer 1: index, operations and comments (no model)
 
 ```python
