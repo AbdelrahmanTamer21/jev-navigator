@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from dataclasses import dataclass
 from operator import itemgetter
 
 from .index.languages import LANGUAGE_BY_SUFFIX, SCHEMA_SUFFIX
@@ -92,3 +93,16 @@ def _member(span: str) -> str | None:
     """The last member of a dotted or qualified name, when it is an identifier."""
     name = _MEMBER_SEPARATOR.split(span.strip().removesuffix("()"))[-1].strip()
     return name if _IDENTIFIER.fullmatch(name) else None
+
+
+@dataclass(frozen=True)
+class TextNames:
+    """Code names and whole paths extracted without a model. Paths are never reduced to suffixes."""
+
+    code: tuple[str, ...]
+    paths: tuple[str, ...]
+
+
+def names_from_text(text: str) -> TextNames:
+    """Extract spelled identifiers and paths using the shared mention rules."""
+    return TextNames(tuple(code_names_in(text)), tuple(paths_in(text)))

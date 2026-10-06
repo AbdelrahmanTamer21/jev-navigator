@@ -111,3 +111,11 @@ def test_a_symbol_names_its_members_and_a_description_names_none() -> None:
 
     # Assert
     assert names == ["flush", "evict", "push"]
+
+
+def test_names_from_text_keeps_paths_whole_beside_plain_identifiers() -> None:
+    from jev_navigator.mentions import names_from_text
+
+    names = names_from_text("copy_sandbox_tree calls copySandbox; `pyproject.toml` and docs/run_all.md")
+    assert names.code == ("copy_sandbox_tree", "copySandbox", "run_all")
+    assert names.paths == ("pyproject.toml", "docs/run_all.md")

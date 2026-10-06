@@ -1221,3 +1221,39 @@ nr3 over SSH with a memory cap, never to this Mac.
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+## Compose code and named text with reserved calls
+
+`mentions.names_from_text(text)` returns `TextNames(code=..., paths=...)`, using the existing
+mention rules. Bare `copy_sandbox_tree` and `copySandbox` are code names, while `pyproject.toml`
+remains a whole path. `sources.TEXT_FILE_NAMES` reaches a text file by its basename or stem even
+when its body never repeats that name; ambiguous basenames retain all matches.
+
+```python
+from jev_navigator.composition import SearchConfiguration, reserve_calls
+from jev_navigator.directives.frontier import Policy, RoleCoverage
+
+coverage = RoleCoverage(
+    required={"p": ("guard", "value")},
+    observed=lambda point, judged_ids: roles_observed_for(point, judged_ids),
+)
+policy = Policy("required-evidence", ranked=True, settles=True, role_coverage=coverage)
+configuration = SearchConfiguration("code-and-named-text", code_calls=36, text_calls=12, policy=policy)
+code, text = await configuration.search(index, judge, {"p": description}, files=scope, anchors=anchors)
+```
+
+The configuration calls `find_all_async` and `find_all_text_async` with separate stage allowances.
+Text uses named paths, file names and name hits, under its own share. Each result retains its own
+units, raw answers, cuts and provenance. The single-target `find_text` block is also available to a
+caller that wants to stop at its first matching text unit.
+
+`reserve_calls(judge, {"discovery": 36, "continuation": 12})` returns scoped judges whose caps are
+reserved before either stage starts. Every call still counts against the parent. Unused calls remain
+reserved; a host can deliberately assign unused calls in a later composition. These are explicit
+allowances, not claims that one split is optimal. The role policy also works with an ordinary
+`find_all` composition. A target cannot settle until every role the caller requires has observations
+among its judged units and its clearing units' pending hops have been judged. Missing role answers
+keep the target open. A match probability does not establish an evidence role. The existing `VALUE`
+policy remains available for comparison.
+
+The [role question proposal](question-templates/evidence_roles/PROPOSAL.md) is not wired into searches.
