@@ -41,6 +41,7 @@ from .memo import memoized
 from .name_table import CALL, DEFINITION_KINDS, REFERENCE, FileEntry, NameRow, NameTable, git_blob_id
 from .packages import Packages
 from .prisma_schema import SchemaBlock, schema_blocks
+from .scope import text_files_left_out
 from .scope_scan import (
     CallMatch,
     FileFacts,
@@ -54,6 +55,7 @@ from .scope_scan import (
 )
 from .source_files import DISAPPEARED, SourceFiles
 from .spans import CallEdge, CallSite, CodeSlice, Reference, Span, TextHit
+from .text_blocks import TextBlock, text_blocks
 from .tsconfig import ScriptPaths, nearest_script_paths
 
 DEFAULT_WINDOW_RADIUS = 10
@@ -122,6 +124,7 @@ class CodeIndex:
         self._unavailable: dict[str, str] = {}
         self._refused: dict[str, str] = {}
         self._not_indexed = dict(not_indexed or {})
+        self._text_left_out: dict[str, str] = {}
         self._sources = SourceFiles(
             self.root, self._unavailable, LINE_CACHE_FILES, _held_weakly(self._standing_first_read)
         )
@@ -446,6 +449,22 @@ class CodeIndex:
         blocks = schema_blocks(self._lines_of(file))
         self._reached.add(file)
         return blocks
+
+    @memoized
+    def text_blocks_in(self, file: str) -> tuple[TextBlock, ...]:
+        """The blocks a text search reads ``file`` in, by its format (``text_blocks``)."""
+        return text_blocks(file, self._lines_of(file))
+
+    def text_files_left_out(self, files: Sequence[str]) -> dict[str, str]:
+        """Which of ``files``, none of them a file JVN parses, a text search leaves out instead of
+        reading them as plain text, each with the reason (``scope.text_files_left_out``), decided once
+        per file for the life of the index. A file gone from the disk is named in ``unavailable_files``
+        instead."""
+        undecided = [file for file in self._available_files(files) if file not in self._text_left_out]
+        if undecided:
+            left_out = text_files_left_out(self.root, undecided)
+            self._text_left_out.update({file: left_out.get(file, "") for file in undecided})
+        return {file: reason for file in files if (reason := self._text_left_out.get(file))}
 
     def declarations_in(self, file: str) -> tuple[Span, ...]:
         """Constants, assignments, types, interfaces and enums at module level or directly in a

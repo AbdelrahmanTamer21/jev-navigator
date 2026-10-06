@@ -18,11 +18,15 @@ from conftest import WEBSITE_QUERIES
 from git_repos import commit_all, git, write_files
 
 from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.index.scope import BINARY, ENV_FILE, VENDORED
 from jev_navigator.index.spans import Span
 from jev_navigator.index.units import (
+    CODE_FILE,
+    UNSUPPORTED_LANGUAGE,
     Item,
     LineAnchor,
     RangeAnchor,
+    Reading,
     Unit,
     UnitKind,
     UnresolvedAnchor,
@@ -478,6 +482,157 @@ def test_files_the_parser_cannot_read_are_named_with_their_reason(shop: CodeInde
         "README.md": "language not supported",
         "config.json": "language not supported",
     }
+
+
+REPLICAS = "".join(
+    f"  region_{number}: the replicas of the region numbered {number}\n" for number in range(1, 131)
+)
+TEXT_FILES = {
+    "deploy/values.yaml": "# Replicas per region.\nreplicas:\n" + REPLICAS + "image: shop:1.0\n",
+    "docs/limits.md": "# Limits\n\nAt most four items.\n\n## Why\n\nThe warehouse packs four.\n",
+    "deploy/blank.yaml": "\n\n",
+    "notes/regions.jsonc": "// eu-west-1 only, for the data residency rule\n",
+    "package-lock.json": '{\n  "name": "shop",\n  "lockfileVersion": 3\n}\n',
+    "assets/logo.png": "\x89PNG\r\n\x1a\n\0\0\0\rIHDR\n",
+    "vendor/data.json": '{"a": 1}\n',
+    ".env": "API_KEY=placeholder\n",
+    "app/orders.py": "def accept(order):\n    return order\n",
+}
+
+
+@pytest.fixture
+def text_index(tmp_path: Path) -> CodeIndex:
+    root = tmp_path / "repo"
+    write_files(root, TEXT_FILES)
+    commit_all(root)
+    return CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+
+def _text_units(index: CodeIndex, files: Iterable[str], box: int = JEV_BOX) -> list[Unit]:
+    return list(list_units(index, tuple(files), box_chars=box, reading=Reading.TEXT).units)
+
+
+def test_a_text_reading_lists_one_text_unit_per_block_its_format_gives(text_index: CodeIndex) -> None:
+    # Act
+    units = _text_units(
+        text_index, ("docs/limits.md", "deploy/values.yaml", "notes/regions.jsonc", "package-lock.json")
+    )
+
+    # Assert: blank edges are left out, and every line of a text file counts, even a script comment
+    assert [(unit.id, unit.symbol, unit.ranges) for unit in units] == [
+        ("docs/limits.md:1-3", "Limits", ((1, 3),)),
+        ("docs/limits.md:5-7", "Limits > Why", ((5, 7),)),
+        ("deploy/values.yaml:1-132", "replicas", ((1, 132),)),
+        ("deploy/values.yaml:133-133", "image", ((133, 133),)),
+        ("notes/regions.jsonc:1-1", "<top level>", ((1, 1),)),
+        ("package-lock.json:1-2", "name", ((1, 2),)),
+        ("package-lock.json:3-4", "lockfileVersion", ((3, 4),)),
+    ]
+    assert {(unit.kind, unit.language) for unit in units} == {(UnitKind.TEXT, "text")}
+
+
+def test_a_yaml_block_over_the_box_is_cut_at_its_keys_packed_into_pieces_that_fit_the_box(
+    text_index: CodeIndex,
+) -> None:
+    # Act: 130 one-line keys of about 50 characters, so 60 of them would be over the box
+    replicas = _text_units(text_index, ("deploy/values.yaml",), box=SMALL_BOX)[0]
+
+    # Assert
+    assert [(piece.start, piece.end) for piece in replicas.pieces] == [(1, 58), (59, 114), (115, 132)]
+    assert not replicas.too_large_pieces
+
+
+def test_a_text_block_over_the_box_without_keys_inside_is_cut_into_pieces_of_sixty_lines(
+    tmp_path: Path,
+) -> None:
+    # Arrange: a YAML list, which has no keys one level deeper
+    items = "".join(f"  - deploy the service to the region numbered {number}\n" for number in range(1, 131))
+    root = tmp_path / "repo"
+    write_files(root, {"deploy/regions.yaml": "regions:\n" + items})
+    commit_all(root)
+    index = CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    [regions] = _text_units(index, ("deploy/regions.yaml",), box=SMALL_BOX)
+
+    # Assert
+    assert [(piece.start, piece.end) for piece in regions.pieces] == [(1, 60), (61, 120), (121, 131)]
+
+
+def _job(name: str, steps: int) -> str:
+    return f"  {name}:\n" + "".join(
+        f"      - run: make step {number:02} of {name}\n" for number in range(1, steps + 1)
+    )
+
+
+JOBS_WORKFLOW = (
+    "name: ci\njobs:\n" + _job("build", 30) + _job("lint", 2) + _job("test", 35) + _job("deploy", 90) + "\n\n"
+)
+
+
+def test_a_yaml_block_over_the_box_is_cut_at_its_jobs_packing_small_ones_and_cutting_one_over_the_box(
+    tmp_path: Path,
+) -> None:
+    # Arrange: build is lines 3 to 33, lint 34 to 36, test 37 to 72, deploy, alone over the box, 73 to 163,
+    # and two blank lines end the file
+    root = tmp_path / "repo"
+    write_files(root, {".github/workflows/ci.yml": JOBS_WORKFLOW})
+    commit_all(root)
+    index = CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    jobs = _text_units(index, (".github/workflows/ci.yml",), box=SMALL_BOX)[1]
+
+    # Assert: no piece splits a job that fits the box, and every piece fits it
+    assert [(piece.start, piece.end) for piece in jobs.pieces] == [(2, 36), (37, 72), (73, 132), (133, 163)]
+    assert not jobs.too_large_pieces
+
+
+def test_a_text_reading_names_code_binary_vendored_and_env_files_and_a_blank_file_lists_nothing(
+    text_index: CodeIndex,
+) -> None:
+    # Act
+    listing = list_units(text_index, tuple(TEXT_FILES), box_chars=JEV_BOX, reading=Reading.TEXT)
+
+    # Assert
+    assert "deploy/blank.yaml" not in {unit.path for unit in listing.units}
+    assert listing.unlisted == {
+        "assets/logo.png": BINARY,
+        "vendor/data.json": VENDORED,
+        ".env": ENV_FILE,
+        "app/orders.py": CODE_FILE,
+    }
+
+
+def test_a_line_of_a_text_file_names_its_block_and_a_line_of_an_env_file_names_its_reason(
+    text_index: CodeIndex,
+) -> None:
+    # Arrange
+    replicas = _text_units(text_index, ("deploy/values.yaml",), box=SMALL_BOX)[0]
+
+    # Act
+    resolution = resolve_anchors(
+        text_index,
+        [LineAnchor("deploy/values.yaml", 70), LineAnchor(".env", 1)],
+        box_chars=SMALL_BOX,
+        listed_only=True,
+        reading=Reading.TEXT,
+    )
+
+    # Assert
+    assert resolution.units == (replicas,)
+    assert resolution.unresolved == (UnresolvedAnchor(LineAnchor(".env", 1), ENV_FILE),)
+
+
+def test_a_code_reading_never_resolves_a_line_of_a_text_file(text_index: CodeIndex) -> None:
+    # Act
+    resolution = resolve_anchors(text_index, [LineAnchor("deploy/values.yaml", 70)], box_chars=JEV_BOX)
+
+    # Assert
+    assert resolution.units == ()
+    assert resolution.unresolved == (
+        UnresolvedAnchor(LineAnchor("deploy/values.yaml", 70), UNSUPPORTED_LANGUAGE),
+    )
 
 
 SCHEMA = "prisma/schema.prisma"

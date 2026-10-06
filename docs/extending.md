@@ -10,13 +10,15 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `resolve_scope` | the files a search covers from folders, patterns, languages and a git ref, with tests, generated, vendored code and docs left out by default; a file only its shape marks as possibly generated is set aside under an output folder (`dist`, `build`, `generated`), and otherwise awaits Jev's generated judgment with its measured facts; a scope over its cap is refused with counts per folder and language (README, "Choosing the files a search covers") |
 | `judge_generated_files` | Jev's generated-file judgment for the files a scope left undecided: one question per file over its path, measured facts, up to 10 importers and up to 5 files naming its path, each with their true count, and two excerpts; a file the secret scan refuses is named as not judged (README, "Choosing the files a search covers") |
 | `CodeIndex` | mechanical lookups over a narrowed scope: definitions, callers, callees, references, text, imports, git history |
-| `index.units` | the units a search judges (functions, methods, Prisma schema blocks, each file's top-level code), cut into 60-line pieces only when larger than their room in a request, and the one resolver of lines and line ranges to units |
+| `index.units` | the units a search judges (functions, methods, Prisma schema blocks, each file's top-level code; in a text reading, the text units of the files JVN does not parse), cut into 60-line pieces only when larger than their room in a request, and the one resolver of lines and line ranges to units |
+| `index.text_blocks` | how a file JVN does not parse splits into blocks without a parser: Markdown by heading section, YAML, JSON and TOML by top-level key, anything else whole |
 | `index.prisma_schema` | a Prisma schema's model, view, enum and composite type blocks with their lines, and the client accessor a model or view is queried through (`model WebsiteEvent` is `prisma.websiteEvent`) |
 | `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc |
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
 | `find_code` | a best-first search that opens places until the code a description names is found |
 | `find_all` | judges every unit of a population (anchored lines, files, and each hit of named texts, rarest name first) against described targets, one question per unit per target |
+| `find_all_text`, `find_text` | the same for text units only, the files JVN does not parse: judge every one, or stop once one is found |
 | `places.MOVES` | the ways a search lists the neighbours of an opened place; pick a subset or add your own |
 | `StopRule`, `History` | your own stop check over a search's history, reading only the sections you select |
 | `LlmStep` | an opt-in LLM call for the cases where Jev's answer is not clear enough |
@@ -156,6 +158,16 @@ thresholds; the CLI verifies those identities in its saved pack. Cancellation ke
 and parses nothing it has not reached. Ctrl-C during judging ends it `cancelled`, and a failed request
 ends it `failed` with `failure` holding the same error; both keep every answer that arrived in
 `judged`, so `completed=` resumes it. Retained journal receipts describe the work actually performed.
+
+`find_all` judges code units only, and `find_all_text` (with `find_all_text_async`) judges only the
+text units of the files JVN does not parse, with the same arguments, question, masker and request
+guard. A caller decides when to include text and gives a text search its own Judge, so it never
+spends code search's budget. A name's hits in code files and lockfiles are left out of a text
+search, so a common word never floods it with a lockfile's pieces; a lockfile named in `files` or
+`anchors` is judged. A code file named in a text search, like a text file named in `find_all`, is
+named in `unlisted`. `find_text(index, judge, description, files=..., names=...)` searches the same
+population for one target, `FIND_TEXT_TARGET`, and ends `found` after the first wave in which a
+unit's answer is yes by the Judge's thresholds. See [Text units](#text-units).
 
 The CLI composes entry selection and `find_code` with this function: the seed search's found code
 becomes range anchors, and the population is every file in scope, so a seed-search miss still judges
@@ -353,7 +365,8 @@ print([unit.id for unit in resolved.units], resolved.unresolved)
 longest question. Passing the whole box would let a unit just under it through, and the request
 carrying it would be refused.
 
-A unit is one function, one method, one Prisma schema block, or one file's top-level code. Its id is
+A unit is one function, one method, one Prisma schema block, or one file's top-level code, in a code
+reading (`Reading.CODE`, the default); a text reading lists [text units](#text-units). Its id is
 the location `path:start-end`; top-level code is `path:top`. `list_units` lists the functions and
 methods no other function holds, the blocks of each schema, and each file's top-level code, so every
 line of code sits in a listed unit once: a nested function or callback is inside its holder's text and is not listed. A unit's
@@ -395,12 +408,15 @@ blocks of the models opened code queries. Both are text matches: `.website.` als
 Top-level code is a file's lines outside every function, method and schema block, class bodies
 included, kept as runs of lines in order (`ranges`) without the blank lines at their edges. A file
 whose top-level code is only imports, comments, directives such as `"use client"`, lines of closing
-brackets and blank lines lists no top-level unit. A file in a language JVN does not read gives no units and is named
-in `unlisted` with `language not supported`, as is a file that disappeared after the inventory, and a
-file outside the index's scope with the index's own reason (`no file at this path`) or `not in the index scope`.
+brackets and blank lines lists no top-level unit. In a code reading, a file JVN does not parse gives
+no units and is named in `unlisted` with `language not supported`; in a text reading a code file is
+named with `code, which a text search leaves to find_all`, and a text file left out with its reason.
+So is a file that disappeared after the inventory, and a file outside the index's scope with the
+index's own reason (`no file at this path`) or `not in the index scope`.
 
 A unit whose text fits `box_chars` is one item, whatever its length. Only a larger unit is cut into
-`pieces` of at most 60 lines, in order, with no overlap and never across two runs of top-level code;
+`pieces` of at most 60 lines (a YAML or JSON text block at its keys, see below), in order, with no
+overlap and never across two runs of top-level code;
 each piece has its own range, hash and size. A piece still larger than `box_chars` is
 `too_large_to_judge`: it keeps its range and size, and `judged_pieces` leaves it out. A cut unit
 stays one unit: `unit_score` gives it its best piece's score, and `best_piece` names that piece's
@@ -421,9 +437,39 @@ another one it names. Each unit comes back once, in the order first named. With 
 every unit named is one `list_units` lists, for a caller that judges only listed units: a nested
 function gives way to the outermost function holding it, and lines of only top-level code the
 listing leaves out (imports, comments, directives, brackets) are reported. A file outside the scope,
-a file in a language JVN does not parse, a line outside its file, a reversed range, and a blank line
-in a file with no top-level code are reported in `unresolved` with their problem, and a file is
-parsed only after its anchor is known to point inside it.
+a file the reading leaves out, a line outside its file, a reversed range, and a blank line in a
+file with no top-level code are reported in `unresolved` with their problem, and a file is parsed
+only after its anchor is known to point inside it.
+
+### Text units
+
+A text reading (`list_units(..., reading=Reading.TEXT)`, and the same argument to `resolve_anchors`)
+lists only the files JVN does not parse, and a code reading never lists them, so find and find_all
+never see a text unit. A text file splits into blocks by its format (`index.text_blocks`), each one
+unit of kind `text` in the language `text`, its id the block's lines `path:start-end` without the
+blank lines at its edges:
+
+- Markdown (`.md`, `.mdx`, `.markdown`) at each `#` heading outside a code fence and front matter, named
+  by its heading path (`Install > macOS`); the lines before the first heading are a block of their own.
+- YAML at each top-level key, JSON at each top-level key of an object whose keys start on lines of
+  their own, and TOML at each root key and table header, named by the key path (`tool.ruff`). The
+  lines before the first key belong to the first block, and comment lines right above a key to its
+  block. A minified or invalid JSON file, or a list, is one block.
+- Any other file is one block, named `<top level>`.
+
+A block larger than its room is cut into 60-line pieces like any unit, except a YAML or JSON block,
+which is cut one level deeper, at its value's keys (`text_blocks.child_blocks`), so one CI job stays in
+one piece. Neighbouring keys are packed together while they fit 60 lines and the room, a longer key that
+fits the room is one piece, and a key over the room is cut into 60-line pieces. A value without keys,
+such as a list, is cut into 60-line pieces. `scope.text_files_left_out`
+leaves out an env file (`.env`, `.env.*`, `*.env`) whatever its content, a binary file (a NUL byte in
+its first 8,000 bytes, as git decides), and a vendored or generated file by the rules a scope applies
+by default. An env template (`.env.example`, `.env.sample`, `.env.template`) is read, masked like a
+config file, and a lockfile (`scope.is_lockfile`) is never left out as generated. `CodeIndex` decides each
+file once (`text_files_left_out`) and reads its blocks once (`text_blocks_in`). A text unit is masked
+like any request: YAML, TOML, `.conf`, `.ini`, `.properties` and Dockerfiles count as config, so an
+unquoted value under a secret key is hidden too. `resolve_scope` still keeps only files JVN parses,
+plus markup with `with_docs`.
 
 ## Trace a workflow and retain its evidence
 

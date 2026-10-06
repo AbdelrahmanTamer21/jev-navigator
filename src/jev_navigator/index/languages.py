@@ -518,6 +518,7 @@ STUB_RULES = {
 
 SCHEMA_SUFFIX = ".prisma"
 SCHEMA_LANGUAGE = "prisma"
+TEXT_LANGUAGE = "text"
 
 # The installed ast-grep supports tsx but not Flow. Route marked files through tsx;
 # unsupported Flow constructs remain visible through ERROR nodes.
@@ -566,7 +567,7 @@ def is_schema_file(path: str) -> bool:
 
 def language_read(path: str) -> str | None:
     """The language JVN reads ``path`` in: its parser's (``language_of``), or ``prisma`` for a
-    Prisma schema; None for a file JVN does not read."""
+    Prisma schema; None for a file a listing reads only as plain text (``TEXT_LANGUAGE``), if at all."""
     return language_of(path) or (SCHEMA_LANGUAGE if is_schema_file(path) else None)
 
 
