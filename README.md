@@ -823,7 +823,8 @@ mentions of that text in question IDs or unrelated error messages do not trigger
 A low neighbour score only lowers that neighbour's priority; it is never treated as proof that the code
 is not there. The search runs out of places when no start or pick waits and no neighbour scores
 above the no bar (0.20 by default). It then ends as `nothing_left` only if its own moves parsed every
-code file in scope without a grammar error; otherwise it ends as `scope_incomplete`. The remaining
+code file in scope without a grammar error and read the blocks of every Prisma schema in scope; otherwise
+it ends as `scope_incomplete`. The remaining
 files are never parsed just to choose the label. Of `FindResult.code_files`, `files_judged` counts the
 files in which Jev judged code (the opened places, not whole files) and `files_read` adds the files
 read only to list neighbours; the CLI prints all three, for example `scope_incomplete (not found: Jev
