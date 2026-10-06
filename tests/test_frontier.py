@@ -234,11 +234,11 @@ LIMIT_ANSWERS = {
 }
 
 
-def settling_search(root: Path, client=None, targets=LIMIT_ONLY, **settings):
-    """One unit per request, one request at a time: checkout clears the limit at 0.85, the callee it
-    pushes, enforce, scores 0.93, and enforce's own callee, over_limit, would score 0.9."""
+def settling_search(root: Path, client=None, targets=LIMIT_ONLY, per_request=1, **settings):
+    """One unit per request by default, one request at a time: checkout clears the limit at 0.85, the
+    callee it pushes, enforce, scores 0.93, and enforce's own callee, over_limit, would score 0.9."""
     index = shop_index(root, CHAIN)
-    judge = Judge(client or labelled(LIMIT_ANSWERS), items_per_request=1, max_concurrency=1)
+    judge = Judge(client or labelled(LIMIT_ANSWERS), items_per_request=per_request, max_concurrency=1)
     request = {"files": ["orders/checkout.py", "billing/refund.py"], "names": ["checkout"]}
     return index, find_all(index, judge, targets, **request, batches_per_wave=1, policy=VALUE, **settings)
 
@@ -269,6 +269,21 @@ def test_a_target_settles_only_after_the_callers_and_callees_its_clearing_unit_p
     assert "orders/limits.py" not in {unit.path for unit in result.units}
     assert (result.stopped_by, result.settled) == ("settled", ("limit",))
     assert result.not_judged == {refund.id: NOT_REACHED}
+
+
+def test_a_settling_target_spends_its_slots_only_on_the_units_it_pushed(tmp_path: Path) -> None:
+    # Arrange: two units per request, so the request after checkout cleared has a slot to spare
+    client = labelled(LIMIT_ANSWERS)
+
+    # Act
+    index, result = settling_search(tmp_path, client, per_request=2)
+
+    # Assert: post_order was judged with checkout, so the next request holds only enforce, and refund,
+    # which a slot to spare could have held, is never judged
+    requests = [[item["code"].splitlines()[0] for item in state["items"]] for state, _ in client.requests]
+    assert requests == [["def checkout(order):", "def post_order(request):"], ["def enforce(order):"]]
+    refund = _unit_at(result, "billing/refund.py", "refund")
+    assert (result.not_judged, result.stopped_by) == ({refund.id: NOT_REACHED}, "settled")
 
 
 def test_a_refused_hop_does_not_hold_its_target_open(tmp_path: Path) -> None:
@@ -337,14 +352,14 @@ SPLIT = {
 SPLIT_TARGETS = {"a": "the code that calls `alpha`", "b": "the code that calls `beta`"}
 
 
-def split_requests(root: Path, client, **settings) -> list[list[str]]:
-    """Each request's units, as alpha or beta, for a search over four units holding each name."""
+def split_search(root: Path, client, **settings):
+    """A search over four units holding each name, and each of its requests' units, as alpha or beta."""
     index = shop_index(root, SPLIT)
     judge = Judge(client, items_per_request=settings.pop("per_request", 2), max_concurrency=1)
-    find_all(
+    result = find_all(
         index, judge, SPLIT_TARGETS, names=["alpha", "beta"], batches_per_wave=1, policy=VALUE, **settings
     )
-    return [
+    return result, [
         [item["file"].removeprefix("pkg/").removesuffix(".py") for item in state["items"]]
         for state, _ in client.requests
     ]
@@ -352,7 +367,7 @@ def split_requests(root: Path, client, **settings) -> list[list[str]]:
 
 def test_each_target_draws_its_equal_share_of_every_batch_from_its_own_queue(tmp_path: Path) -> None:
     # Act
-    requests = split_requests(tmp_path, ScriptedJevClient(default_noul=0.1))
+    _, requests = split_search(tmp_path, ScriptedJevClient(default_noul=0.1))
 
     # Assert
     assert requests == [["alpha", "beta"]] * 4
@@ -360,7 +375,7 @@ def test_each_target_draws_its_equal_share_of_every_batch_from_its_own_queue(tmp
 
 def test_a_caller_sets_the_shares(tmp_path: Path) -> None:
     # Act: three slots of four for a, one for b
-    requests = split_requests(tmp_path, ScriptedJevClient(default_noul=0.1), per_request=4, shares={"a": 3})
+    _, requests = split_search(tmp_path, ScriptedJevClient(default_noul=0.1), per_request=4, shares={"a": 3})
 
     # Assert
     assert sorted(requests[0]) == ["alpha", "alpha", "alpha", "beta"]
@@ -371,11 +386,12 @@ def test_a_settled_targets_share_flows_to_the_target_still_open(tmp_path: Path) 
     client = labelled({("a", "alpha("): 0.9})
 
     # Act
-    requests = split_requests(tmp_path, client)
+    result, requests = split_search(tmp_path, client)
 
     # Assert: after the first request every slot is b's, whose queue holds beta first
     assert requests[0] == ["alpha", "beta"]
     assert [unit for request in requests[1:] for unit in request] == ["beta"] * 3 + ["alpha"] * 3
+    assert (result.settled, result.stopped_by) == (("a",), "scope_examined")
 
 
 @pytest.mark.parametrize(
