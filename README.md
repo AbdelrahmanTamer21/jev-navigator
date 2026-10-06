@@ -21,6 +21,54 @@ For structural questions, use code directly: `jvn stats --kind function --limit 
 function without model calls. `jvn stats` reports counts and line ranges; see the
 [structural command examples](docs/cli.md#structural-measurements).
 
+## Architecture: blocks, mini-workflows and configurations
+
+JVN is a library of building blocks for searching code. Each level composes the one below it, and
+every use of JVN, the `jvn` command included, is a composition of the same blocks.
+
+1. **Code primitives** establish facts without a model: the files in scope, definitions, callers,
+   callees, references, imports, text hits, units and git history
+   ([Layer 1](#layer-1-index-operations-and-comments-no-model)).
+2. **Mini-workflows** compose primitives and Jev judgments into one kind of search: `find`
+   (`find_code`), `find_all` and `trace` are built, and `find_text` and `find_all_text` are being
+   built ([Layer 3](#layer-3-directives)).
+3. **Configurations** (being built) compose mini-workflows into a larger workflow. A configuration is
+   typed: it names the mini-workflows, their order, their inputs and their budgets. `jvn search`, also
+   being built, is to be the default configuration.
+
+Between two stages a configuration can place a **Jev step**, one bounded decision such as a yes or no
+check or a pick from a list code built ([Layer 2](#layer-2-judgments)), or an **LLM step**, generation
+over an open space ([`LlmStep`](#llmstep-an-llm-call-you-add-yourself)). Which steps run is
+configuration: a recipe the caller passes as data names them, never an environment or deploy flag.
+
+| Block | Status |
+| --- | --- |
+| Index, operations, units and scope (`CodeIndex`, `operations`, `index.units`, `resolve_scope`) | built |
+| Jev judgments (`Check`, `Pick`, `Rate`, asked through `Judge`) | built |
+| Mini-workflows `find_code`, `find_all` and `trace` | built |
+| `LlmStep` | built |
+| Text search: the mini-workflows `find_text` and `find_all_text` | being built |
+| The spelling map | being built |
+| Typed configurations | being built |
+| `jvn search` | being built |
+
+The spelling map is an index block. It splits every identifier, file name, config key and string
+literal into word parts and normalises case, separators and plural, so all spellings of one name
+share a key: `Website`, `website`, `websites`, `web_site` and `website.ts` meet. A name lookup then
+returns every real spelling and its locations, rarest first.
+
+Three rules hold for every change:
+
+- A capability that is not about one caller's domain is a block that any caller can use. A caller
+  configures blocks and passes its own inputs; it never reimplements a block.
+- Nothing specific to findings, themes or the Analysis Engine lives in JVN. The Engine's evidence
+  pack, a theme agent's search tool and a coding agent's search are each a configuration plus that
+  caller's inputs.
+- An experiment compares named configurations on an evaluation set, never tweaks inside one call.
+
+Until typed configurations exist, a composition is a plain function of the blocks; see
+[docs/extending.md](docs/extending.md).
+
 ## Trace a known workflow
 
 ```sh
@@ -1032,11 +1080,16 @@ cannot run on with a `skipif` condition. To show the core works without the extr
 `uv run --no-dev --with pytest --with pytest-timeout pytest --without-typesafe`: only there may the
 TypeSafe tests skip, and it refuses to start when the extra is installed. Every run needs
 pytest-timeout (`required_plugins`), so a missing plugin stops the run instead of dropping its
-time limits. Run `uv run ruff check src tests` and
-`uv run ruff format --check src tests` before pushing. Local checks are the normal validation
-path for this small library; pushes and pull requests do not launch hosted CI. The `tests`
-workflow is available through GitHub Actions **Run workflow** when an explicit cross-version
-check is needed (Python 3.11 and 3.13, each with and without the TypeSafe extra).
+time limits. Run `uv run ruff check src tests` and `uv run ruff format --check src tests` before
+pushing.
+
+Locally, run only the test files that cover or import what you changed (`uv run pytest
+--basetemp=<scratch dir> tests/<file>`); never the whole suite on the shared Mac (André,
+05.10.2026). Pushes and pull requests do not launch hosted CI, so once a head is the one to merge,
+start the `tests` workflow on its branch (`gh workflow run tests.yml -R ajbmachon/jev-navigator
+--ref <branch>`). It runs the whole suite on Python 3.11 and 3.13, each with and without the
+TypeSafe extra; judge it by its log. A whole-suite run that must happen outside CI goes to GX10
+nr3 over SSH with a memory cap, never to this Mac.
 
 ## License
 
