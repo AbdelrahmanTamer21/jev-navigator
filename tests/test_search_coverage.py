@@ -11,10 +11,10 @@ from jev_navigator.directives.find_all import (
     NOT_REACHED,
     REFUSED,
     TOO_LARGE,
-    Source,
     find_all,
     match_check,
 )
+from jev_navigator.directives.frontier import Source
 from jev_navigator.directives.search_coverage import Outcome, PointCoverage, Round, point_results
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.units import LineAnchor, RangeAnchor

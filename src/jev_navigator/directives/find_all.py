@@ -1,11 +1,12 @@
 """Judge every unit of a population against described targets: one Noul per unit per target.
 
-The population is units (``index/units.py``), each one a listing lists: first the units the caller's
-line and range anchors name, then the units of the named files, then the units holding each hit of
-the named texts, names with fewer hits first, so a common word never decides which hits of a rare
-name are seen. Code finds the units; Jev judges each one whole, or a unit larger than its room in a
-request by its pieces. The Judge's call cap is the only budget: no code step is capped. The result
-keeps every raw answer with its place; ranking and any bar belong to the caller.
+The population is units (``index/units.py``), each one a listing lists: the units the caller's line
+and range anchors name, the units of the named files, and the units holding each hit of the named
+texts. A policy (``frontier``) orders them: ``STAGE_ORDER``, the default, judges them in that order,
+names with fewer hits first, so a common word never decides which hits of a rare name are seen;
+``VALUE`` judges the units worth most by code first. Code finds the units; Jev judges each one whole,
+or a unit larger than its room in a request by its pieces. The Judge's call cap is the only budget: no
+code step is capped. The result keeps every raw answer with its place; any bar belongs to the caller.
 
 ``find_all`` judges code units only. ``find_all_text`` judges the text units of the files JVN does
 not parse, the same way and with the same question, and never a code unit; ``find_text`` is the text
@@ -19,7 +20,6 @@ import asyncio
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import TypeVar
 
 from ..index.code_index import CodeIndex
@@ -46,6 +46,7 @@ from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
 from ..judgments.questions import Check, item_path, serialized_chars
 from ..judgments.thresholds import NoulVerdict
 from .find_code import search_failure
+from .frontier import STAGE_ORDER, Features, Policy, Source, features_of, name_rarities, value_key
 
 ITEMS = "items"
 TARGETS = "targets"
@@ -63,17 +64,6 @@ so the answer store's keys; it does not follow the Judge's concurrency, so that 
 them."""
 
 T = TypeVar("T")
-
-
-class Source(StrEnum):
-    """How a unit entered a population: find_all lists the units of the caller's anchors (``ANCHOR``),
-    then of its files (``FILE``), then of each name's hits (``NAME``). A caller composing searches names
-    the rest, such as a round of callees (``CALLEE``) it fed as anchors."""
-
-    ANCHOR = "anchor"
-    FILE = "file"
-    NAME = "name"
-    CALLEE = "callee"
 
 
 def match_check(target: str) -> Check:
@@ -117,7 +107,9 @@ class FindAllResult:
     None when the search never started. ``unlisted`` files gave no units and ``unresolved`` caller
     anchors named none. ``refusals`` keeps each refused place's error; the place is ``not_judged``
     as ``REFUSED`` and the search goes on past it. ``entered_by`` gives the source each unit entered
-    the population by, the first when several listed it."""
+    the population by, the first when several listed it. ``policy`` ordered the population; under a
+    ranked policy ``features`` holds each unit's code features, and ``repeat_of`` names, for a unit whose
+    code repeats another's, the unit judged in its place, whose answers and reasons it shares."""
 
     targets: Mapping[str, str]
     room: int | None
@@ -134,6 +126,9 @@ class FindAllResult:
     failure: Exception | None = None
     refusals: tuple[Refusal, ...] = ()
     entered_by: Mapping[str, Source] = field(default_factory=dict)
+    policy: Policy = STAGE_ORDER
+    features: Mapping[str, Features] = field(default_factory=dict)
+    repeat_of: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
     def not_started(cls, targets: Mapping[str, str], stopped_by: str) -> FindAllResult:
@@ -154,11 +149,25 @@ class FindAllResult:
         )
 
     def scores(self, target: str) -> tuple[UnitScore, ...]:
-        """Every judged unit's answer for ``target``, in place order."""
+        """Every judged unit's answer for ``target``, in place order; a repeat has its copy's answer."""
         answers = {answer.place.id: answer for answer in self.judged[target] if answer.place is not None}
         probabilities = {place_id: answer.probability for place_id, answer in answers.items()}
-        scored = (_unit_score(unit, answers, probabilities) for unit in self.units)
+        by_id = {unit.id: unit for unit in self.units}
+        scored = (
+            _unit_score(unit, by_id[self.repeat_of.get(unit.id, unit.id)], answers, probabilities)
+            for unit in self.units
+        )
         return tuple(score for score in scored if score is not None)
+
+    def ranked(self, target: str) -> tuple[UnitScore, ...]:
+        """Every judged unit's answer for ``target``, best first. A tie goes to the unit worth more by
+        code under a ranked policy, then to the content hash, never to the path."""
+        return tuple(sorted(self.scores(target), key=self._rank))
+
+    def _rank(self, score: UnitScore) -> tuple[float, float, str, str]:
+        features = self.features.get(score.unit.id)
+        value = 0.0 if features is None else features.value(self.policy.weights)
+        return -score.probability, -value, score.unit.content_sha256, score.unit.id
 
     @property
     def coverage(self) -> str:
@@ -183,10 +192,11 @@ def find_all(
     completed: Mapping[str, Sequence[CheckResult]] | None = None,
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    policy: Policy = STAGE_ORDER,
 ) -> FindAllResult:
-    """Judge the units ``anchors`` name, then the units of ``files``, then the units holding each hit
-    of ``names``, rarest name first, in waves of ``batches_per_wave`` requests' worth, until the
-    judge's call cap stops it.
+    """Judge the units ``anchors`` name, the units of ``files`` and the units holding each hit of
+    ``names``, in the order ``policy`` gives (see ``frontier``), in waves of ``batches_per_wave``
+    requests' worth, until the judge's call cap stops it.
 
     ``targets`` maps a name (an identifier) to a description; each unit is asked one question per
     target, all in the same request. ``delivered`` names the lines the caller already shows: a unit
@@ -196,7 +206,9 @@ def find_all(
     the error (see ``search_failure``), Ctrl-C ends it ``cancelled``, and either way ``judged`` keeps
     every answer that arrived.
     """
-    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE)
+    search = _begin(
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE, policy
+    )
     return _finished(search, anchors, files, names)
 
 
@@ -212,12 +224,15 @@ def find_all_text(
     completed: Mapping[str, Sequence[CheckResult]] | None = None,
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    policy: Policy = STAGE_ORDER,
 ) -> FindAllResult:
     """``find_all`` over text units (``Reading.TEXT``): the files JVN does not parse, each in the blocks
     its format gives, a code file named ``unlisted``. A name's hits in code and in lockfiles are left
     out, so a common word never floods the search with a lockfile's pieces; a lockfile ``files`` or
     ``anchors`` name is judged."""
-    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT)
+    search = _begin(
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT, policy
+    )
     return _finished(search, anchors, files, names)
 
 
@@ -232,11 +247,12 @@ def find_text(
     delivered: Sequence[RangeAnchor] = (),
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    policy: Policy = STAGE_ORDER,
 ) -> FindAllResult:
     """``find_all_text`` for the one target ``description``, named ``FIND_TEXT_TARGET``, ending
     ``found`` after the first wave in which a unit's answer is yes by the judge's thresholds."""
     targets = {FIND_TEXT_TARGET: description}
-    search = _begin(index, judge, targets, delivered, None, cancelled, batches_per_wave, Reading.TEXT)
+    search = _begin(index, judge, targets, delivered, None, cancelled, batches_per_wave, Reading.TEXT, policy)
     search.stops_when_found = True
     return _finished(search, anchors, files, names)
 
@@ -263,12 +279,15 @@ async def find_all_async(
     completed: Mapping[str, Sequence[CheckResult]] | None = None,
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    policy: Policy = STAGE_ORDER,
 ) -> FindAllResult:
     """``find_all`` with each wave's requests sent concurrently through the Judge's async form, for an
     async client. Listing, resolving and reading code run in a worker thread, so the event loop stays
     free. ``cancelled`` is read before each parse and between waves, since the Judge's async form
     reads none; a cancelled task's ``CancelledError`` is never caught."""
-    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE)
+    search = _begin(
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE, policy
+    )
     return await _finished_async(search, anchors, files, names)
 
 
@@ -284,9 +303,12 @@ async def find_all_text_async(
     completed: Mapping[str, Sequence[CheckResult]] | None = None,
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    policy: Policy = STAGE_ORDER,
 ) -> FindAllResult:
     """``find_all_text`` the way ``find_all_async`` runs ``find_all``."""
-    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT)
+    search = _begin(
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT, policy
+    )
     return await _finished_async(search, anchors, files, names)
 
 
@@ -309,11 +331,12 @@ def _begin(
     cancelled: Callable[[], bool] | None,
     batches_per_wave: int,
     reading: Reading,
+    policy: Policy,
 ) -> _Search:
     _require_identifiers(targets)
     if batches_per_wave < 1:
         raise ValueError("batches_per_wave must be at least 1")
-    search = _Search(index, judge.scope(), targets, delivered, cancelled, batches_per_wave, reading)
+    search = _Search(index, judge.scope(), targets, delivered, cancelled, batches_per_wave, reading, policy)
     search.resume(completed or {})
     return search
 
@@ -348,9 +371,11 @@ class _Search:
         cancelled: Callable[[], bool] | None,
         batches_per_wave: int,
         reading: Reading,
+        policy: Policy,
     ) -> None:
         self.index = index
         self.reading = reading
+        self.policy = policy
         self.stops_when_found = False
         self.found_one = False
         self.batches_per_wave = batches_per_wave
@@ -366,6 +391,9 @@ class _Search:
         self.judged: dict[str, list[CheckResult]] = {target: [] for target in targets}
         self.units: dict[str, Unit] = {}
         self.entered_by: dict[str, Source] = {}
+        self.features: dict[str, Features] = {}
+        self.repeat_of: dict[str, str] = {}
+        self.first_with_content: dict[str, str] = {}
         self.not_judged: dict[str, str] = {}
         self.unlisted: dict[str, str] = {}
         self.unresolved: list[UnresolvedAnchor] = []
@@ -395,7 +423,13 @@ class _Search:
             if self.stopped():
                 return
             async for name, answer in self.judge.iter_check_every_async(
-                self.checks, entries, self.shared, list_name=ITEMS, places=places, refusals=self.refusals
+                self.checks,
+                entries,
+                self.shared,
+                list_name=ITEMS,
+                places=places,
+                refusals=self.refusals,
+                keep_order=self.policy.ranked,
             ):
                 self._record(self.target_of[name], answer)
             if self.found_one:
@@ -430,6 +464,13 @@ class _Search:
     def _population(
         self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
     ) -> Iterator[Item]:
+        if self.policy.ranked:
+            return self._ranked_population(anchors, files, names)
+        return self._staged_population(anchors, files, names)
+
+    def _staged_population(
+        self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
+    ) -> Iterator[Item]:
         """Every place still to judge, in order: the anchored units', the files' units', then the
         places of the units holding each name's hits, rarest name first. A request's worth of hits is
         resolved together, and only when the next wave needs it."""
@@ -447,6 +488,65 @@ class _Search:
             if self.stopped():
                 return
             yield from self._admitted(self._units_of(chunk), Source.NAME)
+
+    def _ranked_population(
+        self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
+    ) -> Iterator[Item]:
+        """Every place still to judge, the units worth most by code first (see ``frontier``). Every
+        source is listed, every name's hits resolved and every unit admitted before the first wave, so a
+        unit the search never reaches is still counted; a unit whose code repeats one already admitted
+        shares that unit's answers instead of being judged."""
+        if self.stopped():
+            return
+        candidates = self._candidates(anchors, files, names)
+        if self.stopped():
+            return
+        near_files = self._near_files(anchors)
+        rarities = name_rarities(self.found)
+        for unit, source in candidates:
+            code = read_ranges(self.index, unit.path, unit.ranges)
+            self.features[unit.id] = features_of(unit, code, source, near_files, rarities)
+        ranked = sorted(candidates, key=self._value_key)
+        yield from [place for unit, source in ranked for place in self._admitted_once(unit, source)]
+
+    def _candidates(
+        self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
+    ) -> list[tuple[Unit, Source]]:
+        """Every unit of the population once, with the first source that listed it."""
+        hits = {name: self._hits(name) for name in dict.fromkeys(names)}
+        self.found = {name: len(found) for name, found in hits.items()}
+        sourced = [
+            *((unit, Source.ANCHOR) for unit in self._anchored(anchors)),
+            *((unit, Source.FILE) for unit in self._listed(files)),
+            *((unit, Source.NAME) for unit in self._units_of(list(_rarest_first(hits)))),
+        ]
+        first: dict[str, tuple[Unit, Source]] = {}
+        for unit, source in sourced:
+            first.setdefault(unit.id, (unit, source))
+        return list(first.values())
+
+    def _near_files(self, anchors: Sequence[Anchor]) -> frozenset[str]:
+        """The anchors' files and the files they import, where the index reads the language."""
+        scope = frozenset(self.index.files)
+        anchored = {anchor.file for anchor in anchors if anchor.file in scope}
+        imported = {
+            file for anchor in anchored if language_read(anchor) for file in self.index.imports(anchor)
+        }
+        return frozenset(anchored | imported)
+
+    def _value_key(self, candidate: tuple[Unit, Source]) -> tuple[float, str, str]:
+        unit, _ = candidate
+        return value_key(unit, self.features[unit.id], self.policy.weights)
+
+    def _admitted_once(self, unit: Unit, source: Source) -> list[Item]:
+        """``unit``'s places to judge, or none when its code repeats a unit already admitted."""
+        first = self.first_with_content.setdefault(unit.content_sha256, unit.id)
+        if first == unit.id:
+            return self._admitted([unit], source)
+        self.units[unit.id] = unit
+        self.entered_by[unit.id] = source
+        self.repeat_of[unit.id] = first
+        return []
 
     def _hits(self, name: str) -> tuple[TextHit, ...]:
         hits = self.index.search_text(name)
@@ -526,6 +626,7 @@ class _Search:
             cancelled=self.cancelled,
             places=places,
             refusals=self.refusals,
+            keep_order=self.policy.ranked,
         ):
             self._record(self.target_of[name], answer)
 
@@ -549,13 +650,14 @@ class _Search:
             for refusal in self.refusals
             if refusal.place is not None and refusal.place.id in self.not_judged
         }
+        not_judged = self.not_judged | dict.fromkeys(refused, REFUSED)
         return FindAllResult(
             self.targets,
             self.room,
             self.batches_per_wave,
             tuple(sorted(self.units.values(), key=_unit_order)),
             {target: tuple(sorted(answers, key=_answer_order)) for target, answers in self.judged.items()},
-            self.not_judged | dict.fromkeys(refused, REFUSED),
+            not_judged | self._repeats_left(not_judged),
             dict(self.unlisted),
             tuple(self.unresolved),
             {
@@ -568,7 +670,18 @@ class _Search:
             failure,
             tuple(self.refusals),
             dict(self.entered_by),
+            self.policy,
+            dict(self.features),
+            dict(self.repeat_of),
         )
+
+    def _repeats_left(self, not_judged: Mapping[str, str]) -> dict[str, str]:
+        """Each place of a repeat whose copy's place was left unjudged, with the copy's reason."""
+        left = {}
+        for repeat_id, first_id in self.repeat_of.items():
+            places = zip(_place_ids(self.units[repeat_id]), _place_ids(self.units[first_id]), strict=True)
+            left |= {repeat: not_judged[first] for repeat, first in places if first in not_judged}
+        return left
 
 
 def _room(judge: Judge, index: CodeIndex, checks: Sequence[Check], shared: Mapping) -> int:
@@ -611,13 +724,20 @@ def _chunks(values: Iterable[T], size: int) -> Iterator[list[T]]:
 
 
 def _unit_score(
-    unit: Unit, answers: Mapping[str, CheckResult], probabilities: Mapping[str, float]
+    unit: Unit, judged_as: Unit, answers: Mapping[str, CheckResult], probabilities: Mapping[str, float]
 ) -> UnitScore | None:
-    if not unit.pieces:
-        answer = answers.get(unit.id)
+    """``unit``'s answer, read at the unit judged in its place: itself, or the copy it repeats."""
+    if not judged_as.pieces:
+        answer = answers.get(judged_as.id)
         return None if answer is None else UnitScore(unit, answer, None)
-    piece = best_piece(unit, probabilities)
-    return None if piece is None else UnitScore(unit, answers[unit.piece_id(piece)], piece)
+    piece = best_piece(judged_as, probabilities)
+    if piece is None:
+        return None
+    return UnitScore(unit, answers[judged_as.piece_id(piece)], unit.pieces[piece.index])
+
+
+def _place_ids(unit: Unit) -> list[str]:
+    return [unit.id, *(unit.piece_id(piece) for piece in unit.pieces)]
 
 
 def _unit_order(unit: Unit) -> tuple:

@@ -17,7 +17,8 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
 | `find_code` | a best-first search that opens places until the code a description names is found |
-| `find_all` | judges every unit of a population (anchored lines, files, and each hit of named texts, rarest name first) against described targets, one question per unit per target |
+| `find_all` | judges every unit of a population (anchored lines, files, and each hit of named texts) against described targets, one question per unit per target, in the order a `frontier` policy gives |
+| `frontier` | the order a search judges its population in: `STAGE_ORDER` (anchors, files, name hits) or `VALUE` (code features first, ties by content hash) |
 | `find_all_text`, `find_text` | the same for text units only, the files JVN does not parse: judge every one, or stop once one is found |
 | `places.MOVES` | the ways a search lists the neighbours of an opened place; pick a subset or add your own |
 | `StopRule`, `History` | your own stop check over a search's history, reading only the sections you select |
@@ -140,8 +141,8 @@ lengthen code past the room (`Judge.fits_alone`). A unit or piece whose request 
 the provider for its size with no smaller split or by the final secret scan, is named `REFUSED` in
 `not_judged`, its error is kept in `refusals`, and the search goes on. One unit never fails the
 search. Every unit is one a listing lists, so a hit inside a nested function names the function
-holding it. No code step is capped: the Judge's call cap is the only budget. The population goes to the Judge in waves of `batches_per_wave`
-requests' worth (16 by default). Its order holds between waves, and exactly only at one batch per
+holding it. No code step is capped: the Judge's call cap is the only budget. The population goes to
+the Judge in waves of `batches_per_wave` requests' worth (16 by default). Its order holds between waves, and exactly only at one batch per
 wave. Like `items_per_request`, the wave size shapes the batches and so the answer store's keys.
 `delivered` names the line ranges the caller already shows: a unit or piece whose every line lies
 in them is named `already delivered by the caller` and not judged, while one with a line outside them
@@ -151,7 +152,24 @@ async client, such as a host's orchestrator; it lists and reads code in a worker
 bar belong to the caller:
 `scores(target)` gives every judged unit's answer, and `names` each name's hits found, reached and
 naming no unit. `entered_by` gives the source each unit entered the population by
-(`Source.ANCHOR`, `FILE` or `NAME`, the first when several listed it).
+(`frontier.Source.ANCHOR`, `FILE` or `NAME`, the first when several listed it).
+
+`policy` (`frontier`) decides the order, and under a call cap whatever is ranked last is what gets
+lost. `STAGE_ORDER`, the default, is the order above: anchors, files, then name hits rarest name first,
+each wave's batches sorted by place. `VALUE` lists every source and resolves every name's hits before
+the first call, scores each unit by code, and judges the best first, its batches kept in that order
+(`Judge.iter_check_every(..., keep_order=True)`). A unit's `features` are facts of any language: the
+request's names its code holds as whole words, each worth `1 / log2(2 + hits)`, whether the unit is
+named like a name, whether its file is, its distance from the anchors (an anchor's unit 0; a unit of an
+anchor's file, or of a file it imports where the index resolves that language's imports, 1; any other
+file's unit 2; a unit only a name hit reached 3), and whether its file is a test. `Weights` turns them
+into one value; a test is ranked lower by that value, never dropped. Ties go to the content hash, never
+to the path, so renaming a folder changes nothing. Code that repeats a unit already queued is judged
+once: `repeat_of` names the unit judged in its place, and the repeat shares its answers in `scores` and
+its reasons in `not_judged`. `ranked(target)` gives the answers best first, a tie going to the unit
+worth more by code, then to the content hash. Under `VALUE` every unit is admitted before the first
+wave, so the units never reached are counted, and the answer store's keys follow the new batches, so
+answers stored under the stage order are asked again once.
 
 `search_coverage.point_results(rounds, bar)` turns one search's rounds into each point's result:
 `found` when a unit's answer reaches the bar, `none_among_judged` over the units judged, or `unknown`

@@ -15,7 +15,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from ..index.units import Unit
-from .find_all import DELIVERED, NOT_REACHED, REFUSED, TOO_LARGE, FindAllResult, Source
+from .find_all import DELIVERED, NOT_REACHED, REFUSED, TOO_LARGE, FindAllResult
+from .frontier import Source
 
 UNJUDGED_PRECEDENCE = (NOT_REACHED, REFUSED, TOO_LARGE, DELIVERED)
 """The reason a unit left unjudged at several places or in several rounds counts under: the first
