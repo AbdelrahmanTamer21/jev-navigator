@@ -27,7 +27,7 @@ _SCRIPT_FROM = re.compile(
     re.M,
 )
 _SCRIPT_COMMENT_OR_STRING = re.compile(
-    r""""(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`|//[^\n]*|/\*.*?\*/""", re.S
+    r""""(?:[^"\\\n]++|\\.)*+"|'(?:[^'\\\n]++|\\.)*+'|`(?:[^`\\]++|\\.)*+`|//[^\n]*|/\*.*?\*/""", re.S
 )
 _SCRIPT_SIDE_EFFECT_IMPORT = re.compile(r"""^[ \t]*import\s*['"][^'"]+['"][ \t]*;?[ \t]*$""", re.M)
 _SCRIPT_REQUIRE_STATEMENT = re.compile(

@@ -15,6 +15,7 @@ from jev_navigator.index.imports import (
     imported_names,
     module_imports,
     reexported_names,
+    without_comments,
 )
 from jev_navigator.index.spans import Span
 
@@ -415,6 +416,19 @@ def test_a_multi_line_import_with_comments_inside_keeps_its_module_and_names() -
     # Assert
     assert modules == ["./x"]
     assert names == {"a": ImportedName("./x", "a"), "b": ImportedName("./x", "b")}
+
+
+@pytest.mark.parametrize("quote", ['"', "'", "`"])
+def test_stripping_comments_keeps_a_long_script_literal(quote: str) -> None:
+    # Arrange
+    literal = quote + "long literal " * 50_000 + rf"// kept \{quote} /* kept */" + quote
+    source = f"const text = {literal}; // removed\n/* removed\nover two lines */\n"
+
+    # Act
+    code = without_comments(source, "src/p.ts")
+
+    # Assert
+    assert code == f"const text = {literal}; \n\n\n"
 
 
 def test_an_import_after_a_statement_without_semicolon_keeps_its_names() -> None:
