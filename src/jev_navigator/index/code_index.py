@@ -1035,6 +1035,13 @@ class CodeIndex:
             if span in exported and self._can_name(role, span)
         )
 
+    def _exports(self, file: str, name: str) -> bool:
+        """Whether ``file`` exports a definition of its own as ``name``: one in its module scope for a
+        Python module, one its export statements name for a script module."""
+        if language_of(file) == "python":
+            return any(span.name == name for span in self._module_scope_spans(file))
+        return name in self._read_export_names(file)
+
     def _own_names(self, file: str, name: str) -> frozenset[str]:
         """The names of the definitions ``file`` exports as ``name``: the same name in a Python
         module, and in a script module the ones ``_read_export_names`` gives."""
@@ -1091,7 +1098,7 @@ class CodeIndex:
                 if identity in seen:
                     continue
                 seen.add(identity)
-                if self._hides(inherited.path, name) or name in self._read_export_names(inherited.path):
+                if self._hides(inherited.path, name) or self._exports(inherited.path, name):
                     prior = found.get(inherited.path)
                     if prior is None or inherited.proven:
                         found[inherited.path] = inherited

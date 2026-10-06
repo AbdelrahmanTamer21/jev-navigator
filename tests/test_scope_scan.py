@@ -2320,10 +2320,9 @@ def test_a_member_read_through_an_import_is_decided_like_a_named_import(tmp_path
     }
 
 
-def test_a_name_a_python_module_imports_and_passes_on_is_not_claimed_unexported(tmp_path: Path) -> None:
+def test_a_name_a_python_module_imports_and_passes_on_binds_to_its_definition(tmp_path: Path) -> None:
     """A Python module exports the names it imports at module level too, so `from pkg.api import
-    compute` where api.py imports `compute` from pkg.core is no proof that api.py exports none: the
-    candidate says the index found no definition there and does not follow the import."""
+    compute`, where api.py imports `compute` from pkg.core, binds to pkg/core.py's definition."""
     # Arrange
     index = committed(
         tmp_path,
@@ -2339,11 +2338,38 @@ def test_a_name_a_python_module_imports_and_passes_on_is_not_claimed_unexported(
     binding = index.binding_of("use_api.py", 2, "compute", None)
 
     # Assert
-    assert (binding.status.value, binding.reason) == (
-        "candidate",
-        "the import names pkg/api.py, where the index finds no definition exported as compute; a name "
-        "that module imports and passes on is not followed",
+    assert (binding.status.value, binding.target.file, binding.target.name) == (
+        "resolved",
+        "pkg/core.py",
+        "compute",
     )
+
+
+def test_a_call_through_a_package_init_reaches_the_definition_it_passes_on(tmp_path: Path) -> None:
+    """A package's __init__.py passes on a name from its submodule (`from .check import check`), or
+    every name (`from .rules import *`); a caller importing from the package reaches the definition.
+    A name the package imports under another name is not followed."""
+    # Arrange
+    index = committed(
+        tmp_path,
+        {
+            "pkg/check.py": "def check(x):\n    return x\n",
+            "pkg/rules.py": "def rule():\n    return 1\n",
+            "pkg/legacy.py": "def old():\n    return 0\n",
+            "pkg/__init__.py": "from .check import check\nfrom .rules import *\nfrom .legacy import old as new\n",
+            "app.py": "from pkg import check, rule, new\n\n\ndef run():\n    return check(rule()) or new()\n",
+        },
+    )
+
+    # Act
+    edges = {edge.name: edge.binding for edge in index.callee_edges(index.enclosing_symbol("app.py", 5))}
+
+    # Assert
+    assert {name: (binding.status.value, binding.target) for name, binding in edges.items()} == {
+        "check": ("resolved", index.find_definition("check")[0]),
+        "rule": ("resolved", index.find_definition("rule")[0]),
+        "new": ("candidate", None),
+    }
 
 
 def test_a_name_imported_under_an_alias_binds_to_the_exported_definition(

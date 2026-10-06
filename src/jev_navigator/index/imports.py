@@ -321,9 +321,12 @@ def _script_imported(specifier: str, exported: str) -> ImportedName:
 
 
 def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
-    """Names re-exported from each script module; ``None`` means an ``export *`` wildcard."""
+    """Names a module passes on from each module it names; ``None`` means every name (``export *``,
+    ``from m import *``). A Python module passes on what it imports by name, as a package's
+    ``__init__.py`` does; a name it imports under another name is left out, since its module exports
+    it under the first."""
     if path.endswith(".py"):
-        return ()
+        return _python_reexports(source)
     exports = []
     for match in _SCRIPT_FROM.finditer(_without_script_comments(source)):
         keyword, clause, specifier = match.groups()
@@ -341,6 +344,19 @@ def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | Non
         )
         if names:
             exports.append((names, specifier))
+    return tuple(exports)
+
+
+def _python_reexports(source: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
+    exports = []
+    for match in _PYTHON_FROM.finditer(source):
+        parts = [part.strip() for part in _PYTHON_COMMENT.sub("", match.group(2)).strip("()\n ").split(",")]
+        if "*" in parts:
+            exports.append((None, match.group(1)))
+            continue
+        names = frozenset(part for part in parts if part and _local(part) == _exported(part))
+        if names:
+            exports.append((names, match.group(1)))
     return tuple(exports)
 
 

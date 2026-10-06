@@ -77,7 +77,18 @@ import { ignored } from "./ignored";
         (None, "./orders"),
         (frozenset({"refund", "placeOrder"}), "./commands"),
     )
-    assert reexported_names("from .orders import create_order", "app/__init__.py") == ()
+
+
+
+def test_a_python_module_passes_on_the_names_it_imports_by_their_own_name() -> None:
+    # Arrange
+    source = "from .orders import create_order, refund as give_back\nfrom .audit import *\nimport json\n"
+
+    # Act
+    exports = reexported_names(source, "app/__init__.py")
+
+    # Assert
+    assert exports == ((frozenset({"create_order"}), ".orders"), (None, ".audit"))
 
 
 def test_destructuring_a_require_imports_each_local_name_under_its_exported_name() -> None:
