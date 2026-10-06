@@ -14,6 +14,7 @@ from git_repos import git
 from jev_navigator import memory_limit
 from jev_navigator.index import file_shape, tools
 from jev_navigator.index.file_shape import Placement
+from jev_navigator.runaway_guards import parse_guard_reason
 
 MISSING_OBJECT = "0" * 40
 
@@ -270,3 +271,54 @@ def test_a_command_still_running_after_its_timeout_is_stopped(tmp_path: Path) ->
 
     # Assert
     assert time.monotonic() - started < 10
+
+
+def _write_runaway_parse(root: Path, name: str) -> None:
+    """A file tree-sitter-python parses in quadratic time: a statement, then a long run of comments."""
+    (root / name).write_text("def first():\n    return 1\n\nx = 1\n" + "# comment\n" * 10_000)
+
+
+def test_a_file_whose_parse_runs_past_the_guard_is_refused_and_counted(tmp_path: Path) -> None:
+    # Arrange
+    _write_runaway_parse(tmp_path, "slow.py")
+    refused: dict[str, str] = {}
+
+    # Act
+    matches = list(
+        tools.ast_grep_rules(VALID_RULE, ["slow.py"], tmp_path, refused=refused, guard_seconds=0.5)
+    )
+
+    # Assert
+    assert matches == []
+    assert refused == {"slow.py": parse_guard_reason(0.5)}
+
+
+def test_files_parsed_beside_a_runaway_file_keep_every_match_exactly_once(tmp_path: Path) -> None:
+    # Arrange
+    _write_python_files(tmp_path, "a.py", "b.py", "c.py")
+    _write_runaway_parse(tmp_path, "slow.py")
+    refused: dict[str, str] = {}
+
+    # Act
+    matches = list(
+        tools.ast_grep_rules(
+            VALID_RULE, ["a.py", "slow.py", "b.py", "c.py"], tmp_path, refused=refused, guard_seconds=0.5
+        )
+    )
+
+    # Assert
+    assert sorted(match["file"] for match in matches) == ["a.py", "b.py", "c.py"]
+    assert refused == {"slow.py": parse_guard_reason(0.5)}
+
+
+def test_a_parse_within_the_guard_is_never_cut(tmp_path: Path) -> None:
+    # Arrange
+    _write_runaway_parse(tmp_path, "slow.py")
+    refused: dict[str, str] = {}
+
+    # Act
+    matches = list(tools.ast_grep_rules(VALID_RULE, ["slow.py"], tmp_path, refused=refused, guard_seconds=60))
+
+    # Assert
+    assert [match["file"] for match in matches] == ["slow.py"]
+    assert refused == {}

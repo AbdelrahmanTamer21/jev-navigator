@@ -2356,7 +2356,9 @@ def test_a_call_through_a_package_init_reaches_the_definition_it_passes_on(tmp_p
             "pkg/check.py": "def check(x):\n    return x\n",
             "pkg/rules.py": "def rule():\n    return 1\n",
             "pkg/legacy.py": "def old():\n    return 0\n",
-            "pkg/__init__.py": "from .check import check\nfrom .rules import *\nfrom .legacy import old as new\n",
+            "pkg/__init__.py": (
+                "from .check import check\nfrom .rules import *\nfrom .legacy import old as new\n"
+            ),
             "app.py": "from pkg import check, rule, new\n\n\ndef run():\n    return check(rule()) or new()\n",
         },
     )

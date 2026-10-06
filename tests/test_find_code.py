@@ -2009,3 +2009,32 @@ def test_a_request_failing_as_ctrl_c_arrives_while_its_round_is_sent_ends_the_se
     # Assert
     assert result.outcome == Outcome.FAILED
     assert str(result.failure) == "disk full"
+
+
+def test_a_search_past_its_runaway_ceiling_ends_runaway_and_keeps_its_frontier(
+    sample_index: CodeIndex,
+) -> None:
+    # Arrange
+    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.5))
+
+    # Act
+    result = find_code(sample_index, Judge(client), TARGET, start_at_place(sample_index), ceiling_seconds=0)
+
+    # Assert
+    assert result.outcome == Outcome.RUNAWAY
+    assert result.steps == 0
+    assert {entry.reason for entry in result.not_inspected} == {"runaway"}
+
+
+def test_an_async_search_past_its_runaway_ceiling_ends_runaway(sample_index: CodeIndex) -> None:
+    # Arrange
+    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.5))
+
+    # Act
+    result = asyncio.run(
+        find_code_async(sample_index, Judge(client), TARGET, start_at_place(sample_index), ceiling_seconds=0)
+    )
+
+    # Assert
+    assert result.outcome == Outcome.RUNAWAY
+    assert result.not_inspected

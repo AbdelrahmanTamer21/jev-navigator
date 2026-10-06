@@ -281,6 +281,12 @@ Use `jvn help find` for grouped help and examples, or `jvn schema find` for a ma
 schema. Agents can also pass an inline JSON object: `jvn --json '{"target":"the order limit"}'`.
 These controls are optional tuning, not prerequisites.
 
+Time is never a budget. Two runaway guards, set in `runaway_guards.py` (André, 06.10.2026), stop only a
+search that would otherwise hang: a file whose parse runs past 60 s is read as text instead (see
+[Choosing the files a search covers](#choosing-the-files-a-search-covers)), and a `find_code` search
+still running after 10 minutes ends `runaway`, with every unopened place listed and resumable like
+`budget`. A library caller can pass its own `ceiling_seconds` to `find_code` and `find_code_async`.
+
 An explicitly selected output directory must be new or empty. Each evidence pack contains:
 
 - `manifest.json`: schema version, navigator build fingerprint and source revision, inspected
@@ -502,7 +508,11 @@ to measure it. `CodeIndex.refused_files` and `unavailable_files` give the reason
 peak, the limit it is over, and the longest line in bytes. A file that ast-grep itself skips without
 parsing (it prints nothing for a file that is not valid UTF-8, or for one of more than 3,000,000
 bytes and 200,000 lines, which a file parsed alone can be) is refused too, as `not parsed`, and is
-never taken for a file without functions. A refused file is never recorded as parsed: it stays readable and
+never taken for a file without functions. So is a file whose parse runs past the 60 s runaway guard
+(`runaway_guards.PARSE_GUARD_SECONDS`): tree-sitter-python takes quadratic time on a long run of `#`
+comment lines after a statement (66 s in ast-grep at 40,000 lines), while normal files parse in well under a second.
+An ast-grep run of files side by side that passes the guard is stopped, and each of its files that had
+not finished is parsed again alone under the same guard, so only the runaway file is cut. A refused file is never recorded as parsed: it stays readable and
 searchable as text, it keeps its path in import relations (also as a re-export target), a name its
 bytes mention binds `unknown`, so does any name imported from it, whether or not its bytes say the
 name (a default export never needs the word `default`), `jvn stats` names it as never scanned, and `find_comments` lists it in
@@ -888,10 +898,10 @@ signature names its file and lines: a function quotes its first line; a window a
 or key outside any function gives its line range and quotes that line; a stretch chosen by position (the
 lines before or after, the start of a co-changed or imported file) gives its range and quotes its first
 line of code, past blank lines, comments, a license banner, a `'use strict'` directive or a module
-docstring. The outcome is `found`, `stop_rule`, `budget`, `cancelled`, `failed`, `nothing_left`,
+docstring. The outcome is `found`, `stop_rule`, `budget`, `runaway`, `cancelled`, `failed`, `nothing_left`,
 `unsure_only` or `scope_incomplete`, and the result keeps three sets: `found`; `searched` and `unsure`
 (bodies actually judged, start places apart in `starts`); and `not_inspected`, each entry with its
-reason (`budget`, `cancelled`, `failed`, `deprioritized`, `capped` or `depth`) and its `QueueTier`:
+reason (`budget`, `runaway`, `cancelled`, `failed`, `deprioritized`, `capped` or `depth`) and its `QueueTier`:
 `START`, `PICK` or `MOVE`. A request that fails, such as a provider error or a full disk while
 storing its answer, ends `find_code` and `find_code_async` as `failed`: `failure` holds that same error object, the answers
 its round did get stay merged, and the failed place waits in `not_inspected` with reason `failed`.
