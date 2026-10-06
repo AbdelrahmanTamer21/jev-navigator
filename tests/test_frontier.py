@@ -290,6 +290,26 @@ def test_the_hop_sources_a_caller_composes_decide_what_a_clearing_unit_pushes(tm
     assert (result.stopped_by, result.settled) == ("settled", ("limit",))
 
 
+def test_a_recursive_unit_that_clears_never_pushes_itself(tmp_path: Path) -> None:
+    # Arrange: countdown calls itself and start calls countdown; one unit per request
+    files = {
+        "count.py": (
+            "def countdown(n):\n    if n:\n        return countdown(n - 1)\n    return 0\n\n\n"
+            "def start():\n    return countdown(3)\n"
+        )
+    }
+    index = shop_index(tmp_path, files)
+    judge = Judge(labelled({("limit", "countdown(n - 1)"): 0.9}), items_per_request=1, max_concurrency=1)
+
+    # Act
+    result = find_all(index, judge, LIMIT_ONLY, files=["count.py"], batches_per_wave=1, policy=VALUE)
+
+    # Assert
+    countdown = _unit_at(result, "count.py", "countdown")
+    start = _unit_at(result, "count.py", "start")
+    assert result.pushed == {countdown.id: (start.id,)}
+
+
 def test_a_settling_target_spends_its_slots_only_on_the_units_it_pushed(tmp_path: Path) -> None:
     # Arrange: two units per request, so the request after checkout cleared has a slot to spare
     client = labelled(LIMIT_ANSWERS)

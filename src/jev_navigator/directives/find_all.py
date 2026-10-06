@@ -662,9 +662,10 @@ class _Search:
             self.awaiting[target].update(place.id for place in places)
 
     def _hops_of(self, unit_id: str) -> tuple[str, ...]:
-        """The units the hop sources reach from ``unit_id``, each admitted on first sight."""
+        """The units the hop sources reach from ``unit_id``, seeded with that unit alone, each admitted on
+        first sight; the unit itself is never its own hop."""
         if unit_id not in self.pushed:
-            seeds = Seeds(self.seeds.names, self.seeds.texts, units=(self.units[unit_id],))
+            seeds = Seeds(units=(self.units[unit_id],))
             reached = (
                 pair
                 for source in self.hops

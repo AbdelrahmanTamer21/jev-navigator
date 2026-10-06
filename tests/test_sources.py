@@ -6,6 +6,7 @@ from conftest import WEBSITE_QUERIES, labelled
 from shop_search import shop_index
 
 from jev_navigator.directives.find_all import find_all
+from jev_navigator.directives.frontier import VALUE
 from jev_navigator.index.units import LineAnchor, RangeAnchor, Unit, list_units
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
@@ -231,3 +232,29 @@ def test_find_all_judges_only_the_units_the_sources_a_caller_composes_reach(tmp_
     assert set(result.entered_by.values()) == {DEFINITIONS.name}
     assert result.sources == (DEFINITIONS, CALLERS, CALLEES)
     assert result.stopped_by == "scope_examined"
+
+
+def test_under_a_ranked_policy_a_unit_two_sources_reach_counts_at_the_nearer_source(tmp_path: Path) -> None:
+    # Arrange: check_limit's definition line is also one of its name's hits, the name source listed first
+    index = shop_index(tmp_path)
+    judge = Judge(labelled({}), items_per_request=4)
+
+    # Act
+    result = find_all(
+        index,
+        judge,
+        {"limit": "the item limit"},
+        names=["check_limit"],
+        sources=(NAMES, DEFINITIONS),
+        policy=VALUE,
+    )
+
+    # Assert
+    check_limit = next(unit for unit in result.units if unit.symbol == "check_limit")
+    place_order = next(unit for unit in result.units if unit.symbol == "place_order")
+    assert result.entered_by[check_limit.id] == DEFINITIONS.name
+    assert result.features["limit"][check_limit.id].distance == 1
+    assert (result.entered_by[place_order.id], result.features["limit"][place_order.id].distance) == (
+        NAMES.name,
+        3,
+    )
