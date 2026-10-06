@@ -485,8 +485,8 @@ class _Search:
         self.unresolved: list[UnresolvedAnchor] = []
         self.refusals: list[Refusal] = []
         self.found: dict[str, set[str | Anchor]] = {}
-        self.reached: defaultdict[str, set[Anchor]] = defaultdict(set)
-        self.without_unit: defaultdict[str, set[Anchor]] = defaultdict(set)
+        self.reached: defaultdict[str, set[str | Anchor]] = defaultdict(set)
+        self.without_unit: defaultdict[str, set[str | Anchor]] = defaultdict(set)
 
     def stopped(self) -> bool:
         return self.cancelled is not None and self.cancelled()
@@ -741,7 +741,16 @@ class _Search:
         reach_of: dict[str, Reach] = {}
         for reach in reaches:
             reach_of.setdefault(reach.at, reach)
+        listed = {unit.path for unit in listing.units}
+        for reach in reaches:
+            self._record_name_resolution(reach, reach.at not in listed)
         return [(unit, reach_of[unit.path]) for unit in listing.units]
+
+    def _record_name_resolution(self, reach: Reach, without_unit: bool) -> None:
+        for name in reach.names:
+            self.reached[name].add(reach.at)
+            if without_unit:
+                self.without_unit[name].add(reach.at)
 
     def _units_at_anchors(self, reaches: Sequence[Reach]) -> list[tuple[Unit, Reach]]:
         """The units each anchor names. An anchor reached by a name that names none counts against that
@@ -752,10 +761,7 @@ class _Search:
         )
         units = []
         for reach, (anchor, named, problem) in zip(reaches, resolved, strict=True):
-            for name in reach.names:
-                self.reached[name].add(anchor)
-                if problem:
-                    self.without_unit[name].add(anchor)
+            self._record_name_resolution(reach, bool(problem))
             if problem and not reach.names:
                 self.unresolved.append(UnresolvedAnchor(anchor, problem))
             units += [(unit, reach) for unit in named]

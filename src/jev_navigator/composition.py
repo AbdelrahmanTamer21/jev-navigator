@@ -18,20 +18,10 @@ from .sources import ANCHORS, FILES, NAMES, TEXT_FILE_NAMES, TEXT_NAMED_FILES, T
 def reserve_calls(judge: Judge, allowances: Mapping[str, int]) -> dict[str, Judge]:
     """Reserve independent stage caps before any stage starts. Parent accounting remains shared.
 
-    Unused calls stay reserved for their stage. A caller can explicitly allocate them to a later
+    Unused calls stay reserved for their stage. A stage can subdivide its share for a later
     composition. An existing parent cap must have room for every reservation.
     """
-    if any(
-        isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in allowances.values()
-    ):
-        raise ValueError("call allowances must be nonnegative integers")
-    remaining = judge.max_calls
-    if remaining is not None and sum(allowances.values()) > remaining - judge.calls:
-        raise ValueError("reservations exceed the parent's remaining call allowance")
-    stages = {name: judge.scope() for name in allowances}
-    for name, stage in stages.items():
-        stage.max_calls = allowances[name]
-    return stages
+    return judge.reserve_calls(allowances)
 
 
 @dataclass(frozen=True)

@@ -226,6 +226,8 @@ class Judge:
         self.replayed_answers = 0
         self.input_total = TokenTotal()
         self._parent: Judge | None = None
+        self._reserved_share = False
+        self._call_reservations: list[Judge] = []
         self._bookkeeping = threading.Lock()
         self._failed_requests: list[tuple[BaseException, str]] = []
         self._send_slots = threading.BoundedSemaphore(self.max_concurrency)
@@ -238,6 +240,7 @@ class Judge:
         child.replayed_answers = 0
         child.input_total = TokenTotal()
         child._parent = self
+        child._reserved_share = False
         child._send_slots = self._send_slots
         return child
 
@@ -254,8 +257,44 @@ class Judge:
 
     def calls_left(self) -> int | None:
         """The calls this judge may still send under its own and its parents' caps; None when uncapped."""
-        caps = [judge.max_calls - judge.calls for judge in self._chain() if judge.max_calls is not None]
+        chain = set(self._chain())
+        outstanding: dict[Judge, int] = {}
+        for reservation in self._call_reservations:
+            if reservation in chain:
+                continue
+            remaining = reservation.max_calls - reservation.calls
+            for ancestor in reservation._parent._chain():
+                outstanding[ancestor] = outstanding.get(ancestor, 0) + remaining
+                if ancestor._reserved_share:
+                    break
+        caps = [
+            judge.max_calls - judge.calls - outstanding.get(judge, 0)
+            for judge in chain
+            if judge.max_calls is not None
+        ]
         return max(0, min(caps)) if caps else None
+
+    def reserve_calls(self, allowances: Mapping[str, int]) -> dict[str, Judge]:
+        """Allocate independent shares atomically under every ancestor cap.
+
+        Unspent shares remain unavailable to siblings and ordinary parent sends. Nested shares
+        subdivide their owning reservation, so they never allocate that capacity twice.
+        """
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in allowances.values()
+        ):
+            raise ValueError("call allowances must be nonnegative integers")
+        with self._bookkeeping:
+            remaining = self.calls_left()
+            if remaining is not None and sum(allowances.values()) > remaining:
+                raise ValueError("reservations exceed the parent's remaining call allowance")
+            stages = {name: self.scope() for name in allowances}
+            for name, stage in stages.items():
+                stage.max_calls = allowances[name]
+                stage._reserved_share = True
+                self._call_reservations.append(stage)
+            return stages
 
     def cancel(self) -> None:
         """Ask a client with an owned cancellation boundary to abort its active requests."""

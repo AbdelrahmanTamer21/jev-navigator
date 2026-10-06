@@ -7,8 +7,9 @@ import pytest
 from shop_search import shop_index
 
 from jev_navigator.composition import SearchConfiguration, reserve_calls
-from jev_navigator.directives.find_all import find_all
+from jev_navigator.directives.find_all import NameHits, find_all, find_all_text
 from jev_navigator.judgments.judge import Judge
+from jev_navigator.sources import TEXT_FILE_NAMES
 from jev_navigator.testing import ScriptedJevClient
 
 
@@ -64,3 +65,41 @@ def test_text_named_by_stem_reaches_the_file_without_a_content_match(tmp_path: P
         )
     )
     assert [score.unit.path for score in text.scores("p")] == ["docs/Policy.md"]
+    assert text.names["Policy"] == NameHits(found=1, reached=1, without_unit=0)
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_reservations_cannot_exceed_any_ancestor_cap(scoped: bool) -> None:
+    parent = Judge(ScriptedJevClient(), max_calls=1)
+    judge = parent.scope().scope() if scoped else parent
+    with pytest.raises(ValueError, match="remaining"):
+        reserve_calls(judge, {"stage": 2})
+
+
+def test_outstanding_reservations_keep_their_calls_from_other_scopes(tmp_path: Path) -> None:
+    index = shop_index(tmp_path, {"app.py": "def run():\n    return 1\n"})
+    parent = Judge(ScriptedJevClient(), max_calls=2)
+    reserved = reserve_calls(parent.scope(), {"stage": 2})["stage"]
+    with pytest.raises(ValueError, match="remaining"):
+        reserve_calls(parent, {"competing": 2})
+    blocked = find_all(index, parent.scope(), {"p": "run"}, files=["app.py"])
+    assert blocked.stopped_by == "budget"
+    nested = reserve_calls(reserved.scope(), {"first": 1, "second": 1})
+    for stage in nested.values():
+        result = find_all(index, stage.scope(), {"p": "run"}, files=["app.py"])
+        assert len(result.scores("p")) == 1
+    assert parent.calls == reserved.calls == 2
+
+
+@pytest.mark.parametrize("content", ["# Rules\nKeep every answer.\n", ""])
+def test_named_file_coverage_counts_resolution_even_without_units(tmp_path: Path, content: str) -> None:
+    index = shop_index(tmp_path, {"docs/Policy.md": content})
+    result = find_all_text(
+        index,
+        Judge(ScriptedJevClient()),
+        {"p": "read Policy"},
+        names=["Policy"],
+        sources=(TEXT_FILE_NAMES,),
+    )
+    assert [score.unit.path for score in result.scores("p")] == (["docs/Policy.md"] if content else [])
+    assert result.names["Policy"] == NameHits(found=1, reached=1, without_unit=0 if content else 1)
