@@ -49,6 +49,7 @@ configuration: a recipe the caller passes as data names them, never an environme
 | The frontier: `find_all`'s order as a named policy, `STAGE_ORDER` or `VALUE` (per-target queues and shares, settling after one step of callers and callees) | built |
 | `LlmStep` | built |
 | Text search: the mini-workflows `find_text` and `find_all_text` | built |
+| Sources: one contract (`sources.Source`) for every primitive that reaches candidates | contract written; the existing primitives move under it |
 | The spelling map | being built |
 | Typed configurations | being built |
 | `jvn search` | being built |
@@ -57,6 +58,17 @@ The spelling map is an index block. It splits every identifier, file name, confi
 literal into word parts and normalises case, separators and plural, so all spellings of one name
 share a key: `Website`, `website`, `websites`, `web_site` and `website.ts` meet. A name lookup then
 returns every real spelling and its locations, rarest first.
+
+**Sources** are the primitives a search's candidates come from, all under one contract
+([`sources.py`](src/jev_navigator/sources.py)). A source takes `Seeds` (the request's names and the
+targets' descriptions, the caller's files and anchors, or units a search already judged) and the index,
+and returns `Reach` records without a model call: a place, which is a file or an anchor, and its
+provenance, which is the source, the seed, a distance and the request names it was reached by. A
+source never builds units and never scores them. The search turns places into units with its own room
+and reading, and the frontier measures every unit's code the same way whichever source reached it, so
+two sources reaching one unit never score it differently. A workflow is then a composition: the sources
+that start it, the sources a unit that clears a target's bar expands through, the frontier's policy and
+shares, and Jev judging in queue order.
 
 Three rules hold for every change:
 
