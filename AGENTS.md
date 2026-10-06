@@ -19,3 +19,5 @@ which blocks are built or being built, lives in the README's
 - **Checks (André, 05.10.2026).** Locally run only the tests that cover or import changed files and ruff;
   never the whole suite on this Mac. The full suite runs on GitHub Actions (`gh workflow run tests.yml`
   on the branch) once the head is the one to merge, judged by its log. Detail: [Tests](README.md#tests).
+- **One PR per coherent change (André, 05.10.2026).** While it is open, the next step goes onto it as
+  commits; a stack collapses into its top PR, and the full suite runs once, on the head to merge.
