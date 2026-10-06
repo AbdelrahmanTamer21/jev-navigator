@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from jev_navigator.index.languages import split_lines
-from jev_navigator.index.text_blocks import TextBlock, text_blocks
+from jev_navigator.index.text_blocks import TextBlock, child_blocks, text_blocks
 
 README = """\
 [![build](https://ci.example/badge.svg)](https://ci.example)
@@ -120,6 +120,52 @@ line-length = 110
 [[tool.mypy.overrides]]
 module = "shop.*"
 '''
+
+
+CI_JOBS = """\
+name: ci
+jobs:
+  # Builds the wheel.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make
+  test:
+    runs-on: ubuntu-latest
+"""
+
+
+def _children(path: str, text: str, block: int) -> list[tuple[str | None, int, int]]:
+    lines = split_lines(text)
+    parent = text_blocks(path, lines)[block]
+    return [(child.name, child.start, child.end) for child in child_blocks(path, lines, parent)]
+
+
+def test_a_yaml_block_splits_one_level_deeper_at_its_value_keys() -> None:
+    # Assert: the block's own key line joins its first child, and a comment above a key belongs to it
+    assert _children("ci.yml", CI_JOBS, 1) == [("jobs.build", 2, 7), ("jobs.test", 8, 9)]
+
+
+def test_a_json_block_splits_one_level_deeper_at_its_object_keys() -> None:
+    assert _children("settings.json", SETTINGS_JSON, 1) == [("limits.items", 3, 4), ("limits.note", 5, 6)]
+
+
+@pytest.mark.parametrize(
+    ("path", "text", "block"),
+    [
+        ("ci.yml", "steps:\n  - run: make\n  - run: test\n", 0),
+        ("ci.yml", CI_JOBS, 0),
+        ("settings.json", SETTINGS_JSON, 2),
+        ("rules.json", '[\n  {"name": "shop"}\n]\n', 0),
+        ("settings.toml", "[tool.shop]\nitems = 4\nnote = 'x'\n", 0),
+        ("README.md", README, 1),
+    ],
+    ids=["yaml list", "yaml scalar", "json list", "json top-level array", "toml", "markdown"],
+)
+def test_a_block_whose_format_gives_no_keys_one_level_deeper_has_no_children(
+    path: str, text: str, block: int
+) -> None:
+    assert _children(path, text, block) == []
 
 
 def test_toml_splits_by_root_key_and_table_named_by_its_key_path() -> None:

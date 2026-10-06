@@ -432,8 +432,6 @@ class _Search:
                 keep_order=self.policy.ranked,
             ):
                 self._record(self.target_of[name], answer)
-            if self.found_one:
-                return
 
     def ended(self, error: KeyboardInterrupt | Exception | None) -> FindAllResult:
         stop, failure = _stop_by(error)

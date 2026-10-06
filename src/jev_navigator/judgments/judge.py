@@ -842,8 +842,9 @@ class Judge:
 
     def _send_batch(self, plan: _CheckPlan, batch: _Batch, stop: _BatchStop) -> _SentBatch:
         """One batch's request on a worker thread. A size refusal returns the batch's halves for a
-        later wave; any other failure stops the other batches' unsent requests and is kept for the
-        caller to raise."""
+        later wave. A size refusal with no smaller split, or a secret-scan refusal, is kept as
+        refused while the other batches go on, when the caller keeps refusals (``_refused``). Any
+        other failure stops the other batches' unsent requests and is kept for the caller to raise."""
         if stop.requested():
             return _SentBatch([], None, [])
         try:

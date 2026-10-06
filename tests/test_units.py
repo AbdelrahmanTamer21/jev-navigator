@@ -531,12 +531,61 @@ def test_a_text_reading_lists_one_text_unit_per_block_its_format_gives(text_inde
     assert {(unit.kind, unit.language) for unit in units} == {(UnitKind.TEXT, "text")}
 
 
-def test_a_text_block_over_the_box_is_cut_into_pieces_of_sixty_lines(text_index: CodeIndex) -> None:
-    # Act
+def test_a_yaml_block_over_the_box_is_cut_at_its_keys_packed_into_pieces_that_fit_the_box(
+    text_index: CodeIndex,
+) -> None:
+    # Act: 130 one-line keys of about 50 characters, so 60 of them would be over the box
     replicas = _text_units(text_index, ("deploy/values.yaml",), box=SMALL_BOX)[0]
 
     # Assert
-    assert [(piece.start, piece.end) for piece in replicas.pieces] == [(1, 60), (61, 120), (121, 132)]
+    assert [(piece.start, piece.end) for piece in replicas.pieces] == [(1, 58), (59, 114), (115, 132)]
+    assert not replicas.too_large_pieces
+
+
+def test_a_text_block_over_the_box_without_keys_inside_is_cut_into_pieces_of_sixty_lines(
+    tmp_path: Path,
+) -> None:
+    # Arrange: a YAML list, which has no keys one level deeper
+    items = "".join(f"  - deploy the service to the region numbered {number}\n" for number in range(1, 131))
+    root = tmp_path / "repo"
+    write_files(root, {"deploy/regions.yaml": "regions:\n" + items})
+    commit_all(root)
+    index = CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    [regions] = _text_units(index, ("deploy/regions.yaml",), box=SMALL_BOX)
+
+    # Assert
+    assert [(piece.start, piece.end) for piece in regions.pieces] == [(1, 60), (61, 120), (121, 131)]
+
+
+def _job(name: str, steps: int) -> str:
+    return f"  {name}:\n" + "".join(
+        f"      - run: make step {number:02} of {name}\n" for number in range(1, steps + 1)
+    )
+
+
+JOBS_WORKFLOW = (
+    "name: ci\njobs:\n" + _job("build", 30) + _job("lint", 2) + _job("test", 35) + _job("deploy", 90) + "\n\n"
+)
+
+
+def test_a_yaml_block_over_the_box_is_cut_at_its_jobs_packing_small_ones_and_cutting_one_over_the_box(
+    tmp_path: Path,
+) -> None:
+    # Arrange: build is lines 3 to 33, lint 34 to 36, test 37 to 72, deploy, alone over the box, 73 to 163,
+    # and two blank lines end the file
+    root = tmp_path / "repo"
+    write_files(root, {".github/workflows/ci.yml": JOBS_WORKFLOW})
+    commit_all(root)
+    index = CodeIndex.from_git(root, fact_cache_dir=tmp_path / "facts")
+
+    # Act
+    jobs = _text_units(index, (".github/workflows/ci.yml",), box=SMALL_BOX)[1]
+
+    # Assert: no piece splits a job that fits the box, and every piece fits it
+    assert [(piece.start, piece.end) for piece in jobs.pieces] == [(2, 36), (37, 72), (73, 132), (133, 163)]
+    assert not jobs.too_large_pieces
 
 
 def test_a_text_reading_names_code_binary_vendored_and_env_files_and_a_blank_file_lists_nothing(

@@ -308,15 +308,17 @@ def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
 
 def _client_calls(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     """The code that queries a model or view the opened lines of a schema declare, found by the
-    text of its Prisma Client calls (``.website.`` for ``model Website``)."""
-    places = []
-    for block in index.schema_blocks_in(opened.span.file):
-        text = block.client_call_text
-        if text is None or not opened.span.overlaps(Span(opened.span.file, block.start, block.end)):
-            continue
-        relation = f"queries {block.keyword} {block.name} by the text `{text}`"
-        places += [place_for_line(index, hit.file, hit.line, relation) for hit in index.search_text(text)]
-    return places
+    text of its Prisma Client calls (``.website.`` for ``model Website``), tests last."""
+    calls = sorted(
+        (
+            (hit, f"queries {block.keyword} {block.name} by the text `{block.client_call_text}`")
+            for block in index.schema_blocks_in(opened.span.file)
+            if block.client_call_text and opened.span.overlaps(Span(opened.span.file, block.start, block.end))
+            for hit in index.search_text(block.client_call_text)
+        ),
+        key=lambda call: is_test_file(call[0].file),
+    )
+    return [place_for_line(index, hit.file, hit.line, relation) for hit, relation in calls]
 
 
 def _callees(index: CodeIndex, opened: CodeSlice) -> list[Place]:

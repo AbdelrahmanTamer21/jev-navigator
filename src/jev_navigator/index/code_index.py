@@ -282,10 +282,11 @@ class CodeIndex:
 
     @property
     def parsed_files(self) -> frozenset[str]:
-        """Files navigation has reached so far, through their facts or their name rows, never one it
-        refused to parse; reading it never starts a scan. Covering the scope for the name table
-        reaches no file. A file that changed or vanished after it was reached still counts, since its
-        facts and rows come from the bytes first read, and it is listed in ``unavailable_files`` too."""
+        """Files navigation has reached so far, through their facts, their name rows or a schema's
+        blocks, never one it refused to parse; reading it never starts a scan. Covering the scope for
+        the name table reaches no file. A file that changed or vanished after it was reached still
+        counts, since its facts and rows come from the bytes first read, and it is listed in
+        ``unavailable_files`` too."""
         return frozenset(self._reached - self._refused.keys())
 
     @property
@@ -295,8 +296,9 @@ class CodeIndex:
     @property
     def parser_scans_pending(self) -> tuple[str, ...]:
         """The fact scan is pending until navigation has reached every available code file, through its
-        facts, its name rows or the parser's refusal of it; covering the scope for the table reaches none."""
-        available = set(self._available_files(self._code_files))
+        facts, its name rows or the parser's refusal of it, and every Prisma schema, through its blocks;
+        covering the scope for the table reaches none."""
+        available = set(self._available_files((*self._code_files, *self.schema_files)))
         return () if available <= self._reached else ("facts",)
 
     @property
@@ -439,9 +441,14 @@ class CodeIndex:
 
     @memoized
     def schema_blocks_in(self, file: str) -> tuple[SchemaBlock, ...]:
-        """The model, view, enum and type blocks of a Prisma schema in scope; none for any other file."""
+        """The model, view, enum and type blocks of a Prisma schema in scope, which reach the schema;
+        none for any other file."""
         self._require_in_scope(file)
-        return schema_blocks(self._lines_of(file)) if is_schema_file(file) else ()
+        if not is_schema_file(file):
+            return ()
+        blocks = schema_blocks(self._lines_of(file))
+        self._reached.add(file)
+        return blocks
 
     @memoized
     def text_blocks_in(self, file: str) -> tuple[TextBlock, ...]:

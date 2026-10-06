@@ -20,6 +20,7 @@ from .directives.trace import EvidenceStatus, TraceObligation, TraceResult, trac
 from .index.code_index import CodeIndex
 from .index.spans import Span
 from .judgments.client import JevClient
+from .judgments.journal import error_fields, error_text_digested
 from .judgments.judge import CheckResult, Judge
 from .judgments.store import run_answer_store
 from .judgments.thresholds import Thresholds
@@ -121,6 +122,8 @@ def create_trace_evidence_pack(
         progress.phase("writing evidence pack")
         if not keep_requests:
             _drop_code(manifest)
+        if not journal.keeps_error_text:
+            manifest["trace"]["refused"] = refused_digested(manifest["trace"]["refused"])
         (output / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n")
         (output / "report.md").write_text(_report(manifest))
         return manifest
@@ -198,6 +201,7 @@ def _manifest(
             "functions": [_span_json(span) for span in result.graph.functions],
             "links": [_link_json(link) for link in result.graph.links],
             "obligations": [_obligation_json(obligation) for obligation in result.obligations],
+            "refused": {refusal.item["span_key"]: error_fields(refusal.error) for refusal in result.refusals},
             "included": [_span_json(span) for span in result.included],
             "excluded": [_span_json(span) for span in result.excluded],
             "unresolved_links": [_link_json(link) for link in result.unresolved_links],
@@ -214,6 +218,14 @@ def _outcome(result: TraceResult) -> str:
     if result.budget_stopped:
         return "budget"
     return "depth" if result.graph.stop == "depth" else "completed"
+
+
+def _unexamined_cause(trace: dict) -> str:
+    """Why some spans were never judged: judging stopped, requests were refused, or both."""
+    causes = [f"judging stopped: {trace['outcome']}"] if trace["outcome"] in ("budget", "cancelled") else []
+    if trace["refused"]:
+        causes.append(f"refused requests: {len(trace['refused'])}")
+    return f"Not every span was examined ({'; '.join(causes)})"
 
 
 def _obligation_json(obligation: TraceObligation) -> dict:
@@ -268,6 +280,22 @@ def _link_json(link) -> dict:
         if binding is None
         else {"status": binding.status, "reason": binding.reason, "proven": binding.proven},
     }
+
+
+def refused_digested(refused: Mapping[str, Mapping]) -> dict[str, dict]:
+    """The refused requests with each message kept only as its digest (``--no-error-text``)."""
+    return {place: error_text_digested(error) for place, error in refused.items()}
+
+
+def refused_lines(refused: Mapping[str, Mapping]) -> list[str]:
+    """One report line per refused request: the code it held, and its error or the error's digest."""
+    return [f"- `{place}`: {_error_text(error)}" for place, error in refused.items()]
+
+
+def _error_text(error: Mapping) -> str:
+    if "message" in error:
+        return f"{error['type']}: {error['message']}"
+    return f"{error['type']}; --no-error-text kept only its message's SHA-256 `{error['message_sha256']}`"
 
 
 def unavailable_file_lines(files: Mapping[str, str]) -> list[str]:
@@ -327,9 +355,8 @@ def _report(manifest: dict) -> str:
     if unexamined:
         lines += [
             "",
-            f"Judging stopped ({trace['outcome']}) before every span was examined, so "
-            f"{', '.join(unexamined)} keep their unexamined spans `unresolved`; unexamined spans "
-            "are never reported as a negative or a gap.",
+            f"{_unexamined_cause(trace)}, so {', '.join(unexamined)} keep their unexamined spans "
+            "`unresolved`; unexamined spans are never reported as a negative or a gap.",
             "",
         ]
     lines += ["", "## Evidence", ""]
@@ -344,6 +371,8 @@ def _report(manifest: dict) -> str:
                 f"- `{source['file']}:{source['lines'][0]}-{source['lines'][1]}` "
                 f"P(yes) {evidence['probability']:.3f} ({evidence['verdict']})"
             ]
+    if trace["refused"]:
+        lines += ["", "## Refused requests", "", *refused_lines(trace["refused"])]
     if trace["unavailable_files"]:
         lines += ["", "## Files without facts", "", *unavailable_file_lines(trace["unavailable_files"])]
     if trace["not_indexed_files"]:

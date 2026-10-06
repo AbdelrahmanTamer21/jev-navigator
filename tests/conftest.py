@@ -5,6 +5,8 @@ guard that fails a run with an undeclared skip."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import signal
 import subprocess
@@ -261,6 +263,33 @@ def _tool_name(arguments) -> str:
 @pytest.fixture
 def sample_index(sample_repo: Path) -> CodeIndex:
     return CodeIndex.from_git(sample_repo, fact_cache_dir=sample_repo.parent / "fact-cache")
+
+
+REFUSAL = "max_tokens_exceeded"
+REFUSAL_DIGEST = {
+    "message_length": len(REFUSAL),
+    "message_sha256": hashlib.sha256(REFUSAL.encode()).hexdigest(),
+}
+"""How a run file keeps ``REFUSAL`` with error text off."""
+
+
+class RefusingClient:
+    """Answers as ``scripted`` does, but refuses for its input size, with ``REFUSAL``, every request
+    whose list ``list_name`` holds ``marker``; a request without that list is answered."""
+
+    def __init__(self, scripted, marker: str, list_name: str) -> None:
+        self.scripted = scripted
+        self.marker = marker
+        self.list_name = list_name
+        self.model = scripted.model
+
+    def ask(self, state: Mapping, questions: Mapping) -> JevResponse:
+        if self.marker in json.dumps(state.get(self.list_name, [])):
+            raise InputBudgetExceededError(REFUSAL)
+        return self.scripted.ask(state, questions)
+
+    def close(self) -> None:
+        pass
 
 
 class BudgetedClient:
