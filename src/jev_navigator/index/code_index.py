@@ -104,7 +104,6 @@ class CodeIndex:
         blob_ids: Mapping[str, str] | None = None,
         not_indexed: Mapping[str, str] | None = None,
     ) -> None:
-        memory_limit.index_opened(self)
         self.root = Path(root)
         self.git_root = Path(git_root) if git_root is not None else self.root
         self.binding_resolver = binding_resolver
@@ -899,9 +898,8 @@ class CodeIndex:
             self._fact_cache.save(file, contents[file], facts)
 
     def _load_cached_facts(self, files: Sequence[str]) -> dict[str, bytes]:
-        """Remembers the persisted facts of ``files``; returns the bytes of those still to parse. Facts
-        loaded from the cache grow the process with no parser running, so each file is first checked
-        against JVN's memory allowance.
+        """Remembers persisted facts; returns the bytes of files still to parse. The host owns
+        loaded facts' memory; the shared JVN slot is reserved before loading them.
 
         The caller holds the facts lock."""
         to_parse: dict[str, bytes] = {}

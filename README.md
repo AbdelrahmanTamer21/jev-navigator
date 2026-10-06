@@ -133,11 +133,12 @@ Needs Python 3.11 or newer, and `ast-grep`, `rg` (ripgrep) and `git` on the PATH
 the official SDK for live calls; set `TYPESAFE_API_KEY`. Everything else, including the tests, runs
 offline.
 
-JVN limits its own memory, for the command and for every program that imports the library. Each
-process may grow by 1,024 MB, its ast-grep, ripgrep and git processes included, and all JVN processes
-on a machine share 8,192 MB; a process waits up to two minutes for room, then stops with
-`MemoryLimitReachedError`. See [Memory limit](docs/cli.md#memory-limit) for what a refusal does and
-the settings.
+JVN limits the child processes it starts. Each host reserves 1,024 MB for its ast-grep, ripgrep,
+git and command-line connector processes together, with an 8,192 MB shared child-process ceiling.
+It waits up to two minutes for room, then raises `MemoryLimitReachedError`. The embedding host or
+CLI launcher owns the Python process's total memory, including indexes and other caches. JVN cannot
+attribute a shared process's footprint to individual libraries. See
+[Memory limit](docs/cli.md#memory-limit) for the settings and refusal behavior.
 
 ## Live evidence-pack command
 
@@ -523,7 +524,7 @@ parse passes through, estimates each file's parse peak (`index/file_shape.py`): 
 file, every byte counted as code, plus the square of the punctuation `{}();,[]` on each line,
 which a minified bundle of a few tens of kilobytes on one line drives up. Files estimated at up to
 250 MB are parsed side by side. A file over that, but within the single-file limit
-(`MemoryLimit.single_parse_mb`: the memory allowance less Python's 270 MB share, so 754 MB at the
+(`MemoryLimit.single_parse_mb`: the child-process allowance less 270 MB of parser headroom, so 754 MB at the
 default), is parsed alone on one thread, one at a time, with no other file beside it. A file
 over the single-file limit is never handed to ast-grep, and neither is a large file that cannot be read
 to measure it. `CodeIndex.refused_files` and `unavailable_files` give the reason, with the estimated

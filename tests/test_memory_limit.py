@@ -4,7 +4,6 @@ and real JVN processes contending for real slot files."""
 from __future__ import annotations
 
 import asyncio
-import gc
 import json
 import mmap
 import os
@@ -15,15 +14,12 @@ import sys
 import sysconfig
 import threading
 import time
-import weakref
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from git_repos import commit_files
-from test_cli_failures import closable, hashes, journal_failures, manifest_of, provider_error, use_clients
-from test_cli_run_logs import TARGET, limit_client
 from test_oversized_guard import _real_code_file
 
 from jev_navigator import cli, memory_limit
@@ -145,30 +141,6 @@ def _holding(megabytes: int) -> Iterator[None]:
         held.close()
 
 
-class GrowsAfterTheFirstOpening:
-    """Answers like ``script``. Once it has answered the first request about opened code, this process
-    holds 200 MB more until ``release``, as a search that grew past its allowance would."""
-
-    def __init__(self, script: ScriptedJevClient) -> None:
-        self.script = script
-        self.model = script.model
-        self.received: list[tuple[Mapping, Mapping]] = []
-        self.held: mmap.mmap | None = None
-
-    def ask(self, state: Mapping, questions: Mapping):
-        self.received.append((state, questions))
-        answer = self.script.ask(state, questions)
-        if self.held is None and "slice" in state:
-            self.held = _touched(200)
-        return answer
-
-    def release(self) -> None:
-        self.held.close()
-
-    def close(self) -> None:
-        pass
-
-
 def _three_file_repository(root: Path) -> Path:
     """The target is in ``admit``, two steps from the start; opening ``admit`` looks up ``record`` in a
     file nothing before it needed, so the second round must start a process."""
@@ -230,7 +202,7 @@ def test_a_child_that_grows_past_the_allowance_is_stopped_and_named(
     # Assert
     message = str(stopped.value)
     assert "memory allowance of 150 MB" in message
-    assert f"process {os.getpid()}" in message
+    assert "child-process" in message
     assert "stopped" in message and os.path.basename(sys.executable) in message
     assert time.monotonic() - started < 5
 
@@ -289,73 +261,20 @@ def test_a_real_parse_over_the_allowance_is_stopped_and_caches_no_facts(
     assert bundle not in index.unavailable_files
 
 
-def test_growth_past_the_allowance_while_an_index_is_open_starts_no_further_process(
-    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: list[list[str]]
+def test_host_growth_with_a_live_index_does_not_refuse_a_second_pack(
+    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Arrange
     _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
-    index = CodeIndex(sample_repo, ["app/orders.py"], fact_cache_dir=tmp_path / "facts")
-    tools.git(["--version"], tmp_path)
+    index = CodeIndex(sample_repo, ["app/orders.py", "app/validation.py"], fact_cache_dir=tmp_path / "facts")
+    first = index.functions_in("app/orders.py")
 
-    # Act
-    with _holding(200), pytest.raises(MemoryLimitReachedError, match="memory allowance of 100 MB"):
-        index.functions_in("app/orders.py")
+    with _holding(200):
+        second = index.functions_in("app/validation.py")
+        assert tools.git(["--version"], sample_repo).startswith("git version")
 
-    # Assert
-    assert _scans(commands) == []
-    assert "app/orders.py" not in index.parsed_files
-
-
-@pytest.mark.parametrize(
-    ("program", "run_once"),
-    [
-        ("git", lambda folder: tools.git(["--version"], folder)),
-        ("git", tools.inside_git_worktree),
-        ("cat", lambda folder: _model_step(["cat"], folder)),
-    ],
-    ids=["git", "inside_git_worktree", "model step connector"],
-)
-def test_growth_past_the_allowance_while_an_index_is_open_starts_no_git_or_model_step(
-    sample_repo: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    commands: list[list[str]],
-    program: str,
-    run_once,
-) -> None:
-    # Arrange
-    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
-    index = CodeIndex(sample_repo, ["app/orders.py"], fact_cache_dir=tmp_path / "facts")
-    run_once(tmp_path)
-    started_before = list(commands)
-
-    # Act
-    with _holding(200), pytest.raises(MemoryLimitReachedError, match="memory allowance of 100 MB"):
-        run_once(tmp_path)
-
-    # Assert: the process started before the growth is the last one started
-    assert started_before[-1][0] == program
-    assert commands == started_before
-    assert index.files == ("app/orders.py",)
-
-
-def test_growth_past_the_allowance_stops_loading_cached_facts(
-    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: list[list[str]]
-) -> None:
-    # Arrange: a first index fills the fact cache; a second one over the same files reads only it.
-    facts = tmp_path / "facts"
-    CodeIndex.from_git(sample_repo, fact_cache_dir=facts).functions_in("app/orders.py")
-    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
-    tools.git(["--version"], tmp_path)
-    warm = CodeIndex(sample_repo, ["app/orders.py"], fact_cache_dir=facts)
-
-    # Act
-    with _holding(200), pytest.raises(MemoryLimitReachedError):
-        warm.functions_in("app/orders.py")
-
-    # Assert
-    assert len(_scans(commands)) == 1
-    assert "app/orders.py" not in warm.parsed_files
+    assert [span.name for span in first] == ["place", "cancel"]
+    assert second
+    assert index.parsed_files == {"app/orders.py", "app/validation.py"}
 
 
 def test_a_second_jvn_process_waits_for_a_full_ceiling_then_refuses_naming_the_holder(tmp_path: Path) -> None:
@@ -570,110 +489,6 @@ def test_a_process_started_while_no_index_is_alive_is_charged_only_for_itself(
     assert output == ""
 
 
-class FailsEveryRequest:
-    """A Jev client whose every request fails, as a provider answering 503 would."""
-
-    model = "jev-scripted"
-
-    def ask(self, state: Mapping, questions: Mapping):
-        raise provider_error()
-
-    def close(self) -> None:
-        pass
-
-
-def _failed_search(repository: Path, facts: Path, how: str) -> tuple[Outcome, weakref.ref[CodeIndex]]:
-    """A search whose requests all fail, and a weak reference to the index it searched."""
-    index = _opened(repository, facts, how)
-    starts = [place_for_line(index, "app/orders.py", 6, "start")]
-    result = find_code(
-        index, Judge(FailsEveryRequest()), "the item limit check", starts, budget=SearchBudget(beam_width=1)
-    )
-    return result.outcome, weakref.ref(index)
-
-
-@pytest.fixture
-def no_automatic_collection() -> Iterator[None]:
-    """A host whose cycle collector has not run since its last search: Python runs it only when its
-    allocation counts say so."""
-    enabled = gc.isenabled()
-    gc.disable()
-    try:
-        yield
-    finally:
-        if enabled:
-            gc.enable()
-
-
-@pytest.mark.parametrize("how", ["from_git", "with_files"])
-def test_an_index_a_failed_search_left_in_a_reference_cycle_does_not_charge_the_next_search(
-    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str, no_automatic_collection
-) -> None:
-    # Arrange: the failure's traceback holds the frames that hold the dropped index, so only the
-    # cycle collector frees it; then the host grows past the whole allowance.
-    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
-    outcome, left_behind = _failed_search(sample_repo, tmp_path / "first", how)
-    held_by_the_cycle = left_behind() is not None
-
-    # Act
-    with _holding(200):
-        second = _opened(sample_repo, tmp_path / "second", how).functions_in("app/orders.py")
-
-    # Assert
-    assert outcome == Outcome.FAILED
-    assert held_by_the_cycle
-    assert left_behind() is None
-    assert [span.name for span in second] == ["place", "cancel"]
-
-
-def test_what_the_process_grows_while_one_index_is_open_is_charged_to_the_next_index(
-    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: list[list[str]]
-) -> None:
-    # Arrange
-    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
-    first = CodeIndex(sample_repo, ["app/orders.py"], fact_cache_dir=tmp_path / "first")
-    first.functions_in("app/orders.py")
-
-    # Act
-    with _holding(200), pytest.raises(MemoryLimitReachedError, match="memory allowance of 100 MB"):
-        CodeIndex(sample_repo, ["app/validation.py"], fact_cache_dir=tmp_path / "second").functions_in(
-            "app/validation.py"
-        )
-
-    # Assert
-    assert len(_scans(commands)) == 1
-    assert first.parsed_files == {"app/orders.py"}
-
-
-def test_growth_of_this_process_while_a_child_runs_stops_the_child(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Arrange: the child only sleeps; this process grows past the allowance while it waits for it.
-    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
-    tools.git(["--version"], tmp_path)
-    grown = threading.Event()
-
-    def grow_while_waiting() -> None:
-        time.sleep(0.3)
-        with _holding(200):
-            grown.set()
-            time.sleep(2)
-
-    grower = threading.Thread(target=grow_while_waiting)
-    grower.start()
-    started = time.monotonic()
-
-    # Act
-    with pytest.raises(MemoryLimitReachedError, match="it stopped") as stopped:
-        tools.run_command([sys.executable, "-c", "import time; time.sleep(10)"], tmp_path)
-    grower.join()
-
-    # Assert
-    assert grown.is_set()
-    assert time.monotonic() - started < 8
-    assert f"process {os.getpid()} grew" in str(stopped.value)
-
-
 def test_a_slot_folder_that_is_a_symbolic_link_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -765,9 +580,14 @@ def test_a_breach_during_a_round_ends_the_search_failed_and_its_resume_finishes_
     starts = start_in(index)
     client = ScriptedJevClient(nouls=answer)
 
-    # Act
-    with _holding(200):
-        failed = search(index, client, starts)
+    # A real JVN-owned child crosses the allowance while the first scan opens.
+    def exceed_allowance(name, phase, count):
+        if phase == "started":
+            tools.run_command([sys.executable, "-c", GROWS_TO_600_MB_THEN_STAYS], sample_repo)
+
+    index.scan_observer = exceed_allowance
+    failed = search(index, client, starts)
+    index.scan_observer = None
     asked_before_resume = len(client.requests)
     resumed = search(index, client, [], resume=failed)
 
@@ -800,64 +620,6 @@ def test_any_other_error_while_opening_a_round_still_raises(
             find_code(*arguments, budget=SearchBudget(beam_width=1))
         else:
             asyncio.run(find_code_async(*arguments, budget=SearchBudget(beam_width=1)))
-
-
-@pytest.mark.parametrize("start", [("--start", "app/entry.py:3"), ()], ids=["given_start", "chosen_entry"])
-def test_jvn_find_stopped_by_the_allowance_while_opening_resumes_to_the_uninterrupted_result(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    start: tuple[str, ...],
-) -> None:
-    # Arrange
-    repository = _three_file_repository(tmp_path / "repository")
-
-    def jvn_find(output: Path, store: Path, *options: str) -> list[str]:
-        command = [
-            "find",
-            TARGET,
-            "--repo",
-            str(repository),
-            "--prefix",
-            "app/",
-            *start,
-            "--max-calls",
-            "none",
-        ]
-        return [*command, "--out", str(output), "--answer-store", str(store), *options]
-
-    whole_client = closable(limit_client())
-    use_clients(monkeypatch, iter([whole_client]))
-    assert cli.main(jvn_find(tmp_path / "whole", tmp_path / "whole.sqlite")) == 0
-    whole = manifest_of(tmp_path / "whole")
-    growing = GrowsAfterTheFirstOpening(limit_client())
-    resuming = closable(limit_client())
-    use_clients(monkeypatch, iter([growing, resuming]))
-    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
-    first, second, store = tmp_path / "first", tmp_path / "second", tmp_path / "answers.sqlite"
-    capsys.readouterr()
-
-    # Act
-    stopped_status = cli.main(jvn_find(first, store))
-    stopped_stderr = capsys.readouterr().err
-    growing.release()
-    resumed_status = cli.main(jvn_find(second, store, "--resume", str(first)))
-
-    # Assert
-    stopped = manifest_of(first)
-    assert stopped_status == 1
-    assert "memory allowance of 100 MB" in stopped_stderr
-    assert f"--resume {first.resolve()}" in stopped_stderr
-    assert stopped["search"]["outcome"] == "failed"
-    assert stopped["search"]["failure"]["type"] == "MemoryLimitReachedError"
-    assert stopped["search"]["failure"]["request_id"] is None
-    assert journal_failures(first) == []
-    assert (first / "resume.json").is_file()
-    resumed = manifest_of(second)
-    assert resumed_status == 0
-    assert resumed["search"]["outcome"] == whole["search"]["outcome"] == "found"
-    assert resumed["search"]["found"] == whole["search"]["found"]
-    assert sorted(hashes(growing.received + resuming.requests)) == sorted(hashes(whole_client.requests))
 
 
 def test_a_test_takes_its_memory_slot_in_the_suites_folder_and_never_in_the_machines(
@@ -1017,3 +779,29 @@ def test_the_process_guard_follows_the_settings_it_is_read_with(
     # Assert
     assert first is not second
     assert (second.limit.allowance_mb, second.directory) == (256, tmp_path / "b")
+
+
+def test_host_growth_while_a_child_runs_does_not_stop_the_child(
+    sample_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _limit_the_process(monkeypatch, tmp_path / "slots", allowance_mb=100, ceiling_mb=100)
+    index = CodeIndex(sample_repo, ["app/orders.py"], fact_cache_dir=tmp_path / "facts")
+    index.functions_in("app/orders.py")
+    ready = threading.Event()
+    release = threading.Event()
+
+    def grow():
+        with _holding(200):
+            ready.set()
+            release.wait(5)
+
+    with memory_limit.started([sys.executable, "-c", "import time; time.sleep(0.5)"]) as child:
+        grower = threading.Thread(target=grow)
+        grower.start()
+        try:
+            assert ready.wait(2)
+            assert child.wait(timeout=3) == 0
+        finally:
+            release.set()
+            grower.join()
+    assert index.parsed_files == {"app/orders.py"}
