@@ -289,6 +289,12 @@ Use `jvn help find` for grouped help and examples, or `jvn schema find` for a ma
 schema. Agents can also pass an inline JSON object: `jvn --json '{"target":"the order limit"}'`.
 These controls are optional tuning, not prerequisites.
 
+Time is never a budget. Two runaway guards, set in `runaway_guards.py` (André, 06.10.2026), stop only a
+search that would otherwise hang: a file whose parse runs past 30 s is read as text instead (see
+[Choosing the files a search covers](#choosing-the-files-a-search-covers)), and a `find_code` search
+still running after 7 minutes ends `runaway`, with every unopened place listed and resumable like
+`budget`. A library caller can pass its own `ceiling_seconds` to `find_code` and `find_code_async`.
+
 An explicitly selected output directory must be new or empty. Each evidence pack contains:
 
 - `manifest.json`: schema version, navigator build fingerprint and source revision, inspected
@@ -524,7 +530,11 @@ to measure it. `CodeIndex.refused_files` and `unavailable_files` give the reason
 peak, the limit it is over, and the longest line in bytes. A file that ast-grep itself skips without
 parsing (it prints nothing for a file that is not valid UTF-8, or for one of more than 3,000,000
 bytes and 200,000 lines, which a file parsed alone can be) is refused too, as `not parsed`, and is
-never taken for a file without functions. A refused file is never recorded as parsed: it stays readable and
+never taken for a file without functions. So is a file whose parse runs past the 30 s runaway guard
+(`runaway_guards.PARSE_GUARD_SECONDS`): tree-sitter-python takes quadratic time on a long run of `#`
+comment lines after a statement (66 s in ast-grep at 40,000 lines), while normal files parse in well under a second.
+An ast-grep run of files side by side that passes the guard is stopped, and each of its files that had
+not finished is parsed again alone under the same guard, so only the runaway file is cut. A refused file is never recorded as parsed: it stays readable and
 searchable as text, it keeps its path in import relations (also as a re-export target), a name its
 bytes mention binds `unknown`, so does any name imported from it, whether or not its bytes say the
 name (a default export never needs the word `default`), `jvn stats` names it as never scanned, and `find_comments` lists it in
@@ -563,18 +573,24 @@ is never bound again, so there `db.query()` binds through `./db` like a module a
 module's default export (`module.exports = ...`). A `const` is block-scoped, so it holds the module
 from its own line to the end of its block, or of the function when it sits in the function's body;
 before it, after its block, or in a `switch` case, the call stays a `candidate`. A `let` or `var` may
-be bound again and holds no module. A function counts from its first line, so on
+be bound again and holds no module. A function's own `const` that unpacks or reads a member of a plain
+name, `const { insert } = client`, `const { insert: write } = client` or `const utc = client.toUtc`,
+holds that member on the same terms, so `insert()`, `write()` and `utc()` bind as `client.insert()` and
+`client.toUtc()` would; when `client` is itself the function's own value, such as a parameter, they stay
+a `candidate`. A function counts from its first line, so on
 `stream(c, async (stream) => ...)` the outer call counts as inside the callback.
 Types are looked up apart from values, so a local value never replaces a type. A call `halt()` where
 `halt` imports a definition under another name (`import { stop as halt }`, `const { stop: halt } =
 require(...)`, `from m import stop as halt`) binds the same way to `stop`, unless the file defines
-`halt` itself. A default import, under any local name, takes the module's default export; the default's own name is no named export, so `import { make }`, `defaults.make()` and `const { solo } = require(...)` of a default reach nothing. Every import, by name, under another
+`halt` itself. A default import, under any local name, takes the module's default export; the default's own name is no named export, so `import { make }`, `defaults.make()` and `const { solo } = require(...)` of a default reach nothing. When the default export is an object literal, `export default { insert, utc: toUtc }`, a default import reaches its members: `client.insert()` binds to the module's `insert`, and `client.utc()` to its `toUtc`; `import { insert }` still reaches nothing, since the object's members are no named exports. Every import, by name, under another
 name, as a default or through a module alias, is decided the same way from the module it names and
 the modules that one re-exports the name from: one definition proves the target, several leave a
 `candidate`, any of these modules that could not be parsed where it mentions the name, or that
 vanished, leaves it `unknown`, and a module with no definition exported under the name leaves a
-`candidate` that says so. A name a module imports and passes on without an `export ... from`, as a
-Python module's own `from pkg.core import compute`, is not followed. A function or class
+`candidate` that says so. A Python module passes on each name it imports by that name, as a package's
+`__init__.py` does with `from .check import check` or `from .rules import *`, so `from pkg import check`
+reaches `pkg/check.py`; a name it imports under another name (`from .legacy import old as new`) is not
+followed, since its module exports it under the first. A function or class
 held by another function, a class or an object literal, or assigned to a property (`foo.bar =
 function () {}`), is no module-level definition, and neither is a function or class expression's own
 name (`run(function handler() {})`), which is bound only inside it. One assigned to `exports.x` or
@@ -910,10 +926,10 @@ signature names its file and lines: a function quotes its first line; a window a
 or key outside any function gives its line range and quotes that line; a stretch chosen by position (the
 lines before or after, the start of a co-changed or imported file) gives its range and quotes its first
 line of code, past blank lines, comments, a license banner, a `'use strict'` directive or a module
-docstring. The outcome is `found`, `stop_rule`, `budget`, `cancelled`, `failed`, `nothing_left`,
+docstring. The outcome is `found`, `stop_rule`, `budget`, `runaway`, `cancelled`, `failed`, `nothing_left`,
 `unsure_only` or `scope_incomplete`, and the result keeps three sets: `found`; `searched` and `unsure`
 (bodies actually judged, start places apart in `starts`); and `not_inspected`, each entry with its
-reason (`budget`, `cancelled`, `failed`, `deprioritized`, `capped` or `depth`) and its `QueueTier`:
+reason (`budget`, `runaway`, `cancelled`, `failed`, `deprioritized`, `capped` or `depth`) and its `QueueTier`:
 `START`, `PICK` or `MOVE`. A request that fails, such as a provider error or a full disk while
 storing its answer, ends `find_code` and `find_code_async` as `failed`: `failure` holds that same error object, the answers
 its round did get stay merged, and the failed place waits in `not_inspected` with reason `failed`.

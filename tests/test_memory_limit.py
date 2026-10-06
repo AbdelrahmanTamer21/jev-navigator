@@ -37,6 +37,7 @@ from jev_navigator.index.spans import Span
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.round import RoundRegistration, freeze
 from jev_navigator.memory_limit import MemoryLimit, MemoryLimitReachedError
+from jev_navigator.runaway_guards import PARSE_GUARD_SECONDS
 from jev_navigator.testing import ScriptedJevClient
 
 MB = 2**20
@@ -246,7 +247,12 @@ def test_a_reader_that_stops_early_does_not_wait_for_its_child(
             started_processes.append(self)
 
     monkeypatch.setattr(subprocess, "Popen", RecordedPopen)
-    lines = tools._json_lines([sys.executable, "-c", PRINTS_A_LINE_THEN_STAYS], tmp_path, decode=json.loads)
+    lines = tools._json_lines(
+        [sys.executable, "-c", PRINTS_A_LINE_THEN_STAYS],
+        tmp_path,
+        decode=json.loads,
+        guarded=tools._Guarded((), PARSE_GUARD_SECONDS),
+    )
     started = time.monotonic()
 
     # Act

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import itertools
+import time
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -61,6 +62,7 @@ from ..judgments.questions import (
 from ..judgments.secrets import DEFAULT_MASKER, TARGET, Masker
 from ..judgments.thresholds import NoulVerdict, Thresholds
 from ..memory_limit import MemoryLimitReachedError
+from ..runaway_guards import SEARCH_CEILING_SECONDS
 from .places import MOVES, Move, Place, neighbours_and_omissions, place_relationship
 from .shown import MAX_LINE_CHARS, cut_long_line, shown_slice
 
@@ -136,6 +138,7 @@ class Outcome(StrEnum):
     NOTHING_LEFT = "nothing_left"
     SCOPE_INCOMPLETE = "scope_incomplete"
     BUDGET = "budget"
+    RUNAWAY = "runaway"
     FAILED = "failed"
 
 
@@ -275,6 +278,8 @@ class _Search:
     replay_exhausted: bool = False
     failure: Exception | None = None
     counter: itertools.count = field(default_factory=itertools.count)
+    deadline: float = float("inf")
+    """When the search ends ``runaway`` (``runaway_guards.SEARCH_CEILING_SECONDS`` after it began)."""
     unmerged: list[_Opening] = field(default_factory=list)
     """The places a round opened and has not merged yet; a caller interrupt returns them to the
     frontier, wherever in the round it arrives."""
@@ -334,6 +339,7 @@ def find_code(
     stop_rule: StopRule | None = None,
     moves: Mapping[str, Move] | None = None,
     initial_candidates: Sequence[tuple[Place, float]] = (),
+    ceiling_seconds: float = SEARCH_CEILING_SECONDS,
 ) -> FindResult:
     """``commit``: the revision the caller means; the index must hold exactly it. ``resume``: continue
     a stopped search from its frontier with a fresh budget. ``stop_rule`` (off by default): after each
@@ -342,10 +348,12 @@ def find_code(
     picked place and may be found, while the rest keep their supplied probabilities in the ordinary
     move frontier. Explicit ``start`` places retain their caller-known semantics and never count as
     finds. ``moves`` chooses how neighbours are listed (default ``places.MOVES``); pass a
-    subset, or add a move of your own. Each round's places are asked concurrently in threads;
+    subset, or add a move of your own. ``ceiling_seconds`` is a runaway guard, not a budget
+    (``runaway_guards``): a search still running after it ends ``runaway`` with its frontier listed.
+    Each round's places are asked concurrently in threads;
     ``find_code_async`` is the same search for an async client."""
     options = _SearchOptions(
-        budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
+        budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates, ceiling_seconds
     )
     search, judge = _begin(index, judge, target_description, start, options)
     stop = None
@@ -382,13 +390,14 @@ async def find_code_async(
     stop_rule: StopRule | None = None,
     moves: Mapping[str, Move] | None = None,
     initial_candidates: Sequence[tuple[Place, float]] = (),
+    ceiling_seconds: float = SEARCH_CEILING_SECONDS,
 ) -> FindResult:
     """``find_code`` with each round's places sent concurrently with ``asyncio.gather``; budgets,
     masking, the store, the journal and the history work exactly as in ``find_code``, and a failed
     request ends the search ``failed`` the same way. Opening places
     runs ripgrep, git and the parser, so it runs in a worker thread and the event loop stays free."""
     options = _SearchOptions(
-        budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
+        budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates, ceiling_seconds
     )
     search, judge = _begin(index, judge, target_description, start, options)
     while (stop := _stop_reason(search, index)) is None:
@@ -436,6 +445,7 @@ class _SearchOptions:
     stop_rule: StopRule | None
     moves: Mapping[str, Move] | None
     initial_candidates: Sequence[tuple[Place, float]]
+    ceiling_seconds: float
 
 
 def _begin(
@@ -456,6 +466,7 @@ def _begin(
         rule,
         history,
         MOVES if options.moves is None else options.moves,
+        deadline=time.monotonic() + options.ceiling_seconds,
     )
     if options.resume is not None:
         _restore(search, options.resume)
@@ -684,6 +695,8 @@ def _stop_reason(search: _Search, index: CodeIndex) -> Outcome | None:
         return Outcome.FAILED
     if search.stop_judgment is not None and search.stop_judgment.outcome == HistoryOutcome.FOUND:
         return Outcome.STOP_RULE
+    if time.monotonic() >= search.deadline:
+        return Outcome.RUNAWAY
     steps_used = search.budget.max_steps is not None and search.steps >= search.budget.max_steps
     if steps_used or search.replay_exhausted:
         return Outcome.BUDGET

@@ -363,12 +363,49 @@ def _script_local_modules(language: str) -> str:
     - not: {{not: {{inside: {{stopBy: end, any: [{functions}]}}}}}}"""
 
 
-# The blocks a function's own `const` require ends in early: a statement block other than a
-# function's body that directly holds a `const` require. A body ends with its function, so it is
-# left out, which keeps the scan from printing every function body.
+# A function's own `const` that holds a member of a plain name, captured as `$OBJ` and `$MEMBER`, on
+# the name it binds: `const { insert } = client`, `const { insert: write } = client` and
+# `const utc = client.getUTCString`. The name then calls that member (see ``LocalName.member``).
+_HOLDS_PLAIN_NAME = "{kind: variable_declarator, has: {field: value, kind: identifier, pattern: $OBJ}}"
+_CONST_DESTRUCTURING = (
+    f"{{kind: object_pattern, inside: {{all: [{_HOLDS_PLAIN_NAME}, {{inside: {_CONST_DECLARATION}}}]}}}}"
+)
+
+
+def _script_local_members(language: str) -> str:
+    functions = ", ".join(f"{{kind: {kind}}}" for kind in FUNCTION_KINDS[language])
+    return f"""  any:
+    - kind: shorthand_property_identifier_pattern
+      pattern: $MEMBER
+      inside: {_CONST_DESTRUCTURING}
+    - kind: identifier
+      inside:
+        field: value
+        kind: pair_pattern
+        has: {{field: key, kind: property_identifier, pattern: $MEMBER}}
+        inside: {_CONST_DESTRUCTURING}
+    - kind: identifier
+      inside:
+        field: name
+        kind: variable_declarator
+        inside: {_CONST_DECLARATION}
+        has:
+          field: value
+          kind: member_expression
+          all:
+            - has: {{field: object, kind: identifier, pattern: $OBJ}}
+            - has: {{field: property, kind: property_identifier, pattern: $MEMBER}}
+  inside: {{stopBy: end, any: [{functions}]}}"""
+
+
+# The blocks a function's own `const` require or member ends in early: a statement block other than a
+# function's body that directly holds one. A body ends with its function, so it is left out, which
+# keeps the scan from printing every function body.
 _CONST_REQUIRE = (
     "{kind: lexical_declaration, all: [{has: {field: kind, regex: '^const$'}},"
-    " {has: {kind: variable_declarator, has: {field: value, pattern: 'require($SPEC)'}}}]}"
+    " {has: {kind: variable_declarator, any: [{has: {field: value, pattern: 'require($SPEC)'}},"
+    " {has: {field: value, kind: member_expression, has: {field: object, kind: identifier}}},"
+    " {all: [{has: {field: name, kind: object_pattern}}, {has: {field: value, kind: identifier}}]}]}}]}"
 )
 
 
@@ -385,6 +422,11 @@ LOCAL_MODULE_RULES = {
     "typescript": _script_local_modules("typescript"),
     "tsx": _script_local_modules("tsx"),
     "javascript": _script_local_modules("javascript"),
+}
+LOCAL_MEMBER_RULES = {
+    "typescript": _script_local_members("typescript"),
+    "tsx": _script_local_members("tsx"),
+    "javascript": _script_local_members("javascript"),
 }
 LOCAL_MODULE_BLOCK_RULES = {
     "typescript": _script_local_module_blocks("typescript"),
@@ -535,6 +577,7 @@ MODULE_ALIAS_RULES[FLOW_LANGUAGE] = _SCRIPT_MODULE_ALIASES
 LOCAL_NAME_RULES[FLOW_LANGUAGE] = LOCAL_NAME_RULES["tsx"]
 LOCAL_MODULE_RULES[FLOW_LANGUAGE] = LOCAL_MODULE_RULES["tsx"]
 LOCAL_MODULE_BLOCK_RULES[FLOW_LANGUAGE] = LOCAL_MODULE_BLOCK_RULES["tsx"]
+LOCAL_MEMBER_RULES[FLOW_LANGUAGE] = LOCAL_MEMBER_RULES["tsx"]
 MODULE_BINDING_RULES[FLOW_LANGUAGE] = MODULE_BINDING_RULES["tsx"]
 DECORATED_KINDS[FLOW_LANGUAGE] = DECORATED_KINDS["tsx"]
 
@@ -817,6 +860,23 @@ _TYPED_DEFAULT_EXPORTS = (
     _DEFAULT_VALUE,
     f"  any: [{{kind: identifier}}, {{kind: type_identifier}}]\n{_DEFAULT_DECLARATION_NAME}",
 )
+# The members of a module's default export object, captured as `$NAME`, with the definition each holds
+# as `$OWN` when its name differs: `export default { insert, utc: toUtc }`. A default import reaches
+# them as members (`client.insert()`); they are not the module's named exports.
+_DEFAULT_OBJECT = (
+    "not: {not: {inside: {kind: object, inside: {kind: export_statement, has: {regex: '^default$'}}}}}"
+)
+_DEFAULT_MEMBERS = (
+    f"""  pattern: {{context: '({{ $NAME: $OWN }})', selector: pair}}
+  all:
+    - not: {{not: {{has: {{field: value, kind: identifier}}}}}}
+    - {_DEFAULT_OBJECT}""",
+    f"""  kind: shorthand_property_identifier
+  pattern: $NAME
+  {_DEFAULT_OBJECT}""",
+)
+DEFAULT_MEMBERS = {"typescript": _DEFAULT_MEMBERS, "tsx": _DEFAULT_MEMBERS, "javascript": _DEFAULT_MEMBERS}
+
 DEFAULT_EXPORTS = {
     "typescript": _TYPED_DEFAULT_EXPORTS,
     "tsx": _TYPED_DEFAULT_EXPORTS,
@@ -843,7 +903,8 @@ OWN_EXPORT_SPECIFIERS = (
 def export_rules(languages: Iterable[str]) -> str:
     """ast-grep rules for the script export surface: the names exported declarations make, the
     entries of the module's own ``{ ... }`` lists, the names exported as values (see
-    ``EXPORTED_VALUES``) and the default export's (see ``DEFAULT_EXPORTS``). Python has no such
+    ``EXPORTED_VALUES``), the default export's (see ``DEFAULT_EXPORTS``) and its object's members (see
+    ``DEFAULT_MEMBERS``). Python has no such
     kinds, so it contributes no rules."""
     documents = []
     for language in languages:
@@ -857,6 +918,9 @@ def export_rules(languages: Iterable[str]) -> str:
         ]
         documents += [
             f"id: default_export\nlanguage: {grammar}\nrule:\n{rule}" for rule in DEFAULT_EXPORTS[grammar]
+        ]
+        documents += [
+            f"id: default_member\nlanguage: {grammar}\nrule:\n{rule}" for rule in DEFAULT_MEMBERS[grammar]
         ]
     return "\n---\n".join(documents)
 

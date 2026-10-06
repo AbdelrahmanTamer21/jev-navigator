@@ -80,7 +80,7 @@ POSITIVE_BUDGET_FIELDS = ("beam_width", "max_line_chars")
 # Each call is a paid request, so a bare `jvn find` stops at this many; `--max-calls none` lifts it.
 DEFAULT_MAX_CALLS = 24
 DEFAULT_FIND_ALL_MAX_CALLS = 2 * DEFAULT_MAX_CALLS
-RESUMABLE_OUTCOMES = (Outcome.BUDGET, Outcome.CANCELLED, Outcome.FAILED)
+RESUMABLE_OUTCOMES = (Outcome.BUDGET, Outcome.RUNAWAY, Outcome.CANCELLED, Outcome.FAILED)
 FIND_ALL_TARGET = "target"
 FIND_ALL_QUESTION = match_check(FIND_ALL_TARGET)
 """A search that stopped before it finished: it saves its frontier, a Find All does not enumerate

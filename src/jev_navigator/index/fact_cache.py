@@ -202,6 +202,7 @@ def _encode(facts: FileFacts) -> dict:
         "renamed_exports": [list(pair) for pair in facts.renamed_exports],
         "module_bindings": list(facts.module_bindings),
         "language": facts.language,
+        "default_members": [list(pair) for pair in facts.default_members],
     }
 
 
@@ -217,8 +218,8 @@ def _decode(file: str, raw: dict) -> FileFacts:
             tuple(_span(file, span) for span in structure["type_declarations"]),
             tuple(_span(file, span) for span in structure["value_declarations"]),
             tuple(
-                LocalName(int(first), int(last), name, int(line), module, int(block_end))
-                for first, last, name, line, module, block_end in structure["local_names"]
+                LocalName(int(first), int(last), name, int(line), module, int(block_end), member)
+                for first, last, name, line, module, block_end, member in structure["local_names"]
             ),
             tuple(
                 NamespaceMember(int(first), int(last), _span(file, span))
@@ -251,4 +252,5 @@ def _decode(file: str, raw: dict) -> FileFacts:
         tuple((exported, own) for exported, own in raw["renamed_exports"]),
         tuple(raw["module_bindings"]),
         language=raw["language"],
+        default_members=tuple((member, own) for member, own in raw["default_members"]),
     )

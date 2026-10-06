@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from typing import IO
 import msgspec
 
 from .. import memory_limit
+from ..runaway_guards import PARSE_GUARD_SECONDS, parse_guard_reason
 from .file_shape import Placement, placement_of
 from .spans import TextHit
 
@@ -50,6 +52,15 @@ MAX_ARGUMENT_BYTES = 128 * 1024
 
 class ToolFailedError(RuntimeError):
     """A command-line tool failed for a reason other than finding nothing."""
+
+
+class _ParseGuardTrippedError(Exception):
+    """An ast-grep run outlasted the parse guard and was stopped; ``unfinished`` are its files that
+    neither printed a match nor were listed as scanned."""
+
+    def __init__(self, unfinished: list[str]) -> None:
+        super().__init__(f"{len(unfinished)} file(s) unfinished when the parse guard stopped ast-grep")
+        self.unfinished = unfinished
 
 
 def run_command(
@@ -107,6 +118,7 @@ def ast_grep_rules(
     *,
     refused: dict[str, str],
     decode: Callable[[str], dict] = json.loads,
+    guard_seconds: float = PARSE_GUARD_SECONDS,
 ) -> Iterator[dict]:
     """The matches of ``rules_yaml`` over ``files``, one at a time as ast-grep prints them, so no
     process's whole output is ever held. Every parse passes through here, placed by its estimated parse
@@ -121,7 +133,14 @@ def ast_grep_rules(
     say), otherwise ``NEUTRAL_AST_GREP_CONFIG``. It is written to a temporary file outside every
     repository and passed with ``--config``, so the repository being analysed never configures the
     parser. ``decode`` turns one printed match into the dict the caller reads, in every run, side by
-    side or alone; a caller that reads few fields passes a decoder that skips the rest."""
+    side or alone; a caller that reads few fields passes a decoder that skips the rest.
+
+    Every run is stopped once it outlasts ``guard_seconds`` (``runaway_guards``). A file parsed alone
+    that trips the guard is added to ``refused`` with ``parse_guard_reason``. Side-by-side files parse
+    in well under a second each, so a stopped side-by-side run holds a runaway file: each of its files
+    that had not finished is parsed again alone under the same guard. ast-grep prints a file's matches
+    together once its parse ends and lists the file as scanned at the same moment, so a file that
+    printed a match or was listed had finished and is never parsed twice."""
     limit = memory_limit.process_guard().limit
     placed = _placed(files, cwd, limit.single_parse_mb)
     refused.update(placed.refused)
@@ -133,28 +152,61 @@ def ast_grep_rules(
         path.write_text(NEUTRAL_AST_GREP_CONFIG if config is None else config)
         resources.enter_context(memory_limit.parsing())
         command = [AST_GREP, "scan", "--inline-rules", rules_yaml, "--config", str(path)]
+        scan = _Scan([*command, "--threads", "1"], cwd, refused, decode, guard_seconds)
         side_by_side = [*command, "--threads", str(limit.parse_threads)]
         for chunk in file_chunks(placed.side_by_side):
-            yield from _scanned(side_by_side, chunk, cwd, refused, decode)
+            yield from scan.side_by_side(side_by_side, chunk)
         for file in placed.alone:
-            yield from _scanned([*command, "--threads", "1"], [file], cwd, refused, decode)
+            yield from scan.alone(file)
 
 
-def _scanned(
-    command: Sequence[str],
-    files: Sequence[str],
-    cwd: Path,
-    refused: dict[str, str],
-    decode: Callable[[str], dict],
-) -> Iterator[dict]:
-    """The matches of one ast-grep run over ``files``, each decoded with ``decode``; a file it skipped
-    without parsing is added to ``refused`` when the run ends."""
-    yield from _json_lines(
-        [*command, "--json=stream", "--inspect=entity", "--", *files],
-        cwd,
-        decode=decode,
-        on_stderr=lambda inspection: refused.update(_skipped_files(files, inspection, cwd)),
-    )
+@dataclass(frozen=True)
+class _Scan:
+    """What every ast-grep run of one ``ast_grep_rules`` call shares."""
+
+    alone_command: Sequence[str]
+    cwd: Path
+    refused: dict[str, str]
+    decode: Callable[[str], dict]
+    guard_seconds: float
+
+    def side_by_side(self, command: Sequence[str], files: Sequence[str]) -> Iterator[dict]:
+        try:
+            yield from self.run(command, files)
+        except _ParseGuardTrippedError as tripped:
+            for file in tripped.unfinished:
+                yield from self.alone(file)
+
+    def alone(self, file: str) -> Iterator[dict]:
+        try:
+            yield from self.run(self.alone_command, [file])
+        except _ParseGuardTrippedError:
+            self.refused[file] = parse_guard_reason(self.guard_seconds)
+
+    def run(self, command: Sequence[str], files: Sequence[str]) -> Iterator[dict]:
+        """The matches of one ast-grep run over ``files``, each decoded with ``decode``; a file it
+        skipped without parsing is added to ``refused`` when the run ends."""
+        yield from _json_lines(
+            [*command, "--json=stream", "--inspect=entity", "--", *files],
+            self.cwd,
+            decode=self.decode,
+            on_stderr=lambda inspection: self.refused.update(_skipped_files(files, inspection, self.cwd)),
+            guarded=_Guarded(files, self.guard_seconds),
+        )
+
+
+@dataclass
+class _Guarded:
+    """One run's files, the ones that printed a match, and whether the guard stopped the run."""
+
+    files: Sequence[str]
+    seconds: float
+    printed: set[str] = field(default_factory=set)
+    tripped: threading.Event = field(default_factory=threading.Event)
+
+    def unfinished(self, inspection: str) -> list[str]:
+        finished = self.printed | _scanned_files(inspection)
+        return [file for file in self.files if file not in finished]
 
 
 @dataclass
@@ -201,13 +253,18 @@ def file_chunks(files: Sequence[str], *, bytes_only: bool = False) -> Iterator[S
 def _skipped_files(chunk: Sequence[str], inspection: str, cwd: Path) -> dict[str, str]:
     """The non-empty files of ``chunk`` that ast-grep's ``--inspect=entity`` output does not list as
     scanned. ast-grep lists no empty file either, and an empty file has nothing to find."""
-    scanned = {
+    scanned = _scanned_files(inspection)
+    reasons = {file: _not_parsed_reason(cwd / file) for file in chunk if file not in scanned}
+    return {file: reason for file, reason in reasons.items() if reason is not None}
+
+
+def _scanned_files(inspection: str) -> set[str]:
+    """The files ``--inspect=entity`` lists as scanned."""
+    return {
         line.removeprefix(_SCANNED_FILE_PREFIX).rsplit(": language=", 1)[0]
         for line in inspection.splitlines()
         if line.startswith(_SCANNED_FILE_PREFIX)
     }
-    reasons = {file: _not_parsed_reason(cwd / file) for file in chunk if file not in scanned}
-    return {file: reason for file, reason in reasons.items() if reason is not None}
 
 
 def _not_parsed_reason(path: Path) -> str | None:
@@ -231,24 +288,40 @@ def _json_lines(
     cwd: Path,
     *,
     decode: Callable[[str], dict],
+    guarded: _Guarded,
     on_stderr: Callable[[str], None] | None = None,
 ) -> Iterator[dict]:
     """Each line the command prints, decoded with ``decode`` while it runs. stderr goes to a file, so a full
     stderr pipe cannot stall the command; the process is killed if the reader stops early. A line
     that is no JSON (the process died partway through it) fails with the process's exit code and
     stderr, which say why it stopped. ``on_stderr`` gets the whole stderr text once the command has
-    ended successfully."""
+    ended successfully. A command still running after ``guarded.seconds`` is stopped and raises
+    ``_ParseGuardTrippedError`` naming its unfinished files, after the matches it printed."""
     with tempfile.TemporaryFile() as errors:
         with memory_limit.started(
             arguments, cwd=cwd, stdout=subprocess.PIPE, stderr=errors, text=True
         ) as process:
-            for line in process.stdout:
-                if line.strip():
-                    yield _json_object(line, process, errors, arguments[0], decode)
+            guard = threading.Timer(guarded.seconds, _stop, (process, guarded.tripped))
+            guard.start()
+            try:
+                for line in process.stdout:
+                    if line.strip():
+                        match = _json_object(line, process, errors, arguments[0], decode)
+                        guarded.printed.add(match.get("file"))
+                        yield match
+            finally:
+                guard.cancel()
+        if guarded.tripped.is_set():
+            raise _ParseGuardTrippedError(guarded.unfinished(_stderr_text(errors)))
         if process.returncode not in (0, _NO_MATCHES_EXIT):
             raise _tool_failed(arguments[0], process.returncode, errors)
         if on_stderr is not None:
             on_stderr(_stderr_text(errors))
+
+
+def _stop(process: subprocess.Popen, tripped: threading.Event) -> None:
+    tripped.set()
+    process.kill()
 
 
 def _json_object(
