@@ -163,16 +163,25 @@ def test_a_copy_of_code_the_search_did_not_reach_is_not_reached_too(tmp_path: Pa
 def test_a_value_search_resumed_from_its_answers_asks_only_the_units_it_had_not_reached(
     tmp_path: Path,
 ) -> None:
-    # Arrange
+    # Request order is the frontier order only with one send at a time, as in sent_requests.
     index = shop_index(tmp_path)
     stopped = find_all(
-        index, Judge(ScriptedJevClient(), items_per_request=2, max_calls=2), TARGETS, **REQUEST, policy=VALUE
+        index,
+        Judge(ScriptedJevClient(), items_per_request=2, max_calls=2, max_concurrency=1),
+        TARGETS,
+        **REQUEST,
+        policy=VALUE,
     )
     client = ScriptedJevClient()
 
     # Act
     find_all(
-        index, Judge(client, items_per_request=2), TARGETS, **REQUEST, policy=VALUE, completed=stopped.judged
+        index,
+        Judge(client, items_per_request=2, max_concurrency=1),
+        TARGETS,
+        **REQUEST,
+        policy=VALUE,
+        completed=stopped.judged,
     )
 
     # Assert: the two calls answered the first four units in value order
