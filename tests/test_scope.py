@@ -284,6 +284,32 @@ def test_language_filter_leaves_other_languages_out(mixed_repo: Path) -> None:
     assert _files(_scope(mixed_repo, languages=("python",))) == ("app/orders.py",)
 
 
+def test_a_prisma_schema_is_in_scope_and_chosen_by_its_own_language(
+    tmp_path: Path, umami_schema: str
+) -> None:
+    # Arrange: JVN reads a schema's blocks, so a scope keeps it like a source file.
+    repo = _repository(tmp_path / "repo", {"prisma/schema.prisma": umami_schema, "web/routes.ts": SCRIPT})
+
+    # Act and assert
+    assert _files(_scope(repo)) == ("prisma/schema.prisma", "web/routes.ts")
+    assert _files(_scope(repo, languages=("typescript",))) == ("web/routes.ts",)
+    assert _files(_scope(repo, languages=("prisma",))) == ("prisma/schema.prisma",)
+
+
+def test_a_refusal_counts_a_schema_under_its_own_language(tmp_path: Path, umami_schema: str) -> None:
+    # Arrange
+    repo = _repository(
+        tmp_path / "repo", {"prisma/schema.prisma": umami_schema, "a.py": SOURCE, "b.py": SOURCE}
+    )
+
+    # Act
+    refusal = resolve_scope(_scope(repo, max_files=1))
+
+    # Assert
+    assert isinstance(refusal, ScopeRefusal)
+    assert refusal.counts_by_language == {"prisma": 1, "python": 2}
+
+
 @pytest.mark.parametrize(
     ("include", "exclude", "expected"),
     [
@@ -339,7 +365,7 @@ def test_the_resolved_scope_names_every_filter_it_applied(mixed_repo: Path) -> N
         "include": ["app"],
         "exclude": [],
         "languages": ["python"],
-        "supported_languages": ["javascript", "python", "tsx", "typescript"],
+        "supported_languages": ["javascript", "prisma", "python", "tsx", "typescript"],
         "with_tests": False,
         "with_generated": False,
         "with_vendored": False,

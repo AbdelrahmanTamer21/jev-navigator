@@ -276,7 +276,7 @@ request-display options as `find`. `jvn schema findall` describes the JSON input
 to 48 live model calls, twice the 24-call `find` default. Use `--max-calls N` to change it or
 `--max-calls none` (JSON `null`) to remove it. Parsing and cached answers are free. Depth/step/neighbour
 and preview options affect seed discovery only. Find All then judges every unit in scope, each
-function, method and file's top-level code, with the units that hold the seed's found code in its first
+function, method, Prisma schema block and file's top-level code, with the units that hold the seed's found code in its first
 wave of requests;
 a unit larger than its room in a request is judged by its 60-line pieces and scored by its best one.
 The call allowance is shared across seed discovery and enumeration. A budget stop writes completed

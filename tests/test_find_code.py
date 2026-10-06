@@ -12,12 +12,14 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from conftest import WEBSITE_QUERIES
 from git_repos import commit_files
 
 from jev_navigator.directives.find_code import (
     OPEN_FIRST,
     Outcome,
     SearchBudget,
+    SearchQuestions,
     StopRule,
     find_code,
     find_code_async,
@@ -96,6 +98,78 @@ def test_search_follows_likely_neighbours_until_the_target_is_found(sample_index
     ]
     assert result.not_inspected
     assert result.steps == 3
+
+
+def test_a_search_starting_at_a_schema_reaches_the_code_writing_a_model_through_the_model(
+    tmp_path: Path, umami_schema: str
+) -> None:
+    # Arrange
+    commit_files(tmp_path, {"prisma/schema.prisma": umami_schema, "src/website.ts": WEBSITE_QUERIES})
+    index = CodeIndex(tmp_path, ["prisma/schema.prisma", "src/website.ts"])
+    client = ScriptedJevClient(
+        nouls=scripted(
+            found=lambda code: 0.95 if "website.update(" in code else 0.05,
+            could_contain=lambda signature: (
+                0.9 if "`model Website {`" in signature or "updateWebsite" in signature else 0.1
+            ),
+        )
+    )
+    start = [place_for_line(index, "prisma/schema.prisma", 1, "start")]
+
+    # Act: neighbours ranked by their own judgments alone, so the path follows the moves.
+    result = find_code(
+        index,
+        Judge(client),
+        "the code that writes the website table",
+        start,
+        budget=SearchBudget(beam_width=1),
+        questions=SearchQuestions(open_first=None),
+    )
+
+    # Assert: the schema's settings, then the `Website` model, then the function querying it.
+    assert result.outcome == Outcome.FOUND
+    assert result.found[0].code.span.name == "updateWebsite"
+    assert result.found[0].path == (
+        "prisma/schema.prisma:1~10",
+        "prisma/schema.prisma:98-131",
+        "src/website.ts:3-5",
+    )
+    assert (result.files_judged, result.code_files) == (2, 2)
+
+
+PRICES = "def total(prices):\n    return sum(prices)\n"
+
+
+def find_beside_a_schema(tmp_path: Path, umami_schema: str, moves: Mapping | None = None):
+    """A search for absent code from a function that queries no model, with a schema in scope."""
+    commit_files(tmp_path, {"prisma/schema.prisma": umami_schema, "app/prices.py": PRICES})
+    index = CodeIndex(tmp_path, ["prisma/schema.prisma", "app/prices.py"])
+    client = ScriptedJevClient(nouls=scripted(found=lambda code: 0.05, could_contain=lambda signature: 0.05))
+    start = [place_for_line(index, "app/prices.py", 2, "start")]
+    questions = SearchQuestions(open_first=None)
+    return find_code(index, Judge(client), TARGET, start, questions=questions, moves=moves)
+
+
+def test_a_schema_the_moves_scanned_counts_as_read_when_nothing_is_left(
+    tmp_path: Path, umami_schema: str
+) -> None:
+    # Act: `queried_models` scans the schema's blocks from the opened function.
+    result = find_beside_a_schema(tmp_path, umami_schema)
+
+    # Assert
+    assert result.outcome == Outcome.NOTHING_LEFT
+    assert (result.files_judged, result.files_read, result.code_files) == (1, 2, 2)
+    assert result.files_never_reached == 0
+
+
+def test_a_schema_no_move_read_leaves_the_scope_incomplete(tmp_path: Path, umami_schema: str) -> None:
+    # Act: the one move lists callers, which never reads the schema.
+    result = find_beside_a_schema(tmp_path, umami_schema, moves={"callers": MOVES["callers"]})
+
+    # Assert
+    assert result.outcome == Outcome.SCOPE_INCOMPLETE
+    assert result.parser_scans_pending == ("facts",)
+    assert (result.files_read, result.code_files, result.files_never_reached) == (1, 2, 1)
 
 
 def test_a_low_neighbour_score_keeps_the_neighbour_as_not_inspected(sample_index: CodeIndex) -> None:

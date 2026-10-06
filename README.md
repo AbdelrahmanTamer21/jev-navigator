@@ -44,7 +44,7 @@ jvn schema findall
 ```
 
 `find` locates an implementation; `findall` finds a seed, then judges every unit in scope (each
-function, method and file's top-level code), the units holding the seed's found code in its first
+function, method, Prisma schema block and file's top-level code), the units holding the seed's found code in its first
 wave of requests. It uses batched Jev judgments and defaults to 48 live model calls (twice `find`);
 `--max-calls none` lifts that cap. There is no file cap. Reports, source provenance and request journals go to a unique
 [run folder](#where-jvn-keeps-runs-and-caches). `units_examined` describes coverage of the units in
@@ -565,8 +565,9 @@ else:
     resolved.counts_by_folder, resolved.counts_by_language  # a ScopeRefusal: over max_files
 ```
 
-- Only files JVN parses (Python, TypeScript, TSX, JavaScript) enter a scope and count toward the cap,
-  plus markup files with `with_docs`; `filters["supported_languages"]` names them.
+- Only files JVN reads (Python, TypeScript, TSX, JavaScript, and Prisma schemas, whose blocks a
+  scanner reads) enter a scope and count toward the cap, plus markup files with `with_docs`;
+  `filters["supported_languages"]` names them.
 - Left out unless asked for: tests (`with_tests`), generated code (`with_generated`: a true
   `linguist-generated` attribute, or a comment line holding `@generated` or `do not edit`, in any case,
   in the first 10 lines), vendored code (`with_vendored`: a true `linguist-vendored` attribute, or a
@@ -820,7 +821,8 @@ mentions of that text in question IDs or unrelated error messages do not trigger
 A low neighbour score only lowers that neighbour's priority; it is never treated as proof that the code
 is not there. The search runs out of places when no start or pick waits and no neighbour scores
 above the no bar (0.20 by default). It then ends as `nothing_left` only if its own moves parsed every
-code file in scope without a grammar error; otherwise it ends as `scope_incomplete`. The remaining
+code file in scope without a grammar error and read the blocks of every Prisma schema in scope; otherwise
+it ends as `scope_incomplete`. The remaining
 files are never parsed just to choose the label. Of `FindResult.code_files`, `files_judged` counts the
 files in which Jev judged code (the opened places, not whole files) and `files_read` adds the files
 read only to list neighbours; the CLI prints all three, for example `scope_incomplete (not found: Jev
@@ -862,8 +864,9 @@ the judge's masker leaves it (`judge.masked_request_fits`), since masking can ma
 `not_inspected` with reason `budget`; Resume on a route with a larger box inspects that same source.
 `questions=SearchQuestions(found=...,
 could_contain=..., open_first=None)` replaces the wording. `moves=` chooses how neighbours are listed: the default
-`places.MOVES` maps each move's name (`callers`, `callees`, `referenced_by`, `passed_on`, `imported`,
-`same_file`, `keys_mentioned`, `co_changed`, `lines_before`, `rest_of_file`) to a function of the
+`places.MOVES` maps each move's name (`callers`, `client_calls`, `callees`, `queried_models`,
+`referenced_by`, `passed_on`, `imported`, `same_file`, `keys_mentioned`, `co_changed`, `lines_before`,
+`rest_of_file`) to a function of the
 index and the opened code that returns places. Pass a subset, or add a function of your own; `MOVES`
 itself is read-only. `FindResult.moves` and the final `stop` step name the moves a search used, and
 `context_for_comment` takes `moves=` too. The directives take their check (`check=`) as a parameter too.

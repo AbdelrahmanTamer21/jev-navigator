@@ -211,9 +211,10 @@ wire captures or re-encoded SDK data.
 ## Choosing how the search moves
 
 A move is a plain function of the index and the opened code that returns places. `places.MOVES` maps
-each built-in move's name to its function (callers, callees, references, code passed on, imported
-modules, the same file, quoted keys and environment variables, co-changed files, the lines before
-and after) and is read-only. Pass `moves=` to `find_code`, `find_code_async` or
+each built-in move's name to its function (callers, the code querying a Prisma model through its
+client, callees, the Prisma models the code queries, references, code passed on, imported modules, the
+same file, quoted keys and environment variables, co-changed files, the lines before and after) and is
+read-only. Pass `moves=` to `find_code`, `find_code_async` or
 `context_for_comment` to use a subset,
 for example `{name: MOVES[name] for name in ("callers", "callees")}`, or add a function of your own.
 `FindResult.moves` and the final `stop` step of the history name the moves the search used, so every
@@ -281,8 +282,8 @@ Name lookups read `name_table.NameTable`: one SQLite file per `table_identity()`
 blob id of the file content, and hold names, kinds, lines, roles and receivers as the facts hold them:
 `scope_scan.receiver_of` keeps a receiver only as a plain chain of names and records anything else,
 which could quote a string literal, as `OPAQUE_RECEIVER`. `CodeIndex` records the files navigation
-reaches apart from the table's coverage, and `parsed_files`, `parser_scans_pending` and
-`observed_unparsed_files` read only the reached files. Two processes may write the table at once: a new file is created whole and
+reaches apart from the table's coverage (a Prisma schema is reached once `schema_blocks_in` reads it),
+and `parsed_files`, `parser_scans_pending` and `observed_unparsed_files` read only the reached files. Two processes may write the table at once: a new file is created whole and
 linked into place (`shared_database.open_shared_database`), and each content's rows are written in
 one transaction. A bidirectional
 trace prepares the scoped fact inventory in one batch before walking incoming and outgoing links;
@@ -381,9 +382,15 @@ A `.prisma` file has no parser grammar, so `index.prisma_schema.schema_blocks` s
 `view`, `enum` and `type` block is one unit of kind `schema_block`, from its header line to the line of
 the brace that closes it, named `model Website`. Braces in strings and after `//` never count, and a
 header whose brace never closes is no block. A `generator` or `datasource` block holds settings, so
-its lines are the schema's top-level code. A model's code lives where it is queried, so a caller
-that starts at a schema adds each block's `client_accessor` as a name (`.website.` for `model
-Website`) to reach the functions that read and write it.
+its lines are the schema's top-level code. `CodeIndex.schema_blocks_in(file)` gives a schema's blocks
+and `CodeIndex.schema_files` the schemas in scope. A scope keeps schemas under the language `prisma`
+(`languages.language_read`). A model's code lives where it is queried, so a caller that starts at a
+schema adds each block's `client_call_text` as a name (`.website.` for `model Website`, from its
+`client_accessor`) to reach the functions that read and write it. Find follows the same link both
+ways: a line in a block opens the whole block, the same-file move offers a schema's other blocks,
+`client_calls` offers the code holding a model's client call text, and `queried_models` offers the
+blocks of the models opened code queries. Both are text matches: `.website.` also matches a
+`session.website.domain` relation read.
 
 Top-level code is a file's lines outside every function, method and schema block, class bodies
 included, kept as runs of lines in order (`ranges`) without the blank lines at their edges. A file

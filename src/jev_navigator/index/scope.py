@@ -38,7 +38,7 @@ from pathlib import Path, PurePosixPath
 
 from . import listing, tools
 from .file_shape import FileShape, shape_of
-from .languages import LANGUAGE_BY_SUFFIX, language_of
+from .languages import LANGUAGE_BY_SUFFIX, SCHEMA_LANGUAGE, language_read
 
 HEADER_LINES = 10
 HEADER_BYTES = 4096
@@ -50,7 +50,7 @@ OUTPUT_FOLDER_PREFIX = "generated-"
 DOCS_FOLDER = "docs"
 MARKUP_SUFFIXES = frozenset({".md", ".mdx", ".markdown", ".rst", ".adoc", ".asciidoc"})
 MARKUP = "markup"
-KNOWN_LANGUAGES = frozenset(LANGUAGE_BY_SUFFIX.values())
+KNOWN_LANGUAGES = frozenset({*LANGUAGE_BY_SUFFIX.values(), SCHEMA_LANGUAGE})
 TEST_FOLDERS = frozenset({"test", "tests", "__tests__", "spec"})
 _TEST_FILE_NAME = re.compile(r"^test_|_test\.|\.test\.|\.spec\.|^conftest\.py$")
 _GLOB_CHARACTERS = frozenset("*?[")
@@ -154,7 +154,7 @@ def counts_by_folder(files: Sequence[str]) -> dict[str, int]:
 
 
 def counts_by_language(files: Iterable[str]) -> dict[str, int]:
-    return dict(Counter(language_of(file) or MARKUP for file in files))
+    return dict(Counter(language_read(file) or MARKUP for file in files))
 
 
 def checked_root(scope: Scope) -> Path:
@@ -190,7 +190,7 @@ def _kept_by_path(scope: Scope, path: str) -> bool:
         return False
     if any(_matches(entry, path) for entry in scope.exclude):
         return False
-    if scope.languages and language_of(path) not in scope.languages and not _is_markup(path):
+    if scope.languages and language_read(path) not in scope.languages and not _is_markup(path):
         return False
     if not scope.with_tests and is_test_file(path):
         return False
@@ -198,7 +198,7 @@ def _kept_by_path(scope: Scope, path: str) -> bool:
 
 
 def _parsed_or_wanted_markup(scope: Scope, path: str) -> bool:
-    return language_of(path) is not None or (scope.with_docs and _is_markup(path))
+    return language_read(path) is not None or (scope.with_docs and _is_markup(path))
 
 
 def _is_markup(path: str) -> bool:

@@ -7,8 +7,8 @@ hold one shape a line-by-line scanner gets wrong.
 
 from __future__ import annotations
 
-from jev_navigator.index.languages import split_lines
-from jev_navigator.index.prisma_schema import SchemaBlock, is_schema_file, schema_blocks
+from jev_navigator.index.languages import is_schema_file, language_read, split_lines
+from jev_navigator.index.prisma_schema import SchemaBlock, schema_blocks
 
 EVERY_KIND = """\
 generator client {
@@ -91,6 +91,8 @@ def test_a_models_client_accessor_is_its_name_with_the_first_character_lower_cas
     assert accessors["WebsiteEvent"] == "websiteEvent"
     assert accessors["TwoFactorOtpUsed"] == "twoFactorOtpUsed"
     assert SchemaBlock("model", "URL", 1, 3).client_accessor == "uRL"
+    assert SchemaBlock("model", "Website", 98, 131).client_call_text == ".website."
+    assert SchemaBlock("enum", "Role", 1, 4).client_call_text is None
 
 
 def test_enums_views_and_composite_types_are_blocks_and_only_models_and_views_are_queried() -> None:
@@ -124,9 +126,14 @@ def test_a_header_without_its_closing_brace_is_no_block_and_the_blocks_after_it_
     assert blocks == (SchemaBlock("model", "Next", 4, 6),)
 
 
-def test_a_schema_file_is_named_by_its_prisma_suffix() -> None:
+def test_a_schema_file_is_named_by_its_prisma_suffix_and_read_as_prisma() -> None:
     # Assert
     assert is_schema_file("prisma/schema.prisma")
     assert is_schema_file("prisma/schema/website.prisma")
     assert not is_schema_file("src/lib/prisma.ts")
     assert not is_schema_file("prisma/.prisma")
+    assert [language_read(path) for path in ("prisma/schema.prisma", "src/lib/prisma.ts", "README.md")] == [
+        "prisma",
+        "typescript",
+        None,
+    ]
