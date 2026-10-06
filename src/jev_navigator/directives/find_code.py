@@ -58,7 +58,7 @@ from ..judgments.questions import (
     content_hash,
     serialized_chars,
 )
-from ..judgments.secrets import DEFAULT_MASKER, Masker
+from ..judgments.secrets import DEFAULT_MASKER, TARGET, Masker
 from ..judgments.thresholds import NoulVerdict, Thresholds
 from ..memory_limit import MemoryLimitReachedError
 from .places import MOVES, Move, Place, neighbours_and_omissions, place_relationship
@@ -826,7 +826,7 @@ def _target(description: str) -> dict:
 def _opened_state(target: Mapping, code: CodeSlice) -> dict:
     """What every request about an opening carries: the target and the code it shows."""
     shown = {"file": code.span.file, "lines": f"{code.span.start}-{code.span.end}", "code": code.text}
-    return {"target": target, "slice": shown}
+    return {TARGET: target, "slice": shown}
 
 
 def _opening_request(search: _Search, opening: _Opening) -> _OpeningRequest:
