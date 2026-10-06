@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 
 import pytest
+from git_repos import commit_files, git, refuse_ownership
 
+from jev_navigator.index.tools import ToolFailedError
 from jev_navigator.judgments.round import (
     MANIFEST_FILE,
     REGISTRATION_FILE,
@@ -109,11 +111,11 @@ def test_registered_hash_selects_real_stored_answers_and_rejects_reworded_questi
         state, reg.questions, thresholds=Thresholds()
     )
     stored = JsonlAnswerStore(path)
-    record = stored.by_request(registered_request_sha256(reg, state))
+    record = stored.by_request(registered_request_sha256(reg, state), None)
     assert record is not None
     assert record.answers["keep"]["noul"] == 0.9
     changed = replace(reg, questions={"keep": {"type": "noul", "instructions": "Does it fail?"}})
-    assert stored.by_request(registered_request_sha256(changed, state)) is None
+    assert stored.by_request(registered_request_sha256(changed, state), None) is None
 
 
 def test_unspecified_library_commit_does_not_use_the_callers_repository():
@@ -147,3 +149,33 @@ def test_freeze_creates_its_output_directory(tmp_path):
     round_dir = tmp_path / "new-round"
     freeze(round_dir, registration())
     verify(round_dir, registration())
+
+
+def test_a_round_frozen_in_a_repository_git_refuses_fails_instead_of_recording_no_commit(
+    tmp_path, monkeypatch
+):
+    # Arrange: git refuses the checkout the round is frozen in, as it does under another user
+    checkout = tmp_path / "checkout"
+    commit_files(checkout, {"a.py": "x = 1\n"})
+    monkeypatch.chdir(checkout)
+    refuse_ownership(monkeypatch)
+
+    # Act and assert
+    with pytest.raises(ToolFailedError, match="dubious ownership"):
+        freeze(tmp_path / "round", registration())
+
+
+@pytest.mark.parametrize("has_commit", [True, False], ids=["committed", "no-commit-yet"])
+def test_a_round_records_the_checkouts_commit_and_none_before_the_first(tmp_path, monkeypatch, has_commit):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    git(checkout, "init", "-q")
+    if has_commit:
+        commit_files(checkout, {"a.py": "x = 1\n"})
+    monkeypatch.chdir(checkout)
+
+    fields = freeze(tmp_path / "round", registration())
+
+    expected = git(checkout, "rev-parse", "HEAD").strip() if has_commit else None
+    assert fields["checkout_commit"] == expected
+    assert fields["uncommitted_changes"] is (False if has_commit else None)

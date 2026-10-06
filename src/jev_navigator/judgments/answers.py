@@ -60,14 +60,79 @@ class ScoreAnswer:
 Answer = ChoiceAnswer | NoulAnswer | ScoreAnswer
 
 
+NOT_REPORTED_TEXT = "not reported"
+"""How a missing token count (``None``) reads in text for people; data keeps ``None``/``null``."""
+
+
+@dataclass(frozen=True)
+class AnswerSource:
+    """Where one answer came from: the request's hash and the question id it was asked under, which
+    a journal's request row lists, and whether the store replayed it."""
+
+    request_sha256: str
+    question_id: str
+    from_store: bool
+
+    def to_json(self) -> dict:
+        return {
+            "request_sha256": self.request_sha256,
+            "question_id": self.question_id,
+            "from_store": self.from_store,
+        }
+
+
+ANSWERED_BY = "answered_by"
+SCORED_BY = "scored_by"
+ANSWER_SOURCE_FIELDS = frozenset({ANSWERED_BY, SCORED_BY})
+"""Run-file join keys, never shown to Jev: ``from_store`` differs between a run and its replay."""
+
+
+def answered_by(source: AnswerSource | None) -> dict:
+    """A record's ``answered_by`` field, or nothing when no request is known: the one form every run
+    file uses to join a judgment to its journal answer."""
+    return {ANSWERED_BY: source.to_json()} if source is not None else {}
+
+
+def scored_by(source: AnswerSource | None) -> dict:
+    """A queued place's ``scored_by`` field: the answer whose probability became its priority."""
+    return {SCORED_BY: source.to_json()} if source is not None else {}
+
+
+def without_answer_sources(value: object) -> object:
+    """``value`` with every answer source field removed, at any depth."""
+    if isinstance(value, Mapping):
+        return {
+            key: without_answer_sources(item)
+            for key, item in value.items()
+            if key not in ANSWER_SOURCE_FIELDS
+        }
+    if isinstance(value, list | tuple):
+        return [without_answer_sources(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class JevResponse:
+    """``input_tokens`` is what the provider reported for the request, ``None`` when it reported
+    nothing; a missing count is never 0. ``from_store`` marks a replay: it sent nothing and carries
+    no count. A response composed from several requests carries none either; totals count only
+    requests sent. Its ``sources`` name the request and question behind each of its answers."""
+
     answers: Mapping[str, Answer]
     model: str
-    input_tokens: int = 0
+    input_tokens: int | None = None
     request_sha256: str = ""
     from_store: bool = False
     extra: Mapping[str, object] = field(default_factory=dict)
+    sources: Mapping[str, AnswerSource] = field(default_factory=dict)
+
+    def source(self, question_id: str) -> AnswerSource | None:
+        """The request and question that answered ``question_id``; None when no request is known."""
+        if question_id in self.sources:
+            return self.sources[question_id]
+        if not self.request_sha256:
+            return None
+        return AnswerSource(self.request_sha256, question_id, self.from_store)
 
     def choice(self, question_id: str) -> ChoiceAnswer:
         answer = self.answers[question_id]
@@ -107,16 +172,50 @@ def distribution_confidence(probabilities: Mapping[str, float]) -> float:
     return (option_count * max(probabilities.values()) - 1) / (option_count - 1)
 
 
+def reported_input_tokens(raw: Mapping) -> int | None:
+    return _reported_usage_count(raw, "input_tokens")
+
+
+def reported_output_tokens(raw: Mapping) -> int | None:
+    return _reported_usage_count(raw, "output_tokens")
+
+
+def _reported_usage_count(raw: Mapping, name: str) -> int | None:
+    """A ``usage`` count when it is a non-negative integer, else ``None``: the one place a raw
+    response's token counts are read."""
+    usage = raw.get("usage")
+    reported = usage.get(name) if isinstance(usage, Mapping) else None
+    return (
+        reported if isinstance(reported, int) and not isinstance(reported, bool) and reported >= 0 else None
+    )
+
+
 def response_from_raw(raw: Mapping) -> JevResponse:
     """Parses a raw System One response: ``{"model", "usage": {"input_tokens"}, "answers": {...}}``."""
     answers = {question_id: answer_from_json(answer) for question_id, answer in raw["answers"].items()}
-    usage = raw.get("usage") or {}
-    return JevResponse(answers, str(raw["model"]), int(usage.get("input_tokens") or 0))
+    return JevResponse(answers, str(raw["model"]), reported_input_tokens(raw))
 
 
 def response_to_raw(response: JevResponse) -> dict:
+    usage = {} if response.input_tokens is None else {"input_tokens": response.input_tokens}
     return {
         "model": response.model,
-        "usage": {"input_tokens": response.input_tokens},
+        "usage": usage,
         "answers": {question_id: answer.to_json() for question_id, answer in response.answers.items()},
     }
+
+
+@dataclass
+class TokenTotal:
+    """The tokens responses reported, how many responses there were, and how many reported none."""
+
+    reported: int = 0
+    not_reported: int = 0
+    responses: int = 0
+
+    def add(self, tokens: int | None) -> None:
+        self.responses += 1
+        if tokens is None:
+            self.not_reported += 1
+        else:
+            self.reported += tokens

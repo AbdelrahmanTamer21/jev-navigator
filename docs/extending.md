@@ -7,12 +7,16 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 
 | Piece | What it gives you |
 | --- | --- |
+| `resolve_scope` | the files a search covers from folders, patterns, languages and a git ref, with tests, generated, vendored code and docs left out by default; a file only its shape marks as possibly generated is set aside under an output folder (`dist`, `build`, `generated`), and otherwise awaits Jev's generated judgment with its measured facts; a scope over its cap is refused with counts per folder and language (README, "Choosing the files a search covers") |
+| `judge_generated_files` | Jev's generated-file judgment for the files a scope left undecided: one question per file over its path, measured facts, up to 10 importers and up to 5 files naming its path, each with their true count, and two excerpts; a file the secret scan refuses is named as not judged (README, "Choosing the files a search covers") |
 | `CodeIndex` | mechanical lookups over a narrowed scope: definitions, callers, callees, references, text, imports, git history |
+| `index.units` | the units a search judges (functions, methods, Prisma schema blocks, each file's top-level code), cut into 60-line pieces only when larger than their room in a request, and the one resolver of lines and line ranges to units |
+| `index.prisma_schema` | a Prisma schema's model, view, enum and composite type blocks with their lines, and the client accessor a model or view is queried through (`model WebsiteEvent` is `prisma.websiteEvent`) |
 | `operations` | ready-made combinations of lookups: slices, traces, similar functions, code named in a doc |
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
 | `find_code` | a best-first search that opens places until the code a description names is found |
-| `find_all` | seed-first function search: expand the static component, batch containment judgments, then examine disconnected functions |
+| `find_all` | judges every unit of a population (anchored lines, files, and each hit of named texts, rarest name first) against described targets, one question per unit per target |
 | `places.MOVES` | the ways a search lists the neighbours of an opened place; pick a subset or add your own |
 | `StopRule`, `History` | your own stop check over a search's history, reading only the sections you select |
 | `LlmStep` | an opt-in LLM call for the cases where Jev's answer is not clear enough |
@@ -27,7 +31,8 @@ Code holds the goal, the loop and the stopping. Jev gets concrete state and one 
 
 1. Say what code will do with each answer, and what the costly error is.
 2. Do everything mechanical in code: which functions exist, who calls whom, which files changed.
-3. Ask one `Check` per item about a concrete property of supplied code, with yes and no criteria.
+3. Ask one `Check` per item about a concrete property of supplied code. Add yes and no criteria
+   when the instructions alone leave the boundary open; a `Check` takes both or neither.
 4. Never ask whether something is false, wrong or contradicts something; ask for the concrete
    property instead, and let code combine the answers.
 5. Handle every outcome: yes, no, unsure, and low confidence.
@@ -99,49 +104,64 @@ Test it offline with `ScriptedJevClient` and AAA tests, including the unsure pat
 
 ## Searching instead of listing
 
-### Compose a seed-first Find All search
+### Judge every unit with Find All
 
-This is an ordinary function composition, not a workflow interpreter. Obtain concrete seeds from
-`find_code` or a symbol lookup, follow relationships with `operations.trace_graph`, and judge each
-candidate body with the existing containment question. `find_all` combines the latter two pieces:
+This is an ordinary function composition, not a workflow interpreter. `find_all` judges each unit of
+a population against one or more described targets: one question per unit per target, all targets
+asked in the same request. The population is the units the caller's line and range anchors name,
+then the units of the named files, then the units holding each hit of the named texts, names with
+fewer hits first, so a common word never decides which hits of a rare name are seen:
 
 ```python
 from jev_navigator.directives.find_all import find_all
+from jev_navigator.index.units import RangeAnchor
 
-seeds = index.find_definition("check_limits")
-result = find_all(index, judge, "the check that limits items per order", seeds)
-for match in result.matched:
-    print(match.item["file"], match.item["lines"], match.probability)
+seed = index.find_definition("check_limits")[0]
+result = find_all(
+    index,
+    judge,
+    {"limit": "the check that limits items per order"},
+    files=index.files,
+    anchors=[RangeAnchor(seed.file, seed.start, seed.end)],
+    names=["max_items"],
+)
+for score in result.scores("limit"):
+    print(score.unit.path, score.unit.ranges, score.probability)
 ```
 
-The seed is a candidate, not an assumed match. Connected functions are examined first; the fallback
-then enumerates every other in-scope function, even with unrelated names. Both phases batch atomic
-questions through `Judge`; code deduplicates by source span. Entire bodies and source hashes are
-retained. `CodeIndex.functions_in_files` batches fact collection instead of launching a parser scan
-for each file. No default file or live-call cap is added by this composition.
+Each item Jev reads holds only the unit's file and code. The targets sit in the shared state, and each
+question reads "Look only at `items[n]`. Does that code match the description in `targets.<name>`?"
+(`match_check`). A unit larger than its room in a request (`result.room`) is judged by its pieces and
+scored by its best one; a piece still too large is named in `not_judged`, and so is a unit or piece
+whose request asking every target does not fit the client's limits once masked, since masking can
+lengthen code past the room (`Judge.fits_alone`). One unit never fails the search. Every unit is one
+a listing lists, so a hit inside a nested function names the function holding it. No code step is capped: the
+Judge's call cap is the only budget. The population goes to the Judge in waves of `batches_per_wave`
+requests' worth (16 by default). Its order holds between waves, and exactly only at one batch per
+wave. Like `items_per_request`, the wave size shapes the batches and so the answer store's keys.
+`delivered` names the line ranges the caller already shows: a unit or piece whose every line lies
+in them is named `already delivered by the caller` and not judged, while one with a line outside them
+is judged. `find_all_async` takes the same arguments for an
+async client, such as a host's orchestrator; it lists and reads code in a worker thread, reads
+`cancelled` between waves, and keeps every answer a wave received before a failure. Ranking and any
+bar belong to the caller:
+`scores(target)` gives every judged unit's answer, and `names` each name's hits found, reached and
+naming no unit.
 
-Pass `include_disconnected=False` for a deliberately partial, component-only search. Supply a `Check`
-through `check=` to examine another concrete property of each body; use `{item}.code` and the shared
-`target.description`. Independent additional properties belong in `Judge.check_every`, which asks
-them together and keeps the answers separate. The engineer authors the branches and stopping rule;
-Jev does not decide whether to invent a workflow or declare the repository fully understood.
-Checks in one batch need distinct names because each name identifies its returned result list.
+`units_examined` means every unit of the population was judged, not that every semantic answer is
+correct. Uncertain answers, parser failures, unlisted files and unresolved anchors remain visible.
+Pass `completed=previous.judged` to continue with a fresh Judge allowance: a place answered for every
+target is not asked again. Reuse is valid only for the same source bytes, scope, targets and
+thresholds; the CLI verifies those identities in its saved pack. Cancellation keeps coverage partial
+and parses nothing it has not reached. Ctrl-C during judging ends it `cancelled`, and a failed request
+ends it `failed` with `failure` holding the same error; both keep every answer that arrived in
+`judged`, so `completed=` resumes it. Retained journal receipts describe the work actually performed.
 
-`functions_examined` means the function inventory was examined, not that every semantic answer is
-correct. Module-level statements, declarations and multi-function behaviors require a different
-unit/composition. `uncertain`, parser failures, unavailable files and unsupported grammars remain
-visible. A graph link marked candidate never becomes a proven call because its body matched.
-Pass `completed=previous.judged` to continue enumeration with a fresh Judge allowance. Reuse is valid
-only for the same source bytes, scope, target, Check and thresholds; the CLI verifies those identities
-in its saved pack. Completed positive, negative and uncertain judgments retain their original
-request hashes and are not sent again. Static graph reconstruction does not consume model calls.
-Cancellation keeps coverage partial and reporting does not trigger scans of untouched files.
-Provider errors propagate; retained journal receipts describe the work actually performed.
-
-The CLI composes entry selection and `find_code` with this function. A seed-search miss still permits
-the disconnected fallback. Use `jvn findall "functions that enforce the order item limit"` or
+The CLI composes entry selection and `find_code` with this function: the seed search's found code
+becomes range anchors, and the population is every file in scope, so a seed-search miss still judges
+the whole scope. Use `jvn findall "functions that enforce the order item limit"` or
 `jvn --json '{"command":"findall","target":"functions that enforce the order item limit"}'`.
-The evidence pack retains the seed search, per-function answers and raw request identities.
+The evidence pack retains the seed search, per-unit answers and raw request identities.
 
 ### Find one location
 
@@ -152,17 +172,28 @@ places (starts, then Jev's picks, then the best-scored neighbours) and returns `
 
 Read `searched` and the outcome `nothing_left` as "opened and judged unlikely", never as "the code does
 not exist": one "no" about one place can be wrong. When nothing is found, rank the opened places by
-their probability and treat the best one as the likeliest place.
+their probability and treat the best one as the likeliest place. A search that ran out of places
+before parsing every code file in scope ends as `scope_incomplete`. `files_judged`, `files_read` and
+`code_files` say in how many files Jev judged code, how many the search read, and how many are in scope.
 
 Documents and other files without a supported code grammar remain searchable as text and can
 participate in text-based moves. Syntax operations return no symbols, calls or references for them;
 they are never sent to ast-grep with an empty language rule. This does not claim their text was
 parsed as code.
 
-The CLI creates a unique run directory under `jvn-results/` in the invocation directory when `--out`
-is omitted. Each run retains its report, manifest and request journal. Generated result directories
-are excluded from the CLI's source inventory so repeated searches do not search their own evidence.
-Library callers can similarly pass `exclude_paths` to `CodeIndex.from_directory`.
+The CLI creates a unique run folder under `$XDG_DATA_HOME/jev-navigator/runs/` when `--out` is
+omitted. Each run retains its report, manifest and request journal. An `--out` folder inside the
+searched directory is excluded from the CLI's source inventory so repeated searches do not search
+their own evidence. Library callers can similarly pass `exclude_paths` to `CodeIndex.from_directory`.
+
+The CLI indexes every file under the search root whether git tracks it or not, minus ignored ones: in a
+Git worktree by git's ignore rules, including the lines of an enclosing repository's .gitignore that
+match the root, and outside Git by ripgrep's ignore files. Each file or folder left out (ignored, a
+separate git repository, a symbolic link) is named with its reason in `search.not_indexed_files`,
+`trace.not_indexed_files` or the statistics pack's `coverage.not_indexed`; the reports count them by
+reason and top folder, so thousands of ignored build outputs stay one row. A left-out folder that holds
+no indexed file is named once, ending in `/`. A file that is new or edited since the last commit is
+read from the disk, and its slices carry the commit plus `+worktree`.
 
 Agents can pass the same CLI request as JSON with `jvn --json request.json`, an inline JSON object,
 or `jvn --json -` for stdin. `jvn schema find` emits its JSON Schema without model calls. The CLI parser remains the single owner of options, types and defaults. `target` is
@@ -180,9 +211,10 @@ wire captures or re-encoded SDK data.
 ## Choosing how the search moves
 
 A move is a plain function of the index and the opened code that returns places. `places.MOVES` maps
-each built-in move's name to its function (callers, callees, references, code passed on, the same
-file, quoted keys and environment variables, co-changed files, the lines before and after) and is
-read-only. Pass `moves=` to `find_code`, `find_code_async` or `context_for_comment` to use a subset,
+each built-in move's name to its function (callers, callees, references, code passed on, imported
+modules, the same file, quoted keys and environment variables, co-changed files, the lines before
+and after) and is read-only. Pass `moves=` to `find_code`, `find_code_async` or
+`context_for_comment` to use a subset,
 for example `{name: MOVES[name] for name in ("callers", "callees")}`, or add a function of your own.
 `FindResult.moves` and the final `stop` step of the history name the moves the search used, so every
 result says how it was found. Your move's places go through the same filter as the built-in ones:
@@ -228,13 +260,31 @@ text before any paid call.
 
 ### Parser facts and naming
 
-Function and class names come from the matched AST node, with the containing physical line used
-only when the node does not contain its binding name (for example an assigned anonymous function).
-This keeps a method on a one-line TypeScript class distinct from its enclosing class.
-Persistent facts are keyed by source bytes, language, parser version and `FACT_RULE_VERSION`.
-A change to extracted facts must change that rule identity so existing cached results are reparsed.
-Name lookups reuse an in-memory index of parsed definitions, calls and references, including facts
-loaded from the persistent cache. Text discovery searches only files without facts. A bidirectional
+Function and class names come from the syntax tree, never from a physical line. A declaration is
+named by its own name node. A function or class expression is named by the declarator, class field,
+object key or assignment that holds it, looking through parentheses and type casts
+(`export const load = (async () => ...) satisfies PageLoad` is `load`), and only then by its own
+name. A callback passed to a call (`it("works", () => ...)`) is held by no name and stays
+`<anonymous>`. This keeps a method on a one-line TypeScript class distinct from its enclosing class,
+and keeps test and framework callbacks from sharing the names `it`, `describe` or `expect`. A
+callback spanning exactly a named symbol's lines (`xs.map((x) => x.id)` on the one line of `ids`) is
+the same place, so it is left out rather than listed as a second, anonymous symbol.
+Persistent facts are keyed by source bytes, language, parser version, the ast-grep rule text a scan
+of that language sends, and the source of the modules that build the rules and turn matches into
+facts (`fact_cache._MODULES_THAT_READ_MATCHES`). Changing a rule or the code that reads matches
+reparses existing cached results by itself; there is no version string to bump. A new module that
+shapes facts belongs in that tuple.
+
+Name lookups read `name_table.NameTable`: one SQLite file per `table_identity()`, which hashes
+`fact_cache.facts_identity()` (the parser version and every language's rules) with the source of
+`name_table.py`. Rows are written only from facts, at `CodeIndex._remember_facts`, keyed by the git
+blob id of the file content, and hold names, kinds, lines, roles and receivers as the facts hold them:
+`scope_scan.receiver_of` keeps a receiver only as a plain chain of names and records anything else,
+which could quote a string literal, as `OPAQUE_RECEIVER`. `CodeIndex` records the files navigation
+reaches apart from the table's coverage, and `parsed_files`, `parser_scans_pending` and
+`observed_unparsed_files` read only the reached files. Two processes may write the table at once: a new file is created whole and
+linked into place (`shared_database.open_shared_database`), and each content's rows are written in
+one transaction. A bidirectional
 trace prepares the scoped fact inventory in one batch before walking incoming and outgoing links;
 it does not launch one repository search for every encountered name.
 
@@ -266,6 +316,107 @@ all source parsed successfully. An unrequested symbol kind is omitted, not repre
 `None` when that file was not measured; only a measured empty file has zero counts.
 Same-line nesting can have no known holder because the current index records line spans rather
 than AST parent identities. The `jvn stats` CLI writes these measurements as JSON and Markdown; see [the CLI guide](cli.md#structural-measurements).
+
+## Units
+
+`index.units` lists what a search judges and names the units that hold a caller's lines, with no
+model:
+
+```python
+from jev_navigator.index.units import (
+    LineAnchor,
+    RangeAnchor,
+    items_to_judge,
+    list_units,
+    read_ranges,
+    resolve_anchors,
+)
+
+room = judge.input_limits.box_chars - beside_the_unit  # the characters one unit's text may take in a request
+listing = list_units(index, index.files, box_chars=room)
+for unit in listing.units:
+    print(unit.id, unit.kind, unit.symbol, unit.content_sha256[:12])
+print(listing.unlisted)  # files that gave no units, each with its reason
+for item in items_to_judge(listing.units[0]):  # the unit, or its pieces that fit the box
+    print(item.id, item.ranges, read_ranges(index, item.file, item.ranges)[:60])
+
+resolved = resolve_anchors(
+    index, [LineAnchor("app/routes.py", 21), RangeAnchor("app/orders.py", 5, 7)], box_chars=room
+)
+print([unit.id for unit in resolved.units], resolved.unresolved)
+```
+
+`box_chars` is the room a unit's text has in one request, counted as escaped JSON like every request
+(`judgments.questions.serialized_chars`): the client's box, `judge.input_limits.box_chars` (Jev's is
+76,800 characters), less what the request carries beside the unit, such as its shared state and its
+longest question. Passing the whole box would let a unit just under it through, and the request
+carrying it would be refused.
+
+A unit is one function, one method, one Prisma schema block, or one file's top-level code. Its id is
+the location `path:start-end`; top-level code is `path:top`. `list_units` lists the functions and
+methods no other function holds, the blocks of each schema, and each file's top-level code, so every
+line of code sits in a listed unit once: a nested function or callback is inside its holder's text and is not listed. A unit's
+`symbol` names every holder, `OrderService.place`, and names an anonymous function by the line it
+starts on, `<anonymous:4>`. A function a module-level constant's call builds goes by the name the
+entry text gives it, `CodeIndex.constant_function_names`: `run` for `export const run =
+Effect.fn("run")(function* ...)` and `userRouter.list` for a router's procedure, so a callback inside
+one is `run.<anonymous:2>`. A callback that builds data, as in `items.map((item) => item.id)` or
+`new Map(...)`, gets no constant's name. `content_sha256` hashes the unit's own text, so
+an unchanged function keeps its hash when other lines of its file change. The record holds locations
+and hashes, never code; its `ranges` are its (start, end) line pairs in file order, one for a
+function and one per run for top-level code. `read_ranges(index, file, ranges)` is the one reader of
+that code, joining the ranges in order with a newline.
+
+A function's or method's unit starts at its first decorator, so a route such as
+`@app.route("/orders")` or NestJS `@Get()` is judged with its handler and is not top-level code.
+Only the unit's `ranges` reach back to the decorator: its id, like the index's span
+(`CodeIndex.decorator_starts_in`), still starts at the function's own first line. Python and
+TypeScript put decorators before the function node; JavaScript's parser already starts a method at
+its decorators. A class's decorators stay with the class head in the top-level code. A stub, a Python
+function whose body is only `...`, `pass`, a docstring or `raise NotImplementedError`
+(`CodeIndex.stubs_in`), is no unit of its own: its lines are top-level code, so a Protocol is judged
+whole.
+
+A `.prisma` file has no parser grammar, so `index.prisma_schema.schema_blocks` scans it: each `model`,
+`view`, `enum` and `type` block is one unit of kind `schema_block`, from its header line to the line of
+the brace that closes it, named `model Website`. Braces in strings and after `//` never count, and a
+header whose brace never closes is no block. A `generator` or `datasource` block holds settings, so
+its lines are the schema's top-level code. A model's code lives where it is queried, so a caller
+that starts at a schema adds each block's `client_accessor` as a name (`.website.` for `model
+Website`) to reach the functions that read and write it.
+
+Top-level code is a file's lines outside every function, method and schema block, class bodies
+included, kept as runs of lines in order (`ranges`) without the blank lines at their edges. A file
+whose top-level code is only imports, comments, directives such as `"use client"`, lines of closing
+brackets and blank lines lists no top-level unit. A file in a language JVN does not read gives no units and is named
+in `unlisted` with `language not supported`, as is a file that disappeared after the inventory, and a
+file outside the index's scope with the index's own reason (`no file at this path`) or `not in the index scope`.
+
+A unit whose text fits `box_chars` is one item, whatever its length. Only a larger unit is cut into
+`pieces` of at most 60 lines, in order, with no overlap and never across two runs of top-level code;
+each piece has its own range, hash and size. A piece still larger than `box_chars` is
+`too_large_to_judge`: it keeps its range and size, and `judged_pieces` leaves it out. A cut unit
+stays one unit: `unit_score` gives it its best piece's score, and `best_piece` names that piece's
+lines as the place to read. `items_to_judge(unit)` gives what a request judges: the whole unit as
+one `Item(id, file, ranges)`, or each piece that fits, with the id `unit.piece_id(piece)`, the unit
+id plus `#p<index>`.
+
+Spans are lines, so functions on the same lines are one unit named by the first named one, and a
+callback that shares a line with top-level code (`app.post("/orders", (req, res) => ...)`) takes
+that line: its unit's text holds the registration.
+
+`resolve_anchors` is the one way to turn lines into units. A line names the innermost unit holding it:
+a function, its decorators included, or the file's top-level code when the line lies outside every
+function, stubs included, even top-level code the listing leaves out. A line inside a nested
+function names that function, which the listing leaves out; its `nested_in` names the function that
+holds its text. A range names each unit its non-blank lines touch, without the units nested in
+another one it names. Each unit comes back once, in the order first named. With `listed_only=True`
+every unit named is one `list_units` lists, for a caller that judges only listed units: a nested
+function gives way to the outermost function holding it, and lines of only top-level code the
+listing leaves out (imports, comments, directives, brackets) are reported. A file outside the scope,
+a file in a language JVN does not parse, a line outside its file, a reversed range, and a blank line
+in a file with no top-level code are reported in `unresolved` with their problem, and a file is
+parsed only after its anchor is known to point inside it.
 
 ## Trace a workflow and retain its evidence
 
@@ -299,6 +450,8 @@ The manifest retains the full static graph so resolved connections can be inspec
 Outcomes distinguish completion, an explicit depth boundary, call budget and cancellation.
 Cancellation is cooperative between static steps and live model batches; already answered batches
 are retained in full, and a request already in flight is not aborted by the callback.
-`answers_from` with the prior served-model identity reuses identical stored answers without calls.
+`answers_from` with the prior served-model identity reuses identical stored answers without calls. A
+store that kept its requests' text (written with `keep_requests=True`) seeds only a pack that keeps
+them too, and is refused otherwise before the output directory is made, so a default pack holds no code.
 Use `jvn trace "order request to HTTP result" --start app/orders.py:42` for the same pack from the
 CLI. `jvn schema trace` describes JSON input; [the CLI guide](cli.md#workflow-trace) explains options.

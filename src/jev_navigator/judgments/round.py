@@ -33,14 +33,12 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
-import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .secrets import Masker, SecretMasker, mask_request
-
-DEFAULT_MASKER = SecretMasker()
+from ..index import tools
+from .secrets import DEFAULT_MASKER, Masker, mask_request
 
 MANIFEST_LINE = "manifest.json sha256: "
 REGISTRATION_FILE = "registration.json"
@@ -217,20 +215,16 @@ def _hash_value(value: object) -> str:
 
 def _checkout_dirty(repository: Path) -> bool | None:
     if _git_commit(repository) is None:
-        return None  # checkout state is unknown outside a repository
-    return bool(
-        subprocess.run(
-            ["git", "status", "--porcelain"], cwd=repository, capture_output=True, text=True, check=True
-        ).stdout
-    )
+        return None  # checkout state is unknown outside a repository or before its first commit
+    return bool(tools.git(["status", "--porcelain"], repository))
 
 
 def _git_commit(repository: Path) -> str | None:
-    try:
-        done = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repository, capture_output=True, text=True)
-        return done.stdout.strip() or None if done.returncode == 0 else None
-    except OSError:
+    """HEAD's commit; None outside a Git worktree or before its first commit. A repository git
+    refuses raises, so a frozen round never records a refused checkout as having no commit."""
+    if not tools.inside_git_worktree(repository):
         return None
+    return tools.head_commit(repository) or None
 
 
 def _same(what: str, found, registered) -> None:

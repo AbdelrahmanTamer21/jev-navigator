@@ -1,17 +1,47 @@
-"""A small real repository (Python and TypeScript, two commits) that the index tests run against."""
+"""A small real repository (Python and TypeScript, two commits) that the index tests run against, a
+real Prisma schema, every test's isolation from the developer's own decision-model settings, and the
+guard that fails a run with an undeclared skip."""
 
 from __future__ import annotations
 
-import json
+import os
+import signal
+import subprocess
+from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 from git_repos import git, write_files
+from isolated_jvn import NO_SETTINGS
+from no_skipped_tests import *  # noqa: F403
 
+from jev_navigator.cache_root import cache_root
+from jev_navigator.data_root import data_root
+from jev_navigator.environment import SETTING_PREFIXES
 from jev_navigator.index.code_index import CodeIndex
-from jev_navigator.judgments.answers import JevResponse, NoulAnswer
+from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
+from jev_navigator.judgments.questions import serialized_chars
+from jev_navigator.memory_limit import SLOTS_DIR_VARIABLE
+
+
+@pytest.fixture(autouse=True)
+def no_developer_settings(monkeypatch):
+    """`jvn` reads the checkout `.env`, `~/.config/jvn/env` and the exported environment on
+    purpose, and any of them can name a live route with a real key, so a test would send its code
+    to a paid service. Every test starts without them, and what a test loads into the environment
+    is dropped when it ends. A test that runs `jvn` in a subprocess uses `isolated_jvn`."""
+    monkeypatch.setattr("jev_navigator.environment.checkout_root", lambda: NO_SETTINGS)
+    monkeypatch.setattr("jev_navigator.environment.LEGACY_CONFIG", NO_SETTINGS / "env")
+    for name in list(os.environ):
+        if name.startswith(SETTING_PREFIXES):
+            monkeypatch.delenv(name)
+    kept = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(kept)
+
 
 ORDER_SERVICE = '''\
 from app.validation import validate_order
@@ -95,6 +125,16 @@ API_TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 """
 
 
+@pytest.fixture(autouse=True)
+def python_sigint_handler():
+    """Python's own Ctrl-C handler for every test, as a terminal gives it. A suite started as a
+    background job (``cmd &``) inherits SIGINT as ignored, so without this a test that sends SIGINT
+    would never receive it."""
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    yield
+    signal.signal(signal.SIGINT, previous)
+
+
 @pytest.fixture
 def sample_repo(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
@@ -128,6 +168,95 @@ def sample_repo(tmp_path: Path) -> Path:
     return root
 
 
+UMAMI_SCHEMA = Path(__file__).parent / "fixtures" / "umami" / "schema.prisma"
+
+WEBSITE_QUERIES = """\
+import prisma from '@/lib/prisma';
+
+export async function updateWebsite(websiteId: string, data: { name: string }) {
+  return prisma.client.website.update({ where: { id: websiteId }, data });
+}
+
+export async function getWebsiteCount(userId: string) {
+  return prisma.client.website.count({ where: { userId, deletedAt: null } });
+}
+"""
+
+
+@pytest.fixture
+def umami_schema() -> str:
+    """umami's real Prisma schema at ec0ff50 (MIT, its license beside it): a generator, a datasource
+    and 26 models, ``Website`` on lines 98 to 131. ``WEBSITE_QUERIES`` queries that model through its
+    client accessor, as umami's own queries do."""
+    return UMAMI_SCHEMA.read_text()
+
+
+OUTER_CACHE_ROOT = cache_root()
+
+
+@pytest.fixture
+def outer_cache_root() -> Path:
+    """The cache folder the suite's own environment names, before any test's private one replaces it."""
+    return OUTER_CACHE_ROOT
+
+
+@pytest.fixture(autouse=True)
+def private_cache_root(
+    no_developer_settings, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Each test starts with an empty cache folder of its own, holding its fact cache and its shared
+    answer store, so no test reads what another run wrote, and no test, or jvn process a test
+    starts, writes the user's caches. It runs after ``no_developer_settings`` has dropped every
+    ``JEV_NAVIGATOR_`` variable, so the answer store variable is unset and the store lives here."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("cache")))
+    return cache_root()
+
+
+@pytest.fixture(scope="session")
+def memory_slots_folder(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return tmp_path_factory.mktemp("memory-slots")
+
+
+@pytest.fixture(autouse=True)
+def private_memory_slots(
+    no_developer_settings, memory_slots_folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """The suite's JVN processes take their memory slots in a folder of their own, never the
+    machine's, so no test waits for a live JVN run and no test makes one wait. It runs after
+    ``no_developer_settings`` has dropped every ``JEV_NAVIGATOR_`` variable. The folder lasts the whole
+    session, because a process keeps its slot in a folder for as long as it lives."""
+    monkeypatch.setenv(SLOTS_DIR_VARIABLE, str(memory_slots_folder))
+    return memory_slots_folder
+
+
+@pytest.fixture(autouse=True)
+def private_data_root(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Each test starts with an empty data folder of its own, holding the run folders the CLI writes
+    without ``--out``, so no test writes the user's run folders."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path_factory.mktemp("data")))
+    return data_root()
+
+
+@pytest.fixture
+def spawned(monkeypatch: pytest.MonkeyPatch) -> Counter[str]:
+    """How many processes each tool started (``git`` counted by subcommand); every process still runs."""
+    spawns: Counter[str] = Counter()
+
+    class CountedPopen(subprocess.Popen):
+        def __init__(self, arguments, *args, **kwargs) -> None:
+            spawns[_tool_name(arguments)] += 1
+            super().__init__(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", CountedPopen)
+    return spawns
+
+
+def _tool_name(arguments) -> str:
+    if arguments[0] != "git":
+        return arguments[0]
+    return "git " + next(part for part in arguments[1:] if not part.startswith("-") and "=" not in part)
+
+
 @pytest.fixture
 def sample_index(sample_repo: Path) -> CodeIndex:
     return CodeIndex.from_git(sample_repo, fact_cache_dir=sample_repo.parent / "fact-cache")
@@ -137,27 +266,45 @@ class BudgetedClient:
     """A Jev client that refuses any request over a measured input budget, the way the real
     endpoint answered request 5 of the saved trace run: HTTP 400 ``max_tokens_exceeded``.
 
+    ``budget`` bounds the whole body and ``input_box`` the state plus the longest single question,
+    the way the provider measures its documented input limit. Both count characters of the
+    ASCII-escaped serialization (``serialized_chars``), the one measure of the library and the Engine.
+
     It records the requests it accepted, so a test can prove no request over the budget was ever
     sent, and how many times the provider had to refuse one.
     """
 
     model = "jev-scripted"
 
-    def __init__(self, budget: int, default_noul: float = 0.9) -> None:
+    def __init__(self, budget: int, default_noul: float = 0.9, input_box: int | None = None) -> None:
         self.budget = budget
+        self.input_box = input_box
         self.default_noul = default_noul
         self.requests: list[tuple[Mapping, Mapping]] = []
         self.refusals = 0
 
     def ask(self, state: Mapping, questions: Mapping) -> JevResponse:
-        body = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode())
-        if body > self.budget:
+        body = serialized_chars({"state": state, "questions": questions})
+        box = self._state_and_longest_question(state, questions)
+        if body > self.budget or (self.input_box is not None and box > self.input_box):
             self.refusals += 1
             raise InputBudgetExceededError(
                 "TypeSafeBadRequestError: 400 "
                 '{"detail":{"error_type":"max_tokens_exceeded"}} '
-                f"(input of {body} bytes over the {self.budget}-byte budget)"
+                f"(input of {body} characters, {box} of them state and the longest question)"
             )
         self.requests.append((state, questions))
-        answers = {question_id: NoulAnswer(self.default_noul) for question_id in questions}
+        answers = {question_id: self._answer(question) for question_id, question in questions.items()}
         return JevResponse(answers, self.model, 100)
+
+    def _answer(self, question: Mapping) -> NoulAnswer | ChoiceAnswer:
+        """A choice question gets its first option, any other question ``default_noul``."""
+        if question.get("type") != "choice":
+            return NoulAnswer(self.default_noul)
+        first, *others = question["criteria"]
+        return ChoiceAnswer.from_probabilities({first: 1.0, **dict.fromkeys(others, 0.0)})
+
+    @staticmethod
+    def _state_and_longest_question(state: Mapping, questions: Mapping) -> int:
+        longest = max((serialized_chars(question) for question in questions.values()), default=0)
+        return serialized_chars(state) + longest

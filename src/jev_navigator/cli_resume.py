@@ -4,24 +4,31 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .directives.find_code import FindResult, NotInspected, Outcome, QueueTier, Visit
-from .directives.places import Place
+from .directives.places import Place, place_relationship, restored_signature
+from .index.bindings import Binding
 from .index.code_index import CodeIndex
-from .index.spans import CodeSlice, Span
+from .index.spans import Span
+from .index.units import Item
 from .judgments.judge import CheckResult
 from .judgments.thresholds import NoulVerdict
+from .run_files import PlaceLabels, is_place_label, relation_shown, relationship_shown
 
 STATE_VERSION = 1
 
 
 @dataclass(frozen=True)
 class SavedSearch:
+    """``frontier_labels``: the label the earlier save wrote for each place of the frontier, by place
+    key; a place whose stored signature is not a label, the code signature an older pack holds, has
+    none. A restored place's own ``signature`` is its code signature, rebuilt from the code."""
+
     result: FindResult | None
     completed: tuple[CheckResult, ...] | None = None
-    check_id: str | None = None
+    frontier_labels: dict[str, str] = field(default_factory=dict)
 
 
 def scope_identity(index: CodeIndex) -> tuple[str, dict[str, str]]:
@@ -58,6 +65,7 @@ def save_resume(
     index: CodeIndex,
     result: FindResult,
     *,
+    labels: PlaceLabels,
     entry_pending: bool,
     completed: tuple[CheckResult, ...] | None = None,
     check_id: str | None = None,
@@ -71,7 +79,7 @@ def save_resume(
         "stage": "enumeration" if completed is not None else "entry" if entry_pending else "navigation",
         "check_id": check_id,
         "completed": [asdict(answer) for answer in completed] if completed is not None else None,
-        "result": None if entry_pending else _result_record(result),
+        "result": None if entry_pending else _result_record(result, labels),
     }
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
@@ -79,8 +87,10 @@ def save_resume(
     return unavailable
 
 
-def load_resume(path: Path, index: CodeIndex) -> SavedSearch:
-    """Return a fresh-index frontier, or None when entry selection must be replayed."""
+def load_resume(path: Path, index: CodeIndex, *, find_all_question: str) -> SavedSearch:
+    """Return a fresh-index frontier, or None when entry selection must be replayed. An enumeration
+    saved under another Find All question than ``find_all_question`` is refused: its answers are to
+    another question."""
     state = json.loads(path.read_text())
     if state.get("version") != STATE_VERSION:
         raise ValueError("unsupported find resume state version")
@@ -90,28 +100,45 @@ def load_resume(path: Path, index: CodeIndex) -> SavedSearch:
         return SavedSearch(None)
     if state.get("stage") not in ("navigation", "enumeration"):
         raise ValueError("invalid find resume stage")
+    if state["stage"] == "enumeration" and state.get("check_id") != find_all_question:
+        raise ValueError("Find All question changed since the evidence pack; start a new search")
     record = state["result"]
     result = FindResult(
         outcome=Outcome(record.get("outcome", Outcome.BUDGET)),
-        found=tuple(_read_visit(item) for item in record.get("found", [])),
-        searched=tuple(_read_visit(item) for item in record["searched"]),
-        unsure=tuple(_read_visit(item) for item in record["unsure"]),
+        found=tuple(_read_visit(item, index) for item in record.get("found", [])),
+        searched=tuple(_read_visit(item, index) for item in record["searched"]),
+        unsure=tuple(_read_visit(item, index) for item in record["unsure"]),
         not_inspected=tuple(_read_frontier(item, index) for item in record["not_inspected"]),
         steps=record["steps"],
         calls=record["calls"],
         visited=frozenset(record["visited"]),
         judged_code=frozenset(record["judged_code"]),
-        starts=tuple(_read_visit(item) for item in record["starts"]),
+        starts=tuple(_read_visit(item, index) for item in record["starts"]),
     )
     completed = None
     if state["stage"] == "enumeration":
-        completed = tuple(
-            CheckResult(**{**item, "verdict": NoulVerdict(item["verdict"])}) for item in state["completed"]
-        )
-    return SavedSearch(result, completed, state.get("check_id"))
+        completed = tuple(_read_answer(item) for item in state["completed"])
+    labels = {
+        item["place_key"]: item["signature"]
+        for item in record["not_inspected"]
+        if is_place_label(item["place_key"], item["signature"])
+    }
+    return SavedSearch(result, completed, frontier_labels=labels)
 
 
-def _result_record(result: FindResult) -> dict:
+def _read_answer(record: dict) -> CheckResult:
+    place = record["place"]
+    ranges = tuple((start, end) for start, end in place["ranges"])
+    return CheckResult(
+        **{
+            **record,
+            "verdict": NoulVerdict(record["verdict"]),
+            "place": Item(place["id"], place["file"], ranges),
+        }
+    )
+
+
+def _result_record(result: FindResult, labels: PlaceLabels) -> dict:
     return {
         "outcome": result.outcome,
         "found": [_visit_record(item) for item in result.found],
@@ -122,19 +149,17 @@ def _result_record(result: FindResult) -> dict:
         "searched": [_visit_record(item) for item in result.searched],
         "unsure": [_visit_record(item) for item in result.unsure],
         "starts": [_visit_record(item) for item in result.starts],
-        "not_inspected": [_frontier_record(item) for item in result.not_inspected],
+        "not_inspected": [_frontier_record(item, labels) for item in result.not_inspected],
     }
 
 
 def _visit_record(visit: Visit) -> dict:
+    """A location, never code text: Resume re-reads the code from the unchanged scope."""
     return {
         "place_key": visit.place_key,
         "code": {
             "span": asdict(visit.code.span),
-            "text": visit.code.text,
-            "origin": visit.code.origin,
-            "commit": visit.code.commit,
-            "file_sha256": visit.code.file_sha256,
+            "origin": relation_shown(visit.code.origin, visit.place_key),
         },
         "path": list(visit.path),
         "probability": visit.probability,
@@ -142,45 +167,60 @@ def _visit_record(visit: Visit) -> dict:
     }
 
 
-def _read_visit(record: dict) -> Visit:
+def _read_visit(record: dict, index: CodeIndex) -> Visit:
     code = record["code"]
     return Visit(
         record["place_key"],
-        CodeSlice(Span(**code["span"]), code["text"], code["origin"], code["commit"], code["file_sha256"]),
+        index.read_slice(Span(**code["span"]), origin=code["origin"]),
         tuple(record["path"]),
         record["probability"],
         NoulVerdict(record["verdict"]),
     )
 
 
-def _frontier_record(entry: NotInspected) -> dict:
+def _frontier_record(entry: NotInspected, labels: PlaceLabels) -> dict:
+    """A location, never code: no request carries a frontier place's stored signature."""
     code = entry.place.open()
     return {
         "place_key": entry.place_key,
-        "signature": entry.signature,
+        "signature": labels(entry.place_key),
         "kind": entry.place.kind,
         "span": asdict(code.span),
-        "origin": code.origin,
+        "origin": relation_shown(code.origin, entry.place_key),
         "reason": entry.reason,
         "priority": entry.priority,
         "depth": entry.depth,
         "path": list(entry.path),
         "tier": entry.tier.value,
+        "relationship": relationship_shown(place_relationship(entry.place), entry.place_key),
     }
 
 
 def _read_frontier(record: dict, index: CodeIndex) -> NotInspected:
     span = Span(**record["span"])
     origin = record["origin"]
+    relationship = record.get("relationship") or {}
+    binding_record = relationship.get("binding")
+    binding = None
+    if binding_record is not None:
+        target = binding_record.get("target")
+        binding = Binding(
+            binding_record["status"], binding_record["reason"], Span(**target) if target is not None else None
+        )
+    relation = relationship.get("relation")
+    signature = restored_signature(index, record["place_key"], record["kind"], span, relation, binding)
     place = Place(
         record["place_key"],
         record["kind"],
-        record["signature"],
+        signature,
         lambda: index.read_slice(span, origin=origin),
+        relation,
+        binding,
+        relationship.get("move"),
     )
     return NotInspected(
         record["place_key"],
-        record["signature"],
+        signature,
         record["reason"],
         record["priority"],
         record["depth"],

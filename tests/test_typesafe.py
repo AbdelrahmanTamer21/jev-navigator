@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -102,6 +103,52 @@ def _stop(server: ThreadingHTTPServer) -> None:
     server.server_close()
 
 
+def _retry_jev_server(
+    exchanges: list[tuple[str, bytes, int, bytes]], *, always_fail: bool = False
+) -> ThreadingHTTPServer:
+    """A local endpoint that retries each logical marker once (or fails all attempts)."""
+    counts: dict[str, int] = {}
+    lock = threading.Lock()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            sent = self.rfile.read(int(self.headers["content-length"]))
+            marker = json.loads(sent)["state"].get("marker", "one")
+            with lock:
+                counts[marker] = counts.get(marker, 0) + 1
+                attempt = counts[marker]
+            if attempt == 1 or always_fail:
+                status = 503
+                served = b'{"detail":{"error_type":"temporary_unavailable"}}'
+            else:
+                status = 200
+                answers = {
+                    question_id: {"type": "noul", "noul": 0.9}
+                    for question_id in json.loads(sent)["questions"]
+                }
+                served = json.dumps(
+                    {
+                        "model": "local-served-model",
+                        "usage": {"input_tokens": attempt, "output_tokens": 1},
+                        "answers": answers,
+                    }
+                ).encode()
+            with lock:
+                exchanges.append((marker, sent, status, served))
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(served)))
+            self.end_headers()
+            self.wfile.write(served)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, name="jev-retry-local-server", daemon=True).start()
+    return server
+
+
 def _seed_index(root: Path, neighbours: int) -> tuple[CodeIndex, list[str]]:
     blocks = ["def entry():\n    return 0\n"]
     for number in range(neighbours):
@@ -114,16 +161,32 @@ def _seed_index(root: Path, neighbours: int) -> tuple[CodeIndex, list[str]]:
 
 
 @pytest.mark.parametrize("async_search", [False, True])
-@pytest.mark.parametrize("neighbours,input_limit", [(159, 40_000), (2, 3_000)])
+@pytest.mark.parametrize(
+    "neighbours,input_limit,unavailable_fragment",
+    [
+        (159, 40_000, "request-size packing estimate"),
+        (2, 3_000, None),
+        (379, 40_000, "provider accepts 255"),
+    ],
+    ids=("request-size", "fits", "choice-limit"),
+)
 def test_seed_search_batches_every_neighbour_at_the_real_input_boundary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, async_search: bool, neighbours: int, input_limit: int
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    async_search: bool,
+    neighbours: int,
+    input_limit: int,
+    unavailable_fragment: str | None,
 ) -> None:
-    """The original Find All seed sent 159 previews in one 236KB request and died on HTTP 400."""
+    """Oversized openings keep every neighbour judgment while omitting only the optional Choice."""
     pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     index, previews = _seed_index(tmp_path, neighbours)
-    start = function_place(index, index.find_definition("entry")[0])
+    entry = index.find_definition("entry")[0]
+    candidate_ids = {span.key for span in index.functions_in(entry.file) if span.key != entry.key}
+    assert len(candidate_ids) == neighbours
+    start = function_place(index, entry)
     exchanges: list[tuple[bytes, bytes]] = []
     server = _jev_server(exchanges, input_limit=input_limit)
     monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
@@ -149,7 +212,7 @@ def test_seed_search_batches_every_neighbour_at_the_real_input_boundary(
     opened = next(step for step in result.history.steps if step.operation == "open")
     assessed = opened.judgments["could_contain"]
     assert len(assessed) == neighbours
-    assert len({candidate["place"] for candidate in assessed}) == neighbours
+    assert {candidate["place"] for candidate in assessed} == candidate_ids
     assert len(result.not_inspected) == neighbours
     accepted = [
         (json.loads(sent), json.loads(body)) for sent, body in exchanges if "answers" in json.loads(body)
@@ -164,9 +227,9 @@ def test_seed_search_batches_every_neighbour_at_the_real_input_boundary(
     ]
     assert sorted(delivered) == sorted(previews)
     assert judge.calls == result.calls == len(exchanges)
-    if neighbours > 2:
+    if unavailable_fragment is not None:
         assert opened.judgments["open_first"]["used"] is False
-        assert "request-size packing estimate" in opened.judgments["open_first"]["unavailable"]
+        assert unavailable_fragment in opened.judgments["open_first"]["unavailable"]
     else:
         assert opened.judgments["open_first"]["used"] is True
 
@@ -233,7 +296,7 @@ def test_split_seed_resumes_completed_neighbours_without_another_paid_request(
 
 
 @pytest.mark.parametrize("status", [400, 401])
-def test_optional_priority_keeps_size_failure_but_propagates_auth_failure(
+def test_optional_priority_keeps_size_failure_but_an_auth_failure_ends_the_search_failed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     status: int,
@@ -265,8 +328,10 @@ def test_optional_priority_keeps_size_failure_but_propagates_auth_failure(
             )
 
         if status == 401:
-            with pytest.raises(TypeSafeAuthenticationError, match="invalid_api_key"):
-                search()
+            result = search()
+            assert result.outcome == Outcome.FAILED
+            assert isinstance(result.failure, TypeSafeAuthenticationError)
+            assert "invalid_api_key" in str(result.failure)
         else:
             result = search()
             opened = next(step for step in result.history.steps if step.operation == "open")
@@ -278,8 +343,8 @@ def test_optional_priority_keeps_size_failure_but_propagates_auth_failure(
         _stop(server)
 
     records = [json.loads(line) for line in journal_path.read_text().splitlines()]
-    cause = "max_tokens_exceeded" if status == 400 else "invalid_api_key"
-    assert any(cause in record.get("error", "") for record in records if record["kind"] == "failure")
+    cause = "InputBudgetExceededError" if status == 400 else "TypeSafeAuthenticationError"
+    assert cause in [record["error_type"] for record in records if record["kind"] == "failure"]
 
 
 @pytest.mark.parametrize("async_checks", [False, True])
@@ -343,8 +408,8 @@ def test_input_batches_keep_values_masked_across_request_boundaries(
     monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
     client = TypeSafeJevClient()
     try:
-        answers = Judge(client).check_every(
-            [DESCRIBES], items, {"doc": {"sentence": "posts an order"}}, batch_budget=1
+        answers = Judge(client, items_per_request=1).check_every(
+            [DESCRIBES], items, {"doc": {"sentence": "posts an order"}}
         )
     finally:
         client.close()
@@ -419,10 +484,13 @@ def test_cancel_aborts_an_active_official_sdk_request(monkeypatch: pytest.Monkey
         server_thread.join()
 
 
+@pytest.mark.parametrize("deliver", ["any_thread", "main_thread"])
 def test_sigint_returns_the_active_http_place_as_resumable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deliver: str
 ) -> None:
-    """The installed sync search and official SDK share one prompt cancellation boundary."""
+    """The installed sync search and official SDK share one prompt cancellation boundary. The local
+    server never answers until the test ends, so only the cancel can make the search return within
+    seconds of the interrupt; without it, the SDK's own timeout ends the requests after about 30."""
     pytest.importorskip("typesafe_sdk")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
@@ -459,9 +527,17 @@ def test_sigint_returns_the_active_http_place_as_resumable(
         range_place(index, "policy.py", 4, 5, "candidate"),
     ]
 
+    main_thread = threading.get_ident()
+
+    interrupted_at: list[float] = []
+
     def interrupt_when_sent() -> None:
         all_entered.wait()
-        os.kill(os.getpid(), signal.SIGINT)
+        interrupted_at.append(time.monotonic())
+        if deliver == "main_thread":
+            signal.pthread_kill(main_thread, signal.SIGINT)
+        else:
+            os.kill(os.getpid(), signal.SIGINT)
 
     interrupter = threading.Thread(target=interrupt_when_sent)
     interrupter.start()
@@ -475,7 +551,9 @@ def test_sigint_returns_the_active_http_place_as_resumable(
             moves={},
             initial_candidates=[(place, 1.0) for place in places],
         )
+        returned_after = time.monotonic() - interrupted_at[0]
 
+        assert returned_after < 5, "the sent requests were left to the 30 s transport timeout"
         assert result.outcome == Outcome.CANCELLED
         assert {entry.place_key for entry in result.not_inspected} == {place.key for place in places}
         assert {entry.reason for entry in result.not_inspected} == {"cancelled"}
@@ -628,7 +706,149 @@ def test_a_max_tokens_exceeded_response_is_typed_and_the_batch_splits_at_the_bou
     records = [json.loads(line) for line in journal_path.read_text().splitlines()]
     failures = [record for record in records if record["kind"] == "failure"]
     responses = [record for record in records if record["kind"] == "response"]
-    assert len(failures) == 1 and "max_tokens_exceeded" in failures[0]["error"]
+    assert len(failures) == 1 and failures[0]["error_type"] == "InputBudgetExceededError"
     assert len(responses) == 2 and all(record["status"] == 200 for record in responses)
     for record in responses:
         assert len(base64.b64decode(record["sent_body_base64"])) <= 40_000
+
+
+@pytest.mark.parametrize("sync_transport", [False, True])
+def test_the_journal_retains_each_real_sdk_retry_with_exact_wire_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sync_transport: bool
+) -> None:
+    pytest.importorskip("typesafe_sdk")
+    import httpx2
+
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    exchanges: list[tuple[str, bytes, int, bytes]] = []
+    server = _retry_jev_server(exchanges)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    transport = httpx2.HTTPTransport() if sync_transport else None
+    client = TypeSafeJevClient(transport=transport)
+    journal_path = tmp_path / "retry-journal.jsonl"
+    journal = JsonlJournal(journal_path, keep_request_text=True)
+    judge = Judge(client, journal=journal)
+
+    try:
+        if sync_transport:
+            answer = judge.ask({"marker": "one"}, QUESTIONS, thresholds=Thresholds())
+        else:
+            answer = asyncio.run(judge.ask_async({"marker": "one"}, QUESTIONS, thresholds=Thresholds()))
+    finally:
+        client.close()
+        _stop(server)
+
+    assert answer.noul("adds_one").probability == 0.9
+    records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    request = next(record for record in records if record["kind"] == "request")
+    attempts = [record for record in records if record["kind"] == "http_attempt"]
+    assert [record["attempt_no"] for record in attempts] == [1, 2]
+    assert all(record["request_id"] == request["request_id"] for record in attempts)
+    assert [record["status"] for record in attempts] == [503, 200]
+    assert all(record["duration_ms"] >= 0 for record in attempts)
+    assert [base64.b64decode(record["sent_body_base64"]) for record in attempts] == [
+        sent for _, sent, _, _ in exchanges
+    ]
+    assert [base64.b64decode(record["body_base64"]) for record in attempts] == [
+        served for _, _, _, served in exchanges
+    ]
+    assert json.loads(base64.b64decode(attempts[-1]["body_base64"]))["usage"] == {
+        "input_tokens": 2,
+        "output_tokens": 1,
+    }
+    assert records[-1]["kind"] == "response"
+
+
+def test_concurrent_async_retries_stay_with_their_logical_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("typesafe_sdk")
+
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    exchanges: list[tuple[str, bytes, int, bytes]] = []
+    server = _retry_jev_server(exchanges)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    client = TypeSafeJevClient()
+    journal_path = tmp_path / "concurrent-retry-journal.jsonl"
+    judge = Judge(client, journal=JsonlJournal(journal_path, keep_request_text=True))
+
+    async def ask_both():
+        return await asyncio.gather(
+            judge.ask_async({"marker": "alpha"}, QUESTIONS, thresholds=Thresholds()),
+            judge.ask_async({"marker": "beta"}, QUESTIONS, thresholds=Thresholds()),
+        )
+
+    try:
+        answers = asyncio.run(ask_both())
+    finally:
+        client.close()
+        _stop(server)
+
+    assert [answer.noul("adds_one").probability for answer in answers] == [0.9, 0.9]
+    records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    requests = {record["request_id"]: record for record in records if record["kind"] == "request"}
+    attempts = [record for record in records if record["kind"] == "http_attempt"]
+    assert len(requests) == 2 and len(attempts) == 4
+    for request_id, request in requests.items():
+        marker = json.loads(base64.b64decode(request["body_base64"]))["state"]["marker"]
+        matching = sorted(
+            (record for record in attempts if record["request_id"] == request_id),
+            key=lambda record: record["attempt_no"],
+        )
+        assert [record["attempt_no"] for record in matching] == [1, 2]
+        assert [record["status"] for record in matching] == [503, 200]
+        assert all(
+            json.loads(base64.b64decode(record["sent_body_base64"]))["state"]["marker"] == marker
+            for record in matching
+        )
+    assert {marker for marker, _, _, _ in exchanges} == {"alpha", "beta"}
+
+
+@pytest.mark.parametrize("sync_transport", [False, True])
+def test_terminal_sdk_failure_keeps_all_attempt_responses_before_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sync_transport: bool
+) -> None:
+    pytest.importorskip("typesafe_sdk")
+    import httpx2
+    from typesafe_sdk import TypeSafeInternalServerError
+
+    from jev_navigator.adapters.typesafe import TypeSafeJevClient
+
+    exchanges: list[tuple[str, bytes, int, bytes]] = []
+    server = _retry_jev_server(exchanges, always_fail=True)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "local-test-key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    transport = httpx2.HTTPTransport() if sync_transport else None
+    client = TypeSafeJevClient(transport=transport)
+    journal_path = tmp_path / "terminal-retry-journal.jsonl"
+    judge = Judge(client, journal=JsonlJournal(journal_path, keep_request_text=True))
+
+    try:
+        with pytest.raises(TypeSafeInternalServerError):
+            if sync_transport:
+                judge.ask({"marker": "terminal"}, QUESTIONS, thresholds=Thresholds())
+            else:
+                asyncio.run(judge.ask_async({"marker": "terminal"}, QUESTIONS, thresholds=Thresholds()))
+    finally:
+        client.close()
+        _stop(server)
+
+    records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    request = next(record for record in records if record["kind"] == "request")
+    attempts = [record for record in records if record["kind"] == "http_attempt"]
+    failure = next(record for record in records if record["kind"] == "failure")
+    assert [record["attempt_no"] for record in attempts] == [1, 2, 3]
+    assert all(record["request_id"] == request["request_id"] for record in attempts)
+    assert all(record["status"] == 503 for record in attempts)
+    assert [base64.b64decode(record["sent_body_base64"]) for record in attempts] == [
+        sent for _, sent, _, _ in exchanges
+    ]
+    assert [base64.b64decode(record["body_base64"]) for record in attempts] == [
+        served for _, _, _, served in exchanges
+    ]
+    assert failure["request_id"] == request["request_id"]
+    assert failure["error_type"] == "TypeSafeInternalServerError"

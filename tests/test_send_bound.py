@@ -1,0 +1,56 @@
+"""One judge, with every scope and every caller that shares it, keeps at most ``max_concurrency``
+requests in flight, and a search whose openings split into nested batches still finishes."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+from search_deadline import searched_in_child
+
+from jev_navigator.judgments.judge import DEFAULT_MAX_CONCURRENCY
+
+SEARCH = Path(__file__).with_name("send_bound_search.py")
+
+
+def _searched(tmp_path: Path, mode: str, width: int, *, refuse_lists: bool = False) -> dict:
+    """What the provider saw in one search of ``width`` places, run in its own process, so a judge
+    that deadlocks fails here at the deadline and the process is killed instead of hanging pytest."""
+    lists = "refuse-lists" if refuse_lists else "answer-lists"
+    return searched_in_child([sys.executable, str(SEARCH), mode, str(width), lists, str(tmp_path)])
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_beam_of_forty_never_has_more_than_the_judges_bound_in_flight(tmp_path: Path, mode: str) -> None:
+    # Act
+    seen = _searched(tmp_path, mode, 40)
+
+    # Assert
+    assert seen["steps"] == 40
+    assert seen["requests"] == 40
+    assert seen["peak"] == DEFAULT_MAX_CONCURRENCY
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_openings_split_into_nested_batches_stay_within_the_bound_and_finish(
+    tmp_path: Path, mode: str
+) -> None:
+    # Act
+    seen = _searched(tmp_path, mode, 20, refuse_lists=True)
+
+    # Assert
+    assert seen["steps"] == 20
+    assert seen["neighbour_batches"] >= 2 * 20
+    assert seen["peak"] <= DEFAULT_MAX_CONCURRENCY
+
+
+def test_a_beam_of_two_hundred_split_into_nested_batches_keeps_its_threads_within_the_bound_squared(
+    tmp_path: Path,
+) -> None:
+    # Act
+    seen = _searched(tmp_path, "sync", 200, refuse_lists=True)
+
+    # Assert: the main thread, one round pool and one batch pool per round worker.
+    assert seen["steps"] == 200
+    assert seen["threads"] <= 1 + DEFAULT_MAX_CONCURRENCY + DEFAULT_MAX_CONCURRENCY**2

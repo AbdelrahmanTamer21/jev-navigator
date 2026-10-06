@@ -34,23 +34,26 @@ class Criterion:
 class Check:
     """A yes/no judgment about concrete supplied state. ``{item}`` in the instructions stands for
     one entry of a batched list, for example "Is `{item}.code` the implementation that
-    `doc.sentence` describes?"."""
+    `doc.sentence` describes?". ``yes`` and ``no`` come together or not at all: without them the
+    instructions alone define the answer."""
 
     name: str
     instructions: str
-    yes: Criterion
-    no: Criterion
+    yes: Criterion | None = None
+    no: Criterion | None = None
+
+    def __post_init__(self) -> None:
+        if (self.yes is None) != (self.no is None):
+            raise ValueError(f"{self.name}: give both the yes and the no criterion, or neither")
 
     @property
     def question_id(self) -> str:
         return f"{self.name}@{wording_hash(self.to_question())}"
 
     def to_question(self, item_path: str = "") -> dict:
-        question = {
-            "type": "noul",
-            "instructions": self.instructions,
-            "criteria": {"true": self.yes.to_json(), "false": self.no.to_json()},
-        }
+        question: dict = {"type": "noul", "instructions": self.instructions}
+        if self.yes is not None and self.no is not None:
+            question["criteria"] = {"true": self.yes.to_json(), "false": self.no.to_json()}
         if not item_path:
             return question
         return json.loads(json.dumps(question).replace(ITEM_PLACEHOLDER, item_path))
@@ -112,6 +115,15 @@ def request_sha256(state: Mapping, questions: Mapping) -> str:
 def request_body(state: Mapping, questions: Mapping) -> bytes:
     """The request as the library hands it to a client, with every key in the order it was built."""
     return json.dumps({"state": state, "questions": questions}, ensure_ascii=False).encode()
+
+
+def serialized_chars(value: object) -> int:
+    """The size of a value in ASCII-escaped JSON, the one measure of every size box and of packing.
+
+    The Engine measures the escaped form (analysis-engine ``evidence_router.py``), and the fit behind
+    ``REQUEST_CHARS_PER_TOKEN`` counts per byte of it, so a non-ASCII character costs its whole escape
+    here: Chinese comments of 72,043 characters are about 200,000 bytes, over Jev's 32,000 tokens."""
+    return len(json.dumps(value, default=str))
 
 
 def content_hash(value: object) -> str:

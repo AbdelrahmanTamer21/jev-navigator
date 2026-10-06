@@ -17,42 +17,52 @@ from __future__ import annotations
 import asyncio
 import heapq
 import itertools
-import os
-import signal
-import threading
 from collections.abc import Mapping, Sequence
-from concurrent.futures import CancelledError, ThreadPoolExecutor, wait
-from contextlib import contextmanager
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from enum import IntEnum, StrEnum
+from functools import partial
 
 from ..history import (
-    DEFAULT_QUESTION_RESERVE,
     DEFAULT_STOP_SECTIONS,
-    JEV_STATE_TOKEN_LIMIT,
     FetchedSpan,
     History,
     HistoryJudgment,
     HistoryOutcome,
     HistoryStep,
+    HistoryTooLargeError,
     judge_history,
     judge_history_async,
 )
 from ..index.code_index import CodeIndex
+from ..index.languages import language_of
 from ..index.spans import CodeSlice
-from ..judgments.answers import JevResponse, NoulAnswer
-from ..judgments.client import InputBudgetExceededError
+from ..interrupts import defer_keyboard_interrupts
+from ..judgments.answers import AnswerSource, JevResponse, NoulAnswer, answered_by, scored_by
+from ..judgments.client import InputBudgetExceededError, InputLimits
+from ..judgments.journal import error_message
 from ..judgments.judge import (
+    ABORTED_SEND_ERRORS,
     CODE_FIELD,
     CallCapReachedError,
     CheckResult,
     Judge,
-    request_exceeds_input_budget,
+    masked_request_fits,
 )
-from ..judgments.questions import ITEM_PLACEHOLDER, MAX_CHOICE_OPTIONS, Check, Criterion, Pick, content_hash
+from ..judgments.questions import (
+    ITEM_PLACEHOLDER,
+    MAX_CHOICE_OPTIONS,
+    Check,
+    Criterion,
+    Pick,
+    content_hash,
+    serialized_chars,
+)
+from ..judgments.secrets import DEFAULT_MASKER, Masker
 from ..judgments.thresholds import NoulVerdict, Thresholds
-from .places import MOVES, Move, Place, neighbours_and_omissions
-from .shown import MAX_LINE_CHARS, MAX_SLICE_CHARS, cut_long_line, shown_slice
+from ..memory_limit import MemoryLimitReachedError
+from .places import MOVES, Move, Place, neighbours_and_omissions, place_relationship
+from .shown import MAX_LINE_CHARS, cut_long_line, shown_slice
 
 FOUND = Check(
     name="contains_target",
@@ -126,6 +136,7 @@ class Outcome(StrEnum):
     NOTHING_LEFT = "nothing_left"
     SCOPE_INCOMPLETE = "scope_incomplete"
     BUDGET = "budget"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -139,35 +150,14 @@ class SearchBudget:
     beam_width: int = 3
     neighbours_per_kind: int | None = None
     preview_lines: int = 8
-    max_slice_chars: int = MAX_SLICE_CHARS
     max_line_chars: int = MAX_LINE_CHARS
-
-    @classmethod
-    def from_env(cls, environment: Mapping[str, str] | None = None) -> SearchBudget:
-        """Library defaults, overridden by ``JEV_NAVIGATOR_<FIELD>`` variables; read once at the edge."""
-        environment = os.environ if environment is None else environment
-        found = {
-            name: int(environment[f"JEV_NAVIGATOR_{name.upper()}"])
-            for name in (
-                "max_depth",
-                "max_steps",
-                "max_calls",
-                "beam_width",
-                "neighbours_per_kind",
-                "preview_lines",
-                "max_slice_chars",
-                "max_line_chars",
-            )
-            if f"JEV_NAVIGATOR_{name.upper()}" in environment
-        }
-        return replace(cls(), **found)
 
 
 @dataclass(frozen=True)
 class Visit:
-    """An opened place: the code the request showed of it (cut at ``SearchBudget.max_slice_chars``
-    on a line boundary, so ``code.span`` ends at the last shown line), the path from a start place,
-    and the found verdict."""
+    """An opened place: the code the request showed of it (all of it when its requests fit the
+    judge's input box, else cut on a line boundary, so ``code.span`` ends at the last shown line), the
+    path from a start place, and the found verdict."""
 
     place_key: str
     code: CodeSlice
@@ -211,8 +201,11 @@ class FindResult:
     absent: one "no" about one place can be wrong. When nothing is found, rank the opened places by
     their probability; the best one is the likeliest place. ``starts`` holds the start places with
     their verdicts: a start is never a find, because the caller already had it. ``unparsed_files``
-    lists scope files the index could not parse; while it is not empty the outcome is never
-    ``nothing_left``."""
+    lists scope files the index could not parse. Of ``code_files`` scope code files, Jev judged code
+    (the opened places, not whole files) in ``files_judged``; ``files_read`` counts those plus the
+    files the search only parsed to list neighbours. While any file was never read or could not be
+    parsed, the outcome is never ``nothing_left``. ``failure`` is the error that ended a ``failed``
+    search."""
 
     outcome: Outcome
     found: tuple[Visit, ...]
@@ -231,6 +224,18 @@ class FindResult:
     parser_scans_completed: tuple[str, ...] = ()
     parser_scans_pending: tuple[str, ...] = ()
     unavailable_files: Mapping[str, str] = field(default_factory=dict)
+    files_judged: int = 0
+    files_read: int = 0
+    code_files: int = 0
+    failure: Exception | None = None
+
+    @property
+    def files_read_only(self) -> int:
+        return self.files_read - self.files_judged
+
+    @property
+    def files_never_reached(self) -> int:
+        return self.code_files - self.files_read
 
 
 @dataclass(order=True)
@@ -244,6 +249,7 @@ class _Queued:
     depth: int = field(compare=False)
     path: tuple[str, ...] = field(compare=False)
     probability: float = field(compare=False)
+    scored_by: AnswerSource | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -266,7 +272,12 @@ class _Search:
     set_aside: list[NotInspected] = field(default_factory=list)
     steps: int = 0
     cap_reached: bool = False
+    replay_exhausted: bool = False
+    failure: Exception | None = None
     counter: itertools.count = field(default_factory=itertools.count)
+    unmerged: list[_Opening] = field(default_factory=list)
+    """The places a round opened and has not merged yet; a caller interrupt returns them to the
+    frontier, wherever in the round it arrives."""
 
     def push(
         self,
@@ -275,6 +286,7 @@ class _Search:
         depth: int,
         path: tuple[str, ...],
         tier: QueueTier = QueueTier.MOVE,
+        scored_by: AnswerSource | None = None,
     ) -> None:
         if place.key in self.visited:
             return
@@ -284,7 +296,8 @@ class _Search:
             )
             return
         rank = -probability if tier in (QueueTier.DISCOVERED, QueueTier.MOVE) else 0.0
-        heapq.heappush(self.queue, _Queued(tier, rank, next(self.counter), place, depth, path, probability))
+        item = _Queued(tier, rank, next(self.counter), place, depth, path, probability, scored_by)
+        heapq.heappush(self.queue, item)
 
     def next_beam(self, calls_left: int | None) -> list[_Queued]:
         beam = []
@@ -338,17 +351,18 @@ def find_code(
     stop = None
     try:
         while (stop := _stop_reason(search, index)) is None:
-            opened = _open_round(index, search, judge)
+            opened = _open_round_or_fail(index, search, judge)
             if not opened:
                 continue
             responses, cancelled = _ask_round(judge, search, opened)
-            with _defer_keyboard_interrupts():
+            with defer_keyboard_interrupts():
                 _merge_round(search, opened, responses)
             if cancelled:
-                stop = Outcome.CANCELLED
+                stop = Outcome.FAILED if search.failure is not None else Outcome.CANCELLED
                 break
             _apply_stop_rule(judge, search)
     except KeyboardInterrupt:
+        _set_aside_cancelled(search)
         stop = Outcome.CANCELLED
     assert stop is not None
     return _result(search, stop, judge, index)
@@ -370,21 +384,44 @@ async def find_code_async(
     initial_candidates: Sequence[tuple[Place, float]] = (),
 ) -> FindResult:
     """``find_code`` with each round's places sent concurrently with ``asyncio.gather``; budgets,
-    masking, the store, the journal and the history work exactly as in ``find_code``."""
+    masking, the store, the journal and the history work exactly as in ``find_code``, and a failed
+    request ends the search ``failed`` the same way. Opening places
+    runs ripgrep, git and the parser, so it runs in a worker thread and the event loop stays free."""
     options = _SearchOptions(
         budget, thresholds, questions, resume, commit, stop_rule, moves, initial_candidates
     )
     search, judge = _begin(index, judge, target_description, start, options)
     while (stop := _stop_reason(search, index)) is None:
-        opened = _open_round(index, search, judge)
+        opened = await asyncio.to_thread(_open_round_or_fail, index, search, judge)
         if not opened:
             continue
-        responses = await asyncio.gather(
-            *(_ask_within_cap_async(judge, search, opening) for opening in opened)
-        )
+        responses = await _ask_round_async(judge, search, opened)
         _merge_round(search, opened, responses)
         await _apply_stop_rule_async(judge, search)
     return _result(search, stop, judge, index)
+
+
+def shown_for_target(
+    code: CodeSlice,
+    target_description: str,
+    input_limits: InputLimits,
+    *,
+    found: Check = FOUND,
+    masker: Masker | None = DEFAULT_MASKER,
+    max_line_chars: int = MAX_LINE_CHARS,
+) -> CodeSlice | None:
+    """How much of ``code`` Find shows when it asks whether ``code`` is the target: all of it when that
+    request, masked by ``masker`` as a judge sends it, fits the box of ``input_limits``, else the
+    longest start that fits, ending in a visible cut note, and None when not even the first line fits.
+    It is the first cut of every opening; a split opening's neighbours can cut it further. Pass the
+    judge's masker: masking can make a request longer, so the measure is of the masked request."""
+    target = _target(target_description)
+    questions = {found.question_id: found.to_question()}
+
+    def fits(shown: CodeSlice) -> bool:
+        return masked_request_fits(_opened_state(target, shown), questions, input_limits, masker)
+
+    return shown_slice(code, fits, max_line_chars)
 
 
 @dataclass(frozen=True)
@@ -406,7 +443,7 @@ def _begin(
 ) -> tuple[_Search, Judge]:
     if options.commit is not None:
         index.require_commit(options.commit)
-    target = {"description": target_description}
+    target = _target(target_description)
     rule = options.stop_rule
     history = rule.new_history(target) if rule else History(sections={SUBJECT: target})
     if judge.journal is not None and hasattr(judge.journal, "record_step"):
@@ -432,18 +469,30 @@ def _begin(
     return search, scoped_judge
 
 
+def _open_round_or_fail(index: CodeIndex, search: _Search, judge: Judge) -> list[_Opening]:
+    """``_open_round``. An error it raises has already put the round's places back on the frontier,
+    and ``search_failure`` decides whether it ends the search ``failed`` or raises."""
+    try:
+        return _open_round(index, search, judge)
+    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
+        search.failure = search_failure(error, opening=True)
+        return []
+
+
 def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Opening]:
     beam = []
     opened = []
     processed = 0
     try:
-        with _defer_keyboard_interrupts():
+        with defer_keyboard_interrupts():
             beam = search.next_beam(judge.calls_left())
         _record_choice(search, beam)
         for item in beam:
-            if opening := _open(index, search, item):
+            if opening := _open(index, search, judge, item):
                 opened.append(opening)
             processed += 1
+        with defer_keyboard_interrupts():
+            search.unmerged = opened
         return opened
     except BaseException:
         for opening in opened:
@@ -452,41 +501,68 @@ def _open_round(index: CodeIndex, search: _Search, judge: Judge) -> list[_Openin
         for item in beam[processed:]:
             search.visited.discard(item.place.key)
             heapq.heappush(search.queue, item)
+        search.unmerged = []
         raise
 
 
 def _ask_round(judge: Judge, search: _Search, opened: list[_Opening]) -> tuple[list, bool]:
-    """Ask one beam concurrently. A caller interrupt stops future rounds after the already-sent
-    requests settle; successful responses still count and interrupted places return to the frontier."""
-    with ThreadPoolExecutor(max_workers=len(opened)) as pool:
-        futures = [pool.submit(_ask_within_cap, judge, search, opening) for opening in opened]
+    """Ask one beam concurrently, at most ``judge.max_concurrency`` places at once, whatever the beam
+    width. A caller interrupt stops future rounds after the already-sent requests settle; successful
+    responses still count and interrupted places return to the frontier."""
+    with ThreadPoolExecutor(max_workers=min(len(opened), judge.max_concurrency)) as pool:
+        futures: list[Future] = []
         try:
+            with defer_keyboard_interrupts():
+                futures = [pool.submit(_ask_within_cap, judge, search, opening) for opening in opened]
             return [future.result() for future in futures], False
         except KeyboardInterrupt:
-            with _defer_keyboard_interrupts(re_raise=False):
-                judge.cancel()
-                for future in futures:
-                    future.cancel()
-                wait(futures)
-                responses = []
-                for future in futures:
-                    try:
-                        responses.append(future.result())
-                    except (CancelledError, KeyboardInterrupt):
-                        responses.append(_Unanswered.CANCELLED)
-                    except Exception:
-                        responses.append(_Unanswered.CANCELLED)
-            return responses, True
+            return _cancel_round(judge, futures, len(opened)), True
+
+
+async def _ask_round_async(judge: Judge, search: _Search, opened: list[_Opening]) -> list:
+    """Ask one beam concurrently on the event loop, at most ``judge.max_concurrency`` places at once."""
+    slots = asyncio.Semaphore(judge.max_concurrency)
+
+    async def ask(opening: _Opening):
+        async with slots:
+            return await _ask_within_cap_async(judge, search, opening)
+
+    return list(await asyncio.gather(*(ask(opening) for opening in opened)))
+
+
+def _cancel_round(judge: Judge, futures: list[Future], asked: int) -> list:
+    """Abort the round's sends and wait until every one has settled. A send the abort stopped is
+    cancelled; a failed request comes back as ``_Failed`` like in any round, and anything else a
+    send raises propagates as it is."""
+    with defer_keyboard_interrupts(re_raise=False):
+        judge.abort_sends(futures)
+        responses = [_settled_response(future) for future in futures]
+    return [*responses, *[_Unanswered.CANCELLED] * (asked - len(futures))]
+
+
+def _settled_response(future: Future):
+    try:
+        return future.result()
+    except ABORTED_SEND_ERRORS:
+        return _Unanswered.CANCELLED
 
 
 def _merge_round(search: _Search, opened: list[_Opening], responses: list) -> None:
+    """After the call cap refused a live request, only stored answers can still come back; a round
+    that got none means the store holds nothing for the frontier, so opening more places is waste.
+    Counting unreplayed store records instead would never stop a Resume: its store carries the
+    earlier run's answers for places that run already judged, which this run never asks again."""
+    answered = [response for response in responses if not isinstance(response, _Unanswered | _Failed)]
+    search.replay_exhausted = search.cap_reached and not answered
     for opening, response in zip(opened, responses, strict=True):
-        if response is _Unanswered.CANCELLED:
-            _set_aside_unasked(search, opening, "cancelled")
-        elif response is _Unanswered.BUDGET:
-            _set_aside_unasked(search, opening, "budget")
+        if isinstance(response, _Failed):
+            _set_aside_unasked(search, opening, "failed")
+            search.failure = search.failure or response.error
+        elif isinstance(response, _Unanswered):
+            _set_aside_unasked(search, opening, response.value)
         else:
             _merge(search, opening, response)
+    search.unmerged = []
 
 
 class _Unanswered(StrEnum):
@@ -494,31 +570,33 @@ class _Unanswered(StrEnum):
     CANCELLED = "cancelled"
 
 
-@contextmanager
-def _defer_keyboard_interrupts(*, re_raise: bool = True):
-    """Keep the small receipt commit indivisible on the main thread.
+@dataclass(frozen=True)
+class _Failed:
+    """A request that failed: the place returns to the frontier and the search ends ``failed``
+    holding ``error``, so Resume can ask it again."""
 
-    A first interrupt is delivered after a normal merge has preserved its completed responses. Once
-    cancellation has begun, later interrupts are coalesced while the owned transport settles.
-    """
-    if threading.current_thread() is not threading.main_thread():
-        yield
-        return
-    previous = signal.getsignal(signal.SIGINT)
-    interrupted = False
+    error: Exception
 
-    def defer(signum, frame) -> None:
-        del signum, frame
-        nonlocal interrupted
-        interrupted = True
 
-    signal.signal(signal.SIGINT, defer)
-    try:
-        yield
-    finally:
-        signal.signal(signal.SIGINT, previous)
-    if interrupted and re_raise:
-        raise KeyboardInterrupt
+OPENING_FAILURES: tuple[type[Exception], ...] = (MemoryLimitReachedError,)
+"""The errors that end a search ``failed`` while it opens places. Opening runs the index, and an index
+or parser error there raises; JVN's memory limit is the exception, because Resume opens the same places
+again once there is room."""
+
+
+def search_failure(error: Exception, *, opening: bool = False) -> Exception:
+    """The one rule for what ends a search ``failed``: every error a request raises gets resume
+    state, the search holding this same error, and the CLI re-raises it after saving, so its edge
+    still decides between one line and a traceback. Only a send the abort stopped is re-raised, to
+    count as cancelled. While the search is ``opening`` places, only ``OPENING_FAILURES`` end it
+    failed, and any other error is re-raised. Find, entry selection and Find All all apply it."""
+    if isinstance(error, ABORTED_SEND_ERRORS) or (opening and not isinstance(error, OPENING_FAILURES)):
+        raise error
+    return error
+
+
+def _failed(error: Exception) -> _Failed:
+    return _Failed(search_failure(error))
 
 
 SUBJECT = "subject"
@@ -535,17 +613,35 @@ class StopRule:
 
     check: Check
     shared: Mapping = field(default_factory=dict)
-    budget_tokens: int = JEV_STATE_TOKEN_LIMIT - DEFAULT_QUESTION_RESERVE
+    budget_chars: int | None = None
     sections: tuple[str, ...] = DEFAULT_STOP_SECTIONS
     context: Mapping[str, object] = field(default_factory=dict)
 
     def new_history(self, subject: Mapping) -> History:
-        return History(budget_tokens=self.budget_tokens, sections={SUBJECT: subject, **self.context})
+        return History(budget_chars=self.budget_chars, sections={SUBJECT: subject, **self.context})
+
+
+class StopRuleTooLargeError(RuntimeError):
+    """The stop rule's request cannot fit Jev's input box, so the search cannot judge whether to stop.
+    The caller sizes its rule (``budget_chars``, ``shared``, ``sections``); the search does not guess."""
+
+    def __init__(self, rule: StopRule, cause: Exception) -> None:
+        super().__init__(f"the stop rule {rule.check.name} cannot fit Jev's input: {cause}")
+        self.__cause__ = cause
+
+
+def _named_stop_failure(rule: StopRule, error: Exception) -> Exception:
+    """A stop request too large for Jev's input is named for its rule; any other error stays itself."""
+    if isinstance(error, HistoryTooLargeError | InputBudgetExceededError):
+        return StopRuleTooLargeError(rule, error)
+    return error
 
 
 def _apply_stop_rule(judge: Judge, search: _Search) -> None:
+    """Skipped after a failed round, which already ends the search; a failed stop check ends it
+    ``failed`` too, a rule too large for Jev's input as ``StopRuleTooLargeError``."""
     rule = search.stop_rule
-    if rule is None:
+    if rule is None or search.failure is not None:
         return
     try:
         search.stop_judgment = judge_history(
@@ -553,11 +649,13 @@ def _apply_stop_rule(judge: Judge, search: _Search) -> None:
         )
     except CallCapReachedError:
         search.cap_reached = True
+    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
+        search.failure = _failed(_named_stop_failure(rule, error)).error
 
 
 async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:
     rule = search.stop_rule
-    if rule is None:
+    if rule is None or search.failure is not None:
         return
     try:
         search.stop_judgment = await judge_history_async(
@@ -565,6 +663,8 @@ async def _apply_stop_rule_async(judge: Judge, search: _Search) -> None:
         )
     except CallCapReachedError:
         search.cap_reached = True
+    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
+        search.failure = _failed(_named_stop_failure(rule, error)).error
 
 
 def _restore(search: _Search, previous: FindResult) -> None:
@@ -580,10 +680,12 @@ def _restore(search: _Search, previous: FindResult) -> None:
 def _stop_reason(search: _Search, index: CodeIndex) -> Outcome | None:
     if search.found:
         return Outcome.FOUND
+    if search.failure is not None:
+        return Outcome.FAILED
     if search.stop_judgment is not None and search.stop_judgment.outcome == HistoryOutcome.FOUND:
         return Outcome.STOP_RULE
     steps_used = search.budget.max_steps is not None and search.steps >= search.budget.max_steps
-    if steps_used:
+    if steps_used or search.replay_exhausted:
         return Outcome.BUDGET
     if not search.worth_opening():
         if search.cap_reached:
@@ -593,13 +695,13 @@ def _stop_reason(search: _Search, index: CodeIndex) -> Outcome | None:
 
 
 def _nothing_worth_opening(search: _Search, index: CodeIndex) -> Outcome:
-    """``nothing_left`` only when every scope file was parsed; code in an unparsed file was never
-    offered, so the search cannot say it looked everywhere."""
+    """``nothing_left`` only when the search itself parsed every scope file without a grammar error;
+    code in a file it never reached or could not parse was never offered. The remaining files are
+    never parsed just to choose this label."""
     if search.unsure:
         return Outcome.UNSURE_ONLY
-    return (
-        Outcome.SCOPE_INCOMPLETE if index.unparsed_files or index.unavailable_files else Outcome.NOTHING_LEFT
-    )
+    unexamined = index.parser_scans_pending or index.observed_unparsed_files or index.unavailable_files
+    return Outcome.SCOPE_INCOMPLETE if unexamined else Outcome.NOTHING_LEFT
 
 
 @dataclass(frozen=True)
@@ -614,14 +716,22 @@ class _Opening:
     capped: tuple[NotInspected, ...] = ()
 
 
-def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
+def _open(index: CodeIndex, search: _Search, judge: Judge, item: _Queued) -> _Opening | None:
     """Opens a place in code; the same code reached by another path is not judged twice. Moves list
-    neighbours from all of the code, and only lines the request does not show can hold a new place."""
+    neighbours from all of the code, and only lines the request does not show can hold a new place.
+    The request shows all of the code when its requests fit the judge's input box."""
     code = item.place.open()
     fingerprint = content_hash(code.text)
     if fingerprint in search.judged_code:
         return None
-    shown = shown_slice(code, search.budget.max_slice_chars, search.budget.max_line_chars)
+    shown = shown_for_target(
+        code,
+        search.target["description"],
+        judge.input_limits,
+        found=search.questions.found,
+        masker=judge.masker,
+        max_line_chars=search.budget.max_line_chars,
+    )
     if shown is None:
         search.visited.discard(item.place.key)
         search.cap_reached = True
@@ -632,11 +742,10 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
     search.steps += 1
     set_aside_before = len(search.set_aside)
     try:
+        opening = _Opening(item, shown, code.key, fingerprint, [])
         if search.budget.max_depth is not None and item.depth >= search.budget.max_depth:
-            return _Opening(item, shown, code.key, fingerprint, [])
-        candidates, omitted = neighbours_and_omissions(
-            index, code, search.budget.neighbours_per_kind, search.moves, shown.span
-        )
+            return opening
+        opening, omitted = _beside_neighbours(index, search, judge, code, opening)
         capped = tuple(
             NotInspected(
                 place.key,
@@ -651,9 +760,7 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
             if place.key not in search.visited
         )
         search.set_aside.extend(capped)
-        unseen = [place for place in candidates if place.key not in search.visited]
-        available = [place for place in unseen if place.open().text.strip()]
-        return _Opening(item, shown, code.key, fingerprint, available, capped)
+        return replace(opening, capped=capped)
     except BaseException:
         del search.set_aside[set_aside_before:]
         search.judged_code.discard(fingerprint)
@@ -664,19 +771,68 @@ def _open(index: CodeIndex, search: _Search, item: _Queued) -> _Opening | None:
 
 @dataclass(frozen=True)
 class _OpeningRequest:
+    """``shared`` is the part of ``state`` a split opening sends with every one of its requests."""
+
+    shared: Mapping
     state: Mapping
     questions: Mapping
     sources: Mapping
     priority_unavailable: str | None = None
 
 
+def _beside_neighbours(
+    index: CodeIndex, search: _Search, judge: Judge, code: CodeSlice, opening: _Opening
+) -> tuple[_Opening, list[Place]]:
+    """The opening with the neighbours it asks about, and the places the per-kind cap left out. A split
+    opening sends the shown code with each neighbour alone, so a neighbour too large for that request
+    cuts the code further, and a shorter cut can list more neighbours: listing repeats while each pass
+    shows fewer lines than the one before, so it ends. A cut never grows back, so it never shows more
+    than the first cut (``shown_for_target``) and the question whether it is the target always fits;
+    under a per-kind cap a shorter cut can list a small neighbour in place of a large one, and growing
+    back would list the large one again. The opening returned fits, because its neighbours were
+    listed for its cut and a shorter start than the longest that fits also fits. When not even the
+    first line fits beside the largest neighbour, the opening keeps its cut, and the provider refuses
+    that neighbour's request."""
+    while True:
+        listed, omitted = neighbours_and_omissions(
+            index, code, search.budget.neighbours_per_kind, search.moves, opening.code.span
+        )
+        unseen = [place for place in listed if place.key not in search.visited]
+        opening = replace(opening, candidates=[place for place in unseen if place.open().text.strip()])
+        fits = partial(_neighbour_request_fits, search, judge, _largest_neighbour(search, opening))
+        shown = shown_slice(code, fits, search.budget.max_line_chars)
+        if shown is None or shown.span.end >= opening.code.span.end:
+            return opening, omitted
+        opening = replace(opening, code=shown)
+
+
+def _neighbour_request_fits(search: _Search, judge: Judge, largest: Mapping | None, shown: CodeSlice) -> bool:
+    """Whether asking about the opening's largest neighbour alone beside ``shown`` fits the judge's
+    input box."""
+    shared = _opened_state(search.target, shown)
+    return largest is None or judge.fits_alone([_neighbour_check(search)], largest, shared, "candidates")
+
+
+def _largest_neighbour(search: _Search, opening: _Opening) -> Mapping | None:
+    """The opening's neighbour that takes the most room in a request, as a split opening sends it."""
+    items = _neighbour_items(search, _opening_request(search, opening))
+    return max(items, key=serialized_chars, default=None)
+
+
+def _target(description: str) -> dict:
+    return {"description": description}
+
+
+def _opened_state(target: Mapping, code: CodeSlice) -> dict:
+    """What every request about an opening carries: the target and the code it shows."""
+    shown = {"file": code.span.file, "lines": f"{code.span.start}-{code.span.end}", "code": code.text}
+    return {"target": target, "slice": shown}
+
+
 def _opening_request(search: _Search, opening: _Opening) -> _OpeningRequest:
     code, candidates = opening.code, opening.candidates
-    state = {
-        "target": search.target,
-        "slice": {"file": code.span.file, "lines": f"{code.span.start}-{code.span.end}", "code": code.text},
-        "candidates": [_candidate_state(place, search.budget) for place in candidates],
-    }
+    shared = _opened_state(search.target, code)
+    state = {**shared, "candidates": [_candidate_state(place, search.budget) for place in candidates]}
     asked = search.questions
     questions = {asked.found.question_id: asked.found.to_question()}
     priority_unavailable = None
@@ -704,14 +860,15 @@ def _opening_request(search: _Search, opening: _Opening) -> _OpeningRequest:
             for slot, place in enumerate(candidates)
         }
     )
-    return _OpeningRequest(state, questions, sources, priority_unavailable)
+    return _OpeningRequest(shared, state, questions, sources, priority_unavailable)
 
 
 def _ask_within_cap(judge: Judge, search: _Search, opening: _Opening):
-    """None when a judge's global cap, shared with other callers, ran out before this request."""
+    """The response; ``_Unanswered.BUDGET`` when a judge's global cap, shared with other callers, ran
+    out before this request; ``_Failed`` when the request failed."""
     request = _opening_request(search, opening)
     try:
-        if not request_exceeds_input_budget(request.state, request.questions):
+        if judge.fits(request.state, request.questions):
             try:
                 response = judge.ask(
                     request.state, request.questions, thresholds=search.thresholds, sources=request.sources
@@ -723,12 +880,14 @@ def _ask_within_cap(judge: Judge, search: _Search, opening: _Opening):
     except CallCapReachedError:
         search.cap_reached = True
         return _Unanswered.BUDGET
+    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
+        return _failed(error)
 
 
 async def _ask_within_cap_async(judge: Judge, search: _Search, opening: _Opening):
     request = _opening_request(search, opening)
     try:
-        if not request_exceeds_input_budget(request.state, request.questions):
+        if judge.fits(request.state, request.questions):
             try:
                 response = await judge.ask_async(
                     request.state, request.questions, thresholds=search.thresholds, sources=request.sources
@@ -740,14 +899,17 @@ async def _ask_within_cap_async(judge: Judge, search: _Search, opening: _Opening
     except CallCapReachedError:
         search.cap_reached = True
         return _Unanswered.BUDGET
-
-
-def _split_opening_state(request: _OpeningRequest) -> Mapping:
-    return {name: value for name, value in request.state.items() if name != "candidates"}
+    except Exception as error:  # noqa: BLE001 - search_failure owns which errors end a search failed
+        return _failed(error)
 
 
 def _neighbour_batch(search: _Search, request: _OpeningRequest) -> tuple[Check, list[Mapping]]:
-    """Bind previews to Judge's code field, which its default store excludes from source metadata.
+    return _neighbour_check(search), _neighbour_items(search, request)
+
+
+def _neighbour_check(search: _Search) -> Check:
+    """The could-contain question with previews bound to Judge's code field, which its default store
+    excludes from source metadata.
 
     Rebinding the field generates a new wording hash; executed question records stay unchanged.
     """
@@ -755,7 +917,9 @@ def _neighbour_batch(search: _Search, request: _OpeningRequest) -> tuple[Check, 
     def rebind(text: str) -> str:
         return text.replace(f"{ITEM_PLACEHOLDER}.preview", f"{ITEM_PLACEHOLDER}.{CODE_FIELD}")
 
-    def criterion(value: Criterion) -> Criterion:
+    def criterion(value: Criterion | None) -> Criterion | None:
+        if value is None:
+            return None
         return replace(
             value,
             what=rebind(value.what),
@@ -764,18 +928,22 @@ def _neighbour_batch(search: _Search, request: _OpeningRequest) -> tuple[Check, 
         )
 
     check = search.questions.could_contain
-    batched = replace(
+    return replace(
         check, instructions=rebind(check.instructions), yes=criterion(check.yes), no=criterion(check.no)
     )
-    items = [
+
+
+def _neighbour_items(search: _Search, request: _OpeningRequest) -> list[Mapping]:
+    """Each neighbour as a split opening asks about it: its source, signature and preview."""
+    question_id = search.questions.could_contain.question_id
+    return [
         {
-            **request.sources[f"{check.question_id}#{slot}"],
+            **request.sources[f"{question_id}#{slot}"],
             "signature": candidate["signature"],
             CODE_FIELD: candidate["preview"],
         }
         for slot, candidate in enumerate(request.state["candidates"])
     ]
-    return batched, items
 
 
 def _opening_priority(judge: Judge, search: _Search, request: _OpeningRequest) -> tuple[Mapping, str | None]:
@@ -783,7 +951,7 @@ def _opening_priority(judge: Judge, search: _Search, request: _OpeningRequest) -
     if pick is None or pick.question_id not in request.questions:
         return {}, request.priority_unavailable
     questions = {pick.question_id: request.questions[pick.question_id]}
-    if request_exceeds_input_budget(request.state, questions):
+    if not judge.fits(request.state, questions):
         return (
             {},
             "The global priority hint exceeds the request-size packing estimate; "
@@ -800,7 +968,7 @@ def _opening_priority(judge: Judge, search: _Search, request: _OpeningRequest) -
 def _ask_split_opening(judge: Judge, search: _Search, request: _OpeningRequest) -> JevResponse:
     """Keep all independent evidence when one opened place cannot fit a single request."""
     scoped = judge.scope()
-    shared = _split_opening_state(request)
+    shared = request.shared
     found_id = search.questions.found.question_id
     found = scoped.ask(
         shared,
@@ -828,7 +996,7 @@ def _ask_split_opening(judge: Judge, search: _Search, request: _OpeningRequest) 
 
 async def _ask_split_opening_async(judge: Judge, search: _Search, request: _OpeningRequest) -> JevResponse:
     scoped = judge.scope()
-    shared = _split_opening_state(request)
+    shared = request.shared
     found_id = search.questions.found.question_id
     found = await scoped.ask_async(
         shared,
@@ -863,15 +1031,21 @@ def _combine_opening_answers(
     unavailable: str | None,
 ) -> JevResponse:
     """Compose search answers; raw sub-request identities remain in the store and journal."""
+    parts = [found, *([priority] if priority is not None else [])]
     answers = {
         **found.answers,
         **{
-            f"{search.questions.could_contain.question_id}#{slot}": NoulAnswer(answer.probability)
+            _could_contain_id(search, slot): NoulAnswer(answer.probability)
             for slot, answer in enumerate(neighbours)
         },
         **(priority.answers if priority is not None else {}),
     }
-    combined = JevResponse(answers, judge.served_model or found.model, judge.input_tokens)
+    sources = {
+        **{question_id: part.source(question_id) for part in parts for question_id in part.answers},
+        **{_could_contain_id(search, slot): answer.source() for slot, answer in enumerate(neighbours)},
+    }
+    known = {question_id: source for question_id, source in sources.items() if source is not None}
+    combined = JevResponse(answers, judge.served_model or found.model, sources=known)
     return _priority_diagnostic(combined, unavailable)
 
 
@@ -886,6 +1060,15 @@ def _priority_diagnostic(response: JevResponse, unavailable: str | None) -> JevR
 def _set_aside_unasked(search: _Search, opening: _Opening, reason: str) -> None:
     _restore_opening(search, opening)
     _set_aside(search, opening.item, reason)
+
+
+def _set_aside_cancelled(search: _Search) -> None:
+    """A Ctrl-C after a round's places were opened and before its answers were merged, such as
+    while its pool starts or shuts down, leaves those places opened but unrecorded; they wait in
+    ``not_inspected`` as cancelled, and Resume asks them or replays their stored answers."""
+    for opening in search.unmerged:
+        _set_aside_unasked(search, opening, "cancelled")
+    search.unmerged = []
 
 
 def _restore_opening(search: _Search, opening: _Opening) -> None:
@@ -918,7 +1101,11 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
     item, code, candidates = opening.item, opening.code, opening.candidates
     found_probability = response.noul(search.questions.found.question_id).probability
     visit = Visit(
-        item.place.key, code, item.path, found_probability, search.thresholds.noul_verdict(found_probability)
+        item.place.key,
+        code,
+        item.path,
+        found_probability,
+        search.thresholds.noul_verdict(found_probability),
     )
     _file_visit(search, visit, item.tier)
     picked = _picked_slot(search, response)
@@ -928,15 +1115,17 @@ def _merge(search: _Search, opening: _Opening, response) -> None:
         probability = _could_contain(search, response, slot)
         verdict = search.thresholds.noul_verdict(probability)
         path = (*item.path, place.key)
-        search.push(
-            place, probability, item.depth + 1, path, QueueTier.PICK if slot == picked else QueueTier.MOVE
-        )
+        source = response.source(_could_contain_id(search, slot))
+        tier = QueueTier.PICK if slot == picked else QueueTier.MOVE
+        search.push(place, probability, item.depth + 1, path, tier, source)
         offered.append(
             {
                 "place": place.key,
                 "signature": cut_long_line(place.signature, search.budget.max_line_chars),
                 "probability": probability,
                 "verdict": verdict,
+                "relationship": place_relationship(place),
+                **answered_by(source),
             }
         )
     not_opened = [*opening.capped, *search.set_aside[set_aside_before:]]
@@ -967,8 +1156,13 @@ def _open_step(
     not_opened: list[NotInspected],
 ) -> HistoryStep:
     """What was opened, what Jev answered about it and its neighbours, and what code set aside."""
+    found = response.source(search.questions.found.question_id)
     judgments: dict[str, object] = {
-        "contains_target": {"probability": visit.probability, "verdict": visit.verdict},
+        "contains_target": {
+            "probability": visit.probability,
+            "verdict": visit.verdict,
+            **answered_by(found),
+        },
         "could_contain": offered,
     }
     pick = search.questions.open_first
@@ -978,6 +1172,7 @@ def _open_step(
             "choice": _picked_place(answer.choice, opening.candidates),
             "confidence": answer.confidence,
             "used": _picked_slot(search, response) is not None,
+            **answered_by(response.source(pick.question_id)),
         }
     elif (unavailable := response.extra.get("open_first_unavailable")) is not None:
         judgments["open_first"] = {"used": False, "unavailable": unavailable}
@@ -1007,6 +1202,7 @@ def _record_choice(search: _Search, beam: list[_Queued]) -> None:
             "priority": item.probability,
             "depth": item.depth,
             "reason": _choice_reason(item),
+            **scored_by(item.scored_by),
         }
         for item in beam
     ]
@@ -1031,7 +1227,12 @@ def _choice_reason(item: _Queued) -> str:
 
 
 def _frontier_entry(entry: NotInspected) -> dict:
-    return {"place": entry.place_key, "reason": entry.reason, "priority": entry.priority}
+    return {
+        "place": entry.place_key,
+        "reason": entry.reason,
+        "priority": entry.priority,
+        "relationship": place_relationship(entry.place),
+    }
 
 
 def _picked_slot(search: _Search, response) -> int | None:
@@ -1044,7 +1245,11 @@ def _picked_slot(search: _Search, response) -> int | None:
 
 
 def _could_contain(search: _Search, response, slot: int) -> float:
-    return response.noul(f"{search.questions.could_contain.question_id}#{slot}").probability
+    return response.noul(_could_contain_id(search, slot)).probability
+
+
+def _could_contain_id(search: _Search, slot: int) -> str:
+    return f"{search.questions.could_contain.question_id}#{slot}"
 
 
 def _candidate_state(place: Place, budget: SearchBudget) -> dict:
@@ -1054,6 +1259,7 @@ def _candidate_state(place: Place, budget: SearchBudget) -> dict:
     return {
         "signature": cut_long_line(place.signature, budget.max_line_chars),
         "preview": "\n".join(cut_long_line(line, budget.max_line_chars) for line in lines),
+        "relationship": place_relationship(place),
     }
 
 
@@ -1078,6 +1284,9 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
     completed_scans = index.parser_scans_completed
     pending_scans = index.parser_scans_pending
     unavailable = index.unavailable_files
+    code_files = {file for file in index.available_files if language_of(file)}
+    judged_files = code_files & _opened_files(search)
+    read_files = judged_files | (code_files & index.parsed_files)
     search.history.append(
         _stop_step(search, outcome, not_inspected, unparsed, completed_scans, pending_scans, unavailable)
     )
@@ -1099,7 +1308,16 @@ def _result(search: _Search, outcome: Outcome, judge: Judge, index: CodeIndex) -
         completed_scans,
         pending_scans,
         unavailable,
+        len(judged_files),
+        len(read_files),
+        len(code_files),
+        search.failure,
     )
+
+
+def _opened_files(search: _Search) -> set[str]:
+    opened = (*search.starts, *search.found, *search.searched, *search.unsure)
+    return {visit.code.span.file for visit in opened}
 
 
 def _stop_step(
@@ -1112,6 +1330,11 @@ def _stop_step(
     unavailable: Mapping[str, str],
 ) -> HistoryStep:
     judgments: dict[str, object] = {"not_inspected": [_frontier_entry(entry) for entry in not_inspected]}
+    if search.failure is not None:
+        judgments["failure"] = {
+            "type": type(search.failure).__name__,
+            "message": error_message(search.failure),
+        }
     if unparsed:
         judgments["unparsed_files"] = sorted(unparsed)
     judgments["parser_scans"] = {
@@ -1124,6 +1347,7 @@ def _stop_step(
         judgments["last_stop_check"] = {
             "probability": search.stop_judgment.probability,
             "outcome": search.stop_judgment.outcome,
+            **answered_by(search.stop_judgment.answered_by),
         }
     arguments = {"outcome": outcome, "moves": list(search.moves)}
     return HistoryStep("stop", arguments, (), judgments, f"stopped: {outcome}")

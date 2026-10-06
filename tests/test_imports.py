@@ -10,8 +10,10 @@ from jev_navigator import operations
 from jev_navigator.directives.places import neighbours
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.imports import (
+    ImportedName,
     imported_modules,
     imported_names,
+    module_imports,
     reexported_names,
 )
 from jev_navigator.index.spans import Span
@@ -78,9 +80,29 @@ import { ignored } from "./ignored";
     assert reexported_names("from .orders import create_order", "app/__init__.py") == ()
 
 
+def test_destructuring_a_require_imports_each_local_name_under_its_exported_name() -> None:
+    # Arrange
+    source = """\
+const { verify, sign: signToken, decode = fallback, ...rest } = require('./jwt');
+const { app } = require("./app")(options);
+"""
+
+    # Act
+    names = imported_names(source, "src/main.js")
+
+    # Assert
+    assert names == {
+        "verify": ImportedName("./jwt", "verify"),
+        "signToken": ImportedName("./jwt", "sign"),
+        "decode": ImportedName("./jwt", "decode"),
+    }
+
+
 def test_the_export_surface_is_the_ast_grep_statement_nodes(tmp_path: Path) -> None:
-    """The surface names real statements only: a private definition, a default export and a
-    template-literal body contribute nothing."""
+    """The surface names real statements only, and only the module's own definitions: a private
+    definition, a default export, a re-export and a template-literal body contribute nothing. An
+    export list entry under another name and the default export record the definition each
+    exports."""
     # Arrange
     index = indexed(
         tmp_path,
@@ -100,10 +122,39 @@ def test_the_export_surface_is_the_ast_grep_statement_nodes(tmp_path: Path) -> N
     )
 
     # Act
-    names = index._facts_in("src/service.ts").export_names
+    facts = index._facts_in("src/service.ts")
 
     # Assert
-    assert names == ("READY", "placeOrder", "publicLocal", "refund", "run")
+    assert facts.export_names == ("READY", "publicLocal", "run")
+    assert facts.renamed_exports == (("default", "defaultRun"), ("publicLocal", "local"))
+
+
+def test_a_destructured_export_is_part_of_the_export_surface(tmp_path: Path) -> None:
+    """`export const { verify, sign: signToken } = jwt` exports `verify` and `signToken`, so an import
+    through a barrel that re-exports the module finds `verify`. A property key, a default value and a
+    computed key export nothing."""
+    # Arrange
+    index = indexed(
+        tmp_path,
+        {
+            "src/jwt/tools.ts": (
+                "const jwt = make();\n"
+                "export const { verify, sign: signToken, decode = fallback, [key]: other } = jwt;\n"
+            ),
+            "src/jwt/index.ts": 'export * from "./tools";\n',
+            "src/page.ts": (
+                'import { verify } from "./jwt";\nexport function check() {\n  return verify();\n}\n'
+            ),
+        },
+    )
+
+    # Act
+    names = index._facts_in("src/jwt/tools.ts").export_names
+    binding = index.find_callers("verify")[0].binding
+
+    # Assert
+    assert names == ("decode", "other", "signToken", "verify")
+    assert (binding.status, binding.target) == ("resolved", Span("src/jwt/tools.ts", 2, 2, "verify"))
 
 
 def test_a_template_literal_body_is_not_part_of_the_export_surface(tmp_path: Path) -> None:
@@ -150,6 +201,29 @@ def test_a_public_export_beside_a_template_literal_stays_proven(tmp_path: Path) 
     # Assert
     assert call.binding.status == "resolved"
     assert call.binding.target == Span("src/services/one.ts", 2, 2, "run")
+
+
+def test_a_function_inside_an_exported_arrow_does_not_name_the_export(tmp_path: Path) -> None:
+    """The regression: the export's own name is the surface, not the first function in its body,
+    so a call to `Page` through the barrel is proven to reach it."""
+    # Arrange
+    index = indexed(
+        tmp_path,
+        {
+            "src/views/page.ts": (
+                "export const Page = () => {\n  function helper() { return 1; }\n  return helper();\n};\n"
+            ),
+            "src/views/index.ts": 'export * from "./page";\n',
+            "src/app.ts": 'import { Page } from "./views";\nPage();\n',
+        },
+    )
+
+    # Act
+    call = index.find_callers("Page")[0]
+
+    # Assert
+    assert call.binding.status == "resolved"
+    assert call.binding.target == Span("src/views/page.ts", 1, 4, "Page")
 
 
 def test_a_call_imported_through_a_barrel_has_a_proven_target(tmp_path: Path) -> None:
@@ -274,7 +348,28 @@ def test_a_parenthesised_python_import_over_several_lines_lists_every_name() -> 
     names = imported_names(source, "app/routes.py")
 
     # Assert
-    assert names == {"send_invoice": "app.jobs", "give_back": "app.jobs"}
+    assert names == {
+        "send_invoice": ImportedName("app.jobs", "send_invoice"),
+        "give_back": ImportedName("app.jobs", "refund"),
+    }
+
+
+def test_a_python_import_of_several_modules_imports_each_in_source_order() -> None:
+    # Arrange
+    source = "import json, app.billing as billing, app.mail\nfrom app.jobs import run\n"
+
+    # Act
+    modules = imported_modules(source, "app/routes.py")
+    taken = module_imports(source, "app/routes.py")
+
+    # Assert
+    assert modules == ["json", "app.billing", "app.mail", "app.jobs"]
+    assert taken == (
+        ("json", None),
+        ("app.billing", None),
+        ("app.mail", None),
+        ("app.jobs", frozenset({"run"})),
+    )
 
 
 def test_an_index_at_an_old_commit_still_reads_configs_outside_its_scope(tmp_path: Path) -> None:
@@ -310,7 +405,7 @@ def test_a_multi_line_import_with_comments_inside_keeps_its_module_and_names() -
 
     # Assert
     assert modules == ["./x"]
-    assert names == {"a": "./x", "b": "./x"}
+    assert names == {"a": ImportedName("./x", "a"), "b": ImportedName("./x", "b")}
 
 
 def test_an_import_after_a_statement_without_semicolon_keeps_its_names() -> None:
@@ -321,7 +416,29 @@ def test_an_import_after_a_statement_without_semicolon_keeps_its_names() -> None
     names = imported_names(source, "src/p.ts")
 
     # Assert
-    assert names == {"a": "./a"}
+    assert names == {"a": ImportedName("./a", "a")}
+
+
+def test_a_script_import_keeps_the_name_its_module_exports() -> None:
+    """`import { stop as halt }` takes `stop`, also as a type; a default import takes no exported
+    name, so there is none to follow."""
+    # Arrange
+    source = (
+        "import main, { stop as halt, type Kind as K, default as entry } from './x';\n"
+        "import { start } from './y';\n"
+    )
+
+    # Act
+    names = imported_names(source, "src/p.ts")
+
+    # Assert
+    assert names == {
+        "main": ImportedName("./x", None),
+        "halt": ImportedName("./x", "stop"),
+        "K": ImportedName("./x", "Kind"),
+        "entry": ImportedName("./x", None),
+        "start": ImportedName("./y", "start"),
+    }
 
 
 def test_the_alias_with_the_longest_prefix_wins_like_typescript(tmp_path: Path) -> None:
@@ -645,7 +762,7 @@ def test_package_uncertainty_propagates_through_a_relative_barrel(tmp_path: Path
     index = indexed(
         tmp_path,
         {
-            "package.json": '{"name": "@ws/ui", "exports": {"./button": "./src/button.ts"}}',
+            "package.json": '{"name": "@ws/ui", "exports": {"./button": "./dist/button.js"}}',
             "src/button.ts": "export function button() { return 1; }\n",
             "src/services/index.ts": 'export { button } from "@ws/ui/button";\n',
             "src/page.ts": (
@@ -681,3 +798,103 @@ def test_package_redirects_continue_past_four_links_and_stop_cycles(tmp_path: Pa
     edge = index.callee_edges(index.find_definition("run")[0])[0]
     assert edge.binding.status == "candidate"
     assert edge.binding.target is None
+
+
+SHARED_PACKAGE = '{"name": "@acme/shared", "exports": {"./*": "./src/*.ts"}}'
+
+
+@pytest.mark.parametrize(
+    ("files", "specifier", "status"),
+    [
+        ({"apps/web/package.json": '{"imports": {"#lib/*": "./src/lib/*.ts"}}'}, "#lib/money", "resolved"),
+        (
+            {
+                "apps/web/package.json": '{"dependencies": {"@acme/shared": "workspace:*"}}',
+                "packages/shared/package.json": SHARED_PACKAGE,
+            },
+            "@acme/shared/money",
+            "resolved",
+        ),
+        (
+            {
+                "apps/web/package.json": '{"dependencies": {"@acme/shared": "workspace:^1.2.0"}}',
+                "packages/shared/package.json": SHARED_PACKAGE,
+            },
+            "@acme/shared/money",
+            "resolved",
+        ),
+        (
+            {"apps/web/package.json": '{"name": "web", "exports": {"./lib/*": "./src/lib/*.ts"}}'},
+            "web/lib/money",
+            "resolved",
+        ),
+        (
+            {
+                "apps/web/package.json": '{"dependencies": {"@acme/shared": "^1.0.0"}}',
+                "packages/shared/package.json": SHARED_PACKAGE,
+            },
+            "@acme/shared/money",
+            "candidate",
+        ),
+        (
+            {
+                "apps/web/package.json": '{"dependencies": {"@acme/shared": "workspace:@acme/other@*"}}',
+                "packages/shared/package.json": SHARED_PACKAGE,
+            },
+            "@acme/shared/money",
+            "candidate",
+        ),
+        ({"apps/web/package.json": '{"name": "web", "exports": null}'}, "web/src/lib/money", "candidate"),
+        (
+            {
+                "apps/web/package.json": (
+                    '{"imports": {"#lib/*": {"import": "./src/lib/*.ts", "require": "./src/cjs/*.ts"}}}'
+                ),
+                "apps/web/src/cjs/money.ts": "export function cents() { return 3; }\n",
+            },
+            "#lib/money",
+            "candidate",
+        ),
+        (
+            {
+                "apps/web/package.json": '{"imports": {"#lib/*": "./src/lib/*.ts"}}',
+                "apps/web/src/package.json": "{",
+            },
+            "#lib/money",
+            "candidate",
+        ),
+    ],
+    ids=[
+        "hash-import",
+        "workspace-dependency",
+        "workspace-range",
+        "self-reference",
+        "version-range-may-be-installed",
+        "workspace-alias-links-another-package",
+        "null-exports-disable-self-reference",
+        "targets-differ-by-condition",
+        "nearer-unreadable-package-json",
+    ],
+)
+def test_a_declared_package_mapping_proves_a_call_only_when_the_package_and_file_are_certain(
+    tmp_path: Path, files: dict[str, str], specifier: str, status: str
+) -> None:
+    # Arrange
+    index = indexed(
+        tmp_path,
+        {
+            **files,
+            "apps/web/src/lib/money.ts": "export function cents() { return 1; }\n",
+            "packages/shared/src/money.ts": "export function cents() { return 2; }\n",
+            "apps/web/src/page.ts": (
+                f'import {{ cents }} from "{specifier}";\nexport function total() {{ return cents(); }}\n'
+            ),
+        },
+    )
+
+    # Act
+    edge = index.callee_edges(index.find_definition("total")[0])[0]
+
+    # Assert
+    assert edge.binding.status == status
+    assert (edge.binding.target is not None) == (status == "resolved")

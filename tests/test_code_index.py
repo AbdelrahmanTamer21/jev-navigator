@@ -4,9 +4,15 @@ import hashlib
 from pathlib import Path
 
 import pytest
-from git_repos import commit_all, git
+from git_repos import commit_all, git, refuse_ownership, write_files
 
-from jev_navigator.index.code_index import CodeIndex, ScopeTooWideError, UnsafePathError
+from jev_navigator.index import tools
+from jev_navigator.index.code_index import (
+    CodeIndex,
+    ScopeTooWideError,
+    UnsafePathError,
+    _working_git_metadata,
+)
 from jev_navigator.index.spans import Span, TextHit
 
 
@@ -364,6 +370,157 @@ def test_references_in_lists_the_names_a_function_passes_on_without_calling(
     assert "scheduler" not in {ref.name for ref in references}
 
 
+PASSED_MEMBER_PY = """\
+def handler(event):
+    return event
+
+
+class Client:
+    def send(self, bus):
+        bus.on(self.handler)
+        bus.on(handler)
+        bus.on(handler, self.handler)
+"""
+
+PASSED_MEMBER_TS = """\
+function handler(event) {
+  return event;
+}
+
+class Client {
+  send(bus) {
+    bus.on(this.handler);
+    bus.on(handler);
+    bus.on(handler, this.handler);
+  }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("file", "source", "function"),
+    [
+        ("client.py", PASSED_MEMBER_PY, Span("client.py", 1, 2, "handler")),
+        ("client.ts", PASSED_MEMBER_TS, Span("client.ts", 1, 3, "handler")),
+    ],
+    ids=["python", "typescript"],
+)
+def test_a_passed_member_is_a_candidate_while_a_passed_function_is_resolved(
+    tmp_path: Path, file: str, source: str, function: Span
+) -> None:
+    """`bus.on(self.handler)` passes an attribute of `self`, not the function `handler` defined in the
+    same file: it is bound like a method call on an unknown receiver. A line passing both stands as the
+    plain name, as a plain call does for callers. Persisted facts keep the receiver too."""
+    # Arrange
+    (tmp_path / file).write_text(source)
+    cache = tmp_path / "cache"
+
+    for _ in range(2):  # Fresh parser facts, then the persisted ones.
+        # Act
+        index = CodeIndex(tmp_path, [file], fact_cache_dir=cache)
+        references = index.find_references("handler")
+
+        # Assert
+        assert [(ref.line, ref.binding.status, ref.binding.target) for ref in references] == [
+            (7, "candidate", None),
+            (8, "resolved", function),
+            (9, "resolved", function),
+        ]
+
+
+PASSED_MEMBER_CONSTANT_PY = """\
+TIMEOUT = 5
+
+
+class Client:
+    def send(self, bus):
+        bus.wait(self.TIMEOUT)
+        bus.wait(TIMEOUT)
+"""
+
+PASSED_MEMBER_CONSTANT_TS = """\
+const TIMEOUT = 5;
+
+class Client {
+  send(bus) {
+    bus.wait(this.TIMEOUT);
+    bus.wait(TIMEOUT);
+  }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("file", "source", "constant", "member_line"),
+    [
+        ("client.py", PASSED_MEMBER_CONSTANT_PY, Span("client.py", 1, 1, "TIMEOUT"), 6),
+        ("client.ts", PASSED_MEMBER_CONSTANT_TS, Span("client.ts", 1, 1, "TIMEOUT"), 5),
+    ],
+    ids=["python", "typescript"],
+)
+def test_a_passed_member_is_a_candidate_while_a_passed_constant_is_resolved(
+    tmp_path: Path, file: str, source: str, constant: Span, member_line: int
+) -> None:
+    """`bus.wait(self.TIMEOUT)` passes an attribute of `self`, not the module constant `TIMEOUT`: an
+    argument can name a constant, but a member argument is bound like a method call on an unknown
+    receiver. The bare `TIMEOUT` on the next line is proven by the same-file definition."""
+    # Arrange
+    (tmp_path / file).write_text(source)
+
+    # Act
+    references = CodeIndex(tmp_path, [file]).find_references("TIMEOUT")
+
+    # Assert
+    assert [(ref.line, ref.binding.status, ref.binding.target) for ref in references] == [
+        (member_line, "candidate", None),
+        (member_line + 1, "resolved", constant),
+    ]
+
+
+SCRIPT_BASE_AND_SUBCLASS = (
+    "export class Base {}\n",
+    'import { Base } from "./base";\n\n\nexport class Sub extends Base {}\n',
+)
+SCRIPT_BASE_AND_QUALIFIED_SUBCLASS = (
+    "export class Base {}\n",
+    'import * as base from "./base";\n\n\nexport class Sub extends base.Base {}\n',
+)
+
+
+@pytest.mark.parametrize(
+    ("suffix", "base", "subclass"),
+    [
+        (".py", "class Base:\n    pass\n", "from base import Base\n\n\nclass Sub(Base):\n    pass\n"),
+        (".ts", *SCRIPT_BASE_AND_SUBCLASS),
+        (".js", *SCRIPT_BASE_AND_SUBCLASS),
+        (".py", "class Base:\n    pass\n", "import base\n\n\nclass Sub(base.Base):\n    pass\n"),
+        (".ts", *SCRIPT_BASE_AND_QUALIFIED_SUBCLASS),
+        (".js", *SCRIPT_BASE_AND_QUALIFIED_SUBCLASS),
+    ],
+    ids=[
+        "python",
+        "typescript",
+        "javascript",
+        "qualified-python",
+        "qualified-typescript",
+        "qualified-javascript",
+    ],
+)
+def test_a_class_s_base_is_recorded_once_as_its_base(
+    tmp_path: Path, suffix: str, base: str, subclass: str
+) -> None:
+    # Arrange
+    (tmp_path / f"base{suffix}").write_text(base)
+    (tmp_path / f"sub{suffix}").write_text(subclass)
+    index = CodeIndex(tmp_path, [f"base{suffix}", f"sub{suffix}"])
+
+    # Act
+    references = index.find_references("Base")
+
+    # Assert
+    assert [(ref.file, ref.line, ref.role) for ref in references] == [(f"sub{suffix}", 4, "base")]
+
+
 USES_PY = """\
 from app.rules import ALLOWED, PATTERN, Store
 
@@ -452,6 +609,272 @@ def test_a_function_passes_on_the_names_on_its_first_line(tmp_path: Path) -> Non
     assert [(ref.name, ref.line, ref.role) for ref in references] == [("Answer", 3, "type")]
 
 
+@pytest.mark.parametrize(
+    ("files", "holder", "declaration"),
+    [
+        pytest.param(
+            {
+                "hmr.ts": "interface PropagationBoundary {\n  boundary: string\n}\n\n"
+                "export function propagateUpdate(boundaries: PropagationBoundary[]): boolean {\n"
+                "  return boundaries.length > 0\n}\n"
+            },
+            "propagateUpdate",
+            Span("hmr.ts", 1, 3, "PropagationBoundary"),
+            id="interface",
+        ),
+        pytest.param(
+            {
+                "modes.ts": 'export const Mode = { Full: "full" } as const;\n'
+                "export type Mode = (typeof Mode)[keyof typeof Mode];\n\n"
+                "export function reload(mode: Mode) {\n  return mode;\n}\n"
+            },
+            "reload",
+            Span("modes.ts", 2, 2, "Mode"),
+            id="type-alias-named-like-a-constant",
+        ),
+        pytest.param(
+            {
+                "items.py": 'from typing import TypeVar\n\nItem = TypeVar("Item")\n\n\n'
+                "def first(items: list[Item]):\n    return items[0]\n"
+            },
+            "first",
+            Span("items.py", 3, 3, "Item"),
+            id="python-type-alias",
+        ),
+    ],
+)
+def test_a_type_reference_binds_to_the_declaration_it_names(
+    tmp_path: Path, files: dict[str, str], holder: str, declaration: Span
+) -> None:
+    # Arrange
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files))
+
+    # Act
+    references = index.references_in(index.find_definition(holder)[0])
+
+    # Assert
+    assert [(ref.name, ref.role, ref.binding.status, ref.binding.target) for ref in references] == [
+        (declaration.name, "type", "resolved", declaration)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("files", "name", "expected"),
+    [
+        pytest.param(
+            {
+                "redaction.py": 'import re\n\nSECRET_PATTERN = re.compile(r"key=\\w+")\n\n\n'
+                'def redact(text):\n    return SECRET_PATTERN.sub("key=[hidden]", text)\n'
+            },
+            "SECRET_PATTERN",
+            [(7, "receiver", Span("redaction.py", 3, 3, "SECRET_PATTERN"))],
+            id="receiver",
+        ),
+        pytest.param(
+            {
+                "limits.ts": "export const MAX_ITEMS = 50;\n\n"
+                "export function clamp(items: string[]) {\n"
+                "  if (items.length > MAX_ITEMS) {\n    return items.slice(0, MAX_ITEMS);\n  }\n"
+                "  return items;\n}\n"
+            },
+            "MAX_ITEMS",
+            [
+                (4, "condition", Span("limits.ts", 1, 1, "MAX_ITEMS")),
+                (5, "argument", Span("limits.ts", 1, 1, "MAX_ITEMS")),
+            ],
+            id="condition-and-argument",
+        ),
+        pytest.param(
+            {
+                "modes.ts": 'export const Mode = { Full: "full" } as const;\n'
+                "export type Mode = (typeof Mode)[keyof typeof Mode];\n\n"
+                "export function isFull(mode: Mode) {\n  return mode === Mode.Full;\n}\n"
+            },
+            "Mode",
+            [(4, "type", Span("modes.ts", 2, 2, "Mode")), (5, "receiver", Span("modes.ts", 1, 1, "Mode"))],
+            id="value-and-type-named-alike",
+        ),
+        pytest.param(
+            {
+                "cache.py": "import functools\n\ncached = functools.lru_cache(maxsize=None)\n\n\n"
+                "@cached\ndef load(path):\n    return path\n"
+            },
+            "cached",
+            [(6, "decorator", Span("cache.py", 3, 3, "cached"))],
+            id="decorator",
+        ),
+        pytest.param(
+            {"options.ts": "interface Options {\n  strict: boolean\n}\n\nexport { Options };\n"},
+            "Options",
+            [(5, "export", Span("options.ts", 1, 3, "Options"))],
+            id="export-of-an-interface",
+        ),
+    ],
+)
+def test_a_non_call_reference_binds_to_the_declaration_it_names(
+    tmp_path: Path, files: dict[str, str], name: str, expected: list[tuple[int, str, Span]]
+) -> None:
+    # Arrange
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files))
+
+    # Act
+    references = index.find_references(name)
+
+    # Assert
+    assert [(ref.line, ref.role, ref.binding.status, ref.binding.target) for ref in references] == [
+        (line, role, "resolved", declaration) for line, role, declaration in expected
+    ]
+
+
+def test_a_property_assignment_names_no_module_name_but_a_commonjs_export_stays_importable(
+    tmp_path: Path,
+) -> None:
+    """`foo.bar = function () {}` and `exports.other = () => 3` give their module no name `bar` or
+    `other`, so a bare call in that file is no proof. `exports.other`, `module.exports.stop` and the
+    members of `module.exports = {...}` are the module's exports, so importing them stays proven,
+    while importing `bar` does not. `x.other()` through `const x = require('./x')` is proven too;
+    `require('./x').stop()` names no module alias and stays a candidate."""
+    # Arrange
+    files = {
+        "x.js": (
+            "exports.other = () => 3;\n"
+            "module.exports.stop = function () { return 4; };\n"
+            "foo.bar = function namedLater() { return 5; };\n"
+            "function local() {\n  other();\n  stop();\n  bar();\n}\n"
+        ),
+        "y.js": "module.exports = {\n  run() { return 1; },\n  walk: () => 2,\n};\n",
+        "esm.mjs": (
+            "import { other, stop, bar } from './x.js';\nimport { run, walk } from './y.js';\n"
+            "export function viaImport() {\n  other();\n  stop();\n  bar();\n  run();\n  walk();\n}\n"
+        ),
+        "cjs.js": (
+            "const x = require('./x');\nfunction viaRequire() {\n  x.other();\n  require('./x').stop();\n}\n"
+        ),
+    }
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files), fact_cache_dir=tmp_path.parent / "facts")
+
+    # Act
+    bindings = {
+        (caller, edge.name): (edge.binding.status.value, edge.binding.target and edge.binding.target.key)
+        for caller in ("local", "viaImport")
+        for edge in index.callee_edges(index.find_definition(caller)[0])
+    }
+    required = {
+        site.line: site.binding.status.value
+        for site in index.find_callers("other") + index.find_callers("stop")
+        if site.file == "cjs.js"
+    }
+
+    # Assert
+    assert bindings == {
+        ("local", "other"): ("candidate", None),
+        ("local", "stop"): ("candidate", None),
+        ("local", "bar"): ("candidate", None),
+        ("viaImport", "other"): ("resolved", "x.js:1-1"),
+        ("viaImport", "stop"): ("resolved", "x.js:2-2"),
+        ("viaImport", "bar"): ("candidate", None),
+        ("viaImport", "run"): ("resolved", "y.js:2-2"),
+        ("viaImport", "walk"): ("resolved", "y.js:3-3"),
+    }
+    assert required == {3: "resolved", 4: "candidate"}
+
+
+def test_destructuring_a_require_imports_its_names_without_declaring_them(tmp_path: Path) -> None:
+    """`const { other, stop: halt } = require('./x')` imports `other` and `halt` from x.js the way
+    `import { other, stop as halt }` does: a call to `other` binds to x.js's export, a call to `halt`
+    to x.js's `stop`, never to the require line as if that line defined them, and the line declares
+    neither name."""
+    # Arrange
+    files = {
+        "x.js": "exports.other = () => 3;\nexports.stop = () => 4;\n",
+        "cjs.js": (
+            "const { other, stop: halt } = require('./x');\n\n"
+            "function viaRequire() {\n  return other() + halt();\n}\n"
+        ),
+    }
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files), fact_cache_dir=tmp_path.parent / "facts")
+
+    # Act
+    bindings = {
+        edge.name: (edge.binding.status.value, edge.binding.target and edge.binding.target.key)
+        for edge in index.callee_edges(index.find_definition("viaRequire")[0])
+    }
+
+    # Assert
+    assert bindings == {"other": ("resolved", "x.js:1-1"), "halt": ("resolved", "x.js:2-2")}
+    assert index.declarations_in("cjs.js") == ()
+
+
+@pytest.mark.parametrize(
+    ("files", "name", "site", "declaration"),
+    [
+        pytest.param(
+            {
+                "dispatch.py": 'from handlers import make_handler\n\nhandle = make_handler("orders")\n\n\n'
+                "def dispatch(event):\n    return handle(event)\n"
+            },
+            "handle",
+            ("dispatch.py", 7),
+            Span("dispatch.py", 3, 3, "handle"),
+            id="same-file",
+        ),
+        pytest.param(
+            {
+                "client.ts": "export const request = createClient({ retries: 3 });\n",
+                "orders.ts": 'import { request } from "./client";\n\n'
+                'export function loadOrders() {\n  return request("/orders");\n}\n',
+            },
+            "request",
+            ("orders.ts", 4),
+            Span("client.ts", 1, 1, "request"),
+            id="imported",
+        ),
+        pytest.param(
+            {
+                "css.ts": "function createCssContext() {\n"
+                '  const Style = () => "style";\n  return { Style };\n}\n\n'
+                "export const Style = createCssContext().Style;\n",
+                "page.ts": 'import { Style } from "./css";\n\n'
+                "export function page() {\n  return Style();\n}\n",
+            },
+            "Style",
+            ("page.ts", 4),
+            Span("css.ts", 6, 6, "Style"),
+            id="imported-past-a-nested-function",
+        ),
+        pytest.param(
+            {
+                "compose.ts": "export const compose = <T>(value: T): T => {\n  return value;\n};\n",
+                "app.ts": 'import { compose } from "./compose";\n\n'
+                "export function run() {\n  return compose(1);\n}\n",
+            },
+            "compose",
+            ("app.ts", 4),
+            Span("compose.ts", 1, 3, "compose"),
+            id="imported-generic-arrow",
+        ),
+    ],
+)
+def test_a_call_binds_to_the_module_constant_it_names(
+    tmp_path: Path, files: dict[str, str], name: str, site: tuple[str, int], declaration: Span
+) -> None:
+    # Arrange
+    write_files(tmp_path, files)
+    index = CodeIndex(tmp_path, list(files))
+
+    # Act
+    callers = index.find_callers(name)
+
+    # Assert
+    assert [(call.file, call.line, call.binding.status, call.binding.target) for call in callers] == [
+        (*site, "resolved", declaration)
+    ]
+
+
 def test_a_one_line_function_calls_what_its_first_line_calls(sample_index: CodeIndex) -> None:
     # Arrange
     parse_order = sample_index.find_definition("parseOrder")[0]
@@ -516,6 +939,24 @@ def test_an_index_at_a_commit_reads_a_file_whose_name_holds_a_newline(tmp_path: 
     assert historical.files == ("app/line\nbreak.py", "app/plain.py")
     assert (historical.root / "app/line\nbreak.py").read_text().endswith("return 1\n")
     assert (historical.root / "app/plain.py").read_text().endswith("return 2\n")
+
+
+def test_search_text_returns_every_hit_in_file_and_line_order_unless_the_caller_bounds_it(
+    tmp_path: Path,
+) -> None:
+    # Arrange: 27 hits, the last two past the 20 the search once kept by default
+    (tmp_path / "a.py").write_text("".join(f"x{n} = TOKEN\n" for n in range(25)))
+    (tmp_path / "b.py").write_text("y = TOKEN\nz = 1\nw = TOKEN\n")
+    index = CodeIndex(tmp_path, ["a.py", "b.py"])
+
+    # Act
+    every = index.search_text("TOKEN")
+    bounded = index.search_text("TOKEN", max_hits=3)
+
+    # Assert
+    expected = [("a.py", n) for n in range(1, 26)] + [("b.py", 1), ("b.py", 3)]
+    assert [(hit.file, hit.line) for hit in every] == expected
+    assert [(hit.file, hit.line) for hit in bounded] == expected[:3]
 
 
 def test_search_text_reads_a_line_that_is_not_utf8_as_the_index_does(tmp_path: Path) -> None:
@@ -613,3 +1054,144 @@ def test_a_scope_path_that_leaves_the_root_is_refused(tmp_path: Path, scope_path
     # Act and assert
     with pytest.raises(UnsafePathError, match=scope_path.replace(".", r"\.")):
         CodeIndex(root, [scope_path])
+
+
+def test_a_module_names_its_functions_and_classes_but_not_their_methods(sample_index: CodeIndex) -> None:
+    names = sample_index.module_names("app/orders.py")
+
+    assert names == ("OrderService", "cancel")
+    assert "place" in [span.name for span in sample_index.symbols_in("app/orders.py")]
+
+
+def test_module_names_list_what_the_module_names_or_exports_before_its_objects_members(
+    tmp_path: Path,
+) -> None:
+    """A one-line function keeps its place beside the named arrow its default value holds, and a
+    CommonJS export is the module's own. A method of an object literal is the object's, so it follows
+    under the object's name; a method of an object a module-level call is passed belongs to no
+    variable, so it follows under its own, never under the object variable named before it."""
+    # Arrange
+    (tmp_path / "retry.js").write_text(
+        "function retry(again = () => 1) { return attempt(); }\n"
+        "function attempt() {\n  return 1;\n}\n"
+        "const api = {\n  list() { return []; },\n};\n"
+        "const t = create({\n  format() { return 1; },\n});\n"
+        "exports.run = function () {\n  return 0;\n};\n"
+    )
+    index = CodeIndex(tmp_path, ("retry.js",), fact_cache_dir=tmp_path / "cache")
+
+    # Act
+    names = index.module_names("retry.js")
+
+    # Assert
+    assert names == ("retry", "attempt", "run", "api.list", "format")
+
+
+def test_a_function_a_module_level_constant_builds_goes_by_the_constant_and_its_keys(tmp_path: Path) -> None:
+    """A function no other one holds, inside the call that is a module-level constant's value, goes by
+    the constant's name and then the key of every pair around it: `run` for an Effect.fn, also when
+    the generator names only itself, `userRouter.list` for a router's procedure, and
+    `auth.hooks.before` beside `auth.session.before` for a nested config. Several functions with the
+    same name are told apart by their first line; each declarator of one statement names its own.
+    A callback inside one of them, or in a later statement (`app.get(...)` after `const app =
+    express()`), is none of the constant's. Spans are lines, so each function has lines of its own."""
+    # Arrange
+    (tmp_path / "built.ts").write_text(
+        'export const run = Effect.fn("run")(function* (ids: string[]) {\n'
+        "  return yield* Effect.forEach(\n    ids,\n    (id) => load(id),\n  );\n});\n"
+        'export const named = Effect.fn("named")(function* named() {\n  return 1;\n});\n'
+        "export const userRouter = createWebRouter({\n"
+        "  list: procedure.query(({ ctx }) => ctx.users),\n"
+        "  remove: procedure.mutation(async ({ input }) => input),\n"
+        "});\n"
+        "export const auth = betterAuth({\n"
+        "  hooks: { before: middleware((ctx) => ctx) },\n"
+        "  session: { before: middleware((ctx) => ctx) },\n"
+        "});\n"
+        "export const pair = combine(\n  () => 1,\n  () => 2,\n);\n"
+        "const first = wrap(() => 1),\n  second = wrap(() => 2);\n"
+        "export const app = express();\n"
+        'app.get("/", (request) => request);\n'
+    )
+    index = CodeIndex(tmp_path, ("built.ts",), fact_cache_dir=tmp_path / "cache")
+
+    # Act
+    names = sorted((span.start, name) for span, name in index.constant_function_names("built.ts").items())
+
+    # Assert
+    assert names == [
+        (1, "run"),
+        (7, "named"),
+        (11, "userRouter.list"),
+        (12, "userRouter.remove"),
+        (15, "auth.hooks.before"),
+        (16, "auth.session.before"),
+        (19, "pair.<anonymous:19>"),
+        (20, "pair.<anonymous:20>"),
+        (22, "first"),
+        (23, "second"),
+    ]
+
+
+def test_functions_a_constant_builds_on_one_line_go_by_the_first_and_list_every_constant(
+    tmp_path: Path,
+) -> None:
+    """Spans are lines, so functions on one line are one span with one name, the first function's:
+    `api.list`, never `api.remove`. Each constant on such a line is still a name of the module."""
+    # Arrange
+    (tmp_path / "api.ts").write_text(
+        "export const api = router({ list: procedure.query(() => 1), remove: procedure.query(() => 2) });\n"
+        "export const first = wrap(() => 1), second = wrap(() => 2);\n"
+    )
+    index = CodeIndex(tmp_path, ("api.ts",), fact_cache_dir=tmp_path / "cache")
+
+    # Act
+    names = sorted((span.start, name) for span, name in index.constant_function_names("api.ts").items())
+
+    # Assert
+    assert names == [(1, "api.list"), (2, "first")]
+    assert index.module_names("api.ts") == ("api", "first", "second")
+
+
+def test_a_rendered_component_is_a_call_and_a_platform_element_is_not(tmp_path: Path) -> None:
+    (tmp_path / "notices.tsx").write_text("export function LoadFailed() {\n  return <p>Not loaded</p>;\n}\n")
+    (tmp_path / "basket.tsx").write_text(
+        'import { LoadFailed } from "./notices";\n'
+        "export function Basket() {\n"
+        "  return <div><LoadFailed /></div>;\n"
+        "}\n"
+        "export function Page() {\n"
+        "  return <ui.Frame><LoadFailed>x</LoadFailed></ui.Frame>;\n"
+        "}\n"
+    )
+    index = CodeIndex(tmp_path, ("notices.tsx", "basket.tsx"), fact_cache_dir=tmp_path / "cache")
+
+    calls = [(site.file, site.line, site.caller.name) for site in index.find_callers("LoadFailed")]
+
+    assert calls == [("basket.tsx", 3, "Basket"), ("basket.tsx", 6, "Page")]
+    assert [site.line for site in index.find_callers("Frame")] == [6]
+    assert index.find_callers("div") == ()
+
+
+def test_working_tree_metadata_raises_when_git_refuses_the_repository(tmp_path: Path, monkeypatch) -> None:
+    # Arrange
+    write_files(tmp_path, {"a.py": "x = 1\n"})
+    commit_all(tmp_path)
+    refuse_ownership(monkeypatch)
+
+    # Act and assert: a refused repository is never read as a plain folder with no revision
+    with pytest.raises(tools.ToolFailedError, match="dubious ownership"):
+        _working_git_metadata(tmp_path, ())
+
+
+def test_a_repository_without_commits_indexes_its_files_with_no_revision(tmp_path: Path) -> None:
+    # Arrange
+    git(tmp_path, "init", "-q")
+    write_files(tmp_path, {"a.py": "def first():\n    return 1\n"})
+
+    # Act
+    index = CodeIndex.from_directory(tmp_path, fact_cache_dir=tmp_path / ".cache")
+
+    # Assert
+    assert index.commit == ""
+    assert "a.py" in index.files

@@ -1,27 +1,108 @@
 from __future__ import annotations
 
+import errno
 import inspect
 import io
 import json
 import os
+import shutil
 import subprocess
-import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 
 import pytest
-from git_repos import commit_files
+from git_repos import commit_files, git
+from isolated_jvn import JVN
 
+from jev_navigator import cli, environment
 from jev_navigator.cli import (
     SCHEMA_VERSION,
-    _load_typesafe_environment,
+    _outcome_summary,
     _scope_warning,
     create_evidence_pack,
     main,
 )
 from jev_navigator.directives.find_code import SearchBudget
+from jev_navigator.environment import load_typesafe_environment
+from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
 from jev_navigator.testing import ScriptedJevClient
+
+
+def test_an_empty_find_reports_how_much_of_the_scope_it_examined(tmp_path: Path) -> None:
+    # Arrange
+    repository = tmp_path / "repository"
+    commit_files(repository, {"app/entry.py": "def handle(item):\n    return item\n"})
+    commit_files(
+        repository,
+        {
+            "app/mail.py": "def send(letter):\n    return letter\n",
+            "app/billing.py": "def bill(account):\n    return account\n",
+        },
+    )
+    client = ScriptedJevClient(nouls=lambda question_id, question, state: 0.04)
+    output = tmp_path / "evidence"
+
+    # Act
+    manifest = create_evidence_pack(
+        repository,
+        ("app/",),
+        "the check that limits the number of items",
+        ("app/entry.py:2",),
+        output,
+        SearchBudget(),
+        client,
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    # Assert
+    assert manifest["search"]["outcome"] == "scope_incomplete"
+    assert (manifest["search"]["files_judged"], manifest["search"]["files_read"]) == (1, 1)
+    assert manifest["search"]["code_files"] == 3
+    assert (
+        "Outcome: **scope_incomplete (not found: Jev judged code in 1 of 3 files; 0 more were read only "
+        "to list links; 2 never reached)**" in (output / "report.md").read_text()
+    )
+
+
+@pytest.mark.parametrize(
+    ("search", "summary"),
+    [
+        (
+            {"outcome": "nothing_left", "files_judged": 2, "files_read": 7, "code_files": 7},
+            "nothing_left (nothing left worth opening: Jev judged code in 2 of 7 files; all 7 were read)",
+        ),
+        (
+            {
+                "outcome": "scope_incomplete",
+                "files_judged": 1,
+                "files_read": 5,
+                "code_files": 7,
+                "unparsed_files": ["a.js"],
+                "unavailable_files": {"b.py": "disappeared after inventory"},
+            },
+            "scope_incomplete (not found: Jev judged code in 1 of 7 files; 4 more were read only to list "
+            "links; 2 never reached; 1 parsed only partly; 1 unavailable (gone, changed or refused by the "
+            "parser))",
+        ),
+        (
+            {
+                "outcome": "nothing_left",
+                "files_judged": 1,
+                "files_read": 1,
+                "code_files": 1,
+                "not_indexed_files": {"vendor/": "ignored"},
+            },
+            "nothing_left (nothing left worth opening: Jev judged code in 1 of 1 files; all 1 were read; "
+            "1 not indexed, such as ignored)",
+        ),
+        ({"outcome": "budget", "files_judged": 1, "files_read": 1, "code_files": 6}, "budget"),
+        ({"outcome": "scope_incomplete", "coverage": "partial"}, "scope_incomplete"),
+    ],
+)
+def test_the_outcome_summary_says_how_much_of_the_scope_an_empty_find_examined(search, summary) -> None:
+    assert _outcome_summary(search) == summary
 
 
 def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -> None:
@@ -59,6 +140,10 @@ def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -
     assert len(written["navigator"]["source_tree_sha256"]) == 64
     assert written["provider"] == {
         "input_tokens": 200,
+        "responses_without_usage": 0,
+        "unanswered_requests": 0,
+        "input_tokens_complete": True,
+        "replayed_answers": 0,
         "requested_model": "jev-scripted",
         "served_model": "jev-scripted",
     }
@@ -68,6 +153,132 @@ def test_evidence_pack_runs_the_real_index_and_search_boundary(tmp_path: Path) -
     assert written["search"]["history"][-1]["operation"] == "stop"
     assert "Candidates not independently opened" in (output / "report.md").read_text()
     assert (output / "journal.jsonl").read_text()
+
+
+def test_jvn_installed_in_a_host_repository_without_commits_still_writes_its_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The host project's Git repository is not jvn's checkout: its HEAD is never recorded as jvn's
+    # revision, and a host with no commits yet cannot stop a finished search from writing its pack.
+    host = tmp_path / "host"
+    host.mkdir()
+    git(host, "init", "-q")
+    installed = host / ".venv/lib/python3.13/site-packages/jev_navigator"
+    monkeypatch.setattr(cli, "__file__", str(installed / "cli.py"))
+    monkeypatch.setattr(environment, "__file__", str(installed / "environment.py"))
+
+    manifest = _small_search_manifest(tmp_path)
+
+    assert manifest["navigator"]["source_revision"] is None
+    assert manifest["navigator"]["source_dirty"] is None
+    assert manifest["navigator"]["source_revision_error"] is None
+
+
+def test_a_git_failure_in_jvns_checkout_is_recorded_instead_of_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "jvn-checkout"
+    checkout.mkdir()
+    git(checkout, "init", "-q")
+    monkeypatch.setattr(cli, "checkout_root", lambda: checkout)
+
+    manifest = _small_search_manifest(tmp_path)
+
+    provenance = manifest["navigator"]
+    assert provenance["source_revision"] is None
+    assert provenance["source_dirty"] is None
+    assert provenance["source_revision_error"].startswith("git rev-parse HEAD failed: ")
+    assert len(provenance["source_revision_error"]) > len("git rev-parse HEAD failed: ")
+
+
+def test_a_git_call_in_jvns_checkout_past_its_timeout_is_recorded_instead_of_waited_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: a git whose status in jvn's checkout takes five seconds, as in a large project
+    checkout = tmp_path / "jvn-checkout"
+    commit_files(checkout, {"README.md": "jvn\n"})
+    monkeypatch.setattr(cli, "checkout_root", lambda: checkout)
+    monkeypatch.setattr(cli, "CHECKOUT_GIT_TIMEOUT_SECONDS", 1)
+    _put_first_on_path(monkeypatch, tmp_path / "bin", _git_slow_in(checkout, "status"))
+
+    # Act
+    started = time.monotonic()
+    manifest = _small_search_manifest(tmp_path)
+
+    # Assert
+    provenance = manifest["navigator"]
+    assert provenance["source_revision"] is None
+    assert provenance["source_revision_error"].startswith(
+        "git status --porcelain --untracked-files=all failed: "
+    )
+    assert time.monotonic() - started < 5
+
+
+def _git_slow_in(checkout: Path, command: str) -> str:
+    """A git that sleeps five seconds before ``command`` in ``checkout``, and is the real git
+    otherwise."""
+    return f"""#!/bin/sh
+if [ "$PWD" = "{checkout.resolve()}" ] && [ "$1" = "{command}" ]; then sleep 5; fi
+exec "{shutil.which("git")}" "$@"
+"""
+
+
+def _put_first_on_path(monkeypatch: pytest.MonkeyPatch, folder: Path, git_script: str) -> None:
+    folder.mkdir()
+    (folder / "git").write_text(git_script)
+    (folder / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ['PATH']}")
+
+
+def _small_search_manifest(tmp_path: Path) -> dict:
+    """The manifest of a finished one-call search over a small committed repository."""
+    repository = tmp_path / "repository"
+    commit_files(repository, {"app/policy.py": "def admit(item):\n    return len(item) <= 3\n"})
+    client = ScriptedJevClient(nouls=lambda question_id, question, state: 0.96)
+    return create_evidence_pack(
+        repository,
+        ("app/",),
+        "the check that limits the number of items",
+        ("app/policy.py:2",),
+        tmp_path / "evidence",
+        SearchBudget(max_depth=0, max_steps=1, max_calls=1, beam_width=1),
+        client,
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+
+def test_evidence_pack_counts_responses_without_usage_instead_of_adding_zero_tokens(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/entry.py": "from .policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "app/policy.py": "def admit(item):\n    return len(item) <= 3\n",
+        },
+    )
+    output = tmp_path / "evidence"
+    client = ScriptedJevClient(
+        nouls=lambda question_id, question, state: (
+            0.96 if "len(item) <= 3" in state["slice"]["code"] else 0.04
+        ),
+        choices={"open_first": {"0": 1.0}},
+        input_tokens_per_call=None,
+    )
+
+    manifest = create_evidence_pack(
+        repository,
+        ("app/",),
+        "the check that limits the number of items",
+        ("app/entry.py:4",),
+        output,
+        SearchBudget(max_depth=2, max_steps=3, max_calls=3, beam_width=1),
+        client,
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    provider = json.loads((output / "manifest.json").read_text())["provider"]
+    assert provider["input_tokens"] == 0
+    assert provider["responses_without_usage"] == manifest["search"]["calls"] > 0
 
 
 def test_budget_pack_reopens_its_saved_frontier_in_a_second_cli_invocation(
@@ -96,8 +307,8 @@ def test_budget_pack_reopens_its_saved_frontier_in_a_second_cli_invocation(
         clients.append(instance)
         return instance
 
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", client)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: client())
     first = tmp_path / "first"
     second = tmp_path / "second"
     common = ["find", "the item limit", "--repo", str(repository), "--start", "app/entry.py:4"]
@@ -155,6 +366,97 @@ def test_entry_selection_replays_cached_calls_after_its_cap(tmp_path: Path) -> N
     assert resumed["search"]["entry_calls"] == 2
     assert len(client2.requests) == 1  # the first entry decision came from answers.jsonl
     assert json.loads((second / "resume.json").read_text())["stage"] == "navigation"
+
+
+def _capped_pack(tmp_path: Path, name: str) -> tuple[Path, Path, SearchBudget]:
+    repository = tmp_path / "repository"
+    if not repository.exists():
+        commit_files(
+            repository,
+            {
+                "app/one.py": "def one():\n    return 1\n",
+                "app/two.py": "def two():\n    return 2\n",
+                "tests/test_one.py": "def test_one():\n    assert True\n",
+            },
+        )
+    budget = SearchBudget(max_calls=1, beam_width=1)
+    create_evidence_pack(repository, (), "find one", (), tmp_path / name, budget, ScriptedJevClient())
+    return repository, tmp_path / name, budget
+
+
+def test_a_find_records_how_many_answers_its_answer_store_gave_instead_of_jev(tmp_path: Path) -> None:
+    # Arrange
+    repository, first, budget = _capped_pack(tmp_path, "first")
+
+    # Act: the resume replays the first entry decision from the capped run's answers
+    resumed = create_evidence_pack(
+        repository, (), "find one", (), tmp_path / "second", budget, ScriptedJevClient(), resume_from=first
+    )
+
+    # Assert
+    assert json.loads((first / "manifest.json").read_text())["provider"]["replayed_answers"] == 0
+    assert resumed["provider"]["replayed_answers"] > 0
+
+
+def test_resuming_an_earlier_receipt_without_the_replayed_count_keeps_that_count_unknown(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    repository, first, budget = _capped_pack(tmp_path, "first")
+    manifest = json.loads((first / "manifest.json").read_text())
+    del manifest["provider"]["replayed_answers"]
+    (first / "manifest.json").write_text(json.dumps(manifest))
+
+    # Act
+    resumed = create_evidence_pack(
+        repository, (), "find one", (), tmp_path / "second", budget, ScriptedJevClient(), resume_from=first
+    )
+
+    # Assert
+    assert resumed["provider"]["replayed_answers"] is None
+
+
+def test_resuming_an_earlier_receipt_without_the_unreported_count_keeps_that_count_unknown(
+    tmp_path: Path,
+) -> None:
+    repository, first, budget = _capped_pack(tmp_path, "first")
+    manifest = json.loads((first / "manifest.json").read_text())
+    del manifest["provider"]["responses_without_usage"]
+    (first / "manifest.json").write_text(json.dumps(manifest))
+
+    resumed = create_evidence_pack(
+        repository,
+        (),
+        "find one",
+        (),
+        tmp_path / "second",
+        budget,
+        ScriptedJevClient(input_tokens_per_call=None),
+        resume_from=first,
+    )
+
+    assert resumed["provider"]["responses_without_usage"] is None
+    assert (
+        "Responses without usage: not known (earlier receipt)"
+        in (tmp_path / "second" / "report.md").read_text()
+    )
+
+
+def test_resuming_a_receipt_that_knows_its_unreported_count_keeps_adding_to_it(tmp_path: Path) -> None:
+    repository, first, budget = _capped_pack(tmp_path, "first")
+
+    resumed = create_evidence_pack(
+        repository,
+        (),
+        "find one",
+        (),
+        tmp_path / "second",
+        budget,
+        ScriptedJevClient(input_tokens_per_call=None),
+        resume_from=first,
+    )
+
+    assert resumed["provider"]["responses_without_usage"] == resumed["search"]["calls_this_invocation"] > 0
 
 
 def test_resume_rejects_changed_source_before_reusing_the_frontier(tmp_path: Path) -> None:
@@ -252,7 +554,7 @@ def test_findall_pack_composes_seed_search_with_disconnected_enumeration(tmp_pat
     saved = json.loads((output / "manifest.json").read_text())
     assert manifest["search"]["outcome"] == "scope_examined"
     assert saved["workflow"] == "findall"
-    assert saved["search"]["coverage"] == "functions_examined"
+    assert saved["search"]["coverage"] == "units_examined"
     assert {item["name"] for item in saved["search"]["found"]} == {"admit", "fits"}
     assert saved["seed_search"]["outcome"] == "found"
     assert saved["search"]["calls"] == len(client.requests)
@@ -379,6 +681,161 @@ def test_cancelled_navigation_writes_a_resumable_evidence_pack(tmp_path: Path) -
     assert records[-1]["outcome"] == "cancelled"
 
 
+class AnswersAfterTheCancel:
+    """The request for ``first.py`` raises the caller's Ctrl-C once ``second.py``'s is in flight; the
+    second is one the cancel cannot stop, so its answer still arrives and is stored."""
+
+    model = ScriptedJevClient.model
+
+    def __init__(self) -> None:
+        self.second_in_flight = Event()
+        self.cancelled = Event()
+
+    def ask(self, state, questions):
+        if "first" in state["slice"]["code"]:
+            self.second_in_flight.wait(timeout=5)
+            raise KeyboardInterrupt
+        self.second_in_flight.set()
+        self.cancelled.wait(timeout=5)
+        return ScriptedJevClient(default_noul=0.05).ask(state, questions)
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_full_disk_during_ctrl_c_exits_1_with_that_error_and_its_resume_finishes_the_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Arrange
+    from jev_navigator import cli
+    from jev_navigator.judgments.questions import request_sha256
+    from jev_navigator.judgments.store import JsonlAnswerStore
+
+    repository = tmp_path / "repository"
+    commit_files(
+        repository, {"first.py": "def first():\n    return 1\n", "second.py": "def second():\n    return 2\n"}
+    )
+    write_line = JsonlAnswerStore._append
+    disk = {"full": True}
+
+    def full_disk(store: JsonlAnswerStore, line: dict) -> None:
+        if disk["full"]:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        write_line(store, line)
+
+    whole = ScriptedJevClient(default_noul=0.05)
+    resuming = ScriptedJevClient(default_noul=0.05)
+    resuming.close = lambda: None
+    interrupted = AnswersAfterTheCancel()
+    clients = iter([interrupted, resuming])
+    monkeypatch.setattr(JsonlAnswerStore, "_append", full_disk)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: next(clients))
+    starts = ["--start", "first.py:1", "--start", "second.py:1"]
+    command = ["find", "the item limit", "--repo", str(repository), "--beam-width", "2", *starts]
+    command += ["--answer-store", str(tmp_path / "answers.sqlite")]
+    first, second = tmp_path / "first", tmp_path / "second"
+    disk["full"] = False
+    uninterrupted = create_evidence_pack(
+        repository,
+        (),
+        "the item limit",
+        ("first.py:1", "second.py:1"),
+        tmp_path / "whole",
+        SearchBudget(beam_width=2, max_calls=24),
+        whole,
+        answer_store=tmp_path / "whole-answers.sqlite",
+    )
+    disk["full"] = True
+
+    # Act
+    failed_status = main([*command, "--out", str(first)])
+    failed_stderr = capsys.readouterr().err
+    disk["full"] = False
+    resumed_status = main([*command, "--out", str(second), "--resume", str(first)])
+
+    # Assert
+    failed = json.loads((first / "manifest.json").read_text())
+    resumed = json.loads((second / "manifest.json").read_text())
+    assert interrupted.cancelled.is_set()
+    assert failed_status == 1
+    assert "No space left on device" in failed_stderr
+    assert failed["search"]["outcome"] == "failed"
+    assert failed["search"]["failure"]["type"] == "OSError"
+    steps = [json.loads(line) for line in (first / "journal.jsonl").read_text().splitlines()]
+    failures = [
+        record["step"]["judgments"].get("failure") for record in steps if record["kind"] == "history_step"
+    ]
+    assert {"type": "OSError", "message": "[Errno 28] No space left on device"} in failures
+    assert (first / "resume.json").is_file()
+    assert resumed_status == 0
+    assert resumed["search"]["outcome"] == uninterrupted["search"]["outcome"]
+    assert resumed["search"]["starts"] == uninterrupted["search"]["starts"]
+    assert sorted(request_sha256(*request) for request in resuming.requests) == sorted(
+        request_sha256(*request) for request in whole.requests
+    )
+
+
+def test_cancelled_run_marks_its_token_total_incomplete_because_a_sent_request_never_answered(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "app/entry.py": "from .policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "app/policy.py": "def admit(item):\n    return len(item) <= 3\n",
+        },
+    )
+
+    class CancelledOnSecondRequest(ScriptedJevClient):
+        def send(self, state, questions):
+            if self.requests:
+                raise KeyboardInterrupt
+            return super().send(state, questions)
+
+    output = tmp_path / "cancelled-usage"
+
+    # Act
+    manifest = create_evidence_pack(
+        repository,
+        ("app/",),
+        "the check that limits the number of items",
+        ("app/entry.py:4",),
+        output,
+        SearchBudget(max_depth=2, max_steps=3, max_calls=3, beam_width=1),
+        CancelledOnSecondRequest(),
+        fact_cache_dir=tmp_path / "fact-cache",
+    )
+
+    # Assert
+    provider = manifest["provider"]
+    assert manifest["search"]["outcome"] == "cancelled"
+    assert manifest["search"]["calls"] == 2
+    assert provider["input_tokens"] == 100
+    assert provider["responses_without_usage"] == 0
+    assert provider["unanswered_requests"] == 1
+    assert provider["input_tokens_complete"] is False
+    report = (output / "report.md").read_text()
+    assert "Requests whose usage is unknown: 1" in report
+    assert "Input tokens: at least 100 (not complete)" in report
+
+
+def test_answered_run_with_usage_marks_its_token_total_complete(tmp_path: Path) -> None:
+    _, output, _ = _capped_pack(tmp_path, "complete")
+
+    provider = json.loads((output / "manifest.json").read_text())["provider"]
+
+    assert provider["unanswered_requests"] == 0
+    assert provider["input_tokens_complete"] is True
+    report = (output / "report.md").read_text()
+    assert f"- Input tokens: {provider['input_tokens']}\n" in report
+
+
 @pytest.fixture
 def offline_main(monkeypatch: pytest.MonkeyPatch) -> dict:
     """``main`` without credentials or a search: each pack request is recorded by parameter name and
@@ -398,8 +855,8 @@ def offline_main(monkeypatch: pytest.MonkeyPatch) -> dict:
         calls["packs"].append(signature.bind(*args, **kwargs).arguments)
         return {"search": {"outcome": calls["outcome"], "calls": 1}, "provider": {"requested_model": "test"}}
 
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
-    monkeypatch.setattr(cli, "TypeSafeJevClient", Client)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: Client())
     monkeypatch.setattr(cli, "create_evidence_pack", create_evidence_pack)
     return calls
 
@@ -456,12 +913,11 @@ def repository_commit(repository: Path) -> str:
 
 
 def test_each_existing_typesafe_environment_value_wins_independently(tmp_path: Path) -> None:
-    pytest.importorskip("dotenv")
     path = tmp_path / "env"
     path.write_text("TYPESAFE_API_KEY=file-key\nTYPESAFE_BASE_URL=http://file.example/gateway\n")
     environment = {"TYPESAFE_API_KEY": "process-key"}
 
-    _load_typesafe_environment(environment, path)
+    load_typesafe_environment(environment, legacy=path)
 
     assert environment == {
         "TYPESAFE_API_KEY": "process-key",
@@ -469,31 +925,28 @@ def test_each_existing_typesafe_environment_value_wins_independently(tmp_path: P
     }
 
 
-def test_user_dotenv_key_is_loaded_without_shell_evaluation(tmp_path: Path) -> None:
-    pytest.importorskip("dotenv")
+def test_user_dotenv_loads_only_settings_and_never_shell_evaluates(tmp_path: Path) -> None:
+    marker = tmp_path / "shell-ran"
+    command = f"$(touch {marker})"
     path = tmp_path / "env"
     path.write_text(
-        "TYPESAFE_API_KEY='file-value'\n"
-        "TYPESAFE_BASE_URL='http://127.0.0.1:4777/jvn'\n"
-        "UNRELATED=$(touch should-not-run)\n"
+        f"TYPESAFE_API_KEY='file-value'\nTYPESAFE_DEFAULT_MODEL={command}\nUNRELATED=outside-the-settings\n"
     )
     environment: dict[str, str] = {}
 
-    _load_typesafe_environment(environment, path)
+    load_typesafe_environment(environment, legacy=path)
 
     assert environment == {
         "TYPESAFE_API_KEY": "file-value",
-        "TYPESAFE_BASE_URL": "http://127.0.0.1:4777/jvn",
-        "UNRELATED": "$(touch should-not-run)",  # loaded literally, never shell-evaluated
-    }
-    assert not (tmp_path / "should-not-run").exists()
+        "TYPESAFE_DEFAULT_MODEL": command,
+    }  # the value arrives as written, and UNRELATED, outside the tool's settings, never loads
+    assert not marker.exists()
 
 
 def test_dotenv_base_url_reaches_the_real_sdk_system_one_endpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pytest.importorskip("typesafe_sdk")
-    pytest.importorskip("dotenv")
     from jev_navigator.adapters.typesafe import TypeSafeJevClient
 
     received: list[tuple[str, bytes]] = []
@@ -526,7 +979,7 @@ def test_dotenv_base_url_reaches_the_real_sdk_system_one_endpoint(
             "TYPESAFE_API_KEY=local-viewer-key\n"
             f"TYPESAFE_BASE_URL=http://127.0.0.1:{server.server_port}/jvn\n"
         )
-        _load_typesafe_environment(os.environ, path)
+        load_typesafe_environment(os.environ, legacy=path)
 
         answer = TypeSafeJevClient().ask(
             {"code": "return wanted"},
@@ -549,8 +1002,8 @@ def test_large_scope_warning_starts_above_twenty_thousand_files() -> None:
 
 @pytest.mark.parametrize("search_here", [False, True])
 @pytest.mark.parametrize("input_mode", ["flags", "json-file", "json-stdin", "json-inline"])
-def test_find_defaults_to_unique_results_under_invocation_directory(
-    tmp_path, monkeypatch, capsys, search_here, input_mode
+def test_find_defaults_to_unique_results_in_jvns_data_folder(
+    tmp_path, tmp_path_factory, monkeypatch, capsys, search_here, input_mode, private_data_root
 ):
     from jev_navigator import cli
 
@@ -558,7 +1011,7 @@ def test_find_defaults_to_unique_results_under_invocation_directory(
     repository.mkdir(exist_ok=True)
     (repository / "policy.py").write_text("def admit(item):\n    return len(item) <= 3\n")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "_load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
 
     class Client(ScriptedJevClient):
         def close(self):
@@ -566,8 +1019,8 @@ def test_find_defaults_to_unique_results_under_invocation_directory(
 
     monkeypatch.setattr(
         cli,
-        "TypeSafeJevClient",
-        lambda: Client(
+        "system_one_client",
+        lambda environment: Client(
             nouls=lambda question_id, question, state: 1.0,
             choices={"open_first": {"0": 1.0}},
         ),
@@ -579,8 +1032,7 @@ def test_find_defaults_to_unique_results_under_invocation_directory(
         if input_mode == "flags":
             arguments = ["find", "the policy", "--repo", str(repository)]
         elif input_mode == "json-file":
-            request_file = tmp_path / "jvn-results" / "request.json"
-            request_file.parent.mkdir(exist_ok=True)
+            request_file = tmp_path_factory.mktemp("requests") / "request.json"
             request_file.write_text(json.dumps(request))
             arguments = ["--json", str(request_file)]
         elif input_mode == "json-inline":
@@ -597,16 +1049,16 @@ def test_find_defaults_to_unique_results_under_invocation_directory(
             assert response["manifest"] == str(pack / "manifest.json")
             assert response["report"] == str(pack / "report.md")
             assert "jvn" in captured.err
-    packs = [path for path in (tmp_path / "jvn-results").iterdir() if path.is_dir()]
+    packs = [path for path in (private_data_root / "runs").iterdir() if path.is_dir()]
     assert len(packs) == 2
     for pack in packs:
         manifest = json.loads((pack / "manifest.json").read_text())
         assert manifest["search"]["outcome"] == "found"
-        assert manifest["source"]["tracked_files"] == 1
+        assert manifest["source"]["indexed_files"] == 1
         assert (pack / "report.md").is_file()
         assert (pack / "journal.jsonl").is_file()
-    if not search_here:
-        assert not (repository / "jvn-results").exists()
+    assert not (tmp_path / "jvn-results").exists()
+    assert not (repository / "jvn-results").exists()
 
 
 def test_report_distinguishes_included_lines_from_an_unopened_candidate(tmp_path):
@@ -661,7 +1113,7 @@ def test_json_request_errors_fail_before_search(monkeypatch, capsys, request_tex
     def unexpected_client():
         pytest.fail("invalid input reached the model client")
 
-    monkeypatch.setattr(cli, "TypeSafeJevClient", unexpected_client)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: unexpected_client())
     monkeypatch.setattr("sys.stdin", io.StringIO(request_text))
     with pytest.raises(SystemExit) as error:
         main(["--json", "-"])
@@ -725,13 +1177,7 @@ def test_json_pipeline_reaches_sdk_and_preserves_explicit_options(tmp_path):
     }
     try:
         result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "from jev_navigator.cli import main; raise SystemExit(main())",
-                "--json",
-                "-",
-            ],
+            [*JVN, "--json", "-"],
             input=json.dumps(payload),
             text=True,
             capture_output=True,
@@ -777,7 +1223,7 @@ def test_schema_discovery_needs_no_credentials_or_model(monkeypatch, capsys):
     def unexpected_client():
         pytest.fail("schema discovery reached the model client")
 
-    monkeypatch.setattr(cli, "TypeSafeJevClient", unexpected_client)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: unexpected_client())
     assert main(["schema", "find"]) == 0
     output = capsys.readouterr()
     assert not output.err
@@ -820,17 +1266,23 @@ def test_findall_budget_stop_writes_partial_pack_with_completed_results(tmp_path
     saved = json.loads((out / "manifest.json").read_text())
     assert saved["search"]["outcome"] == result["search"]["outcome"]
     assert saved["search"]["calls"] <= cap
-    if cap < 3:
+    if cap == 0:
+        assert saved["search"]["outcome"] == "budget"
+        assert saved["search"]["room_chars"] is None, "the seed search stops before Find All starts"
+    elif cap < 3:
         assert saved["search"]["outcome"] == "budget"
         assert saved["search"]["coverage"] == "partial"
-        assert saved["search"]["remaining_files"]
+        assert saved["search"]["not_judged"]
     else:
         assert saved["search"]["found"]
     assert (out / "report.md").is_file()
 
 
 def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    private_data_root: Path,
 ) -> None:
     from jev_navigator import cli
 
@@ -850,7 +1302,7 @@ def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
     def forbidden_provider():
         raise AssertionError("structural analysis must not construct a model client")
 
-    monkeypatch.setattr(cli, "TypeSafeJevClient", forbidden_provider)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: forbidden_provider())
     assert (
         main(
             [
@@ -872,7 +1324,7 @@ def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
     captured = capsys.readouterr()
     result = json.loads(captured.out)
     output = Path(result["output_directory"])
-    assert output.parent == tmp_path / "jvn-results"
+    assert output.parent == private_data_root / "runs"
     pack = json.loads((output / "statistics.json").read_text())
     assert pack["counts"]["totals"] == {"function": 2}
     assert pack["largest"]["ranking"][0]["name"] == "larger"
@@ -886,7 +1338,10 @@ def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(
 
 
 def test_stats_schema_and_validation_share_the_cli_contract(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    private_data_root: Path,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     assert main(["schema", "stats"]) == 0
@@ -896,6 +1351,198 @@ def test_stats_schema_and_validation_share_the_cli_contract(
     with pytest.raises(SystemExit) as exc:
         main(["--json", '{"command":"stats","operation":["guess"]}'])
     assert exc.value.code == 2
-    assert not (tmp_path / "jvn-results").exists()
+    assert not (private_data_root / "runs").exists()
     assert main(["stats", "--min-lines", "10", "--max-lines", "2"]) == 1
-    assert not (tmp_path / "jvn-results").exists()
+    assert not (private_data_root / "runs").exists()
+
+
+def test_each_run_names_its_answer_store_and_a_fresh_store_isolates_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from jev_navigator import cli
+
+    # Arrange
+    repository = tmp_path / "repository"
+    functions = "".join(
+        f"def admit_{index}(item):\n    return len(item) <= {index}\n\n\n" for index in range(40)
+    )
+    commit_files(repository, {"app/policy.py": functions})
+    clients: list[ScriptedJevClient] = []
+
+    def client() -> ScriptedJevClient:
+        instance = ScriptedJevClient(default_noul=0.96)
+        instance.close = lambda: None
+        clients.append(instance)
+        return instance
+
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: client())
+    common = ["findall", "the item limit", "--repo", str(repository)]
+    arm_a, arm_b = tmp_path / "arm-a.sqlite", tmp_path / "arm-b.sqlite"
+    default_store = os.environ.get(SHARED_STORE_VARIABLE)
+
+    # Act
+    main([*common, "--answer-store", str(arm_a), "--out", str(tmp_path / "a1")])
+    first_err = capsys.readouterr().err
+    main([*common, "--answer-store", str(arm_a), "--out", str(tmp_path / "a2")])
+    main([*common, "--answer-store", str(arm_b), "--out", str(tmp_path / "b1")])
+    later_err = capsys.readouterr().err
+
+    # Assert: the repeat on the same store sends only the one request that learns the served model
+    assert f"answer store: {arm_a}" in first_err
+    assert f"answer store: {arm_b}" in later_err
+    first, repeat, isolated = (len(instance.requests) for instance in clients)
+    assert first > 1 and repeat == 1 and isolated == first
+    assert os.environ.get(SHARED_STORE_VARIABLE) == default_store, (
+        "the flag never travels through the environment"
+    )
+
+
+def test_the_answer_store_variable_chooses_the_shared_store_when_no_flag_is_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from jev_navigator import cli
+
+    # Arrange
+    repository = tmp_path / "repository"
+    functions = "".join(
+        f"def admit_{index}(item):\n    return len(item) <= {index}\n\n\n" for index in range(20)
+    )
+    commit_files(repository, {"app/policy.py": functions})
+    clients: list[ScriptedJevClient] = []
+
+    def client() -> ScriptedJevClient:
+        instance = ScriptedJevClient(default_noul=0.96)
+        instance.close = lambda: None
+        clients.append(instance)
+        return instance
+
+    store = tmp_path / "from-variable.sqlite"
+    monkeypatch.setenv(SHARED_STORE_VARIABLE, str(store))
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: client())
+    common = ["findall", "the item limit", "--repo", str(repository)]
+
+    # Act
+    main([*common, "--out", str(tmp_path / "first")])
+    main([*common, "--out", str(tmp_path / "repeat")])
+
+    # Assert: both runs use the variable's store, so the repeat replays from it
+    assert capsys.readouterr().err.count(f"answer store: {store}") == 2
+    first, repeat = (len(instance.requests) for instance in clients)
+    assert store.is_file() and first > 1 and repeat == 1
+
+
+@pytest.mark.parametrize("named_by", ["flag", "variable"])
+def test_a_store_named_inside_jvns_cache_folder_stops_the_run_with_exit_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    private_cache_root: Path,
+    private_data_root: Path,
+    named_by: str,
+) -> None:
+    from jev_navigator import cli
+
+    # Arrange: an older JVN's default file name, which housekeeping prunes as an older layout
+    monkeypatch.setattr(cli, "load_typesafe_environment", lambda environment: None)
+    monkeypatch.setattr(cli, "system_one_client", lambda environment: ScriptedJevClient())
+    store = private_cache_root / "answers.sqlite"
+    flag = ["--answer-store", str(store)] if named_by == "flag" else []
+    if named_by == "variable":
+        monkeypatch.setenv(SHARED_STORE_VARIABLE, str(store))
+
+    # Act
+    with pytest.raises(SystemExit) as stopped:
+        main(["find", "the order limit", "--repo", str(tmp_path), *flag])
+
+    # Assert
+    error = capsys.readouterr().err
+    assert stopped.value.code == 2
+    assert str(store) in error and "JVN prunes" in error
+    assert not store.exists()
+    assert not (private_data_root / "runs").exists()
+
+
+REFUSED_BUNDLE = ("export function admit(){return 1};" * 6_000)[:200_000]
+
+
+def test_find_and_findall_reports_name_each_ignored_file_as_not_indexed(tmp_path: Path) -> None:
+    # Arrange
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            ".gitignore": "vendor/\n",
+            "entry.py": "from policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "policy.py": "def admit(item):\n    return len(item) <= 3\n",
+        },
+    )
+    (repository / "vendor").mkdir()
+    (repository / "vendor" / "limits.py").write_text("def limit(item):\n    return len(item) <= 3\n")
+    (repository / "notes.md").write_text("Untracked notes are indexed too.\n")
+    reports = {}
+
+    # Act
+    for workflow in ("find", "findall"):
+        output = tmp_path / workflow
+        manifest = create_evidence_pack(
+            repository,
+            (),
+            "the item count limit check",
+            ("entry.py:4",),
+            output,
+            SearchBudget(beam_width=1),
+            ScriptedJevClient(default_noul=0.04),
+            workflow=workflow,
+            fact_cache_dir=tmp_path / "facts",
+        )
+        reports[workflow] = (
+            (output / "report.md").read_text(),
+            manifest["search"]["not_indexed_files"],
+            manifest["source"]["indexed_files"],
+        )
+
+    # Assert: notes.md is untracked and still indexed, beside .gitignore, entry.py and policy.py
+    for report, not_indexed, indexed in reports.values():
+        assert indexed == 4
+        assert not_indexed == {"vendor/": "ignored"}
+        assert "| ignored | `vendor/` | 1 |" in report
+        assert "`search.not_indexed_files` in `manifest.json`" in report
+
+
+def test_find_and_findall_reports_name_each_refused_file_with_its_reason(tmp_path: Path) -> None:
+    # Arrange
+    repository = tmp_path / "repository"
+    commit_files(
+        repository,
+        {
+            "entry.py": "from policy import admit\n\ndef handle(item):\n    return admit(item)\n",
+            "policy.py": "def admit(item):\n    return len(item) <= 3\n",
+            "dist/bundle.js": REFUSED_BUNDLE,
+        },
+    )
+    reports = {}
+
+    # Act
+    for workflow in ("find", "findall"):
+        output = tmp_path / workflow
+        manifest = create_evidence_pack(
+            repository,
+            (),
+            "the item count limit check",
+            ("entry.py:4",),
+            output,
+            SearchBudget(beam_width=1),
+            ScriptedJevClient(default_noul=0.04),
+            workflow=workflow,
+            fact_cache_dir=tmp_path / "facts",
+        )
+        refused = "unlisted_files" if workflow == "findall" else "unavailable_files"
+        reports[workflow] = ((output / "report.md").read_text(), manifest["search"][refused])
+
+    # Assert
+    for report, unavailable in reports.values():
+        reason = unavailable["dist/bundle.js"]
+        assert reason.startswith("too large to parse")
+        assert f"`dist/bundle.js`: {reason}" in report

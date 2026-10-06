@@ -14,14 +14,15 @@ directly. A check selects named sections and ``History.state_for(names)`` builds
 - any section the caller declares, for example ``subject`` or ``shown_code``.
 
 Every section has its own limit (``SectionLimit``: newest entries kept, long text cut), applied before
-the token budget. When the selected state still does not fit, a pluggable eviction policy trims it; the
+the character budget. When the selected state still does not fit, a pluggable eviction policy trims it; the
 default replaces the oldest code bodies with a stub that keeps the source, and every eviction is
 recorded. Checks that select the same sections share one request; different selections run in
 parallel.
 
-The token budget is capped by Jev's context limit. The Models page of the TypeSafe docs
-(https://docs.typesafe.ai/models, read 28.09.2026) gives 64k tokens per request, of which 32k for
-``state`` plus the longest question. The docs also warn that accuracy falls as unrelated state grows,
+A judge holds the selected state, together with the shared state beside it, within what its
+client's box for ``state`` plus the longest question (``InputLimits.box_chars``) leaves after the
+longest question actually asked, and within the history's own ``budget_chars`` when it sets one.
+The docs also warn that accuracy falls as unrelated state grows,
 so select only the sections a check needs, and measure with ``ceiling_curve``.
 
 Whether the history is enough is a caller-defined yes/no question about a concrete property, for
@@ -31,21 +32,17 @@ example "Does `fetched` contain code that compares the item count with a limit?"
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
 
-from .judgments.answers import JevResponse
+from .judgments.answers import AnswerSource, JevResponse, without_answer_sources
 from .judgments.judge import Judge
-from .judgments.questions import Check, content_hash
+from .judgments.questions import Check, content_hash, serialized_chars
 from .judgments.thresholds import NoulVerdict
 
-JEV_REQUEST_TOKEN_LIMIT = 64_000
-JEV_STATE_TOKEN_LIMIT = 32_000
-DEFAULT_QUESTION_RESERVE = 2_000
 EVICTED = "[evicted]"
 HISTORY = "history"
 FETCHED = "fetched"
@@ -54,11 +51,6 @@ PREVIOUS_JUDGMENTS = "previous_judgments"
 BUILT_IN_SECTIONS = (HISTORY, FETCHED, DECISIONS, PREVIOUS_JUDGMENTS)
 DEFAULT_STOP_SECTIONS = (FETCHED,)
 _SECTIONS_WITH_CODE = frozenset({HISTORY, FETCHED})
-
-
-def estimate_tokens(text: str) -> int:
-    """A conservative estimate (about three characters per token) when no tokenizer is supplied."""
-    return len(text) // 3 + 1
 
 
 @dataclass(frozen=True)
@@ -101,16 +93,18 @@ class HistoryStep:
         }
 
     def history_json(self) -> dict:
-        """The step without its judgments or decision: what the ``history`` section shows."""
+        """The step without its judgments or decision: what the ``history`` section shows. Like every
+        section Jev reads, it leaves out the answer sources a run file keeps."""
         full = self.to_json()
-        return {"operation": full["operation"], "arguments": full["arguments"], "fetched": full["fetched"]}
+        arguments = without_answer_sources(full["arguments"])
+        return {"operation": full["operation"], "arguments": arguments, "fetched": full["fetched"]}
 
     def decision_json(self) -> dict:
-        """The step without its code: what the ``decisions`` section shows."""
+        """The step without its code or answer sources: what the ``decisions`` section shows."""
         return {
             "operation": self.operation,
-            "arguments": dict(self.arguments),
-            "judgments": dict(self.judgments),
+            "arguments": without_answer_sources(self.arguments),
+            "judgments": without_answer_sources(self.judgments),
             "decision": self.decision,
         }
 
@@ -168,10 +162,11 @@ def drop_oldest_code(
 @dataclass
 class History:
     """``sections`` declares the caller's own sections with their values; only declared names and the
-    built-in ones (``history``, ``fetched``, ``decisions``, ``previous_judgments``) can be selected."""
+    built-in ones (``history``, ``fetched``, ``decisions``, ``previous_judgments``) can be selected.
+    ``budget_chars`` is the caller's own bound on a selected state; a judge reading the history also
+    holds it within its client's input box, and ``None`` leaves that box alone."""
 
-    budget_tokens: int = JEV_STATE_TOKEN_LIMIT - DEFAULT_QUESTION_RESERVE
-    count_tokens: Callable[[str], int] = estimate_tokens
+    budget_chars: int | None = None
     evict: EvictionPolicy = drop_oldest_code
     recorder: StepRecorder | None = None
     sections: dict[str, object] = field(default_factory=dict)
@@ -181,7 +176,6 @@ class History:
     evictions: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        self.budget_tokens = min(self.budget_tokens, JEV_STATE_TOKEN_LIMIT)
         reserved = set(self.sections) & set(BUILT_IN_SECTIONS)
         if reserved:
             raise ValueError(f"{sorted(reserved)} are built-in section names")
@@ -197,22 +191,36 @@ class History:
             raise UnknownSectionError(f"{name} is not a declared section")
         self.sections[name] = value
 
-    def state_for(self, names: Sequence[str]) -> dict:
-        """Exactly the selected sections, each within its limit and all within the token budget;
-        ``self.evictions`` lists what this call trimmed."""
+    def state_for(
+        self,
+        names: Sequence[str],
+        shared: Mapping | None = None,
+        question_chars: int = 0,
+        *,
+        box_chars: int | None = None,
+    ) -> dict:
+        """Exactly the selected sections, each within its limit; ``self.evictions`` lists what this
+        call trimmed. Measured together with the ``shared`` state that travels next to them, they stay
+        within ``budget_chars`` and within what ``box_chars``, a client's box for the state plus the
+        longest question, leaves after the question of ``question_chars`` that reads them; unbounded
+        when neither is set."""
         self._require_known(names)
+        room = None if box_chars is None else box_chars - question_chars
+        limit = min((bound for bound in (self.budget_chars, room) if bound is not None), default=None)
 
         def fits(steps: list[HistoryStep]) -> bool:
-            return self.tokens(self._build(names, steps)) <= self.budget_tokens
+            return limit is None or self.size({**(shared or {}), **self._build(names, steps)}) <= limit
 
         reads_code = bool(_SECTIONS_WITH_CODE & set(names))
         kept, self.evictions = self.evict(self.steps, fits) if reads_code else (self.steps, [])
         if not fits(kept):
-            raise HistoryTooLargeError(f"the selected sections need more than {self.budget_tokens} tokens")
+            raise HistoryTooLargeError(
+                f"the selected sections, the shared state and the question need more than {limit} characters"
+            )
         return self._build(names, kept)
 
-    def tokens(self, state: Mapping) -> int:
-        return self.count_tokens(json.dumps(state, default=str))
+    def size(self, state: Mapping) -> int:
+        return serialized_chars(state)
 
     def _require_known(self, names: Sequence[str]) -> None:
         unknown = set(names) - set(self.sections) - set(BUILT_IN_SECTIONS)
@@ -261,6 +269,8 @@ def _cut(value: object, max_chars: int | None) -> object:
         )
     if isinstance(value, Mapping):
         return {key: _cut(entry, max_chars) for key, entry in value.items()}
+    if isinstance(value, list):
+        return [_cut(entry, max_chars) for entry in value]
     return value
 
 
@@ -275,9 +285,10 @@ class HistoryOutcome(StrEnum):
 class HistoryJudgment:
     outcome: HistoryOutcome
     probability: float
-    tokens: int
+    chars: int
     evictions: tuple[dict, ...]
     sections: tuple[str, ...] = DEFAULT_STOP_SECTIONS
+    answered_by: AnswerSource | None = None
 
 
 @dataclass(frozen=True)
@@ -327,9 +338,10 @@ def judge_sections(
     exhausted: bool = False,
 ) -> dict[str, HistoryJudgment]:
     """Several history checks: those selecting the same sections share one request, and different
-    selections are asked in parallel. Each answer is kept in ``history.previous_judgments``."""
-    groups = _grouped(history, checks, shared or {})
-    with ThreadPoolExecutor(max_workers=len(groups) or 1) as pool:
+    selections are asked in parallel, at most ``judge.max_concurrency`` at once. Each answer is kept in
+    ``history.previous_judgments``."""
+    groups = _grouped(judge, history, checks, shared or {})
+    with ThreadPoolExecutor(max_workers=min(len(groups), judge.max_concurrency) or 1) as pool:
         responses = list(pool.map(lambda group: _ask_group(judge, group), groups))
     return _judged(judge, history, groups, responses, exhausted)
 
@@ -342,8 +354,14 @@ async def judge_sections_async(
     *,
     exhausted: bool = False,
 ) -> dict[str, HistoryJudgment]:
-    groups = _grouped(history, checks, shared or {})
-    responses = await asyncio.gather(*(_ask_group_async(judge, group) for group in groups))
+    groups = _grouped(judge, history, checks, shared or {})
+    slots = asyncio.Semaphore(judge.max_concurrency)
+
+    async def ask(group: _Group):
+        async with slots:
+            return await _ask_group_async(judge, group)
+
+    responses = await asyncio.gather(*(ask(group) for group in groups))
     return _judged(judge, history, groups, list(responses), exhausted)
 
 
@@ -358,12 +376,14 @@ class _Group:
         return {check.question_id: check.to_question() for check in self.checks.values()}
 
 
-def _grouped(history: History, checks: Mapping[str, HistoryCheck], shared: Mapping) -> list[_Group]:
+def _grouped(
+    judge: Judge, history: History, checks: Mapping[str, HistoryCheck], shared: Mapping
+) -> list[_Group]:
     by_sections: dict[tuple[str, ...], dict[str, Check]] = {}
     for name, entry in checks.items():
         by_sections.setdefault(entry.sections, {})[name] = entry.check
     return [
-        _Group(sections, _state(history, sections, shared), grouped)
+        _Group(sections, _state(history, sections, shared, grouped, judge.input_limits.box_chars), grouped)
         for sections, grouped in by_sections.items()
     ]
 
@@ -385,26 +405,29 @@ def _judged(
 ) -> dict[str, HistoryJudgment]:
     results: dict[str, HistoryJudgment] = {}
     for group, response in zip(groups, responses, strict=True):
-        tokens = history.tokens(group.state)
+        chars = history.size(group.state)
         for name, check in group.checks.items():
             probability = response.noul(check.question_id).probability
-            results[name] = _judgment(judge, probability, tokens, history, group.sections, exhausted)
+            judgment = _judgment(judge, probability, chars, history, group.sections, exhausted)
+            results[name] = replace(judgment, answered_by=response.source(check.question_id))
     history.previous_judgments.update(results)
     return results
 
 
-def _state(history: History, sections: tuple[str, ...], shared: Mapping) -> dict:
-    selected = history.state_for(sections)
-    overlap = set(selected) & set(shared)
+def _state(
+    history: History, sections: tuple[str, ...], shared: Mapping, checks: Mapping[str, Check], box_chars: int
+) -> dict:
+    overlap = set(sections) & set(shared)
     if overlap:
         raise ValueError(f"shared state and history sections both use {sorted(overlap)}")
-    return {**shared, **selected}
+    longest_question = max(serialized_chars(check.to_question()) for check in checks.values())
+    return {**shared, **history.state_for(sections, shared, longest_question, box_chars=box_chars)}
 
 
 def _judgment(
     judge: Judge,
     probability: float,
-    tokens: int,
+    chars: int,
     history: History,
     sections: tuple[str, ...],
     exhausted: bool,
@@ -414,13 +437,13 @@ def _judgment(
         NoulVerdict.YES: HistoryOutcome.FOUND,
         NoulVerdict.NO: HistoryOutcome.SEARCHED_NOT_FOUND,
     }.get(verdict, HistoryOutcome.NOT_INSPECTED if exhausted else HistoryOutcome.CONTINUE)
-    return HistoryJudgment(outcome, probability, tokens, tuple(history.evictions), sections)
+    return HistoryJudgment(outcome, probability, chars, tuple(history.evictions), sections)
 
 
 @dataclass(frozen=True)
 class CeilingPoint:
     steps: int
-    tokens: int
+    chars: int
     probability: float
     evicted_spans: int
 
@@ -432,13 +455,13 @@ def ceiling_curve(
     shared: Mapping | None = None,
     *,
     sections: tuple[str, ...] = DEFAULT_STOP_SECTIONS,
-    budget_tokens: int = JEV_STATE_TOKEN_LIMIT - DEFAULT_QUESTION_RESERVE,
+    budget_chars: int | None = None,
 ) -> list[CeilingPoint]:
     """Replays a recorded search with a growing history and reports the check's probability at each
-    size, to see where more tokens stop helping. Use it with a replay or scripted client."""
+    size, to see where more characters stop helping. Use it with a replay or scripted client."""
     points = []
     for count in range(1, len(steps) + 1):
-        history = History(budget_tokens=budget_tokens, steps=list(steps[:count]))
+        history = History(budget_chars=budget_chars, steps=list(steps[:count]))
         judged = judge_history(judge, history, check, shared, sections=sections)
-        points.append(CeilingPoint(count, judged.tokens, judged.probability, len(judged.evictions)))
+        points.append(CeilingPoint(count, judged.chars, judged.probability, len(judged.evictions)))
     return points

@@ -10,7 +10,7 @@ import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
-from .index.bindings import Binding, BindingStatus
+from .index.bindings import Binding, BindingStatus, names_exactly
 from .index.code_index import CodeIndex
 from .index.languages import language_of
 from .index.spans import CallSite, CodeSlice, Span
@@ -89,7 +89,7 @@ def code_described_by_comment(index: CodeIndex, file: str, line: int) -> CodeSli
 
 def callers_of_file(index: CodeIndex, path: str) -> tuple[CallSite, ...]:
     """Every call from another file to a named function defined in ``path``, deduplicated."""
-    names = {span.name for span in index.functions_in(path) if not span.name.startswith("<")}
+    names = {span.name for span in index.functions_in(path) if span.is_named}
     sites = {site for name in sorted(names) for site in index.find_callers(name) if site.file != path}
     return tuple(sorted(sites, key=lambda site: (site.file, site.line)))
 
@@ -296,7 +296,7 @@ def _links_at(index: CodeIndex, function: Span, hop: int) -> tuple[TraceLink, ..
                 for target in targets
             )
     for site in index.find_callers(function.name):
-        if not _binding_can_target(site.binding, function):
+        if not names_exactly(site.binding, function):
             continue
         links.append(
             TraceLink(
@@ -346,7 +346,7 @@ def _links_at(index: CodeIndex, function: Span, hop: int) -> tuple[TraceLink, ..
                 for target in targets
             )
     for reference in index.find_references(function.name):
-        if not _binding_can_target(reference.binding, function):
+        if not names_exactly(reference.binding, function):
             continue
         links.append(
             TraceLink(
@@ -371,10 +371,6 @@ def _other_end(function: Span, link: TraceLink) -> Span | None:
     return None
 
 
-def _binding_can_target(binding: Binding | None, function: Span) -> bool:
-    return binding is None or binding.target is None or binding.target.key == function.key
-
-
 def _link_key(link: TraceLink) -> tuple:
     return (
         link.source.key if link.source is not None else "",
@@ -392,7 +388,7 @@ def _caller_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Bind
     return [
         (site.caller, site.binding)
         for site in index.find_callers(function.name)
-        if site.caller is not None and _binding_can_target(site.binding, function)
+        if site.caller is not None and names_exactly(site.binding, function)
     ]
 
 
@@ -409,7 +405,7 @@ def _named_functions(index: CodeIndex) -> Iterable[Span]:
     for file in index.files:
         if language_of(file) is None:
             continue
-        yield from (span for span in index.functions_in(file) if not span.name.startswith("<"))
+        yield from (span for span in index.functions_in(file) if span.is_named)
 
 
 def _similarity(subject: Span, subject_calls: set[str], candidate: Span, candidate_calls: set[str]) -> float:
