@@ -1232,7 +1232,9 @@ class CodeIndex:
         hits = sorted(hit for hit in found if hit.file in self._scope)
         return tuple(hits if max_hits is None else hits[:max_hits])
 
+    @memoized
     def imports(self, file: str) -> tuple[str, ...]:
+        """The scope files ``file`` imports, read once per index from the file as the index first read it."""
         source = "\n".join(self._lines_of(file))
         script_paths = self._script_paths(file)
         packages = self._read_packages()
@@ -1260,8 +1262,19 @@ class CodeIndex:
         return tuple(found.values())
 
     def dependents(self, file: str) -> tuple[str, ...]:
+        """The scope files that import ``file``, in scope order."""
         self._require_in_scope(file)
-        return tuple(path for path in self._code_files if path != file and file in self.imports(path))
+        return self._read_dependents().get(file, ())
+
+    @memoized
+    def _read_dependents(self) -> dict[str, tuple[str, ...]]:
+        """Each scope file's importers, from one read of every code file's imports per index."""
+        importers: dict[str, list[str]] = {}
+        for path in self._code_files:
+            for imported in self.imports(path):
+                if imported != path:
+                    importers.setdefault(imported, []).append(path)
+        return {imported: tuple(paths) for imported, paths in importers.items()}
 
     def co_changed_files(self, file: str, limit: int = 5) -> tuple[CoChange, ...]:
         """Scope files most often committed together with ``file``, with their shared-commit counts;
