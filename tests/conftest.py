@@ -21,12 +21,14 @@ from no_skipped_tests import *  # noqa: F403
 
 from jev_navigator.cache_root import cache_root
 from jev_navigator.data_root import data_root
+from jev_navigator.directives.find_all import ITEMS, match_check
 from jev_navigator.environment import SETTING_PREFIXES
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.judgments.answers import ChoiceAnswer, JevResponse, NoulAnswer
 from jev_navigator.judgments.client import InputBudgetExceededError
 from jev_navigator.judgments.questions import serialized_chars
 from jev_navigator.memory_limit import SLOTS_DIR_VARIABLE
+from jev_navigator.testing import ScriptedJevClient
 
 
 @pytest.fixture(autouse=True)
@@ -290,6 +292,23 @@ class RefusingClient:
 
     def close(self) -> None:
         pass
+
+
+def labelled(labels: Mapping[tuple[str, str], float], default: float = 0.05) -> ScriptedJevClient:
+    """A Find All provider: P(yes) by target and a marker in the unit's code. The real listing,
+    resolution, batching and composition run; this proves execution, not Jev's accuracy."""
+
+    def answer(question_id: str, question: Mapping, state: Mapping) -> float:
+        code = state[ITEMS][int(question_id.rsplit("#", 1)[1])]["code"]
+        asked = question_id.split("@", 1)[0]
+        matches = (
+            p
+            for (target, marker), p in labels.items()
+            if match_check(target).name == asked and marker in code
+        )
+        return next(matches, default)
+
+    return ScriptedJevClient(nouls=answer)
 
 
 class BudgetedClient:

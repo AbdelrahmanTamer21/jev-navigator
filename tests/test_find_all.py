@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from conftest import WEBSITE_QUERIES, AsyncBudgetedClient, BudgetedClient
+from conftest import WEBSITE_QUERIES, AsyncBudgetedClient, BudgetedClient, labelled
 from short_secrets import ShortSecretMasker, numbered_secret
 
 from jev_navigator.directives.find_all import (
@@ -29,7 +29,14 @@ from jev_navigator.directives.find_all import (
 from jev_navigator.index.code_index import CodeIndex
 from jev_navigator.index.prisma_schema import schema_blocks
 from jev_navigator.index.scope import ENV_FILE
-from jev_navigator.index.units import CODE_FILE, OUTSIDE_SCOPE, UNSUPPORTED_LANGUAGE, RangeAnchor, UnitKind
+from jev_navigator.index.units import (
+    CODE_FILE,
+    OUTSIDE_SCOPE,
+    UNSUPPORTED_LANGUAGE,
+    LineAnchor,
+    RangeAnchor,
+    UnitKind,
+)
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputBudgetExceededError, InputLimits
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
@@ -52,23 +59,6 @@ def repository(root: Path, files: Mapping[str, str] = ORDERS) -> CodeIndex:
     for name, source in files.items():
         (root / name).write_text(source)
     return CodeIndex(root, files)
-
-
-def labelled(labels: Mapping[tuple[str, str], float], default: float = 0.05) -> ScriptedJevClient:
-    """A provider fixture: P(yes) by target and a marker in the unit's code. The real listing,
-    resolution, batching and composition run; this proves execution, not Jev's accuracy."""
-
-    def answer(question_id: str, question: Mapping, state: Mapping) -> float:
-        code = state[ITEMS][int(question_id.rsplit("#", 1)[1])]["code"]
-        asked = question_id.split("@", 1)[0]
-        matches = (
-            p
-            for (target, marker), p in labels.items()
-            if match_check(target).name == asked and marker in code
-        )
-        return next(matches, default)
-
-    return ScriptedJevClient(nouls=answer)
 
 
 def sent_code(provider: ScriptedJevClient) -> list[str]:
@@ -175,6 +165,37 @@ def test_at_one_batch_per_wave_the_hits_of_the_rarest_name_are_judged_first(tmp_
     assert [score.unit.symbol for score in result.scores("limit")] == ["holder"]
     assert result.names == {"rare_token": NameHits(2, 2, 1), "common": NameHits(3, 1, 0)}
     assert result.stopped_by == "budget"
+
+
+def test_a_caller_anchor_naming_no_unit_is_unresolved_but_a_name_hit_naming_none_counts_against_its_name(
+    tmp_path: Path,
+) -> None:
+    # Arrange: rare_token's hit in c.md names no code unit; a.py has six lines, so line 40 is outside it
+    index = repository(tmp_path, RARE_AND_COMMON)
+    judge = Judge(labelled({}))
+
+    # Act
+    by_name = find_all(index, judge, LIMIT, names=["rare_token"])
+    with_bad_anchor = find_all(index, judge, LIMIT, names=["rare_token"], anchors=[LineAnchor("a.py", 40)])
+
+    # Assert
+    assert (by_name.names["rare_token"], by_name.unresolved, by_name.coverage) == (
+        NameHits(2, 2, 1),
+        (),
+        "units_examined",
+    )
+    assert [problem.anchor for problem in with_bad_anchor.unresolved] == [LineAnchor("a.py", 40)]
+    assert with_bad_anchor.coverage == "scope_incomplete"
+
+
+def test_a_name_no_source_reaches_is_counted_as_measured_zero(tmp_path: Path) -> None:
+    # Act
+    result = find_all(
+        repository(tmp_path), Judge(labelled({})), LIMIT, names=["absent_name"], files=["rules.py"]
+    )
+
+    # Assert
+    assert result.names == {"absent_name": NameHits(0, 0, 0)}
 
 
 MANY_HITS = {

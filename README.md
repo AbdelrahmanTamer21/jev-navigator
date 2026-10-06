@@ -46,8 +46,11 @@ configuration: a recipe the caller passes as data names them, never an environme
 | Index, operations, units and scope (`CodeIndex`, `operations`, `index.units`, `resolve_scope`) | built |
 | Jev judgments (`Check`, `Pick`, `Rate`, asked through `Judge`) | built |
 | Mini-workflows `find_code`, `find_all` and `trace` | built |
+| The frontier: the order a search judges what its sources reach, a named policy, `STAGE_ORDER` or `VALUE` (per-target queues and shares, settling after one step of hops); see [Sources, the frontier and each workflow's composition](#sources-the-frontier-and-each-workflows-composition) | built |
 | `LlmStep` | built |
 | Text search: the mini-workflows `find_text` and `find_all_text` | built |
+| Sources: one contract (`sources.Source`) for every primitive that reaches candidates; `find_all`, `find_all_text` and `find_text` are compositions of them | built |
+| `find` and `trace` as compositions of sources | not yet: they keep their own moves and call graph |
 | The spelling map | being built |
 | Typed configurations | being built |
 | `jvn search` | being built |
@@ -56,6 +59,11 @@ The spelling map is an index block. It splits every identifier, file name, confi
 literal into word parts and normalises case, separators and plural, so all spellings of one name
 share a key: `Website`, `website`, `websites`, `web_site` and `website.ts` meet. A name lookup then
 returns every real spelling and its locations, rarest first.
+
+**Sources** are the primitives a search's candidates come from, all under one contract, and a
+mini-workflow is a composition of them: the sources that start it, the hop sources a unit that clears
+a target's bar expands through, the frontier's policy and shares, and Jev judging in queue order. See
+[Sources, the frontier and each workflow's composition](#sources-the-frontier-and-each-workflows-composition).
 
 Three rules hold for every change:
 
@@ -942,6 +950,94 @@ could_contain=..., open_first=None)` replaces the wording. `moves=` chooses how 
 index and the opened code that returns places. Pass a subset, or add a function of your own; `MOVES`
 itself is read-only. `FindResult.moves` and the final `stop` step name the moves a search used, and
 `context_for_comment` takes `moves=` too. The directives take their check (`check=`) as a parameter too.
+
+### Sources, the frontier and each workflow's composition
+
+A **source** ([`sources.py`](src/jev_navigator/sources.py)) is a primitive that reaches candidates
+without a model call. It takes `Seeds`: the request's names and the targets' descriptions (`texts`),
+the caller's files and anchors, or units a search already judged. It returns `Reach` records: a place,
+which is a file (every unit listed in it) or an anchor (the unit holding it), with its provenance, which
+is the source's name, the seed it came from, a distance and the request names it was reached by. A
+source never builds units and never scores them. The search turns places into units with its own room
+and reading, so units, `unlisted` files, `unresolved` anchors and each name's counts (`names`) have
+one owner. The frontier measures every unit's code the same way whichever source reached it, so two
+sources reaching one unit never score it differently; only the distance is the source's own, and when
+several sources reach one unit the smallest counts. A source is any object with a `name`, a `label`
+(how coverage counts the units it left unjudged) and `reach(index, seeds)`.
+
+| Source | Reads | Reaches | Distance |
+| --- | --- | --- | --- |
+| `ANCHORS` | anchors | the unit each anchor names | 0 |
+| `FILES` | files | every unit of each file | 1 for an anchor's file or a file it imports, else 2 |
+| `NAMES`, `TEXT_NAMES` | names | the unit holding each line a name is on, rarest name first; `TEXT_NAMES` only in text files, never a lockfile | 3 |
+| `DEFINITIONS` | names | the units defining each name | 1 |
+| `REFERENCES` | names | the units using each name other than by a call | 2 |
+| `NAMED_FILES`, `TEXT_NAMED_FILES` | texts, anchors | every unit of the code (or text) files they name by path or run as a module | 1 |
+| `IMPORTS`, `IMPORTERS` | anchors, units | every unit of the files their files import, or that import their files | 1 |
+| `CALLERS`, `CALLEES` | units | the functions calling each function unit, or that it calls | 1 |
+| `MODELS`, `CLIENT_CALLS` | units | the Prisma models a unit queries, or the lines querying a model block | 1 |
+
+The **frontier** ([`directives/frontier.py`](src/jev_navigator/directives/frontier.py)) is the order
+in which a search judges what its sources reached. Under a call cap whatever is ranked last is lost,
+so the order is a named policy. `STAGE_ORDER`, the default, judges source by source in the order the
+composition lists them. `VALUE` scores every unit by code before the first call: the request's names
+its code holds as whole words, each weighted by how rare it is, whether the unit or its file is named
+like one, the distance and whether it is a test. Each target has its own queue, ranked by the names its
+description spells out, and a share of the item slots in every batch: equal by default, and a caller
+overrides it with `shares={"limit": 3}`. Under `VALUE` a target settles: once a unit clears its yes
+bar, the target draws only the units the hop sources reach from that unit, one step deep, and settles
+when none of them is left to judge. A settled target draws nothing more, its share flows to the targets
+still open, and when every target has settled the search ends `settled`. Every unit drawn is still
+asked every target's question. `Policy("value_all", ranked=True)` keeps the queues and shares without
+settling.
+
+Each mini-workflow's default composition (a caller replaces any part with `sources=`, `hops=`,
+`policy=` and `shares=`):
+
+| Workflow | Starts from | Hops (settling policy only) | Policy | Ends |
+| --- | --- | --- | --- | --- |
+| `find_all` | `ANCHORS`, `FILES`, `NAMES` (`CODE_SOURCES`) | `CALLERS`, `CALLEES` (`HOP_SOURCES`) | `STAGE_ORDER` | scope examined, call cap, or every target settled |
+| `find_all_text` | `ANCHORS`, `FILES`, `TEXT_NAMES` (`TEXT_SOURCES`) | `HOP_SOURCES` | `STAGE_ORDER` | as `find_all` |
+| `find_text` | `TEXT_SOURCES` | `HOP_SOURCES` | `STAGE_ORDER` | the first wave with a yes |
+| `find` (`find_code`) | not a composition of sources yet: its own neighbour moves (`places.MOVES`) | | | |
+| `trace` | not a composition of sources yet: the static call graph (`operations.trace_graph`) | | | |
+
+A new source feeds a workflow through `sources=` or `hops=`, with no change to the workflow. The
+spelling map's source (`spelling`, every spelling of a name) and handler following (`handler`) are
+being built under the same contract. A source joins a workflow's default composition only when a
+measurement without model calls shows it reaches more of the deciding units at an equal or better
+rank, without more Jev calls; until then a caller adds it. This composition, run by
+[`tests/test_readme_examples.py`](tests/test_readme_examples.py), adds the definitions of the names
+and the Prisma models a clearing unit queries, ranks by value and gives `limit` three slots for every
+one of `refund`'s:
+
+<!-- example: frontier composition -->
+```python
+from jev_navigator.directives.find_all import CODE_SOURCES, HOP_SOURCES, find_all
+from jev_navigator.directives.frontier import VALUE
+from jev_navigator.index.units import LineAnchor
+from jev_navigator.sources import DEFINITIONS, MODELS
+
+result = find_all(
+    index,
+    judge,
+    {
+        "limit": "the check that refuses an order over the item limit",
+        "refund": "the code that refunds an order",
+    },
+    anchors=[LineAnchor("orders/service.py", 5)],
+    files=index.files,
+    names=["MAX_ITEMS", "check_limit"],
+    sources=(*CODE_SOURCES, DEFINITIONS),
+    hops=(*HOP_SOURCES, MODELS),
+    policy=VALUE,
+    shares={"limit": 3},
+)
+for target in result.targets:
+    best = result.ranked(target)[0]
+    print(target, best.unit.path, best.unit.symbol, round(best.probability, 2))
+print(result.stopped_by, result.settled)
+```
 
 Directives on top: `context_for_comment` and `find_similar_code`. The library finds code; answering
 questions about that code (is a comment accurate, does a claim hold) is a layer you build on top. A new

@@ -14,7 +14,8 @@ from .index.bindings import Binding, BindingStatus, names_exactly
 from .index.code_index import CodeIndex
 from .index.imports import resolve_python_module
 from .index.languages import language_of, language_read
-from .index.spans import CallSite, CodeSlice, Span
+from .index.prisma_schema import SchemaBlock
+from .index.spans import CallSite, CodeSlice, Span, TextHit
 from .mentions import code_names_in, paths_in, python_modules_in
 
 MAX_FUNCTION_LINES = 120
@@ -104,12 +105,12 @@ def callers_of_file(index: CodeIndex, path: str) -> tuple[CallSite, ...]:
 
 def trace_callers(index: CodeIndex, symbol: str, depth: int | None = None) -> tuple[TraceStep, ...]:
     """Functions calling ``symbol``, then their callers, to a fixed point or explicit depth."""
-    return _trace(index, symbol, depth, _caller_functions)
+    return _trace(index, symbol, depth, caller_functions)
 
 
 def trace_callees(index: CodeIndex, symbol: str, depth: int | None = None) -> tuple[TraceStep, ...]:
     """In-scope callees of ``symbol``, then theirs, to a fixed point or explicit depth."""
-    return _trace(index, symbol, depth, _callee_functions)
+    return _trace(index, symbol, depth, callee_functions)
 
 
 def trace_graph(
@@ -443,7 +444,8 @@ def _link_key(link: TraceLink) -> tuple:
     )
 
 
-def _caller_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Binding | None]]:
+def caller_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Binding | None]]:
+    """Each function holding a call that may reach ``function`` itself, with the call's binding."""
     return [
         (site.caller, site.binding)
         for site in index.find_callers(function.name)
@@ -451,13 +453,36 @@ def _caller_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Bind
     ]
 
 
-def _callee_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Binding | None]]:
+def callee_functions(index: CodeIndex, function: Span) -> list[tuple[Span, Binding | None]]:
     """Each callee definition, with the call's binding; when the binding names its target, only that one."""
     linked = []
     for edge in index.callee_edges(function):
         targets = [edge.binding.target] if edge.binding.target else index.find_definition(edge.name)
         linked += [(target, edge.binding) for target in targets]
     return linked
+
+
+def queried_models(index: CodeIndex, code: str) -> list[tuple[str, SchemaBlock]]:
+    """Each Prisma schema's model and view blocks whose Prisma Client calls ``code`` holds, found by
+    their text: ``.website.`` in ``prisma.client.website.update(...)`` names ``model Website``. Each
+    block comes with its schema file."""
+    return [
+        (file, block)
+        for file in index.schema_files
+        for block in index.schema_blocks_in(file)
+        if block.client_call_text and block.client_call_text in code
+    ]
+
+
+def client_calls(index: CodeIndex, lines: Span) -> list[tuple[TextHit, SchemaBlock]]:
+    """Each line that queries a model or view block ``lines`` of a schema overlap, found by the text of
+    its Prisma Client calls (``.website.`` for ``model Website``), with the block it queries."""
+    return [
+        (hit, block)
+        for block in index.schema_blocks_in(lines.file)
+        if block.client_call_text and lines.overlaps(Span(lines.file, block.start, block.end))
+        for hit in index.search_text(block.client_call_text)
+    ]
 
 
 def _named_functions(index: CodeIndex) -> Iterable[Span]:

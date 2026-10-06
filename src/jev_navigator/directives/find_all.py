@@ -1,11 +1,14 @@
 """Judge every unit of a population against described targets: one Noul per unit per target.
 
-The population is units (``index/units.py``), each one a listing lists: first the units the caller's
-line and range anchors name, then the units of the named files, then the units holding each hit of
-the named texts, names with fewer hits first, so a common word never decides which hits of a rare
-name are seen. Code finds the units; Jev judges each one whole, or a unit larger than its room in a
-request by its pieces. The Judge's call cap is the only budget: no code step is capped. The result
-keeps every raw answer with its place; ranking and any bar belong to the caller.
+The population is units (``index/units.py``), each one a listing lists, that the search's sources
+(``sources.py``) reach from the caller's seeds: by default the units the caller's line and range
+anchors name, the units of the named files, and the units holding each hit of the named texts. A
+policy (``frontier``) orders them: ``STAGE_ORDER``, the default, judges them source by source in that
+order, names with fewer hits first, so a common word never decides which hits of a rare name are
+seen; ``VALUE`` judges the units worth most by code first, each target from its own queue and share,
+and stops spending on a target once it has settled. Code finds the units; Jev judges each one whole,
+or a unit larger than its room in a request by its pieces. The Judge's call cap is the only budget: no
+code step is capped. The result keeps every raw answer with its place; any bar belongs to the caller.
 
 ``find_all`` judges code units only. ``find_all_text`` judges the text units of the files JVN does
 not parse, the same way and with the same question, and never a code unit; ``find_text`` is the text
@@ -19,18 +22,13 @@ import asyncio
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from enum import StrEnum
+from itertools import groupby
 from typing import TypeVar
 
 from ..index.code_index import CodeIndex
-from ..index.languages import language_read
-from ..index.scope import is_lockfile
-from ..index.spans import TextHit
 from ..index.units import (
     Anchor,
-    AnchorResolution,
     Item,
-    LineAnchor,
     Piece,
     RangeAnchor,
     Reading,
@@ -40,12 +38,24 @@ from ..index.units import (
     items_to_judge,
     list_units,
     read_ranges,
-    resolve_anchors,
+    resolve_each,
 )
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
 from ..judgments.questions import Check, item_path, serialized_chars
 from ..judgments.thresholds import NoulVerdict
+from ..sources import ANCHORS, CALLEES, CALLERS, FILES, NAMES, TEXT_NAMES, Reach, Seeds, Source
 from .find_code import search_failure
+from .frontier import (
+    STAGE_ORDER,
+    Features,
+    Frontier,
+    Policy,
+    checked_shares,
+    features_of,
+    name_rarities,
+    target_rarities,
+    value_key,
+)
 
 ITEMS = "items"
 TARGETS = "targets"
@@ -54,6 +64,7 @@ TOO_LARGE = "too large to judge"
 NOT_REACHED = "not reached: the search stopped first"
 REFUSED = "refused: the provider or the final secret scan refused its request, so its answer is unknown"
 FOUND = "found"
+SETTLED = "settled"
 FIND_TEXT_TARGET = "target"
 BATCHES_PER_WAVE = 16
 """How many requests' worth of places one wave hands the Judge, in the population's order. The Judge
@@ -61,19 +72,17 @@ sends a wave's batches together and orders them by place, so the population's or
 waves, and exactly only at one batch per wave. Like ``items_per_request`` it shapes the batches, and
 so the answer store's keys; it does not follow the Judge's concurrency, so that setting never moves
 them."""
+CODE_SOURCES: tuple[Source, ...] = (ANCHORS, FILES, NAMES)
+"""find_all's sources by default: the units the anchors name, the units of the files, then the units
+holding each name's hits."""
+TEXT_SOURCES: tuple[Source, ...] = (ANCHORS, FILES, TEXT_NAMES)
+"""find_all_text's and find_text's sources by default: as ``CODE_SOURCES``, with a name's hits only in
+text files and never in a lockfile."""
+HOP_SOURCES: tuple[Source, ...] = (CALLERS, CALLEES)
+"""What a unit that clears a target's bar pushes under a settling policy, by default: its callers and
+callees."""
 
 T = TypeVar("T")
-
-
-class Source(StrEnum):
-    """How a unit entered a population: find_all lists the units of the caller's anchors (``ANCHOR``),
-    then of its files (``FILE``), then of each name's hits (``NAME``). A caller composing searches names
-    the rest, such as a round of callees (``CALLEE``) it fed as anchors."""
-
-    ANCHOR = "anchor"
-    FILE = "file"
-    NAME = "name"
-    CALLEE = "callee"
 
 
 def match_check(target: str) -> Check:
@@ -87,9 +96,9 @@ def match_check(target: str) -> Check:
 
 @dataclass(frozen=True)
 class NameHits:
-    """A name's hits: how many the text search found in the files the search reads, how many the search
-    reached before it stopped, and how many of those named no listed unit (a line of a file the
-    reading leaves out, or of top-level code a listing leaves out, such as imports)."""
+    """A request name's places: how many the search's sources reached by the name, how many of them the
+    search resolved into units before it stopped, and how many of those named no listed unit (a line
+    of a file the reading leaves out, or of top-level code a listing leaves out, such as imports)."""
 
     found: int
     reached: int
@@ -114,10 +123,17 @@ class FindAllResult:
     """``units`` are every unit of the population, in place order; ``judged`` each target's answers,
     each naming its place; ``not_judged`` each unit or piece id left unjudged with the reason.
     ``room`` is what one unit's code had in a request and ``batches_per_wave`` the wave size, both
-    None when the search never started. ``unlisted`` files gave no units and ``unresolved`` caller
-    anchors named none. ``refusals`` keeps each refused place's error; the place is ``not_judged``
-    as ``REFUSED`` and the search goes on past it. ``entered_by`` gives the source each unit entered
-    the population by, the first when several listed it."""
+    None when the search never started. ``unlisted`` files gave no units, and ``unresolved`` anchors
+    named none: the caller's, and any other a source reached other than by a name (one reached by a
+    name counts in ``names``). ``refusals`` keeps each refused place's error; the place is
+    ``not_judged`` as ``REFUSED`` and the search goes on past it. ``sources`` are the sources the
+    search used, its hop sources last, and ``entered_by`` gives the name of the source each unit
+    entered the population by: the first that reached it, or under a ranked policy the one that put it
+    nearest. ``policy`` ordered the population; under a ranked policy ``features`` holds each target's
+    code features of each unit, and ``repeat_of`` names, for a unit whose code repeats another's, the
+    unit judged in its place, whose answers and reasons it shares. Under a settling policy ``pushed``
+    gives each unit that cleared a target's bar the units its hop sources reached from it, and
+    ``settled`` the targets that settled, in the order they did."""
 
     targets: Mapping[str, str]
     room: int | None
@@ -133,7 +149,13 @@ class FindAllResult:
     calls: int
     failure: Exception | None = None
     refusals: tuple[Refusal, ...] = ()
-    entered_by: Mapping[str, Source] = field(default_factory=dict)
+    sources: tuple[Source, ...] = ()
+    entered_by: Mapping[str, str] = field(default_factory=dict)
+    policy: Policy = STAGE_ORDER
+    features: Mapping[str, Mapping[str, Features]] = field(default_factory=dict)
+    repeat_of: Mapping[str, str] = field(default_factory=dict)
+    pushed: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    settled: tuple[str, ...] = ()
 
     @classmethod
     def not_started(cls, targets: Mapping[str, str], stopped_by: str) -> FindAllResult:
@@ -154,11 +176,26 @@ class FindAllResult:
         )
 
     def scores(self, target: str) -> tuple[UnitScore, ...]:
-        """Every judged unit's answer for ``target``, in place order."""
+        """Every judged unit's answer for ``target``, in place order; a repeat has its copy's answer."""
         answers = {answer.place.id: answer for answer in self.judged[target] if answer.place is not None}
         probabilities = {place_id: answer.probability for place_id, answer in answers.items()}
-        scored = (_unit_score(unit, answers, probabilities) for unit in self.units)
+        by_id = {unit.id: unit for unit in self.units}
+        scored = (
+            _unit_score(unit, by_id[self.repeat_of.get(unit.id, unit.id)], answers, probabilities)
+            for unit in self.units
+        )
         return tuple(score for score in scored if score is not None)
+
+    def ranked(self, target: str) -> tuple[UnitScore, ...]:
+        """Every judged unit's answer for ``target``, best first. A tie goes to the unit worth more by
+        code under a ranked policy, then to the content hash, never to the path."""
+        features = self.features.get(target, {})
+        return tuple(sorted(self.scores(target), key=lambda score: self._rank(score, features)))
+
+    def _rank(self, score: UnitScore, features: Mapping[str, Features]) -> tuple[float, float, str, str]:
+        unit_features = features.get(score.unit.id)
+        value = 0.0 if unit_features is None else unit_features.value(self.policy.weights)
+        return -score.probability, -value, score.unit.content_sha256, score.unit.id
 
     @property
     def coverage(self) -> str:
@@ -183,10 +220,15 @@ def find_all(
     completed: Mapping[str, Sequence[CheckResult]] | None = None,
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    policy: Policy = STAGE_ORDER,
+    shares: Mapping[str, float] | None = None,
+    sources: Sequence[Source] = CODE_SOURCES,
+    hops: Sequence[Source] = HOP_SOURCES,
 ) -> FindAllResult:
-    """Judge the units ``anchors`` name, then the units of ``files``, then the units holding each hit
-    of ``names``, rarest name first, in waves of ``batches_per_wave`` requests' worth, until the
-    judge's call cap stops it.
+    """Judge the units ``sources`` reach from ``anchors``, ``files``, ``names`` and the targets'
+    descriptions (by default the units ``anchors`` name, the units of ``files`` and the units holding
+    each hit of ``names``), in the order ``policy`` gives (see ``frontier``), in waves of
+    ``batches_per_wave`` requests' worth, until the judge's call cap stops it.
 
     ``targets`` maps a name (an identifier) to a description; each unit is asked one question per
     target, all in the same request. ``delivered`` names the lines the caller already shows: a unit
@@ -195,9 +237,20 @@ def find_all(
     target is not asked again. A failed request ends the search ``failed`` with ``failure`` holding
     the error (see ``search_failure``), Ctrl-C ends it ``cancelled``, and either way ``judged`` keeps
     every answer that arrived.
+
+    Under a ranked policy ``shares`` sets each target's share of the item slots in every batch (a
+    target it does not name has 1). Under a settling policy (``VALUE``) a unit clears a target's bar
+    when its answer is yes by the Judge's thresholds; that target then draws only the units ``hops``
+    reach from it (by default its callers and callees), and settles once none of them is left to
+    judge. Every unit drawn is still asked every target's question, so a settled target spends no call
+    of its own. Once every target has settled the search ends ``settled``, with the units it never
+    reached ``not_judged``.
     """
-    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE)
-    return _finished(search, anchors, files, names)
+    composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
+    search = _begin(
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE, composition
+    )
+    return _finished(search, _seeds(targets, files, anchors, names))
 
 
 def find_all_text(
@@ -212,13 +265,20 @@ def find_all_text(
     completed: Mapping[str, Sequence[CheckResult]] | None = None,
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    policy: Policy = STAGE_ORDER,
+    shares: Mapping[str, float] | None = None,
+    sources: Sequence[Source] = TEXT_SOURCES,
+    hops: Sequence[Source] = HOP_SOURCES,
 ) -> FindAllResult:
     """``find_all`` over text units (``Reading.TEXT``): the files JVN does not parse, each in the blocks
-    its format gives, a code file named ``unlisted``. A name's hits in code and in lockfiles are left
-    out, so a common word never floods the search with a lockfile's pieces; a lockfile ``files`` or
-    ``anchors`` name is judged."""
-    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT)
-    return _finished(search, anchors, files, names)
+    its format gives, a code file named ``unlisted``. By default a name's hits in code and in lockfiles
+    are left out (``TEXT_SOURCES``), so a common word never floods the search with a lockfile's
+    pieces; a lockfile ``files`` or ``anchors`` name is judged."""
+    composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
+    search = _begin(
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT, composition
+    )
+    return _finished(search, _seeds(targets, files, anchors, names))
 
 
 def find_text(
@@ -232,20 +292,29 @@ def find_text(
     delivered: Sequence[RangeAnchor] = (),
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    policy: Policy = STAGE_ORDER,
+    sources: Sequence[Source] = TEXT_SOURCES,
 ) -> FindAllResult:
     """``find_all_text`` for the one target ``description``, named ``FIND_TEXT_TARGET``, ending
     ``found`` after the first wave in which a unit's answer is yes by the judge's thresholds."""
     targets = {FIND_TEXT_TARGET: description}
-    search = _begin(index, judge, targets, delivered, None, cancelled, batches_per_wave, Reading.TEXT)
+    composition = _Composition(tuple(sources), HOP_SOURCES, policy, {})
+    search = _begin(
+        index, judge, targets, delivered, None, cancelled, batches_per_wave, Reading.TEXT, composition
+    )
     search.stops_when_found = True
-    return _finished(search, anchors, files, names)
+    return _finished(search, _seeds(targets, files, anchors, names))
 
 
-def _finished(
-    search: _Search, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
-) -> FindAllResult:
+def _seeds(
+    targets: Mapping[str, str], files: Sequence[str], anchors: Sequence[Anchor], names: Sequence[str]
+) -> Seeds:
+    return Seeds(tuple(dict.fromkeys(names)), tuple(targets.values()), tuple(files), tuple(anchors))
+
+
+def _finished(search: _Search, seeds: Seeds) -> FindAllResult:
     try:
-        search.run(anchors, files, names)
+        search.run(seeds)
     except (KeyboardInterrupt, Exception) as error:  # noqa: BLE001 - _stop_by owns how an error ends a search
         return search.ended(error)
     return search.ended(None)
@@ -263,13 +332,20 @@ async def find_all_async(
     completed: Mapping[str, Sequence[CheckResult]] | None = None,
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    policy: Policy = STAGE_ORDER,
+    shares: Mapping[str, float] | None = None,
+    sources: Sequence[Source] = CODE_SOURCES,
+    hops: Sequence[Source] = HOP_SOURCES,
 ) -> FindAllResult:
     """``find_all`` with each wave's requests sent concurrently through the Judge's async form, for an
-    async client. Listing, resolving and reading code run in a worker thread, so the event loop stays
-    free. ``cancelled`` is read before each parse and between waves, since the Judge's async form
-    reads none; a cancelled task's ``CancelledError`` is never caught."""
-    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE)
-    return await _finished_async(search, anchors, files, names)
+    async client. Reaching, listing, resolving and reading code run in a worker thread, so the event
+    loop stays free. ``cancelled`` is read before each parse and between waves, since the Judge's async
+    form reads none; a cancelled task's ``CancelledError`` is never caught."""
+    composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
+    search = _begin(
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE, composition
+    )
+    return await _finished_async(search, _seeds(targets, files, anchors, names))
 
 
 async def find_all_text_async(
@@ -284,20 +360,36 @@ async def find_all_text_async(
     completed: Mapping[str, Sequence[CheckResult]] | None = None,
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    policy: Policy = STAGE_ORDER,
+    shares: Mapping[str, float] | None = None,
+    sources: Sequence[Source] = TEXT_SOURCES,
+    hops: Sequence[Source] = HOP_SOURCES,
 ) -> FindAllResult:
     """``find_all_text`` the way ``find_all_async`` runs ``find_all``."""
-    search = _begin(index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT)
-    return await _finished_async(search, anchors, files, names)
+    composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
+    search = _begin(
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT, composition
+    )
+    return await _finished_async(search, _seeds(targets, files, anchors, names))
 
 
-async def _finished_async(
-    search: _Search, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
-) -> FindAllResult:
+async def _finished_async(search: _Search, seeds: Seeds) -> FindAllResult:
     try:
-        await search.run_async(anchors, files, names)
+        await search.run_async(seeds)
     except (KeyboardInterrupt, Exception) as error:  # noqa: BLE001 - _stop_by owns how an error ends a search
         return search.ended(error)
     return search.ended(None)
+
+
+@dataclass(frozen=True)
+class _Composition:
+    """What a search is composed of beside its seeds and Judge: the sources that start it, the hop
+    sources a clearing unit pushes through, the policy that orders the units and the targets' shares."""
+
+    sources: tuple[Source, ...]
+    hops: tuple[Source, ...]
+    policy: Policy
+    shares: Mapping[str, float]
 
 
 def _begin(
@@ -309,11 +401,15 @@ def _begin(
     cancelled: Callable[[], bool] | None,
     batches_per_wave: int,
     reading: Reading,
+    composition: _Composition,
 ) -> _Search:
     _require_identifiers(targets)
     if batches_per_wave < 1:
         raise ValueError("batches_per_wave must be at least 1")
-    search = _Search(index, judge.scope(), targets, delivered, cancelled, batches_per_wave, reading)
+    shares = checked_shares(composition.shares, targets, composition.policy)
+    search = _Search(
+        index, judge.scope(), targets, delivered, cancelled, batches_per_wave, reading, composition, shares
+    )
     search.resume(completed or {})
     return search
 
@@ -348,9 +444,16 @@ class _Search:
         cancelled: Callable[[], bool] | None,
         batches_per_wave: int,
         reading: Reading,
+        composition: _Composition,
+        shares: Mapping[str, float],
     ) -> None:
         self.index = index
         self.reading = reading
+        self.sources = composition.sources
+        self.hops = composition.hops
+        self.policy = composition.policy
+        self.shares = shares
+        self.seeds = Seeds()
         self.stops_when_found = False
         self.found_one = False
         self.batches_per_wave = batches_per_wave
@@ -365,7 +468,18 @@ class _Search:
         self.answered: set[tuple[str, str]] = set()
         self.judged: dict[str, list[CheckResult]] = {target: [] for target in targets}
         self.units: dict[str, Unit] = {}
-        self.entered_by: dict[str, Source] = {}
+        self.entered_by: dict[str, str] = {}
+        self.features: dict[str, dict[str, Features]] = {target: {} for target in targets}
+        self.repeat_of: dict[str, str] = {}
+        self.first_with_content: dict[str, str] = {}
+        self.unit_of_place: dict[str, str] = {}
+        self.places_of: dict[str, list[Item]] = {}
+        self.rarities: dict[str, dict[str, float]] = {}
+        self.pushed: dict[str, tuple[str, ...]] = {}
+        self.hopped: set[str] = set()
+        self.expanded: dict[str, set[str]] = {target: set() for target in targets}
+        self.awaiting: dict[str, set[str]] = {target: set() for target in targets}
+        self.settled: list[str] = []
         self.not_judged: dict[str, str] = {}
         self.unlisted: dict[str, str] = {}
         self.unresolved: list[UnresolvedAnchor] = []
@@ -382,20 +496,26 @@ class _Search:
             for answer in completed.get(target, ()):
                 self._record(target, answer)
 
-    def run(self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]) -> None:
-        for places in self._waves(anchors, files, names):
+    def run(self, seeds: Seeds) -> None:
+        for places in self._waves(seeds):
             self._judge(places)
             if self.found_one:
                 return
 
-    async def run_async(self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]) -> None:
-        waves = self._waves(anchors, files, names)
+    async def run_async(self, seeds: Seeds) -> None:
+        waves = self._waves(seeds)
         while (wave := await asyncio.to_thread(self._next_wave, waves)) is not None:
             places, entries = wave
             if self.stopped():
                 return
             async for name, answer in self.judge.iter_check_every_async(
-                self.checks, entries, self.shared, list_name=ITEMS, places=places, refusals=self.refusals
+                self.checks,
+                entries,
+                self.shared,
+                list_name=ITEMS,
+                places=places,
+                refusals=self.refusals,
+                keep_order=self.policy.ranked,
             ):
                 self._record(self.target_of[name], answer)
 
@@ -405,14 +525,20 @@ class _Search:
             stop = "cancelled"
         elif error is None and self.found_one:
             stop = FOUND
+        elif error is None and self._settled_early():
+            stop = SETTLED
         return self.result(stop, failure)
 
-    def _waves(
-        self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
-    ) -> Iterator[list[Item]]:
-        return _chunks(
-            self._population(anchors, files, names), self.judge.items_per_request * self.batches_per_wave
-        )
+    def _settled_early(self) -> bool:
+        """Every target settled while units were still waiting to be judged."""
+        return len(self.settled) == len(self.targets) and NOT_REACHED in self.not_judged.values()
+
+    def _waves(self, seeds: Seeds) -> Iterator[list[Item]]:
+        self.seeds = seeds
+        size = self.judge.items_per_request * self.batches_per_wave
+        if self.policy.ranked:
+            return self._ranked_waves(size)
+        return _chunks(self._staged_population(), size)
 
     def _next_wave(self, waves: Iterator[list[Item]]) -> tuple[list[Item], list[dict]] | None:
         """The next wave's places and the entries Jev reads for them; None when the population is spent."""
@@ -425,65 +551,216 @@ class _Search:
             for place in places
         ]
 
-    def _population(
-        self, anchors: Sequence[Anchor], files: Sequence[str], names: Sequence[str]
-    ) -> Iterator[Item]:
-        """Every place still to judge, in order: the anchored units', the files' units', then the
-        places of the units holding each name's hits, rarest name first. A request's worth of hits is
-        resolved together, and only when the next wave needs it."""
+    def _staged_population(self) -> Iterator[Item]:
+        """Every place still to judge, source by source in the order the search lists them. The files
+        a source reached are listed together; a request's worth of anchors is resolved together, and
+        only when the next wave needs it."""
         if self.stopped():
             return
-        yield from self._admitted(self._anchored(anchors), Source.ANCHOR)
+        for reaches in self._start_reaches():
+            for group in self._resolution_groups(reaches):
+                if self.stopped():
+                    return
+                yield from self._admitted(self._units_reached(group))
+
+    def _start_reaches(self) -> list[list[Reach]]:
+        """Each start source's places, in the order the search lists the sources. Every request name
+        is counted over all of them, so a name no source reached counts 0."""
+        reaches = [list(source.reach(self.index, self.seeds)) for source in self.sources]
+        self.found = dict.fromkeys(self.seeds.names, 0)
+        for reach in (reach for source_reaches in reaches for reach in source_reaches):
+            for name in reach.names:
+                self.found[name] = self.found.get(name, 0) + 1
+        return reaches
+
+    def _resolution_groups(self, reaches: Sequence[Reach]) -> Iterator[list[Reach]]:
+        for is_file, run in groupby(reaches, key=_is_file_reach):
+            group = list(run)
+            yield from ([group] if is_file else _chunks(group, self.judge.items_per_request))
+
+    def _ranked_waves(self, size: int) -> Iterator[list[Item]]:
+        """Waves of ``size`` places drawn from the targets' queues (``frontier.Frontier``). Every source
+        is reached, every place resolved and every unit admitted before the first wave, so a unit the
+        search never reaches is still counted; a unit whose code repeats one already admitted shares
+        that unit's answers instead of being judged. Before each wave the targets settle."""
         if self.stopped():
             return
-        yield from self._admitted(self._listed(files), Source.FILE)
-        if not names or self.stopped():
-            return
-        hits = {name: self._hits(name) for name in dict.fromkeys(names)}
-        self.found = {name: len(found) for name, found in hits.items()}
-        for chunk in _chunks(_rarest_first(hits), self.judge.items_per_request):
-            if self.stopped():
+        frontier = self._frontier(self._candidates())
+        while not self.stopped() and (drawing := self._drawing(frontier)):
+            wave = frontier.wave(size, drawing)
+            if not wave:
                 return
-            yield from self._admitted(self._units_of(chunk), Source.NAME)
+            yield wave
 
-    def _hits(self, name: str) -> tuple[TextHit, ...]:
-        hits = self.index.search_text(name)
-        if self.reading is Reading.CODE:
-            return hits
-        return tuple(hit for hit in hits if _read_by_name_in_text(hit.file))
+    def _frontier(self, candidates: Sequence[tuple[Unit, Reach]]) -> Frontier:
+        """Each target's queue: every admitted place, its unit's value for that target first."""
+        rarities = name_rarities(self.found)
+        self.rarities = {target: target_rarities(text, rarities) for target, text in self.targets.items()}
+        for unit, reach in candidates:
+            self._add_features(unit, reach)
+        for unit, reach in sorted(candidates, key=lambda candidate: self._admission_key(candidate[0])):
+            self.places_of[unit.id] = self._admitted_once(unit, reach)
+        queues = {
+            target: [
+                place
+                for unit, _ in sorted(candidates, key=lambda candidate: self._value_key(target, candidate[0]))
+                for place in self.places_of[unit.id]
+            ]
+            for target in self.targets
+        }
+        return Frontier(queues, self.shares)
 
-    def _anchored(self, anchors: Sequence[Anchor]) -> tuple[Unit, ...]:
-        resolution = self._resolved(anchors)
-        self.unresolved.extend(resolution.unresolved)
-        return resolution.units
+    def _add_features(self, unit: Unit, reach: Reach) -> None:
+        code = read_ranges(self.index, unit.path, unit.ranges)
+        for target in self.targets:
+            self.features[target][unit.id] = features_of(unit, code, reach.distance, self.rarities[target])
 
-    def _listed(self, files: Sequence[str]) -> tuple[Unit, ...]:
-        listing = list_units(self.index, files, box_chars=self.room, reading=self.reading)
+    def _admission_key(self, unit: Unit) -> tuple[float, str, str]:
+        """Of units with the same code, the one worth most to any target is judged for all of them."""
+        best = max(self.features[target][unit.id].value(self.policy.weights) for target in self.targets)
+        return -best, unit.content_sha256, unit.id
+
+    def _value_key(self, target: str, unit: Unit) -> tuple[float, str, str]:
+        return value_key(unit, self.features[target][unit.id], self.policy.weights)
+
+    def _drawing(self, frontier: Frontier) -> dict[str, bool]:
+        """Each target still drawing, mapped to whether it draws only its hops. Under a settling policy
+        a target with a unit that cleared its bar first gets that unit's hops, and settles once none of
+        its hops is left to judge."""
+        if not self.policy.settles:
+            return dict.fromkeys(self.targets, False)
+        drawing = {}
+        for target in self.targets:
+            if target in self.settled:
+                continue
+            clearing = self._clearing(target)
+            self._push_hops(frontier, target, sorted(clearing - self.expanded[target]))
+            if not clearing or self._awaiting(target):
+                drawing[target] = bool(clearing)
+            else:
+                self.settled.append(target)
+        return drawing
+
+    def _clearing(self, target: str) -> set[str]:
+        """The units whose answer for ``target`` is yes by the Judge's thresholds."""
+        return {
+            self.unit_of_place[answer.place.id]
+            for answer in self.judged[target]
+            if answer.verdict is NoulVerdict.YES and answer.place.id in self.unit_of_place
+        }
+
+    def _push_hops(self, frontier: Frontier, target: str, unit_ids: Sequence[str]) -> None:
+        """Gives ``target`` the units the hop sources reach from each clearing unit, worth most to it
+        first; a unit a push brought in pushes nothing, so hops go one step deep."""
+        for unit_id in unit_ids:
+            self.expanded[target].add(unit_id)
+            if unit_id in self.hopped:
+                continue
+            hops = sorted(self._hops_of(unit_id), key=lambda hop: self._value_key(target, self.units[hop]))
+            places = [place for hop in hops for place in self._still_pending(hop)]
+            frontier.push_hops(target, places)
+            self.awaiting[target].update(place.id for place in places)
+
+    def _hops_of(self, unit_id: str) -> tuple[str, ...]:
+        """The units the hop sources reach from ``unit_id``, seeded with that unit alone, each admitted on
+        first sight; the unit itself is never its own hop."""
+        if unit_id not in self.pushed:
+            seeds = Seeds(units=(self.units[unit_id],))
+            reached = (
+                pair
+                for source in self.hops
+                for pair in self._units_reached(list(source.reach(self.index, seeds)))
+            )
+            hops = {}
+            for hop, reach in reached:
+                if hop.id != unit_id:
+                    hops.setdefault(hop.id, (hop, reach))
+            for hop, reach in hops.values():
+                if hop.id not in self.units:
+                    self._add_features(hop, reach)
+                    self.places_of[hop.id] = self._admitted_once(hop, reach)
+                    self.hopped.add(hop.id)
+            self.pushed[unit_id] = tuple(hops)
+        return self.pushed[unit_id]
+
+    def _still_pending(self, unit_id: str) -> list[Item]:
+        """The places of the unit judged for ``unit_id`` (itself, or the copy it repeats) still waiting."""
+        judged_as = self.repeat_of.get(unit_id, unit_id)
+        return [place for place in self.places_of.get(judged_as, []) if self._waiting(place.id)]
+
+    def _awaiting(self, target: str) -> bool:
+        return any(self._waiting(place_id) for place_id in self.awaiting[target])
+
+    def _waiting(self, place_id: str) -> bool:
+        """Still to judge: neither answered nor cut (too large, delivered or refused)."""
+        refused = any(refusal.place is not None and refusal.place.id == place_id for refusal in self.refusals)
+        return self.not_judged.get(place_id) == NOT_REACHED and not refused
+
+    def _candidates(self) -> list[tuple[Unit, Reach]]:
+        """Every unit the start sources reached, once, with the reach that puts it nearest: the earlier
+        source's on a tie."""
+        nearest: dict[str, tuple[Unit, Reach]] = {}
+        for reaches in self._start_reaches():
+            for unit, reach in self._units_reached(reaches):
+                if unit.id not in nearest or reach.distance < nearest[unit.id][1].distance:
+                    nearest[unit.id] = (unit, reach)
+        return list(nearest.values())
+
+    def _admitted_once(self, unit: Unit, reach: Reach) -> list[Item]:
+        """``unit``'s places to judge, or none when its code repeats a unit already admitted."""
+        first = self.first_with_content.setdefault(unit.content_sha256, unit.id)
+        if first == unit.id:
+            return self._admitted([(unit, reach)])
+        self.units[unit.id] = unit
+        self.entered_by[unit.id] = reach.source
+        self.repeat_of[unit.id] = first
+        return []
+
+    def _units_reached(self, reaches: Sequence[Reach]) -> list[tuple[Unit, Reach]]:
+        """The units ``reaches`` name, each with the reach that named it: every listed unit of a file,
+        the units an anchor names."""
+        files = [reach for reach in reaches if _is_file_reach(reach)]
+        anchors = [reach for reach in reaches if not _is_file_reach(reach)]
+        return self._units_of_files(files) + self._units_at_anchors(anchors)
+
+    def _units_of_files(self, reaches: Sequence[Reach]) -> list[tuple[Unit, Reach]]:
+        if not reaches:
+            return []
+        listing = list_units(
+            self.index, [reach.at for reach in reaches], box_chars=self.room, reading=self.reading
+        )
         self.unlisted.update(listing.unlisted)
-        return listing.units
+        reach_of: dict[str, Reach] = {}
+        for reach in reaches:
+            reach_of.setdefault(reach.at, reach)
+        return [(unit, reach_of[unit.path]) for unit in listing.units]
 
-    def _resolved(self, anchors: Sequence[Anchor]) -> AnchorResolution:
-        return resolve_anchors(
+    def _units_at_anchors(self, reaches: Sequence[Reach]) -> list[tuple[Unit, Reach]]:
+        """The units each anchor names. An anchor reached by a name that names none counts against that
+        name; any other is ``unresolved``."""
+        anchors = [reach.at for reach in reaches]
+        resolved = resolve_each(
             self.index, anchors, box_chars=self.room, listed_only=True, reading=self.reading
         )
+        units = []
+        for reach, (anchor, named, problem) in zip(reaches, resolved, strict=True):
+            for name in reach.names:
+                self.reached[name] += 1
+                self.without_unit[name] += bool(problem)
+            if problem and not reach.names:
+                self.unresolved.append(UnresolvedAnchor(anchor, problem))
+            units += [(unit, reach) for unit in named]
+        return units
 
-    def _units_of(self, chunk: Sequence[tuple[str, TextHit]]) -> tuple[Unit, ...]:
-        anchors = [LineAnchor(hit.file, hit.line) for _, hit in chunk]
-        resolution = self._resolved(anchors)
-        missed = {problem.anchor for problem in resolution.unresolved}
-        for (name, _), anchor in zip(chunk, anchors, strict=True):
-            self.reached[name] += 1
-            self.without_unit[name] += anchor in missed
-        return resolution.units
-
-    def _admitted(self, units: Iterable[Unit], source: Source) -> list[Item]:
+    def _admitted(self, reached: Iterable[tuple[Unit, Reach]]) -> list[Item]:
         """The places still to judge of the units not seen before, each unit registered on first sight
-        with the ``source`` that listed it."""
+        with the source that reached it."""
         places = []
-        for unit in units:
+        for unit, reach in reached:
             if unit.id not in self.units:
                 self.units[unit.id] = unit
-                self.entered_by[unit.id] = source
+                self.entered_by[unit.id] = reach.source
+                self.unit_of_place.update((place.id, unit.id) for place in items_to_judge(unit))
                 places += self._pending_places(unit)
         return places
 
@@ -524,6 +801,7 @@ class _Search:
             cancelled=self.cancelled,
             places=places,
             refusals=self.refusals,
+            keep_order=self.policy.ranked,
         ):
             self._record(self.target_of[name], answer)
 
@@ -547,13 +825,14 @@ class _Search:
             for refusal in self.refusals
             if refusal.place is not None and refusal.place.id in self.not_judged
         }
+        not_judged = self.not_judged | dict.fromkeys(refused, REFUSED)
         return FindAllResult(
             self.targets,
             self.room,
             self.batches_per_wave,
             tuple(sorted(self.units.values(), key=_unit_order)),
             {target: tuple(sorted(answers, key=_answer_order)) for target, answers in self.judged.items()},
-            self.not_judged | dict.fromkeys(refused, REFUSED),
+            not_judged | self._repeats_left(not_judged),
             dict(self.unlisted),
             tuple(self.unresolved),
             {
@@ -565,8 +844,22 @@ class _Search:
             self.judge.calls,
             failure,
             tuple(self.refusals),
-            dict(self.entered_by),
+            sources=self.sources + self.hops,
+            entered_by=dict(self.entered_by),
+            policy=self.policy,
+            features={target: dict(features) for target, features in self.features.items() if features},
+            repeat_of=dict(self.repeat_of),
+            pushed=dict(self.pushed),
+            settled=tuple(self.settled),
         )
+
+    def _repeats_left(self, not_judged: Mapping[str, str]) -> dict[str, str]:
+        """Each place of a repeat whose copy's place was left unjudged, with the copy's reason."""
+        left = {}
+        for repeat_id, first_id in self.repeat_of.items():
+            places = zip(_place_ids(self.units[repeat_id]), _place_ids(self.units[first_id]), strict=True)
+            left |= {repeat: not_judged[first] for repeat, first in places if first in not_judged}
+        return left
 
 
 def _room(judge: Judge, index: CodeIndex, checks: Sequence[Check], shared: Mapping) -> int:
@@ -579,9 +872,8 @@ def _room(judge: Judge, index: CodeIndex, checks: Sequence[Check], shared: Mappi
     return judge.input_limits.box_chars - serialized_chars(beside) - longest_question + serialized_chars("")
 
 
-def _read_by_name_in_text(file: str) -> bool:
-    """A text search reaches by a name's hits only text files, never a lockfile."""
-    return not language_read(file) and not is_lockfile(file)
+def _is_file_reach(reach: Reach) -> bool:
+    return isinstance(reach.at, str)
 
 
 def _lines_by_file(regions: Sequence[RangeAnchor]) -> dict[str, frozenset[int]]:
@@ -589,12 +881,6 @@ def _lines_by_file(regions: Sequence[RangeAnchor]) -> dict[str, frozenset[int]]:
     for region in regions:
         lines.setdefault(region.file, set()).update(range(region.start, region.end + 1))
     return {file: frozenset(numbers) for file, numbers in lines.items()}
-
-
-def _rarest_first(hits: Mapping[str, Sequence[TextHit]]) -> Iterator[tuple[str, TextHit]]:
-    for name in sorted(hits, key=lambda name: (len(hits[name]), name)):
-        for hit in hits[name]:
-            yield name, hit
 
 
 def _chunks(values: Iterable[T], size: int) -> Iterator[list[T]]:
@@ -609,13 +895,20 @@ def _chunks(values: Iterable[T], size: int) -> Iterator[list[T]]:
 
 
 def _unit_score(
-    unit: Unit, answers: Mapping[str, CheckResult], probabilities: Mapping[str, float]
+    unit: Unit, judged_as: Unit, answers: Mapping[str, CheckResult], probabilities: Mapping[str, float]
 ) -> UnitScore | None:
-    if not unit.pieces:
-        answer = answers.get(unit.id)
+    """``unit``'s answer, read at the unit judged in its place: itself, or the copy it repeats."""
+    if not judged_as.pieces:
+        answer = answers.get(judged_as.id)
         return None if answer is None else UnitScore(unit, answer, None)
-    piece = best_piece(unit, probabilities)
-    return None if piece is None else UnitScore(unit, answers[unit.piece_id(piece)], piece)
+    piece = best_piece(judged_as, probabilities)
+    if piece is None:
+        return None
+    return UnitScore(unit, answers[judged_as.piece_id(piece)], unit.pieces[piece.index])
+
+
+def _place_ids(unit: Unit) -> list[str]:
+    return [unit.id, *(unit.piece_id(piece) for piece in unit.pieces)]
 
 
 def _unit_order(unit: Unit) -> tuple:
