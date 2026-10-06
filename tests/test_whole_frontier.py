@@ -166,3 +166,24 @@ def test_cached_builtin_masking_keeps_path_rules_and_cross_item_secret_copies(tm
     assert secret not in code
     assert "config-only-value" not in code
     assert "[MASKED]" in code
+
+
+def test_default_frontier_follows_fresh_identifier_references_and_incoming_calls(tmp_path: Path) -> None:
+    index = shop_index(
+        tmp_path,
+        {
+            "entry.py": "def entry():\n    callback = support_task\n    return callback\n",
+            "support.py": "def support_task():\n    return 'FEATURE_LIMIT'\n",
+            "consumer.py": "from entry import entry\n\ndef consume():\n    return entry()\n",
+            "config.toml": "FEATURE_LIMIT = 7\n",
+            "unrelated.py": "def other():\n    return 99\n",
+        },
+    )
+    result = asyncio.run(
+        FrontierConfiguration().search(
+            index, Judge(ScriptedJevClient(default_noul=0.0)), {"p": "entry"}, files=["entry.py"]
+        )
+    )
+    assert result.stopped_by == "scope_examined", result.failure
+    assert {unit.path for unit in result.units} == {"entry.py", "support.py", "consumer.py", "config.toml"}
+    assert not result.not_judged
