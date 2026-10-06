@@ -43,6 +43,7 @@ from ..index.units import (
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
 from ..judgments.questions import Check, item_path, serialized_chars
 from ..judgments.thresholds import NoulVerdict
+from ..mentions import code_names_in
 from ..sources import ANCHORS, CALLEES, CALLERS, FILES, NAMES, TEXT_NAMES, Reach, Seeds, Source
 from .find_code import search_failure
 from .frontier import (
@@ -223,6 +224,7 @@ def find_all(
     policy: Policy = STAGE_ORDER,
     shares: Mapping[str, float] | None = None,
     sources: Sequence[Source] = CODE_SOURCES,
+    reading: Reading = Reading.CODE,
     hops: Sequence[Source] = HOP_SOURCES,
 ) -> FindAllResult:
     """Judge the units ``sources`` reach from ``anchors``, ``files``, ``names`` and the targets'
@@ -248,7 +250,7 @@ def find_all(
     """
     composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
     search = _begin(
-        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE, composition
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, reading, composition
     )
     return _finished(search, _seeds(targets, files, anchors, names))
 
@@ -335,6 +337,7 @@ async def find_all_async(
     policy: Policy = STAGE_ORDER,
     shares: Mapping[str, float] | None = None,
     sources: Sequence[Source] = CODE_SOURCES,
+    reading: Reading = Reading.CODE,
     hops: Sequence[Source] = HOP_SOURCES,
 ) -> FindAllResult:
     """``find_all`` with each wave's requests sent concurrently through the Judge's async form, for an
@@ -343,7 +346,7 @@ async def find_all_async(
     form reads none; a cancelled task's ``CancelledError`` is never caught."""
     composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
     search = _begin(
-        index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE, composition
+        index, judge, targets, delivered, completed, cancelled, batches_per_wave, reading, composition
     )
     return await _finished_async(search, _seeds(targets, files, anchors, names))
 
@@ -515,7 +518,7 @@ class _Search:
                 list_name=ITEMS,
                 places=places,
                 refusals=self.refusals,
-                keep_order=self.policy.ranked,
+                keep_order=self.policy.ranked or self.policy.search_order,
             ):
                 self._record(self.target_of[name], answer)
 
@@ -538,7 +541,44 @@ class _Search:
         size = self.judge.items_per_request * self.batches_per_wave
         if self.policy.ranked:
             return self._ranked_waves(size)
+        if self.policy.expands:
+            return self._expanding_waves(size)
         return _chunks(self._staged_population(), size)
+
+    def _expanding_waves(self, size: int) -> Iterator[list[Item]]:
+        """Register the entire reached frontier before judging, then expand newly judged units.
+
+        Answers control neither admission nor expansion. Every unit is expanded once, and fresh
+        terms are searched once. A spent call budget leaves the full pending population visible.
+        """
+        pending = list(self._staged_population())
+        expanded: set[str] = set()
+        terms = set(self.seeds.names)
+        while pending and not self.stopped():
+            yield from _chunks(pending, size)
+            judged = {
+                self.unit_of_place[answer.place.id]
+                for answers in self.judged.values()
+                for answer in answers
+                if answer.place is not None and answer.place.id in self.unit_of_place
+            }
+            fresh = [unit for unit in self.units.values() if unit.id in judged - expanded]
+            expanded.update(unit.id for unit in fresh)
+            codes = tuple(read_ranges(self.index, unit.path, unit.ranges) for unit in fresh)
+            names = tuple(
+                dict.fromkeys(name for code in codes for name in code_names_in(code) if name not in terms)
+            )
+            terms.update(names)
+            seeds = Seeds(
+                names=names,
+                texts=codes,
+                files=tuple(dict.fromkeys(unit.path for unit in fresh)),
+                units=tuple(fresh),
+            )
+            pending = []
+            for source in self.hops:
+                reaches = list(source.reach(self.index, seeds))
+                pending.extend(self._admitted(self._units_reached(reaches)))
 
     def _next_wave(self, waves: Iterator[list[Item]]) -> tuple[list[Item], list[dict]] | None:
         """The next wave's places and the entries Jev reads for them; None when the population is spent."""
@@ -816,7 +856,7 @@ class _Search:
             cancelled=self.cancelled,
             places=places,
             refusals=self.refusals,
-            keep_order=self.policy.ranked,
+            keep_order=self.policy.ranked or self.policy.search_order,
         ):
             self._record(self.target_of[name], answer)
 

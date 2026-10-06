@@ -70,6 +70,7 @@ class Reading(StrEnum):
 
     CODE = "code"
     TEXT = "text"
+    MIXED = "mixed"
 
 
 @dataclass(frozen=True)
@@ -276,6 +277,8 @@ def _left_out(index: CodeIndex, files: Sequence[str], reading: Reading) -> dict[
     ``CodeIndex.text_files_left_out`` names."""
     if reading is Reading.CODE:
         return {file: UNSUPPORTED_LANGUAGE for file in files if not language_read(file)}
+    if reading is Reading.MIXED:
+        return index.text_files_left_out([file for file in files if not language_read(file)])
     code = {file: CODE_FILE for file in files if language_read(file)}
     return code | index.text_files_left_out([file for file in files if file not in code])
 
