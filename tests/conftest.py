@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import os
 import signal
 import subprocess
@@ -277,7 +276,8 @@ REFUSAL_DIGEST = {
 
 class RefusingClient:
     """Answers as ``scripted`` does, but refuses for its input size, with ``REFUSAL``, every request
-    whose list ``list_name`` holds ``marker``; a request without that list is answered."""
+    whose list ``list_name`` has an item with ``marker`` in its code; metadata is ignored and
+    a request without that list is answered."""
 
     def __init__(self, scripted, marker: str, list_name: str) -> None:
         self.scripted = scripted
@@ -286,7 +286,7 @@ class RefusingClient:
         self.model = scripted.model
 
     def ask(self, state: Mapping, questions: Mapping) -> JevResponse:
-        if self.marker in json.dumps(state.get(self.list_name, [])):
+        if any(self.marker in item["code"] for item in state.get(self.list_name, [])):
             raise InputBudgetExceededError(REFUSAL)
         return self.scripted.ask(state, questions)
 
