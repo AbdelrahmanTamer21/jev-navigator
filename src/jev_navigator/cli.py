@@ -23,7 +23,13 @@ from .cache_root import cache_root
 from .cli_cache import CACHE_ACTIONS, run_cache_command, tidy_after_run
 from .cli_resume import SavedSearch, load_resume, save_resume
 from .cli_statistics import STATISTICS_KINDS, STATISTICS_OPERATIONS, create_statistics_pack
-from .cli_trace import create_trace_evidence_pack, not_indexed_lines, unavailable_file_lines
+from .cli_trace import (
+    create_trace_evidence_pack,
+    not_indexed_lines,
+    refused_digested,
+    refused_lines,
+    unavailable_file_lines,
+)
 from .data_root import default_run_folder
 from .directives.entry import EntrySelection, choose_initial_candidates
 from .directives.find_all import FindAllResult, UnitScore, find_all, match_check
@@ -36,12 +42,7 @@ from .index.code_index import CodeIndex
 from .index.units import RangeAnchor
 from .judgments.answers import answered_by
 from .judgments.client import JevClient
-from .judgments.journal import (
-    ERROR_TEXT_VARIABLE,
-    error_message,
-    error_text_kept,
-    message_fields,
-)
+from .judgments.journal import ERROR_TEXT_VARIABLE, error_fields, error_text_kept
 from .judgments.judge import CallCapReachedError, Judge
 from .judgments.store import (
     SHARED_STORE_VARIABLE,
@@ -202,6 +203,9 @@ def _run_search(args: argparse.Namespace) -> int:
     else:
         print(f"evidence pack: {output.resolve()}")
         print(f"outcome: {_outcome_summary(result)} ({calls} live calls)")
+        if result.get("refused"):
+            count = len(result["refused"])
+            print(f"refused: {count} request{'' if count == 1 else 's'}, named in report.md")
         if resume_directory is not None:
             print(f"resume: use --resume {output.resolve()} with the same target and repository")
     return 130 if search_outcome == "cancelled" else 0
@@ -477,7 +481,7 @@ def create_evidence_pack(
         if not keep_requests:
             _drop_code(manifest, labels)
         if not journal.keeps_error_text:
-            _digest_history_failures(manifest)
+            _digest_error_text(manifest)
         _write_json(output / "manifest.json", manifest)
         (output / "report.md").write_text(
             _find_all_report(manifest) if enumeration is not None else _report(manifest)
@@ -517,8 +521,8 @@ def _failure_record(error: BaseException, judge: Judge, journal: ProgressJournal
     request_id = judge.failed_request(error)
     keep = journal.keeps_error_text
     return {
-        **_error_fields(error, keep),
-        "causes": [_error_fields(cause, keep) for cause in _causes(error)],
+        **error_fields(error, keep_text=keep),
+        "causes": [error_fields(cause, keep_text=keep) for cause in _causes(error)],
         "request_id": request_id,
         "route": journal.routes.get(request_id) if request_id is not None else None,
         "status": journal.statuses.get(request_id) if request_id is not None else None,
@@ -544,10 +548,6 @@ def _failure_lines(search: dict, bullet: str) -> list[str]:
         f"{bullet}Failure: {failure['type']}{status}; its message ({failure['message_length']} characters, "
         f"SHA-256 `{failure['message_sha256']}`) was printed to stderr; --no-error-text kept only its digest"
     ]
-
-
-def _error_fields(error: BaseException, keep: bool) -> dict:
-    return {"type": type(error).__name__, **message_fields(error_message(error), keep_text=keep)}
 
 
 def _causes(error: BaseException) -> list[BaseException]:
@@ -1125,10 +1125,13 @@ def _manifest(
     }
 
 
-def _digest_history_failures(manifest: dict) -> None:
+def _digest_error_text(manifest: dict) -> None:
+    """Keeps each history failure's and refused request's message only as its digest."""
     for name in ("search", "seed_search"):
         search = manifest.get(name) or {}
         search["history"] = [failure_digested(step) for step in search.get("history", [])]
+        if "refused" in search:
+            search["refused"] = refused_digested(search["refused"])
 
 
 def _drop_code(manifest: dict, labels: PlaceLabels) -> None:
@@ -1185,6 +1188,11 @@ def _find_all_summary(
             for group, verdict in _VERDICT_GROUPS
         },
         "not_judged": dict(result.not_judged),
+        "refused": {
+            refusal.place.id: error_fields(refusal.error)
+            for refusal in result.refusals
+            if refusal.place is not None
+        },
         "unlisted_files": dict(result.unlisted),
         "unresolved_seeds": [
             {**asdict(problem.anchor), "problem": problem.problem} for problem in result.unresolved
@@ -1255,6 +1263,8 @@ def _find_all_report(manifest: dict) -> str:
             )
     lines += ["", "## Coverage gaps", ""]
     lines.append(f"- not_judged: {_reason_counts(search['not_judged']) or 'none'}")
+    lines.append("- refused:" if search["refused"] else "- refused: none")
+    lines += refused_lines(search["refused"])
     lines.append("- unlisted_files:" if search["unlisted_files"] else "- unlisted_files: none")
     lines += unavailable_file_lines(search["unlisted_files"])
     lines.append(f"- unresolved_seeds: {len(search['unresolved_seeds']) or 'none'}")

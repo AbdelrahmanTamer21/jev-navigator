@@ -12,6 +12,7 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+from conftest import REFUSAL, REFUSAL_DIGEST, RefusingClient
 from git_repos import commit_files, git
 from isolated_jvn import JVN
 
@@ -23,6 +24,7 @@ from jev_navigator.cli import (
     create_evidence_pack,
     main,
 )
+from jev_navigator.directives.find_all import REFUSED
 from jev_navigator.directives.find_code import SearchBudget
 from jev_navigator.environment import load_typesafe_environment
 from jev_navigator.judgments.store import SHARED_STORE_VARIABLE
@@ -1273,6 +1275,44 @@ def test_findall_budget_stop_writes_partial_pack_with_completed_results(tmp_path
     else:
         assert saved["search"]["found"]
     assert (out / "report.md").is_file()
+
+
+@pytest.mark.parametrize("keep_error_text", [True, False])
+def test_findall_names_a_refused_unit_and_its_error_and_judges_the_rest(
+    tmp_path: Path, keep_error_text: bool
+) -> None:
+    # Arrange
+    repo = tmp_path / "repo"
+    commit_files(
+        repo,
+        {
+            "policy.py": "def admit(item):\n    return len(item) <= 3\n",
+            "other.py": "def refused_here(item):\n    return 'REFUSE-ME'\n",
+        },
+    )
+
+    # Act
+    result = create_evidence_pack(
+        repo,
+        (),
+        "item limit",
+        (),
+        tmp_path / "pack",
+        SearchBudget(max_calls=20),
+        RefusingClient(ScriptedJevClient(default_noul=0.2), "REFUSE-ME", list_name="items"),
+        workflow="findall",
+        keep_error_text=keep_error_text,
+    )
+
+    # Assert: without error text the message is kept only as its digest.
+    search = result["search"]
+    message = {"message": REFUSAL} if keep_error_text else REFUSAL_DIGEST
+    assert search["outcome"] == "scope_examined"
+    assert search["not_judged"] == {"other.py:1-2": REFUSED}
+    assert search["refused"] == {"other.py:1-2": {"type": "InputBudgetExceededError", **message}}
+    assert ("InputBudgetExceededError: max_tokens_exceeded" in (tmp_path / "pack/report.md").read_text()) == (
+        keep_error_text
+    )
 
 
 def test_stats_cli_measures_methods_and_filters_line_ranges_without_a_provider(

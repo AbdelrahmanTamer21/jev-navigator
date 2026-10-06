@@ -74,8 +74,8 @@ class SecretMasker:
 
     ``masked_values`` lists every masked value of ``COPY_MIN_CHARS`` or more characters but a short number
     (``"1234"``), so request masking hides each copy elsewhere too; a shorter value (``"x"``) is too short
-    to identify a secret and is hidden only where a rule finds it: anywhere for a value of ``BY_CONTENT_MIN_CHARS`` or more characters,
-    as a whole word for a shorter one (see ``copy_pattern``).
+    to identify a secret and is hidden only where a rule finds it: anywhere for a value of
+    ``BY_CONTENT_MIN_CHARS`` or more characters, as a whole word for a shorter one (see ``copy_pattern``).
 
     ``path`` is the file the text comes from. In a config file, or in text from no file, an unquoted value
     under a secret key is a value (``POSTGRES_PASSWORD: example``); in code it stays (``token: str``)."""

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import BudgetedClient
+from conftest import BudgetedClient, RefusingClient
 
 from jev_navigator.directives.trace import (
     TRACE_EVIDENCE_CHECKS,
@@ -242,6 +242,24 @@ def test_name_only_and_missing_targets_remain_unresolved_static_links(tmp_path: 
     missing = next(link for link in result.unresolved_links if link.name == "missing_sink")
     assert missing.target is None
     assert missing.binding is not None and missing.binding.status == "unresolved"
+
+
+def test_a_refused_item_leaves_every_obligation_unexamined_and_the_trace_goes_on(tmp_path: Path) -> None:
+    # Arrange
+    index = _workflow_index(tmp_path)
+    root = index.find_definition("handle_order")[0]
+    [reject] = index.find_definition("reject")
+    provider = RefusingClient(_evidence_client(), marker="422", list_name="trace")
+
+    # Act
+    result = trace_workflow(
+        index, Judge(provider), "How does an order request become an HTTP result?", [root]
+    )
+
+    # Assert
+    assert [refusal.item["span_key"] for refusal in result.refusals] == [reject.key]
+    assert all(not obligation.examined for obligation in result.obligations)
+    assert set(_statuses(result).values()) == {EvidenceStatus.EVIDENCE_BACKED}
 
 
 def test_trace_requires_a_concrete_start_instead_of_inventing_one(tmp_path: Path) -> None:

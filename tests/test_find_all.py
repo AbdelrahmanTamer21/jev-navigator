@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from conftest import WEBSITE_QUERIES, BudgetedClient
+from conftest import WEBSITE_QUERIES, AsyncBudgetedClient, BudgetedClient
 from short_secrets import ShortSecretMasker, numbered_secret
 
 from jev_navigator.directives.find_all import (
     DELIVERED,
     ITEMS,
     NOT_REACHED,
+    REFUSED,
     TARGETS,
     TOO_LARGE,
     NameHits,
@@ -32,6 +34,7 @@ from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputBudgetExceeded
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
 from jev_navigator.judgments.secrets import MASK
+from jev_navigator.judgments.thresholds import NoulVerdict
 from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 LIMIT = {"limit": "the check that limits the items of an order"}
@@ -345,6 +348,30 @@ def test_a_unit_of_exactly_its_room_is_judged_whole_and_one_character_more_is_to
     entry = {"file": "big.py", "code": sized_function(room + 1).removesuffix("\n")}
     with pytest.raises(InputBudgetExceededError):
         Judge(over).check_each(match_check("limit"), [entry], {TARGETS: LIMIT})
+
+
+@pytest.mark.parametrize("sending", ["sync", "async"])
+def test_a_refused_request_marks_its_unit_refused_and_the_search_goes_on(
+    tmp_path: Path, sending: str
+) -> None:
+    # Arrange: the provider's budget is below the box the Judge measures, so it refuses the big unit
+    index = repository(tmp_path, {"big.py": sized_function(3_000), "rules.py": ORDERS["rules.py"]})
+    provider = BudgetedClient(2_500)
+
+    # Act
+    if sending == "sync":
+        result = find_all(index, Judge(provider), LIMIT, files=index.files)
+    else:
+        result = asyncio.run(
+            find_all_async(index, Judge(AsyncBudgetedClient(provider)), LIMIT, files=index.files)
+        )
+
+    # Assert
+    [big] = [unit for unit in result.units if unit.path == "big.py"]
+    assert result.not_judged == {big.id: REFUSED}
+    assert (result.stopped_by, result.coverage) == ("scope_examined", "scope_incomplete")
+    assert {answer.place.file for answer in result.judged["limit"]} == {"rules.py"}
+    assert [type(refusal.error) for refusal in result.refusals] == [InputBudgetExceededError]
 
 
 def secrets_function(lines: int) -> str:
@@ -860,3 +887,45 @@ def test_find_text_stops_after_the_first_wave_holding_a_confident_yes(tmp_path: 
     assert result.stopped_by == "found"
     assert [score.unit.path for score in result.scores("target")] == ["a.md", "b.md"]
     assert result.not_judged == {"c.md:1-2": NOT_REACHED}
+
+
+class FailsOn:
+    """Answers as ``scripted`` does, and fails every request whose items hold ``marker``."""
+
+    def __init__(self, scripted: ScriptedJevClient, marker: str, error: Exception) -> None:
+        self.scripted = scripted
+        self.marker = marker
+        self.error = error
+        self.model = scripted.model
+
+    def ask(self, state, questions):
+        if self.marker in json.dumps(state[ITEMS]):
+            raise self.error
+        return self.scripted.ask(state, questions)
+
+
+@pytest.mark.parametrize("stop", ["failed", "budget"])
+def test_find_text_ends_as_its_wave_failed_even_when_that_wave_held_a_yes(tmp_path: Path, stop: str) -> None:
+    # Arrange: one wave of three one-unit requests sent in turn; b.md's answer is yes, then c.md's
+    # request fails, or finds the allowance of two calls spent
+    index = repository(tmp_path, GUIDES)
+    provider = labelled({("target", "at most four items"): 0.95})
+    error = RuntimeError("Jev answered 503")
+    client = FailsOn(provider, "warehouse", error) if stop == "failed" else provider
+    max_calls = None if stop == "failed" else 2
+
+    # Act
+    result = find_text(
+        index,
+        Judge(client, items_per_request=1, max_concurrency=1, max_calls=max_calls),
+        "the rule that limits the items of an order",
+        files=index.files,
+        batches_per_wave=3,
+    )
+
+    # Assert: the yes is kept, and the outcome says the wave did not end cleanly.
+    assert result.stopped_by == stop
+    assert (result.failure is error) == (stop == "failed")
+    assert [
+        score.unit.path for score in result.scores("target") if score.answer.verdict is NoulVerdict.YES
+    ] == ["b.md"]

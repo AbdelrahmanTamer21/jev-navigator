@@ -16,7 +16,7 @@ from .. import operations
 from ..index.bindings import BindingStatus
 from ..index.code_index import CodeIndex
 from ..index.spans import Span
-from ..judgments.judge import CallCapReachedError, CheckResult, Judge
+from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
 from ..judgments.questions import Check, Criterion
 from ..judgments.thresholds import NoulVerdict
 
@@ -116,8 +116,8 @@ class TraceObligation:
 
     ``evidence_backed`` means Jev supported at least one supplied source item. It is semantic model
     evidence, never a promotion of candidate or unresolved links to static proof. ``examined`` says
-    whether every span of the walked component was judged for this obligation; when a budget stop
-    left spans unjudged, the obligation stays ``unresolved`` instead of becoming a gap.
+    whether every span of the walked component was judged for this obligation; when a budget stop or
+    a refused request left spans unjudged, the obligation stays ``unresolved`` instead of becoming a gap.
     """
 
     name: str
@@ -130,6 +130,9 @@ class TraceObligation:
 
 @dataclass(frozen=True)
 class TraceResult:
+    """``refusals`` are the spans whose request was refused: they stay unjudged, so every obligation
+    stays unexamined, and the trace goes on past them."""
+
     question: str
     graph: operations.TraceGraph
     included: tuple[Span, ...]
@@ -138,6 +141,7 @@ class TraceResult:
     unresolved_links: tuple[operations.TraceLink, ...]
     budget_stopped: bool
     cancelled: bool
+    refusals: tuple[Refusal, ...] = ()
 
 
 def trace_workflow(
@@ -165,6 +169,7 @@ def trace_workflow(
     graph = operations.trace_graph(index, starts, depth=depth, cancelled=cancelled)
     stopped = graph.stop == "cancelled" or (cancelled is not None and cancelled())
     answers: dict[str, list[CheckResult]] = {check.name: [] for check in checks}
+    refusals: list[Refusal] = []
     budget_stopped = False
 
     def cancellation_requested() -> bool:
@@ -195,6 +200,7 @@ def trace_workflow(
                 {"workflow": {"question": question}},
                 list_name="trace",
                 cancelled=cancellation_requested,
+                refusals=refusals,
             ):
                 answers[name].append(result)
         except CallCapReachedError:
@@ -238,6 +244,7 @@ def trace_workflow(
         unresolved_links,
         budget_stopped,
         stopped,
+        tuple(refusals),
     )
 
 
