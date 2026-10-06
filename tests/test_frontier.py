@@ -9,7 +9,15 @@ from pathlib import Path
 from shop_search import FROZEN, REQUEST, SHOP, TARGETS, sent_requests, shop_index
 
 from jev_navigator.directives.find_all import NOT_REACHED, find_all, find_all_async
-from jev_navigator.directives.frontier import STAGE_ORDER, VALUE, Features, Source, features_of, name_rarities
+from jev_navigator.directives.frontier import (
+    STAGE_ORDER,
+    VALUE,
+    Features,
+    Source,
+    Weights,
+    features_of,
+    name_rarities,
+)
 from jev_navigator.index.units import list_units, read_ranges
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
@@ -80,6 +88,18 @@ def test_a_units_features_count_whole_word_names_and_its_own_and_its_files_name(
     assert features == Features(
         names=("invoice",), rarity=rarities["invoice"], defines=False, file_named=True, distance=2, test=False
     )
+
+
+def test_by_default_a_unit_defining_a_name_outranks_one_holding_two_names() -> None:
+    # Arrange: the definer holds only its own name; the other holds both names, each as rare as can be
+    rarest = name_rarities({"check_limit": 0})["check_limit"]
+    definer = Features(("check_limit",), rarest, defines=True, file_named=False, distance=2, test=False)
+    mentioner = Features(
+        ("check_limit", "MAX_ITEMS"), 2 * rarest, defines=False, file_named=False, distance=2, test=False
+    )
+
+    # Act / Assert
+    assert definer.value(Weights()) > mentioner.value(Weights())
 
 
 def test_renaming_a_folder_leaves_the_value_order_and_ranking_unchanged_while_it_moves_the_stage_order(
