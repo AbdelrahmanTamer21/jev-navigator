@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
 from shop_search import shop_index
 
 from jev_navigator.composition import FrontierConfiguration
@@ -204,3 +205,33 @@ def test_default_lists_target_word_files_before_paths_read_from_supplied_code(tm
     )
     assert result.stopped_by == "scope_examined", result.failure
     assert client.requests[0][0]["items"][0]["file"] == "z/limit.py"
+
+
+def test_literal_hops_search_fresh_values_once_while_following_a_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = shop_index(
+        tmp_path,
+        {
+            "app.py": "def run():\n    return 'FEATURE_KEY'\n",
+            "config.py": "FEATURE_KEY = 'OTHER_KEY'\n",
+            "other.py": "OTHER_KEY = 'FEATURE_KEY'\n",
+        },
+    )
+    searched = []
+    search = index.search_texts
+
+    def recorded(terms):
+        terms = tuple(terms)
+        searched.extend(terms)
+        return search(terms)
+
+    monkeypatch.setattr(index, "search_texts", recorded)
+    result = asyncio.run(
+        FrontierConfiguration(sources=(FILES,), hops=(LITERALS,)).search(
+            index, Judge(ScriptedJevClient()), {"p": "configuration"}, files=["app.py"]
+        )
+    )
+    assert result.stopped_by == "scope_examined", result.failure
+    assert {unit.path for unit in result.units} == {"app.py", "config.py", "other.py"}
+    assert searched == ["FEATURE_KEY", "OTHER_KEY"]

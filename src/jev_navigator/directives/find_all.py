@@ -44,7 +44,7 @@ from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
 from ..judgments.questions import Check, item_path, serialized_chars
 from ..judgments.secrets import DEFAULT_MASKER
 from ..judgments.thresholds import NoulVerdict
-from ..mentions import code_names_in
+from ..mentions import code_names_in, literal_names_in
 from ..sources import ANCHORS, CALLEES, CALLERS, FILES, NAMES, TEXT_NAMES, Reach, Seeds, Source
 from .find_code import search_failure
 from .frontier import (
@@ -568,6 +568,7 @@ class _Search:
         pending = list(self._staged_population())
         expanded: set[str] = set()
         terms = set(self.seeds.names)
+        searched_literals: set[str] = set()
         while not self.stopped():
             yield from _chunks(pending, size)
             judged = {
@@ -586,11 +587,21 @@ class _Search:
                 dict.fromkeys(name for code in codes for name in code_names_in(code) if name not in terms)
             )
             terms.update(names)
+            literals = tuple(
+                dict.fromkeys(
+                    literal
+                    for code in codes
+                    for literal in literal_names_in(code)
+                    if literal not in searched_literals
+                )
+            )
+            searched_literals.update(literals)
             seeds = Seeds(
                 names=names,
                 texts=codes,
                 files=tuple(dict.fromkeys(unit.path for unit in fresh)),
                 units=tuple(fresh),
+                literals=literals,
             )
             pending = []
             for source in self.hops:
@@ -800,10 +811,14 @@ class _Search:
             by_place[reach.at].append(unit)
         self.resolved_units.update((at, tuple(units)) for at, units in by_place.items())
         result = []
+        admitted = set(self.units)
         for reach in reaches:
             units = self.resolved_units[reach.at]
             self._record_name_resolution(reach, not units)
-            result.extend((unit, reach) for unit in units)
+            for unit in units:
+                if unit.id not in admitted:
+                    admitted.add(unit.id)
+                    result.append((unit, reach))
         return result
 
     def _units_of_files(self, reaches: Sequence[Reach]) -> list[tuple[Unit, Reach]]:

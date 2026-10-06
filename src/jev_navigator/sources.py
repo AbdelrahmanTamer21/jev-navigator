@@ -41,6 +41,7 @@ class Seeds:
     files: tuple[str, ...] = ()
     anchors: tuple[Anchor, ...] = ()
     units: tuple[Unit, ...] = ()
+    literals: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -310,13 +311,15 @@ class LiteralSource:
     label: ClassVar[str] = "literal uses"
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
-        literals = tuple(dict.fromkeys(literal for text in seeds.texts for literal in literal_names_in(text)))
+        literals = seeds.literals
+        if literals is None:
+            literals = tuple(
+                dict.fromkeys(literal for text in seeds.texts for literal in literal_names_in(text))
+            )
         index.search_texts(literals)
         return [
             Reach(LineAnchor(hit.file, hit.line), self.name, literal, 2, frozenset({literal}))
-            for literal in dict.fromkeys(
-                literal for text in seeds.texts for literal in literal_names_in(text)
-            )
+            for literal in literals
             for hit in index.search_text(literal)
             if not is_lockfile(hit.file)
         ]
