@@ -7,14 +7,15 @@ their own: in a script, a test, or a pipeline that never calls a model.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
 from .index.bindings import Binding, BindingStatus, names_exactly
 from .index.code_index import CodeIndex
+from .index.imports import resolve_python_module
 from .index.languages import language_of, language_read
 from .index.spans import CallSite, CodeSlice, Span
-from .mentions import code_names_in, paths_in
+from .mentions import code_names_in, paths_in, python_modules_in
 
 MAX_FUNCTION_LINES = 120
 _COMMENT_PREFIXES = ("#", "//", "/*", "*", "*/")
@@ -173,23 +174,42 @@ def code_named_in_doc(index: CodeIndex, doc_text: str) -> tuple[Span, ...]:
 
 
 def files_named_by(index: CodeIndex, texts: Sequence[str], anchor_files: Sequence[str]) -> NamedFiles:
-    """The scope files that ``texts``, or the whole text of ``anchor_files``, name by path. A path
-    token names a file whose path is the token or ends with ``/`` and the token, so ``jobs/sweep.py``
-    names ``web/jobs/sweep.py`` but never ``xjobs/sweep.py``, and a bare ``ci.yml`` names every
-    ``ci.yml``. An anchor file is never among them, an anchor file outside the scope is never read,
-    and a named file is not read for further names."""
+    """The scope files that ``texts``, or the whole text of ``anchor_files``, name by path or run as a
+    module. A path token names a file whose path is the token or ends with ``/`` and the token, so
+    ``jobs/sweep.py`` names ``web/jobs/sweep.py`` but never ``xjobs/sweep.py``, and a bare ``ci.yml``
+    names every ``ci.yml``. A module a ``python -m`` command runs names the file Python runs, resolved
+    like an import: ``app.jobs`` names ``src/app/jobs.py``, and a package its ``__main__.py``. An anchor
+    file is never among them, an anchor file outside the scope is never read, and a named file is not
+    read for further names."""
     scope = frozenset(index.files)
     anchors = [file for file in dict.fromkeys(anchor_files) if file in scope]
     sources = [*texts, *("\n".join(index.lines(file)) for file in anchors)]
     by_name = _files_by_name(index.files)
     named_by: dict[str, str] = {}
-    for token in (token for source in sources for token in paths_in(source)):
-        for file in _files_ending_with(by_name, token):
-            if file not in anchors:
-                named_by.setdefault(file, token)
+    for file, token in (named for source in sources for named in _files_named_in(source, by_name, scope)):
+        if file not in anchors:
+            named_by.setdefault(file, token)
     code = tuple(file for file in named_by if language_read(file))
     text = tuple(file for file in named_by if not language_read(file))
     return NamedFiles(code, text, named_by)
+
+
+def _files_named_in(
+    source: str, by_name: Mapping[str, list[str]], scope: frozenset[str]
+) -> Iterator[tuple[str, str]]:
+    for token in paths_in(source):
+        yield from ((file, token) for file in _files_ending_with(by_name, token))
+    for module in python_modules_in(source):
+        if file := _file_run_as(module, scope):
+            yield file, module
+
+
+def _file_run_as(module: str, scope: frozenset[str]) -> str | None:
+    """The file ``python -m module`` runs: the module's own, or a package's ``__main__.py``."""
+    path = resolve_python_module(module, scope)
+    if path is None or not path.endswith("/__init__.py"):
+        return path
+    return resolve_python_module(f"{module}.__main__", scope) or path
 
 
 def _files_by_name(files: Iterable[str]) -> dict[str, list[str]]:

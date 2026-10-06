@@ -182,6 +182,39 @@ def test_an_anchor_outside_the_scope_is_never_read(tmp_path: Path) -> None:
     assert (named.code, named.text) == ((), ())
 
 
+RUN_MODULES = {
+    "src/app/__init__.py": "",
+    "src/app/jobs/__init__.py": "",
+    "src/app/jobs/sweep.py": "def sweep():\n    return 1\n",
+    "src/app/cli/__init__.py": "",
+    "src/app/cli/__main__.py": "def main():\n    return 0\n",
+    "src/app/other.py": "def other():\n    return 2\n",
+    "deploy.yml": (
+        "steps:\n"
+        "  - run: uv run python -m app.jobs.sweep --all\n"
+        "  - run: python3 -u -m app.cli\n"
+        "  - run: python -m missing.module\n"
+        "  - run: echo app.other\n"
+    ),
+}
+
+
+def test_a_module_a_python_command_runs_names_its_file_resolved_like_an_import(tmp_path: Path) -> None:
+    # Arrange: a module run by -m, a package run by -m (its __main__ runs), a module outside the scope,
+    # and a dotted word no python command runs
+    for name, source in RUN_MODULES.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(source)
+    index = CodeIndex(tmp_path, list(RUN_MODULES))
+
+    # Act
+    named = operations.files_named_by(index, [], ["deploy.yml"])
+
+    # Assert
+    assert named.named_by == {"src/app/jobs/sweep.py": "app.jobs.sweep", "src/app/cli/__main__.py": "app.cli"}
+    assert named.code == ("src/app/jobs/sweep.py", "src/app/cli/__main__.py")
+
+
 def test_a_file_named_in_backticks_gives_no_code_name(tmp_path: Path) -> None:
     # Arrange
     (tmp_path / "config.py").write_text(

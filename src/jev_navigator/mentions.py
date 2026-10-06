@@ -1,5 +1,5 @@
-"""What a text mentions: the paths and the code names it spells out. This module is the one owner of
-whether a token in a text is a path, and of how a text names code."""
+"""What a text mentions: the paths, the modules a command runs, and the code names it spells out. This
+module is the one owner of whether a token in a text is a path, and of how a text names code."""
 
 from __future__ import annotations
 
@@ -28,6 +28,8 @@ _SCREAMING_CASE = re.compile(r"\b([A-Z][A-Z0-9]*_[A-Z0-9_]+)\b")
 _SNAKE_CASE = re.compile(r"\b([a-z]+(?:_[a-z0-9]+)+)\b")
 BARE_NAME_RULES = (_CALL, _CAMEL_CASE, _SCREAMING_CASE, _SNAKE_CASE)
 """The shapes of a word a text names code by without backticks; snake_case is its own rule."""
+_DOTTED_MODULE = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+_PYTHON_MODULE_RUN = re.compile(rf"\bpython[\d.]*(?:\s+-[A-Za-z]\w*)*\s+-m\s+({_DOTTED_MODULE})")
 _IDENTIFIER = re.compile(r"[A-Za-z_$][\w$]*")
 _MEMBER_SEPARATOR = re.compile(r"[.#:]")
 _SYMBOL_SEPARATOR = re.compile(r"[/,|]")
@@ -38,6 +40,12 @@ def paths_in(text: str) -> list[str]:
     ``./``, ``../`` or ``/``: ``../config/app.toml`` gives ``config/app.toml``."""
     tokens = (_LEADING_RELATIVE.sub("", token) for token in PATH_TOKEN.findall(text))
     return list(dict.fromkeys(token for token in tokens if token))
+
+
+def python_modules_in(text: str) -> list[str]:
+    """The modules ``text`` runs with ``python -m``, each once, in order of first mention:
+    ``uv run python3 -u -m app.jobs --all`` runs ``app.jobs``. A dotted word no command runs is none."""
+    return list(dict.fromkeys(_PYTHON_MODULE_RUN.findall(text)))
 
 
 def is_file_path(span: str) -> bool:
