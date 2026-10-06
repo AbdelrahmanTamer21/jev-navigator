@@ -205,11 +205,12 @@ def _files_named_in(
 
 
 def _file_run_as(module: str, scope: frozenset[str]) -> str | None:
-    """The file ``python -m module`` runs: the module's own, or a package's ``__main__.py``."""
+    """The file ``python -m module`` runs: the module's own, or a package's ``__main__.py`` (None for a
+    package without one, which Python cannot run)."""
     path = resolve_python_module(module, scope)
     if path is None or not path.endswith("/__init__.py"):
         return path
-    return resolve_python_module(f"{module}.__main__", scope) or path
+    return resolve_python_module(f"{module}.__main__", scope)
 
 
 def _files_by_name(files: Iterable[str]) -> dict[str, list[str]]:
