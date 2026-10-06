@@ -1326,3 +1326,15 @@ def test_batched_text_search_retains_overlapping_terms_and_literal_punctuation(t
     }
     assert [(hit.file, hit.line) for hit in index.search_text("bab")] == [("app.py", 1)]
     assert index.search_text("sandbox", whole_word=True)[0].line == 2
+
+
+def test_binary_matches_cannot_corrupt_the_next_text_hit_path(tmp_path: Path) -> None:
+    from shop_search import shop_index
+
+    index = shop_index(
+        tmp_path,
+        {"a.png": "\0sandbox\0", "config.yaml": "sandbox: enabled\n"},
+    )
+    for hits in (index.search_texts(["sandbox"])["sandbox"], index.search_text("sandbox", whole_word=True)):
+        assert {(hit.file, hit.line) for hit in hits} == {("a.png", 1), ("config.yaml", 1)}
+        assert all(hit.file in index.files for hit in hits)

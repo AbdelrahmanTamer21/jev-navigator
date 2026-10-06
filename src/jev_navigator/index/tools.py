@@ -368,7 +368,15 @@ def ripgrep_fixed(
     ripgrep's JSON would carry the whole line."""
     pattern = _hit_window(text, context_bytes, whole_word)
     per_file = [] if max_hits is None else ["--max-count", str(max_hits)]
-    command = [*RIPGREP_SAFE, "--only-matching", "--line-number", "--with-filename", "--null", *per_file]
+    command = [
+        *RIPGREP_SAFE,
+        "--text",
+        "--only-matching",
+        "--line-number",
+        "--with-filename",
+        "--null",
+        *per_file,
+    ]
     command += ["--replace", "$window", "--regexp", pattern, "--"]
     hits: dict[tuple[str, int], TextHit] = {}
     for chunk in file_chunks(files, bytes_only=True):
@@ -382,6 +390,7 @@ def ripgrep_term_lines(texts: Sequence[str], files: Sequence[str], cwd: Path) ->
     pattern = "(?:" + "|".join(re.escape(text) for text in texts) + ")"
     command = [
         *RIPGREP_SAFE,
+        "--text",
         "--only-matching",
         "--line-number",
         "--with-filename",
