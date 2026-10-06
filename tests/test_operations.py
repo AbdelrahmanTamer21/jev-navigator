@@ -128,6 +128,7 @@ NAMED_FILES = {
     "web/jobs/sweep.py": "def sweep():\n    return 2\n",
     "xjobs/sweep.py": "def sweep():\n    return 3\n",
     ".github/workflows/ci.yml": "on: push\n",
+    "prisma/schema.prisma": "model Order {\n  id Int @id\n}\n",
     "secret.py": "TOKEN = 1\n",
 }
 WITHHELD = "secret.py"
@@ -143,18 +144,19 @@ def named_files_repository(root: Path) -> CodeIndex:
 def test_files_named_by_a_text_or_an_anchor_file_come_back_split_into_code_and_text(tmp_path: Path) -> None:
     # Arrange
     index = named_files_repository(tmp_path)
-    statement = "jobs/sweep.py and secret.py skip `send`; ci.yml never runs it"
+    statement = "jobs/sweep.py and secret.py skip `send`; ci.yml never runs it; schema.prisma holds Order"
 
     # Act
     named = operations.files_named_by(index, [statement], ["service.py", "loader.py"])
 
-    # Assert
-    assert named.code == ("jobs/sweep.py", "web/jobs/sweep.py")
+    # Assert: a Prisma schema is code JVN reads.
+    assert named.code == ("jobs/sweep.py", "web/jobs/sweep.py", "prisma/schema.prisma")
     assert named.text == (".github/workflows/ci.yml", "rules/limits.json")
     assert named.named_by == {
         "jobs/sweep.py": "jobs/sweep.py",
         "web/jobs/sweep.py": "jobs/sweep.py",
         ".github/workflows/ci.yml": "ci.yml",
+        "prisma/schema.prisma": "schema.prisma",
         "rules/limits.json": "rules/limits.json",
     }
 

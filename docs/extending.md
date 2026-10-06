@@ -183,7 +183,8 @@ or `/`). A token names each scope file whose path is the token or ends with `/` 
 `jobs/sweep.py` names `web/jobs/sweep.py` but never `xjobs/sweep.py`, and a bare `ci.yml` names every
 `ci.yml`. A module a `python -m` command runs (`mentions.python_modules_in`) names the file Python
 runs, resolved like an import from the repository root or `src/`: `uv run python -m app.jobs` names
-`src/app/jobs.py`, and a package names its `__main__.py`. Anchor files are never named, an anchor file
+`src/app/jobs.py`, and a package names its `__main__.py`. Options before `-m` are skipped, also
+those with a value (`python -W ignore -m app.jobs`, `python -X dev -m app.jobs`). Anchor files are never named, an anchor file
 outside the scope is never read, and a named file is not read for further names. The result splits `code` files, for `find_all`'s `files`, from
 `text` files, and `named_by` keeps the token that named each one. No model is called.
 
