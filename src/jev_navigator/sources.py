@@ -111,6 +111,7 @@ class NameSource:
     label: ClassVar[str] = "from name hits"
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        index.search_texts(seeds.names)
         hits = {name: self._hits(index, name) for name in dict.fromkeys(seeds.names)}
         return [
             Reach(LineAnchor(hit.file, hit.line), self.name, name, 3, frozenset({name}))
@@ -309,6 +310,8 @@ class LiteralSource:
     label: ClassVar[str] = "literal uses"
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        literals = tuple(dict.fromkeys(literal for text in seeds.texts for literal in literal_names_in(text)))
+        index.search_texts(literals)
         return [
             Reach(LineAnchor(hit.file, hit.line), self.name, literal, 2, frozenset({literal}))
             for literal in dict.fromkeys(
@@ -327,6 +330,9 @@ class SpellingSource:
     label: ClassVar[str] = "spelling variants"
 
     def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        index.search_texts(
+            variant for name in seeds.names for variant in spelling_variants(name) if variant != name
+        )
         return [
             Reach(LineAnchor(hit.file, hit.line), self.name, name, 3, frozenset({name}))
             for name in dict.fromkeys(seeds.names)
