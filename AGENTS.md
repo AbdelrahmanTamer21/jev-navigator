@@ -7,6 +7,9 @@ which blocks are built or being built, lives in the README's
 - **Levels.** Code primitives compose into mini-workflows (`find`, `find_all`, `trace`, `find_text`
   and `find_all_text`); mini-workflows compose into larger workflows
   through typed configurations (being built).
+- **Compositions.** A mini-workflow is sources under one contract feeding the frontier, then Jev; a new
+  source joins through `sources=` or `hops=`. Defaults per workflow:
+  [README](README.md#sources-the-frontier-and-each-workflows-composition).
 - **Default.** `jvn search`, being built, is to be the default configuration; every other use is
   another named configuration.
 - **Optional steps.** A Jev step (a bounded decision) or an LLM step (generation over an open space) can

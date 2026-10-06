@@ -18,8 +18,9 @@ system, registry or base class: a new use case is a plain function of 30 to 60 l
 | `Check`, `Pick`, `Rate` | one closed question each: yes or no, one option of a list, a level on a scale |
 | `Judge` | asks questions with masking, a secret scan, a cache, budgets and a journal; returns raw probabilities |
 | `find_code` | a best-first search that opens places until the code a description names is found |
-| `find_all` | judges every unit of a population (anchored lines, files, and each hit of named texts) against described targets, one question per unit per target, in the order a `frontier` policy gives |
-| `frontier` | the order a search judges its population in: `STAGE_ORDER` (anchors, files, name hits) or `VALUE` (each target's own queue by code features, ties by content hash, an equal or caller-set share of every batch, and a target settling once a unit clears its bar and that unit's callers and callees are judged) |
+| `sources` | the primitives a search's candidates come from, under one contract: a source reaches places (files or anchors) from seeds with their provenance and no model call; anchors, files, name hits, definitions, references, named files, imports, importers, callers, callees and Prisma model links are built in |
+| `find_all` | judges every unit its sources reach (by default anchored lines, files, and each hit of named texts) against described targets, one question per unit per target, in the order a `frontier` policy gives |
+| `frontier` | the order a search judges its population in: `STAGE_ORDER` (source by source) or `VALUE` (each target's own queue by code features, ties by content hash, an equal or caller-set share of every batch, and a target settling once a unit clears its bar and the units its hop sources reach from that unit are judged) |
 | `find_all_text`, `find_text` | the same for text units only, the files JVN does not parse: judge every one, or stop once one is found |
 | `places.MOVES` | the ways a search lists the neighbours of an opened place; pick a subset or add your own |
 | `StopRule`, `History` | your own stop check over a search's history, reading only the sections you select |
@@ -151,20 +152,30 @@ is judged. `find_all_async` takes the same arguments for an
 async client, such as a host's orchestrator; it lists and reads code in a worker thread, reads
 `cancelled` between waves, and keeps every answer a wave received before a failure. Ranking and any
 bar belong to the caller:
-`scores(target)` gives every judged unit's answer, and `names` each name's hits found, reached and
-naming no unit. `entered_by` gives the source each unit entered the population by
-(`frontier.Source.ANCHOR`, `FILE` or `NAME`, the first when several listed it; `CALLER` or `CALLEE`
-for a unit a settling search pushed).
+`scores(target)` gives every judged unit's answer, and `names` each request name's places: how many
+the sources reached by the name, how many the search resolved before it stopped, and how many named no
+unit. `sources` lists the sources the search used, its hop sources last, and `entered_by` gives the
+name of the source each unit entered the population by (`anchor`, `file` or `name` by default, the
+first when several reached it; `caller` or `callee` for a unit a settling search pushed).
+
+The population comes from sources (`jev_navigator/sources.py`): `sources=` names the ones that start
+the search (`CODE_SOURCES` by default: `ANCHORS`, `FILES`, then `NAMES`) and `hops=` the ones a unit
+that clears a target's bar expands through under a settling policy (`HOP_SOURCES`: `CALLERS` and
+`CALLEES`). Every source reaches places from the same seeds, the caller's anchors, files and names plus
+the targets' descriptions, and the search resolves them into units. A source of your own is any object
+with a `name`, a `label` and `reach(index, seeds)` returning `Reach` records; the README's
+[source table](../README.md#sources-the-frontier-and-each-workflows-composition) lists the built-in ones.
 
 `policy` (`frontier`) decides the order, and under a call cap whatever is ranked last is what gets
 lost. `STAGE_ORDER`, the default, is the order above: anchors, files, then name hits rarest name first,
 each wave's batches sorted by place. `VALUE` lists every source and resolves every name's hits before
 the first call, scores each unit by code, and judges the best first, its batches kept in that order
 (`Judge.iter_check_every(..., keep_order=True)`). A unit's `features` are facts of any language: the
-request's names its code holds as whole words, each worth `1 / log2(2 + hits)`, whether the unit is
-named like a name, whether its file is, its distance from the anchors (an anchor's unit 0; a unit of an
-anchor's file, or of a file it imports where the index resolves that language's imports, 1; any other
-file's unit 2; a unit only a name hit reached 3), and whether its file is a test. `Weights` turns them
+request's names its code holds as whole words, each worth `1 / log2(2 + places)` over the places the
+sources reached by that name, whether the unit is named like a name, whether its file is, its distance
+(the smallest any source reached it at: an anchor's unit 0; a unit of an anchor's file, or of a file it
+imports where the index resolves that language's imports, 1; any other file's unit 2; a unit only a
+name hit reached 3), and whether its file is a test. `Weights` turns them
 into one value; a test is ranked lower by that value, never dropped. Ties go to the content hash, never
 to the path, so renaming a folder changes nothing. Code that repeats a unit already queued is judged
 once: `repeat_of` names the unit judged in its place, and the repeat shares its answers in `scores` and
@@ -178,9 +189,10 @@ as whole words (all the request's names when it spells out none), so `features` 
 Each batch's item slots go to the targets in proportion to their shares, by smooth weighted round
 robin: equal by default, set with `shares={"limit": 3}` (a target not named has 1). A unit drawn for
 one target is asked every target's question. A unit clears a target's bar when its answer is yes by the
-Judge's thresholds; it then pushes its callers and callees (`operations.caller_functions` and
-`callee_functions`, a function or method only), which that target judges before anything else, and a
-pushed unit pushes nothing, so the hops go one step deep. The target settles once none of its pushed
+Judge's thresholds; it then pushes the units the hop sources reach from it (by default its callers
+and callees, `operations.caller_functions` and `callee_functions`, a function or method only), which
+that target judges before anything else, and a pushed unit pushes nothing, so the hops go one step
+deep. The target settles once none of its pushed
 units is left to judge (a refused, too large or delivered one counts as done), draws no more slots, and
 its share flows to the targets still open. `pushed` names what each clearing unit pushed and `settled`
 the targets that settled; when every target has, the search ends `settled`. `STAGE_ORDER` has one
@@ -193,7 +205,7 @@ when no unit was judged or a round failed, never "none". Its coverage counts uni
 rounds: the units considered, the ones judged for the point, and the rest cut by source and reason. A
 unit left unjudged for several reasons counts under the first of not reached, refused, too large and
 delivered. A caller composing rounds names the source of a round it fed, such as
-`Round(callees, Source.CALLEE)`. `PointResult.render(bar)` gives the fact line, for example
+`Round(callees, sources.CALLEES)`; each source counts under its `label`. `PointResult.render(bar)` gives the fact line, for example
 `audit: none at the bar 0.80 among 16 unit(s) judged, best P=0.100; 284 not reached (not negative proof)`.
 
 `units_examined` means every unit of the population was judged, not that every semantic answer is
@@ -231,7 +243,9 @@ runs, resolved like an import from the repository root or `src/`: `uv run python
 `src/app/jobs.py`, and a package names its `__main__.py`. Options before `-m` are skipped, also
 those with a value (`python -W ignore -m app.jobs`, `python -X dev -m app.jobs`). Anchor files are never named, an anchor file
 outside the scope is never read, and a named file is not read for further names. The result splits `code` files, for `find_all`'s `files`, from
-`text` files, and `named_by` keeps the token that named each one. No model is called.
+`text` files, and `named_by` keeps the token that named each one. No model is called. As a source,
+`sources.NAMED_FILES` (or `TEXT_NAMED_FILES` for a text search) reaches the files the targets'
+descriptions and the anchors' files name, so a search can start from them through `sources=`.
 
 ### Find one location
 
