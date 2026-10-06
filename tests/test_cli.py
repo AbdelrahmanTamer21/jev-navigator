@@ -7,7 +7,6 @@ import json
 import os
 import shutil
 import subprocess
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Thread
@@ -202,7 +201,6 @@ def test_a_git_call_in_jvns_checkout_past_its_timeout_is_recorded_instead_of_wai
     _put_first_on_path(monkeypatch, tmp_path / "bin", _git_slow_in(checkout, "status"))
 
     # Act
-    started = time.monotonic()
     manifest = _small_search_manifest(tmp_path)
 
     # Assert
@@ -211,7 +209,6 @@ def test_a_git_call_in_jvns_checkout_past_its_timeout_is_recorded_instead_of_wai
     assert provenance["source_revision_error"].startswith(
         "git status --porcelain --untracked-files=all failed: "
     )
-    assert time.monotonic() - started < 5
 
 
 def _git_slow_in(checkout: Path, command: str) -> str:

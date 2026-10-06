@@ -1021,8 +1021,10 @@ capability regressions and verifies request/response capture through a real loca
 Plain `uv run pytest` installs the TypeSafe extra with the dev group, so every test runs. A skipped
 test did not run, so a run with a skip fails and names it, unless the test declares a platform it
 cannot run on with a `skipif` condition. To show the core works without the extra, run
-`uv run --no-dev --with pytest pytest --without-typesafe`: only there may the TypeSafe tests skip,
-and it refuses to start when the extra is installed. Run `uv run ruff check src tests` and
+`uv run --no-dev --with pytest --with pytest-timeout pytest --without-typesafe`: only there may the
+TypeSafe tests skip, and it refuses to start when the extra is installed. Every run needs
+pytest-timeout (`required_plugins`), so a missing plugin stops the run instead of dropping its
+time limits. Run `uv run ruff check src tests` and
 `uv run ruff format --check src tests` before pushing. Local checks are the normal validation
 path for this small library; pushes and pull requests do not launch hosted CI. The `tests`
 workflow is available through GitHub Actions **Run workflow** when an explicit cross-version
