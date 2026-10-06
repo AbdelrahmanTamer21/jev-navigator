@@ -112,6 +112,8 @@ class CheckResult:
     question_id: str | None = None
     place: Item | None = None
 
+    components: Mapping[str, CheckResult] = field(default_factory=dict)
+
     def source(self) -> AnswerSource | None:
         if self.question_id is None:
             return None

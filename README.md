@@ -1257,3 +1257,20 @@ keep the target open. A match probability does not establish an evidence role. T
 policy remains available for comparison.
 
 The [role question proposal](question-templates/evidence_roles/PROPOSAL.md) is not wired into searches.
+
+### Search question profiles
+
+Code and text population searches accept `question_profile`, defaulting to `MATCH` from
+`jev_navigator.judgments.profiles`. `ROLES_V2` selects the measured proposal-v2 questions:
+`decide`, `guard`, `value`, `effect`, `delegates` and `satisfied`. All six run together for each
+unit and target, using the existing 16-unit batching, size limits, store and call cap.
+The wording lives in `judgments/role_questions.json`; composition lives in `judgments/profiles.py`.
+
+Relevance is the maximum of the four local roles and `satisfied`. Every composed answer retains
+its raw answers in `components`. `forwarding_only(components)` requires delegation at least 0.80
+and all four local roles at most 0.20. Delegation alone never demotes local evidence.
+`result.ranked(target)` keeps the best unit for each explicitly supplied `required_roles` ahead
+of the relevance ranking, including uncertain winners. Ties keep first-seen order. Required roles
+change retention only. They do not alter today's stopping policy, and the library does not infer
+which roles a search needs. `ProfileJudge` supplies the same questions and composition to collectors
+that need per-answer receipts; collectors keep no copy of this profile.

@@ -41,6 +41,7 @@ from ..index.units import (
     resolve_each,
 )
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
+from ..judgments.profiles import MATCH, QuestionProfile, retain_roles
 from ..judgments.questions import Check, item_path, serialized_chars
 from ..judgments.thresholds import NoulVerdict
 from ..sources import ANCHORS, CALLEES, CALLERS, FILES, NAMES, TEXT_NAMES, Reach, Seeds, Source
@@ -88,10 +89,7 @@ T = TypeVar("T")
 def match_check(target: str) -> Check:
     """The one question asked of every unit for ``target``: no criteria, the description in the
     shared state, as jgrep asks it."""
-    return Check(
-        f"match_{target}",
-        f"Look only at `{{item}}`. Does that code match the description in `{TARGETS}.{target}`?",
-    )
+    return MATCH.questions(target)[0]
 
 
 @dataclass(frozen=True)
@@ -156,6 +154,8 @@ class FindAllResult:
     repeat_of: Mapping[str, str] = field(default_factory=dict)
     pushed: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     settled: tuple[str, ...] = ()
+    question_profile: QuestionProfile = MATCH
+    required_roles: tuple[str, ...] = ()
 
     @classmethod
     def not_started(cls, targets: Mapping[str, str], stopped_by: str) -> FindAllResult:
@@ -189,6 +189,10 @@ class FindAllResult:
     def ranked(self, target: str) -> tuple[UnitScore, ...]:
         """Every judged unit's answer for ``target``, best first. A tie goes to the unit worth more by
         code under a ranked policy, then to the content hash, never to the path."""
+        if self.question_profile != MATCH:
+            order = {answer.place.id: number for number, answer in enumerate(self.judged[target])}
+            scores = sorted(self.scores(target), key=lambda score: order[score.answer.place.id])
+            return retain_roles(scores, self.required_roles)
         features = self.features.get(target, {})
         return tuple(sorted(self.scores(target), key=lambda score: self._rank(score, features)))
 
@@ -220,6 +224,8 @@ def find_all(
     completed: Mapping[str, Sequence[CheckResult]] | None = None,
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    question_profile: QuestionProfile = MATCH,
+    required_roles: Sequence[str] = (),
     policy: Policy = STAGE_ORDER,
     shares: Mapping[str, float] | None = None,
     sources: Sequence[Source] = CODE_SOURCES,
@@ -246,7 +252,9 @@ def find_all(
     of its own. Once every target has settled the search ends ``settled``, with the units it never
     reached ``not_judged``.
     """
-    composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
+    composition = _Composition(
+        tuple(sources), tuple(hops), policy, shares or {}, question_profile, tuple(required_roles)
+    )
     search = _begin(
         index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE, composition
     )
@@ -265,6 +273,8 @@ def find_all_text(
     completed: Mapping[str, Sequence[CheckResult]] | None = None,
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    question_profile: QuestionProfile = MATCH,
+    required_roles: Sequence[str] = (),
     policy: Policy = STAGE_ORDER,
     shares: Mapping[str, float] | None = None,
     sources: Sequence[Source] = TEXT_SOURCES,
@@ -274,7 +284,9 @@ def find_all_text(
     its format gives, a code file named ``unlisted``. By default a name's hits in code and in lockfiles
     are left out (``TEXT_SOURCES``), so a common word never floods the search with a lockfile's
     pieces; a lockfile ``files`` or ``anchors`` name is judged."""
-    composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
+    composition = _Composition(
+        tuple(sources), tuple(hops), policy, shares or {}, question_profile, tuple(required_roles)
+    )
     search = _begin(
         index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT, composition
     )
@@ -292,13 +304,17 @@ def find_text(
     delivered: Sequence[RangeAnchor] = (),
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    question_profile: QuestionProfile = MATCH,
+    required_roles: Sequence[str] = (),
     policy: Policy = STAGE_ORDER,
     sources: Sequence[Source] = TEXT_SOURCES,
 ) -> FindAllResult:
     """``find_all_text`` for the one target ``description``, named ``FIND_TEXT_TARGET``, ending
     ``found`` after the first wave in which a unit's answer is yes by the judge's thresholds."""
     targets = {FIND_TEXT_TARGET: description}
-    composition = _Composition(tuple(sources), HOP_SOURCES, policy, {})
+    composition = _Composition(
+        tuple(sources), HOP_SOURCES, policy, {}, question_profile, tuple(required_roles)
+    )
     search = _begin(
         index, judge, targets, delivered, None, cancelled, batches_per_wave, Reading.TEXT, composition
     )
@@ -332,6 +348,8 @@ async def find_all_async(
     completed: Mapping[str, Sequence[CheckResult]] | None = None,
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    question_profile: QuestionProfile = MATCH,
+    required_roles: Sequence[str] = (),
     policy: Policy = STAGE_ORDER,
     shares: Mapping[str, float] | None = None,
     sources: Sequence[Source] = CODE_SOURCES,
@@ -341,7 +359,9 @@ async def find_all_async(
     async client. Reaching, listing, resolving and reading code run in a worker thread, so the event
     loop stays free. ``cancelled`` is read before each parse and between waves, since the Judge's async
     form reads none; a cancelled task's ``CancelledError`` is never caught."""
-    composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
+    composition = _Composition(
+        tuple(sources), tuple(hops), policy, shares or {}, question_profile, tuple(required_roles)
+    )
     search = _begin(
         index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.CODE, composition
     )
@@ -360,13 +380,17 @@ async def find_all_text_async(
     completed: Mapping[str, Sequence[CheckResult]] | None = None,
     cancelled: Callable[[], bool] | None = None,
     batches_per_wave: int = BATCHES_PER_WAVE,
+    question_profile: QuestionProfile = MATCH,
+    required_roles: Sequence[str] = (),
     policy: Policy = STAGE_ORDER,
     shares: Mapping[str, float] | None = None,
     sources: Sequence[Source] = TEXT_SOURCES,
     hops: Sequence[Source] = HOP_SOURCES,
 ) -> FindAllResult:
     """``find_all_text`` the way ``find_all_async`` runs ``find_all``."""
-    composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
+    composition = _Composition(
+        tuple(sources), tuple(hops), policy, shares or {}, question_profile, tuple(required_roles)
+    )
     search = _begin(
         index, judge, targets, delivered, completed, cancelled, batches_per_wave, Reading.TEXT, composition
     )
@@ -390,6 +414,8 @@ class _Composition:
     hops: tuple[Source, ...]
     policy: Policy
     shares: Mapping[str, float]
+    question_profile: QuestionProfile = MATCH
+    required_roles: tuple[str, ...] = ()
 
 
 def _begin(
@@ -459,8 +485,13 @@ class _Search:
         self.batches_per_wave = batches_per_wave
         self.judge = judge
         self.targets = dict(targets)
-        self.checks = [match_check(target) for target in targets]
-        self.target_of = {check.name: target for check, target in zip(self.checks, targets, strict=True)}
+        self.question_profile = composition.question_profile
+        self.required_roles = composition.required_roles
+        asked = self.question_profile.asked(targets)
+        self.checks = [check for check, _, _ in asked.values()]
+        self.target_of = {name: target for name, (_, _, target) in asked.items()}
+        self.role_of = {name: role for name, (_, role, _) in asked.items()}
+        self.raw_answers: dict[tuple[str, str], dict[str, CheckResult]] = {}
         self.shared = {TARGETS: self.targets}
         self.room = _room(judge, index, self.checks, self.shared)
         self.delivered = _lines_by_file(delivered)
@@ -515,9 +546,9 @@ class _Search:
                 list_name=ITEMS,
                 places=places,
                 refusals=self.refusals,
-                keep_order=self.policy.ranked,
+                keep_order=self.policy.ranked or self.question_profile != MATCH,
             ):
-                self._record(self.target_of[name], answer)
+                self._consume(name, answer)
 
     def ended(self, error: KeyboardInterrupt | Exception | None) -> FindAllResult:
         stop, failure = _stop_by(error)
@@ -816,9 +847,16 @@ class _Search:
             cancelled=self.cancelled,
             places=places,
             refusals=self.refusals,
-            keep_order=self.policy.ranked,
+            keep_order=self.policy.ranked or self.question_profile != MATCH,
         ):
-            self._record(self.target_of[name], answer)
+            self._consume(name, answer)
+
+    def _consume(self, name: str, answer: CheckResult) -> None:
+        target = self.target_of[name]
+        raw = self.raw_answers.setdefault((target, answer.place.id), {})
+        raw[self.role_of[name]] = answer
+        if len(raw) == len(self.question_profile.templates):
+            self._record(target, self.question_profile.compose(raw, self.judge.thresholds))
 
     def _record(self, target: str, answer: CheckResult) -> None:
         if answer.place is None:
@@ -846,7 +884,14 @@ class _Search:
             self.room,
             self.batches_per_wave,
             tuple(sorted(self.units.values(), key=_unit_order)),
-            {target: tuple(sorted(answers, key=_answer_order)) for target, answers in self.judged.items()},
+            {
+                target: (
+                    tuple(answers)
+                    if self.question_profile != MATCH
+                    else tuple(sorted(answers, key=_answer_order))
+                )
+                for target, answers in self.judged.items()
+            },
             not_judged | self._repeats_left(not_judged),
             dict(self.unlisted),
             tuple(self.unresolved),
@@ -866,6 +911,8 @@ class _Search:
             repeat_of=dict(self.repeat_of),
             pushed=dict(self.pushed),
             settled=tuple(self.settled),
+            question_profile=self.question_profile,
+            required_roles=self.required_roles,
         )
 
     def _repeats_left(self, not_judged: Mapping[str, str]) -> dict[str, str]:
