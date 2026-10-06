@@ -33,6 +33,7 @@ from .languages import (
     EXPRESSION_KINDS,
     FLOW_LANGUAGE,
     FUNCTION_KINDS,
+    LOCAL_MEMBER_RULES,
     LOCAL_MODULE_BLOCK_RULES,
     LOCAL_MODULE_RULES,
     LOCAL_NAME_RULES,
@@ -83,16 +84,19 @@ class Unparsed:
 class LocalName(NamedTuple):
     """``name`` is bound on ``line`` by the function on lines ``first`` to ``last`` for its own body:
     one fact per binding, so a function that binds a name twice has two. ``module`` is the module the
-    binding holds as a whole, when it is a ``const`` require (see ``LOCAL_MODULE_RULES``)."""
+    binding holds as a whole, when it is a ``const`` require (see ``LOCAL_MODULE_RULES``); ``member``
+    is the member it holds, as ``object.member``, when it is a ``const`` that unpacks or reads a member
+    of a plain name (see ``LOCAL_MEMBER_RULES``)."""
 
     first: int
     last: int
     name: str
     line: int
     module: str = ""
-    # The last line of the block holding a binding that holds ``module``: the binding holds it from
-    # ``line`` to here, since a `const` is block-scoped.
+    # The last line of the block holding a binding that holds ``module`` or ``member``: the binding
+    # holds it from ``line`` to here, since a `const` is block-scoped.
     block_end: int = 0
+    member: str = ""
 
 
 class ModuleAlias(NamedTuple):
@@ -218,6 +222,10 @@ class FileFacts:
     # The language the facts were read as: ``flow`` for JavaScript read with the tsx grammar. None
     # when no grammar read the file.
     language: str | None = None
+    # Each member of a script module's default export object, with the definition it holds:
+    # ("insert", "insert") and ("utc", "toUtc") for `export default { insert, utc: toUtc }` (see
+    # ``DEFAULT_MEMBERS``). A default import reaches them as members.
+    default_members: tuple[tuple[str, str], ...] = ()
 
 
 class _Text(TypedDict):
@@ -232,7 +240,9 @@ class _Captured(TypedDict, total=False):
     CALLEE: _Text
     FROM: _Text
     KEY: _Text
+    MEMBER: _Text
     NAME: _CapturedNode
+    OBJ: _Text
     OWN: _Text
     SPEC: _Text
     DECORATOR: _CapturedNode
@@ -375,8 +385,10 @@ class _FileFound:
     declaration_nodes: list[_Declaration] = field(default_factory=list)
     declared_names: list[tuple[int, str]] = field(default_factory=list)
     bound_names: list[tuple[int, int, str]] = field(default_factory=list)
-    # The module each `const` require binds, by the byte offset of the name it binds.
+    # The module each `const` require binds, and the member each member `const` binds, as
+    # ``object.member``, by the byte offset of the name it binds.
     local_modules: dict[int, str] = field(default_factory=dict)
+    local_members: dict[int, str] = field(default_factory=dict)
     # The byte range, end exclusive, and the last line of each block a `const` require may end in.
     local_module_blocks: list[_Block] = field(default_factory=list)
     decorated: set[tuple[int, int, int]] = field(default_factory=set)
@@ -385,6 +397,7 @@ class _FileFound:
     receivers: dict[tuple[str, int, str, str], set[str | None]] = field(default_factory=dict)
     export_names: set[str] = field(default_factory=set)
     exported_values: set[str] = field(default_factory=set)
+    default_members: set[tuple[str, str]] = field(default_factory=set)
     renamed_exports: set[tuple[str, str]] = field(default_factory=set)
     module_aliases: list[tuple[int, ModuleAlias]] = field(default_factory=list)
     from_imports: list[_FromImport] = field(default_factory=list)
@@ -413,6 +426,8 @@ class _FileFound:
             self._add_exported_value(match)
         elif rule == _DEFAULT_EXPORT_RULE:
             self._add_renamed_export("default", _captured_name(match))
+        elif rule == _DEFAULT_MEMBER_RULE:
+            self.default_members.add((_captured_name(match), _captured_own_name(match)))
         elif rule == _MODULE_ALIAS_RULE:
             offset = match["range"]["byteOffset"]["start"]
             self.module_aliases += [(offset, alias) for alias in _module_aliases_of(match)]
@@ -444,6 +459,7 @@ class _FileFound:
             tuple(sorted(self.renamed_exports)),
             tuple(sorted(self.module_bindings)),
             language=self.language,
+            default_members=tuple(sorted(self.default_members)),
         )
 
     def _structure(self) -> FileStructure:
@@ -464,7 +480,11 @@ class _FileFound:
             _sorted(span for span, declaration in declared if declaration.kind.named_by_types),
             _sorted(span for span, declaration in declared if declaration.kind.named_by_values),
             _local_names(
-                self.ranges, self.classes, self.bound_names, self.local_modules, self.local_module_blocks
+                self.ranges,
+                self.classes,
+                self.bound_names,
+                _Holdings(self.local_modules, self.local_members),
+                self.local_module_blocks,
             ),
             nodes.namespace_members(declared),
             _object_members(self.ranges, self.marks[_OBJECT_MEMBER_RULE], self.object_owners),
@@ -523,6 +543,8 @@ class _FileFound:
         elif rule == _LOCAL_MODULE_RULE:
             name = match["metaVariables"]["single"]["NAME"]["range"]["byteOffset"]["start"]
             self.local_modules[name] = _unquoted(_captured(match, "SPEC"))
+        elif rule == _LOCAL_MEMBER_RULE:
+            self.local_members[offsets["start"]] = f"{_captured(match, 'OBJ')}.{_captured(match, 'MEMBER')}"
         elif rule == _LOCAL_MODULE_BLOCK_RULE:
             self.local_module_blocks.append(_Block(offsets["start"], offsets["end"], end))
         elif rule in _DECLARATION_BY_RULE:
@@ -570,17 +592,25 @@ class _FileFound:
             self.renamed_exports.add((exported, own))
 
 
+@dataclass(frozen=True)
+class _Holdings:
+    """What a function's own bindings hold, by the byte offset of the name each binds."""
+
+    modules: dict[int, str]
+    members: dict[int, str]
+
+
 def _local_names(
     ranges: list[tuple[int, int, Span]],
     classes: set[Span],
     names: list[tuple[int, int, str]],
-    modules: dict[int, str],
+    holdings: _Holdings,
     blocks: list[_Block],
 ) -> tuple[LocalName, ...]:
     """Each bound name, with its line, the lines of the innermost function holding it, and the module
-    it holds when ``modules`` names one at its position, until the end of its block. A name a class
-    body binds (a Python class attribute) reaches none of its methods, so it is no function's local
-    name."""
+    or member it holds when ``holdings`` names one at its position, until the end of its block. A name
+    a class body binds (a Python class attribute) reaches none of its methods, so it is no function's
+    local name."""
     ordered = sorted((_Node(start, end, span) for start, end, span in ranges), key=lambda node: node.start)
     starts = [node.start for node in ordered]
     ordered_blocks = sorted(blocks)
@@ -590,9 +620,10 @@ def _local_names(
         holder = _innermost(ordered, starts, offset)
         if holder is None or holder.span in classes:
             continue
-        module = modules.get(offset, "")
-        block_end = _block_end(holder, ordered_blocks, block_starts, offset) if module else 0
-        found.add(LocalName(holder.span.start, holder.span.end, name, line, module, block_end))
+        module, member = holdings.modules.get(offset, ""), holdings.members.get(offset, "")
+        held = module or member
+        block_end = _block_end(holder, ordered_blocks, block_starts, offset) if held else 0
+        found.add(LocalName(holder.span.start, holder.span.end, name, line, module, block_end, member))
     return tuple(sorted(found))
 
 
@@ -938,6 +969,7 @@ _DECLARED_NAME_RULE = "declared_name"
 _LOCAL_NAME_RULE = "local_name"
 _LOCAL_MODULE_RULE = "local_module"
 _LOCAL_MODULE_BLOCK_RULE = "local_module_block"
+_LOCAL_MEMBER_RULE = "local_member"
 _MODULE_ALIAS_RULE = "module_alias"
 _FROM_IMPORT_RULE = "from_import"
 _FROM_NAME_RULE = "from_name"
@@ -969,6 +1001,7 @@ _STRUCTURE_RULE_IDS = frozenset(
         _LOCAL_NAME_RULE,
         _LOCAL_MODULE_RULE,
         _LOCAL_MODULE_BLOCK_RULE,
+        _LOCAL_MEMBER_RULE,
         *_MARK_RULES,
         _NAMESPACE_RULE,
         _OBJECT_OWNER_RULE,
@@ -982,6 +1015,7 @@ _EXPORT_SPECIFIER_RULE = "export_specifier"
 _EXPORT_RULE_IDS = (_EXPORT_STATEMENT_RULE, _EXPORT_SPECIFIER_RULE)
 _EXPORTED_VALUE_RULE = "exported_value"
 _DEFAULT_EXPORT_RULE = "default_export"
+_DEFAULT_MEMBER_RULE = "default_member"
 
 
 def _module_aliases_of(match: dict) -> list[ModuleAlias]:
@@ -1044,6 +1078,7 @@ def _structure_rules(languages: Sequence[str]) -> str:
             documents.append(
                 _rule_document(_LOCAL_MODULE_BLOCK_RULE, language, LOCAL_MODULE_BLOCK_RULES[language])
             )
+            documents.append(_rule_document(_LOCAL_MEMBER_RULE, language, LOCAL_MEMBER_RULES[language]))
         if DECORATED_KINDS[language]:
             documents.append(_decorated_rule(language))
         if language in STUB_RULES:

@@ -2315,8 +2315,8 @@ def test_a_member_read_through_an_import_is_decided_like_a_named_import(tmp_path
     assert {
         bindings[site].reason for site in (("use_tools.js", 2), ("use_tools.ts", 3), ("use_tools.ts", 4))
     } == {
-        "the import names tools.js, where the index finds no definition exported as walk; a name that "
-        "module imports and passes on is not followed"
+        "the import names tools.js, where the index finds no definition exported as walk; a name it "
+        "passes on under another name, or without an export ... from, is not followed"
     }
 
 
@@ -2905,3 +2905,122 @@ def test_a_parsed_file_that_vanished_still_counts_as_read_and_is_listed_unavaila
     assert pending == ("facts",)
     assert "app/a.py" in index.parsed_files
     assert "app/a.py" in index.unavailable_files
+
+
+_UNPACKED_CLIENT = {
+    "tsconfig.json": '{"compilerOptions": {"paths": {"@/*": ["./src/*"]}}}\n',
+    "src/lib/clickhouse.ts": (
+        "async function insert(table: string, values: any[]) {\n"
+        "  return client.insert({ table, values });\n"
+        "}\n"
+        "function getUTCString(date: Date) {\n"
+        "  return date.toISOString();\n"
+        "}\n"
+        "export default { insert, getUTCString };\n"
+    ),
+}
+
+
+def _unpacking(tmp_path: Path, body: str) -> CodeIndex:
+    """The shape of umami's ``saveEventData``: a module's default export object, unpacked inside the
+    function that calls its members."""
+    caller = (
+        "import clickhouse from '@/lib/clickhouse';\n"
+        "\n"
+        "export async function clickhouseQuery(data: any) {\n"
+        f"{body}"
+        "}\n"
+    )
+    return committed(tmp_path, {**_UNPACKED_CLIENT, "src/queries/saveEventData.ts": caller})
+
+
+def _callee_targets(index: CodeIndex) -> dict[str, tuple[str, str | None]]:
+    caller = index.enclosing_symbol("src/queries/saveEventData.ts", 4)
+    return {
+        edge.name: (edge.binding.status.value, edge.binding.target and edge.binding.target.file)
+        for edge in index.callee_edges(caller)
+    }
+
+
+def test_members_unpacked_from_an_imported_object_bind_to_their_definitions(tmp_path: Path) -> None:
+    # Arrange
+    index = _unpacking(
+        tmp_path,
+        "  const { insert, getUTCString } = clickhouse;\n"
+        "  return insert('event_data', [getUTCString(data.createdAt)]);\n",
+    )
+
+    # Act
+    targets = _callee_targets(index)
+
+    # Assert
+    assert targets == {
+        "insert": ("resolved", "src/lib/clickhouse.ts"),
+        "getUTCString": ("resolved", "src/lib/clickhouse.ts"),
+    }
+
+
+def test_a_renamed_or_assigned_member_of_an_imported_object_binds_to_its_definition(tmp_path: Path) -> None:
+    # Arrange
+    index = _unpacking(
+        tmp_path,
+        "  const { insert: write } = clickhouse;\n"
+        "  const utc = clickhouse.getUTCString;\n"
+        "  return write('event_data', [utc(data.createdAt)]);\n",
+    )
+
+    # Act
+    targets = _callee_targets(index)
+
+    # Assert
+    assert targets == {
+        "write": ("resolved", "src/lib/clickhouse.ts"),
+        "utc": ("resolved", "src/lib/clickhouse.ts"),
+    }
+
+
+def test_members_unpacked_from_a_parameter_bind_to_nothing_outside(tmp_path: Path) -> None:
+    # Arrange
+    index = _unpacking(tmp_path, "  const { insert } = data;\n  return insert(data.row);\n")
+
+    # Act
+    targets = _callee_targets(index)
+
+    # Assert
+    assert targets["insert"][1] is None
+
+
+def test_a_member_called_on_a_default_import_binds_to_the_definition_its_default_object_holds(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    index = _unpacking(
+        tmp_path, "  return clickhouse.insert('event_data', [clickhouse.getUTCString(data.createdAt)]);\n"
+    )
+
+    # Act
+    targets = _callee_targets(index)
+
+    # Assert
+    assert targets == {
+        "insert": ("resolved", "src/lib/clickhouse.ts"),
+        "getUTCString": ("resolved", "src/lib/clickhouse.ts"),
+    }
+
+
+def test_a_name_the_function_binds_twice_stays_its_own(tmp_path: Path) -> None:
+    # Arrange
+    index = _unpacking(
+        tmp_path,
+        "  const { insert } = clickhouse;\n"
+        "  if (data) {\n"
+        "    const insert = data.save;\n"
+        "  }\n"
+        "  return insert('event_data', []);\n",
+    )
+
+    # Act
+    targets = _callee_targets(index)
+
+    # Assert
+    assert targets["insert"][1] is None

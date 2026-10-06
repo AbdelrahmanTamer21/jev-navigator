@@ -103,7 +103,7 @@ def binding_from_facts(facts: CallFacts) -> Binding:
         return Binding(
             BindingStatus.CANDIDATE,
             f"the import names {paths}, where the index finds no definition exported as {facts.name}; "
-            "a name that module imports and passes on is not followed",
+            "a name it passes on under another name, or without an export ... from, is not followed",
         )
     if not facts.definitions:
         return Binding(BindingStatus.UNRESOLVED, f"no definition of {facts.name} in the index scope")

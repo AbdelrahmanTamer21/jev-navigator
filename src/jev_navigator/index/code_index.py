@@ -576,7 +576,7 @@ class CodeIndex:
             if own_module is not None:
                 return own_module
             if receiver is None:
-                return local_binding(name)
+                return self._binding_through_local_member(file, line, name, role) or local_binding(name)
         return binding_from_facts(self._call_facts(file, name, receiver, role))
 
     def _binding_beyond_the_function(
@@ -660,9 +660,26 @@ class CodeIndex:
             return None
         return self._binding_through_exporters(file, module, "default" if receiver is None else name, role)
 
+    def _binding_through_local_member(
+        self, file: str, line: int, name: str, role: str | None
+    ) -> Binding | None:
+        """The binding of ``name()`` when the innermost function around ``line`` binds ``name`` once, to
+        a member of a plain name (``const { insert } = client``, ``const utc = client.toUtc``, see
+        ``LocalName.member``): the call is ``client.insert()``. None when it binds it otherwise."""
+        held = self._held(file, line, name)
+        if held is None or not held.member:
+            return None
+        holder, member = held.member.split(".", 1)
+        return self.binding_of(file, line, member, holder, role)
+
     def _local_module(self, file: str, line: int, name: str) -> str | None:
-        """The module ``name`` holds at ``line`` when the innermost function there that binds it binds
-        it once, to a whole module, and ``line`` lies from that binding to the end of its block."""
+        """The module ``name`` holds at ``line`` (see ``_held``), when it holds a whole module."""
+        held = self._held(file, line, name)
+        return None if held is None else held.module or None
+
+    def _held(self, file: str, line: int, name: str) -> LocalName | None:
+        """The binding of ``name`` at ``line`` when the innermost function there that binds it binds it
+        once, to a module or a member, and ``line`` lies from that binding to the end of its block."""
         holding = [
             local
             for local in self._read_local_bindings(file).get(name, ())
@@ -674,7 +691,7 @@ class CodeIndex:
         own = [local for local in holding if (local.first, local.last) == innermost]
         if len(own) != 1 or not own[0].line <= line <= own[0].block_end:
             return None
-        return own[0].module or None
+        return own[0]
 
     @memoized
     def _read_local_bindings(self, file: str) -> dict[str, tuple[LocalName, ...]]:
@@ -932,9 +949,40 @@ class CodeIndex:
         None when ``receiver`` holds no module of the scope, or when its from-import may take the
         package's own name instead (see ``_package_binds_otherwise``)."""
         alias = self._module_alias(file, receiver)
-        if alias is None or (alias.from_import and self._package_binds_otherwise(file, alias.specifier)):
+        if alias is None:
+            return self._binding_through_default_object(file, name, receiver, role)
+        if alias.from_import and self._package_binds_otherwise(file, alias.specifier):
             return None
         return self._binding_through_exporters(file, alias.specifier, name, role)
+
+    def _binding_through_default_object(
+        self, file: str, name: str, receiver: str, role: str | None
+    ) -> Binding | None:
+        """The binding of ``receiver.name`` when ``receiver`` is a default import of a module whose
+        default export object holds ``name`` (``export default { insert, utc: toUtc }``, see
+        ``FileFacts.default_members``): that module's own definition the member holds. None when
+        ``receiver`` is no default import of a module of the scope, or its default object has no such
+        member."""
+        imported = self._read_imported_names(file).get(receiver)
+        if imported is None or imported.exported is not None:
+            return None
+        module = resolve_import(
+            imported.specifier, file, self._scope, self._script_paths(file), self._read_packages()
+        )
+        if module is None:
+            return None
+        own = dict(self._facts_in(module.path).default_members).get(name)
+        if own is None:
+            return None
+        definitions = tuple(
+            span
+            for span in self._module_scope_spans(module.path)
+            if span.name == own and self._can_name(role, span)
+        )
+        hiding = {module.path} if self._hides(module.path, own) else set()
+        return binding_from_facts(
+            CallFacts(file, name, None, definitions, (), definitions, (module,), hiding)
+        )
 
     def _package_binds_otherwise(self, file: str, specifier: str) -> bool:
         """Whether ``from package import module`` may give something other than the module

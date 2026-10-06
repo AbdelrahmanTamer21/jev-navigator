@@ -551,18 +551,24 @@ is never bound again, so there `db.query()` binds through `./db` like a module a
 module's default export (`module.exports = ...`). A `const` is block-scoped, so it holds the module
 from its own line to the end of its block, or of the function when it sits in the function's body;
 before it, after its block, or in a `switch` case, the call stays a `candidate`. A `let` or `var` may
-be bound again and holds no module. A function counts from its first line, so on
+be bound again and holds no module. A function's own `const` that unpacks or reads a member of a plain
+name, `const { insert } = client`, `const { insert: write } = client` or `const utc = client.toUtc`,
+holds that member on the same terms, so `insert()`, `write()` and `utc()` bind as `client.insert()` and
+`client.toUtc()` would; when `client` is itself the function's own value, such as a parameter, they stay
+a `candidate`. A function counts from its first line, so on
 `stream(c, async (stream) => ...)` the outer call counts as inside the callback.
 Types are looked up apart from values, so a local value never replaces a type. A call `halt()` where
 `halt` imports a definition under another name (`import { stop as halt }`, `const { stop: halt } =
 require(...)`, `from m import stop as halt`) binds the same way to `stop`, unless the file defines
-`halt` itself. A default import, under any local name, takes the module's default export; the default's own name is no named export, so `import { make }`, `defaults.make()` and `const { solo } = require(...)` of a default reach nothing. Every import, by name, under another
+`halt` itself. A default import, under any local name, takes the module's default export; the default's own name is no named export, so `import { make }`, `defaults.make()` and `const { solo } = require(...)` of a default reach nothing. When the default export is an object literal, `export default { insert, utc: toUtc }`, a default import reaches its members: `client.insert()` binds to the module's `insert`, and `client.utc()` to its `toUtc`; `import { insert }` still reaches nothing, since the object's members are no named exports. Every import, by name, under another
 name, as a default or through a module alias, is decided the same way from the module it names and
 the modules that one re-exports the name from: one definition proves the target, several leave a
 `candidate`, any of these modules that could not be parsed where it mentions the name, or that
 vanished, leaves it `unknown`, and a module with no definition exported under the name leaves a
-`candidate` that says so. A name a module imports and passes on without an `export ... from`, as a
-Python module's own `from pkg.core import compute`, is not followed. A function or class
+`candidate` that says so. A Python module passes on each name it imports by that name, as a package's
+`__init__.py` does with `from .check import check` or `from .rules import *`, so `from pkg import check`
+reaches `pkg/check.py`; a name it imports under another name (`from .legacy import old as new`) is not
+followed, since its module exports it under the first. A function or class
 held by another function, a class or an object literal, or assigned to a property (`foo.bar =
 function () {}`), is no module-level definition, and neither is a function or class expression's own
 name (`run(function handler() {})`), which is bound only inside it. One assigned to `exports.x` or
