@@ -237,6 +237,7 @@ class ProfileJudge(Judge):
             thresholds.noul_verdict(rank),
             all(answer.from_store for answer in answers.values()),
             first.request_sha256,
-            self.question_set.identity(),
+            None,
             first.place,
+            dict(answers),
         )

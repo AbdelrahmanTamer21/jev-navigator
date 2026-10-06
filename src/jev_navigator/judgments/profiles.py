@@ -120,7 +120,7 @@ class QuestionProfile:
             thresholds.noul_verdict(relevance),
             all(answer.from_store for answer in answers.values()),
             first.request_sha256,
-            f"{self.name}@{content_hash(self.templates)}",
+            None,
             first.place,
             dict(answers),
         )

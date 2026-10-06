@@ -79,6 +79,8 @@ def test_profile_batches_real_units_and_retains_roles(tmp_path: Path, asynchrono
     assert scores["unit04"].probability == 0.99
     assert scores["unit01"].probability == 0.70
     assert len(scores["unit01"].answer.components) == 6
+    assert scores["unit01"].answer.source() is None
+    assert all(raw.source() is not None for raw in scores["unit01"].answer.components.values())
     assert not forwarding_only(scores["unit01"].answer.components)
     assert forwarding_only(scores["unit05"].answer.components)
     assert [Path(score.unit.path).stem for score in result.ranked("p0")[:5]] == [

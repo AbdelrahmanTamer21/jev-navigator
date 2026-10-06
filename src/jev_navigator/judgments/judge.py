@@ -98,7 +98,9 @@ class Refusal:
 
 @dataclass(frozen=True)
 class CheckResult:
-    """``probability`` is Jev's raw P(yes); ``verdict`` applies the current yes/no band. Callers may
+    """``probability`` is raw P(yes), or a profile's derived relevance when ``components`` holds
+    its raw answers. A composed result has no provider question id. ``verdict`` applies the
+    current yes/no band. Callers may
     apply any band of their own to ``probability``. ``request_sha256`` identifies the masked request
     that answered it, also when the answer came from the store, and ``question_id`` the question it
     was asked under there (None in a result saved before it was recorded). ``place`` is the unit or
