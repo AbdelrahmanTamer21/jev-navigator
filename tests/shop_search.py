@@ -27,11 +27,12 @@ SHOP = {
     "orders/limits.py": (
         "MAX_ITEMS = 4\n\n\n"
         "def check_limit(order):\n    if len(order.items) > MAX_ITEMS:\n"
-        '        raise ValueError("too many items")\n'
+        '        raise ValueError("too many items")\n\n\n'
+        "def round_total(order):\n    return round(order.total, 2)\n"
     ),
     "orders/api.ts": (
         "export function submitOrder(order) {\n"
-        '  return fetch("/orders", { method: "POST", body: order });\n}\n\n'
+        '  return fetch("/orders", { method: "POST", body: order, pageSize: MAX_ITEMS_PER_PAGE });\n}\n\n'
         'export function cancelOrder(id) {\n  return fetch(`/orders/${id}`, { method: "DELETE" });\n}\n'
     ),
     "billing/invoice.py": (

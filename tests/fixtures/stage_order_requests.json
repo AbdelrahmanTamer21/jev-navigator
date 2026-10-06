@@ -27,13 +27,13 @@
       ],
       [
         "orders/limits.py",
-        "MAX_ITEMS = 4"
+        "def check_limit(order):"
       ]
     ],
     [
       [
         "orders/limits.py",
-        "def check_limit(order):"
+        "def round_total(order):"
       ],
       [
         "tests/test_limits.py",
@@ -45,6 +45,12 @@
         "orders/copy.py",
         "def cancel_order(order):"
       ],
+      [
+        "orders/limits.py",
+        "MAX_ITEMS = 4"
+      ]
+    ],
+    [
       [
         "orders/service.py",
         "def cancel_order(order):"
@@ -79,7 +85,7 @@
       ],
       [
         "orders/limits.py",
-        "MAX_ITEMS = 4"
+        "def check_limit(order):"
       ]
     ]
   ]

@@ -9,7 +9,9 @@ from pathlib import Path
 from shop_search import FROZEN, REQUEST, SHOP, TARGETS, sent_requests, shop_index
 
 from jev_navigator.directives.find_all import NOT_REACHED, find_all, find_all_async
-from jev_navigator.directives.frontier import STAGE_ORDER, VALUE
+from jev_navigator.directives.frontier import STAGE_ORDER, VALUE, Features, Source, features_of, name_rarities
+from jev_navigator.index.units import list_units, read_ranges
+from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
@@ -19,6 +21,7 @@ PRODUCTION_WITHOUT_NAMES = [
     "def invoice(order):",
     "def refund(order):",
 ]
+JEV_BOX = JEV_INPUT_LIMITS.box_chars
 RENAMED = {path.replace("billing/", "zzz/"): text for path, text in SHOP.items()}
 RENAMED_REQUEST = {**REQUEST, "files": [path.replace("billing/", "zzz/") for path in REQUEST["files"]]}
 
@@ -48,22 +51,35 @@ def test_the_stage_order_policy_and_the_default_send_the_requests_find_all_sent_
 
 def test_the_value_policy_judges_the_unit_defining_a_name_first_and_the_test_last(tmp_path: Path) -> None:
     # Arrange: check_limit defines a name and holds both; place_order is the anchor and holds one; the
-    # limit constant and cancel_order sit in files the anchor's file is or imports; the test holds both
-    # names but is a test
+    # limit constant holds one in a file the anchor's file imports; round_total and cancel_order hold
+    # none but sit in files the anchor's file is or imports; submitOrder holds MAX_ITEMS_PER_PAGE, which
+    # is not the name; the test holds both names but is a test
     index = shop_index(tmp_path)
 
     # Act
     judged = first_lines(sent_requests(index, policy=VALUE))
 
     # Assert
-    assert judged[:4] == [
-        "def check_limit(order):",
-        "def place_order(order):",
-        "MAX_ITEMS = 4",
-        "def cancel_order(order):",
-    ]
-    assert sorted(judged[4:8]) == sorted(PRODUCTION_WITHOUT_NAMES)
-    assert judged[8:] == ["def test_check_limit_refuses_one_item_over(order_factory):"]
+    assert judged[:3] == ["def check_limit(order):", "def place_order(order):", "MAX_ITEMS = 4"]
+    assert sorted(judged[3:5]) == ["def cancel_order(order):", "def round_total(order):"]
+    assert sorted(judged[5:9]) == sorted(PRODUCTION_WITHOUT_NAMES)
+    assert judged[9:] == ["def test_check_limit_refuses_one_item_over(order_factory):"]
+
+
+def test_a_units_features_count_whole_word_names_and_its_own_and_its_files_name(tmp_path: Path) -> None:
+    # Arrange: refund calls invoice and sits in invoice.py; refunds is a longer word than refund
+    index = shop_index(tmp_path)
+    units = list_units(index, ["billing/invoice.py"], box_chars=JEV_BOX).units
+    [refund] = [unit for unit in units if unit.symbol == "refund"]
+    rarities = name_rarities({"invoice": 2, "refunds": 6})
+
+    # Act
+    features = features_of(refund, read_ranges(index, refund.path, refund.ranges), Source.FILE, (), rarities)
+
+    # Assert
+    assert features == Features(
+        names=("invoice",), rarity=rarities["invoice"], defines=False, file_named=True, distance=2, test=False
+    )
 
 
 def test_renaming_a_folder_leaves_the_value_order_and_ranking_unchanged_while_it_moves_the_stage_order(
@@ -136,11 +152,9 @@ def test_a_value_search_resumed_from_its_answers_asks_only_the_units_it_had_not_
         index, Judge(client, items_per_request=2), TARGETS, **REQUEST, policy=VALUE, completed=stopped.judged
     )
 
-    # Assert
+    # Assert: the two calls answered the first four units in value order
     asked = [item["code"].splitlines()[0] for state, _ in client.requests for item in state["items"]]
-    assert sorted(asked) == sorted(
-        [*PRODUCTION_WITHOUT_NAMES, "def test_check_limit_refuses_one_item_over(order_factory):"]
-    )
+    assert asked == first_lines(sent_requests(index, policy=VALUE))[4:]
 
 
 def test_the_async_search_keeps_the_value_order(tmp_path: Path) -> None:
