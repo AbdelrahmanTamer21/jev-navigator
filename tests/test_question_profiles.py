@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 import pytest
+from git_repos import commit_all
 
 from jev_navigator.directives.find_all import find_all, find_all_async, find_all_text, find_all_text_async
 from jev_navigator.index.code_index import CodeIndex
@@ -28,7 +29,8 @@ def test_profile_batches_real_units_and_retains_roles(tmp_path: Path, asynchrono
         body = f"unit {number}" if text else f"def unit{number}():\n    return {number}\n"
         (tmp_path / path).write_text(body)
         paths.append(path)
-    index = CodeIndex(tmp_path, paths)
+    commit_all(tmp_path)
+    index = CodeIndex.from_git(tmp_path)
     probabilities = {
         "unit00": {"decide": 0.60},
         "unit01": {"guard": 0.70, "delegates": 0.95},
@@ -87,3 +89,43 @@ def test_profile_batches_real_units_and_retains_roles(tmp_path: Path, asynchrono
         "unit04",
     ]
     assert result.stopped_by == "scope_examined"  # Missing high-band roles do not extend search.
+
+
+def test_resumed_profile_retains_prior_units_with_new_role_winners(tmp_path: Path):
+    (tmp_path / "first.py").write_text("def decide():\n    return True\n")
+    (tmp_path / "next.py").write_text("def guard():\n    return False\n")
+    commit_all(tmp_path)
+    index = CodeIndex.from_git(tmp_path)
+    provider = ScriptedJevClient(nouls={"decide_p0": 0.6, "guard_p0": 0.7}, default_noul=0.1)
+    judge = Judge(provider, masker=None, scanner=None)
+    options = {"question_profile": ROLES_V2, "required_roles": ("decide", "guard")}
+    first = find_all(index, judge, {"p0": "the controls"}, files=["first.py"], **options)
+    # Distinct observations for the new unit, independent of the resumed result.
+    provider.nouls = {"decide_p0": 0.1, "guard_p0": 0.9}
+    second = find_all(index, judge, first.targets, files=["next.py"], completed=first.judged, **options)
+    assert first.failure is second.failure is None
+    assert [score.unit.path for score in second.ranked_with("p0", first)] == ["first.py", "next.py"]
+    assert len(provider.requests) == 2
+
+
+def test_role_profile_keeps_todays_settling_when_local_roles_are_uncovered(tmp_path: Path):
+    from jev_navigator.directives.frontier import VALUE
+
+    for number in range(3):
+        (tmp_path / f"unit{number}.py").write_text(f"def unit{number}():\n    return {number}\n")
+    commit_all(tmp_path)
+    index = CodeIndex.from_git(tmp_path)
+    provider = ScriptedJevClient(nouls={"satisfied_p0": 0.99}, default_noul=0.1)
+    result = find_all(
+        index,
+        Judge(provider, items_per_request=1),
+        {"p0": "the requested behavior"},
+        files=index.files,
+        question_profile=ROLES_V2,
+        required_roles=LOCAL_ROLES,
+        policy=VALUE,
+        batches_per_wave=1,
+    )
+    assert result.failure is None
+    assert result.stopped_by == "settled"
+    assert len(provider.requests) == 1

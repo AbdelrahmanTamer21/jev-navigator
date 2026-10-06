@@ -32,6 +32,41 @@ def bind_question(value, item: str, point: str):
 
 
 @dataclass(frozen=True)
+class RoleAnswers:
+    """Raw role observations reusable by search and offline allocation."""
+
+    unit_id: str
+    probabilities: Mapping[str, float]
+
+    @property
+    def relevance(self) -> float:
+        return max(self.probabilities[role] for role in (*LOCAL_ROLES, "satisfied"))
+
+    @property
+    def forwarding_only(self) -> bool:
+        return (
+            self.probabilities["delegates"] >= 0.80
+            and max(self.probabilities[role] for role in LOCAL_ROLES) <= 0.20
+        )
+
+
+def compose_roles(answers: Sequence[RoleAnswers], required: Sequence[str]) -> dict:
+    """Measured role winners, uncovered roles and forwarding observations, without a stop rule."""
+    best = {
+        role: max(answers, key=lambda answer: answer.probabilities[role], default=None) for role in required
+    }
+    covered = {
+        role for role, answer in best.items() if answer is not None and answer.probabilities[role] >= 0.80
+    }
+    return {
+        "best_by_role": best,
+        "uncovered_roles": set(required) - covered,
+        "ranked": sorted(answers, key=lambda answer: -answer.relevance),
+        "follow_units": [answer.unit_id for answer in answers if answer.forwarding_only],
+    }
+
+
+@dataclass(frozen=True)
 class QuestionProfile:
     """A selectable question contract. Callers explicitly choose retention roles."""
 
@@ -71,7 +106,7 @@ class QuestionProfile:
         """The measured scalar composition, with delegation retained separately."""
         if "match" in self.templates:
             return probabilities["match"]
-        return max(probabilities[role] for role in (*LOCAL_ROLES, "satisfied"))
+        return RoleAnswers("", probabilities).relevance
 
     def compose(self, answers: Mapping[str, CheckResult], thresholds: Thresholds) -> CheckResult:
         """Keep raw judgments, composing relevance only after every answer arrives."""
@@ -93,22 +128,25 @@ class QuestionProfile:
 
 def forwarding_only(answers: Mapping[str, CheckResult]) -> bool:
     """Delegation is forwarding-only only when all local roles are low."""
-    return (
-        answers["delegates"].probability >= 0.80
-        and max(answers[role].probability for role in LOCAL_ROLES) <= 0.20
-    )
+    return RoleAnswers("", {role: answer.probability for role, answer in answers.items()}).forwarding_only
 
 
 def retain_roles(scores: Sequence, required: Sequence[str]) -> tuple:
     """Best per required role first, then stable relevance order, with uncertain best retained."""
     if unknown := set(required) - set(LOCAL_ROLES):
         raise ValueError(f"unknown local roles: {sorted(unknown)}")
-    winners = (
-        [max(scores, key=lambda score: score.answer.components[role].probability) for role in required]
-        if scores
-        else []
-    )
-    ordered = [*winners, *sorted(scores, key=lambda score: -score.probability)]
+    observed = [
+        RoleAnswers(
+            score.unit.id, {role: answer.probability for role, answer in score.answer.components.items()}
+        )
+        for score in scores
+    ]
+    composed = compose_roles(observed, required)
+    by_id = {score.unit.id: score for score in scores}
+    ordered = [
+        by_id[answer.unit_id]
+        for answer in (*filter(None, composed["best_by_role"].values()), *composed["ranked"])
+    ]
     retained = {}
     for score in ordered:
         retained.setdefault(score.unit.id, score)

@@ -190,11 +190,23 @@ class FindAllResult:
         """Every judged unit's answer for ``target``, best first. A tie goes to the unit worth more by
         code under a ranked policy, then to the content hash, never to the path."""
         if self.question_profile != MATCH:
-            order = {answer.place.id: number for number, answer in enumerate(self.judged[target])}
-            scores = sorted(self.scores(target), key=lambda score: order[score.answer.place.id])
-            return retain_roles(scores, self.required_roles)
+            return retain_roles(self._observed_scores(target), self.required_roles)
         features = self.features.get(target, {})
         return tuple(sorted(self.scores(target), key=lambda score: self._rank(score, features)))
+
+    def ranked_with(self, target: str, previous: FindAllResult) -> tuple[UnitScore, ...]:
+        """Rank a resumed search together with the earlier search's units, without dropping either."""
+        scores = {
+            score.unit.id: score
+            for score in (*previous._observed_scores(target), *self._observed_scores(target))
+        }
+        if self.question_profile != MATCH:
+            return retain_roles(tuple(scores.values()), self.required_roles)
+        return tuple(sorted(scores.values(), key=lambda score: -score.probability))
+
+    def _observed_scores(self, target: str) -> tuple[UnitScore, ...]:
+        order = {answer.place.id: number for number, answer in enumerate(self.judged[target])}
+        return tuple(sorted(self.scores(target), key=lambda score: order[score.answer.place.id]))
 
     def _rank(self, score: UnitScore, features: Mapping[str, Features]) -> tuple[float, float, str, str]:
         unit_features = features.get(score.unit.id)
