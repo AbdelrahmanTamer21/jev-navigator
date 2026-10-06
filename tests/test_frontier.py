@@ -271,6 +271,25 @@ def test_a_target_settles_only_after_the_callers_and_callees_its_clearing_unit_p
     assert result.not_judged == {refund.id: NOT_REACHED}
 
 
+def test_the_hop_sources_a_caller_composes_decide_what_a_clearing_unit_pushes(tmp_path: Path) -> None:
+    # Act: callees only, so post_order, checkout's caller, is never pushed
+    _, result = settling_search(tmp_path, hops=(CALLEES,))
+
+    # Assert
+    checkout, post_order, enforce = (
+        _unit_at(result, path, symbol)
+        for path, symbol in [
+            ("orders/checkout.py", "checkout"),
+            ("web/routes.py", "post_order"),
+            ("orders/rules.py", "enforce"),
+        ]
+    )
+    assert result.pushed == {checkout.id: (enforce.id,)}
+    assert result.not_judged[post_order.id] == NOT_REACHED
+    assert result.ranked("limit")[0].unit == enforce
+    assert (result.stopped_by, result.settled) == ("settled", ("limit",))
+
+
 def test_a_settling_target_spends_its_slots_only_on_the_units_it_pushed(tmp_path: Path) -> None:
     # Arrange: two units per request, so the request after checkout cleared has a slot to spare
     client = labelled(LIMIT_ANSWERS)

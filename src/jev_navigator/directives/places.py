@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
 
+from .. import operations
 from ..index.bindings import Binding, falls_inside
 from ..index.code_index import CodeIndex
 from ..index.scope import is_test_file
@@ -309,16 +310,16 @@ def _callers(index: CodeIndex, opened: CodeSlice) -> list[Place]:
 def _client_calls(index: CodeIndex, opened: CodeSlice) -> list[Place]:
     """The code that queries a model or view the opened lines of a schema declare, found by the
     text of its Prisma Client calls (``.website.`` for ``model Website``), tests last."""
-    calls = sorted(
-        (
-            (hit, f"queries {block.keyword} {block.name} by the text `{block.client_call_text}`")
-            for block in index.schema_blocks_in(opened.span.file)
-            if block.client_call_text and opened.span.overlaps(Span(opened.span.file, block.start, block.end))
-            for hit in index.search_text(block.client_call_text)
-        ),
-        key=lambda call: is_test_file(call[0].file),
-    )
-    return [place_for_line(index, hit.file, hit.line, relation) for hit, relation in calls]
+    calls = sorted(operations.client_calls(index, opened.span), key=lambda call: is_test_file(call[0].file))
+    return [
+        place_for_line(
+            index,
+            hit.file,
+            hit.line,
+            f"queries {block.keyword} {block.name} by the text `{block.client_call_text}`",
+        )
+        for hit, block in calls
+    ]
 
 
 def _callees(index: CodeIndex, opened: CodeSlice) -> list[Place]:
@@ -350,9 +351,7 @@ def _queried_models(index: CodeIndex, opened: CodeSlice) -> list[Place]:
             Span(file, block.start, block.end, block.name),
             f"{block.keyword} {block.name}, which {source} queries by the text `{block.client_call_text}`",
         )
-        for file in index.schema_files
-        for block in index.schema_blocks_in(file)
-        if block.client_call_text and block.client_call_text in opened.text
+        for file, block in operations.queried_models(index, opened.text)
     ]
 
 

@@ -24,7 +24,7 @@ from .index.code_index import CodeIndex
 from .index.languages import language_read
 from .index.scope import is_lockfile
 from .index.spans import Span, TextHit
-from .index.units import Anchor, LineAnchor, Unit, UnitKind
+from .index.units import Anchor, LineAnchor, Unit, UnitKind, read_ranges
 
 
 @dataclass(frozen=True)
@@ -156,12 +156,133 @@ class CalleeSource:
         ]
 
 
+@dataclass(frozen=True)
+class DefinitionSource:
+    """The units defining each request name (functions, classes, constants, assignments, types and
+    enums, as ``CodeIndex.find_definition`` finds them), at distance 1."""
+
+    name: ClassVar[str] = "definition"
+    label: ClassVar[str] = "definitions"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [
+            Reach(LineAnchor(span.file, span.start), self.name, name, 1, frozenset({name}))
+            for name in dict.fromkeys(seeds.names)
+            for span in index.find_definition(name)
+        ]
+
+
+@dataclass(frozen=True)
+class ReferenceSource:
+    """The units using each request name other than by calling it (passed on, stored, assigned, used as
+    a decorator, exported or returned, as ``CodeIndex.find_references`` finds them), at distance 2."""
+
+    name: ClassVar[str] = "reference"
+    label: ClassVar[str] = "references"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [
+            Reach(LineAnchor(reference.file, reference.line), self.name, name, 2, frozenset({name}))
+            for name in dict.fromkeys(seeds.names)
+            for reference in index.find_references(name)
+        ]
+
+
+@dataclass(frozen=True)
+class ImportSource:
+    """Every unit of the files that the anchors' files and the seed units' files import, where the
+    index reads the language, at distance 1."""
+
+    name: ClassVar[str] = "import"
+    label: ClassVar[str] = "imported files"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [
+            Reach(imported, self.name, file, 1)
+            for file in pointed_files(index, seeds)
+            if language_read(file)
+            for imported in index.imports(file)
+        ]
+
+
+@dataclass(frozen=True)
+class ImporterSource:
+    """Every unit of the files that import the anchors' files or the seed units' files, at distance 1."""
+
+    name: ClassVar[str] = "importer"
+    label: ClassVar[str] = "importing files"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [
+            Reach(importer, self.name, file, 1)
+            for file in pointed_files(index, seeds)
+            for importer in index.dependents(file)
+        ]
+
+
+@dataclass(frozen=True)
+class NamedFileSource:
+    """Every unit of the scope files the targets' descriptions or the anchors' files name by path or
+    run as a module (``operations.files_named_by``), at distance 1: the files JVN parses, or with
+    ``text_files`` the rest."""
+
+    text_files: bool = False
+    name: ClassVar[str] = "named_file"
+    label: ClassVar[str] = "named files"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        named = operations.files_named_by(index, seeds.texts, [anchor.file for anchor in seeds.anchors])
+        files = named.text if self.text_files else named.code
+        return [Reach(file, self.name, named.named_by[file], 1) for file in files]
+
+
+@dataclass(frozen=True)
+class ModelSource:
+    """The Prisma schema's model and view blocks each seed unit queries through Prisma Client
+    (``operations.queried_models``), at distance 1."""
+
+    name: ClassVar[str] = "model"
+    label: ClassVar[str] = "queried models"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [
+            Reach(LineAnchor(file, block.start), self.name, unit.id, 1)
+            for unit in seeds.units
+            for file, block in operations.queried_models(index, read_ranges(index, unit.path, unit.ranges))
+        ]
+
+
+@dataclass(frozen=True)
+class ClientCallSource:
+    """The code that queries each seed unit that is a Prisma model or view block, found by the text of
+    its Prisma Client calls (``operations.client_calls``), at distance 1."""
+
+    name: ClassVar[str] = "client_call"
+    label: ClassVar[str] = "client calls"
+
+    def reach(self, index: CodeIndex, seeds: Seeds) -> list[Reach]:
+        return [
+            Reach(LineAnchor(hit.file, hit.line), self.name, unit.id, 1)
+            for unit in seeds.units
+            if unit.kind is UnitKind.SCHEMA_BLOCK
+            for hit, _ in operations.client_calls(index, Span(unit.path, unit.start, unit.end))
+        ]
+
+
 ANCHORS = AnchorSource()
 FILES = FileSource()
 NAMES = NameSource()
 TEXT_NAMES = NameSource(text_files=True)
 CALLERS = CallerSource()
 CALLEES = CalleeSource()
+DEFINITIONS = DefinitionSource()
+REFERENCES = ReferenceSource()
+IMPORTS = ImportSource()
+IMPORTERS = ImporterSource()
+NAMED_FILES = NamedFileSource()
+TEXT_NAMED_FILES = NamedFileSource(text_files=True)
+MODELS = ModelSource()
+CLIENT_CALLS = ClientCallSource()
 
 
 def anchor_text(anchor: Anchor) -> str:
@@ -182,6 +303,13 @@ def near_files(index: CodeIndex, anchors: Sequence[Anchor]) -> frozenset[str]:
         for file in index.imports(anchored_file)
     }
     return frozenset(anchored | imported)
+
+
+def pointed_files(index: CodeIndex, seeds: Seeds) -> tuple[str, ...]:
+    """The scope files the anchors and the seed units sit in, in that order, each once."""
+    scope = frozenset(index.files)
+    pointed = [*(anchor.file for anchor in seeds.anchors), *(unit.path for unit in seeds.units)]
+    return tuple(file for file in dict.fromkeys(pointed) if file in scope)
 
 
 def function_span(index: CodeIndex, unit: Unit) -> Span | None:
