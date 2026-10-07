@@ -20,10 +20,10 @@ from jev_navigator.directives.frontier import (
     name_rarities,
 )
 from jev_navigator.directives.search_coverage import Outcome, Round, point_results
-from jev_navigator.index.units import list_units, read_ranges
+from jev_navigator.index.units import RangeAnchor, list_units, read_ranges
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS
 from jev_navigator.judgments.judge import Judge
-from jev_navigator.sources import CALLEES, CALLERS, NAMES
+from jev_navigator.sources import CALLEES, CALLERS, FILES, LITERALS, NAMES
 from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
 
 PRODUCTION_WITHOUT_NAMES = [
@@ -507,3 +507,34 @@ def test_required_roles_allow_settling_after_their_observed_units_are_judged(tmp
     )
     assert result.settled == ("limit",)
     assert value in {score.unit.id for score in result.scores("limit")}
+
+
+@pytest.mark.parametrize("supplied,probability", [(True, 0.0), (False, 1.0), (False, 0.0)])
+def test_relevant_or_supplied_code_seeds_only_one_hop_without_rejudging_supplied_lines(
+    tmp_path: Path, supplied: bool, probability: float
+) -> None:
+    index = shop_index(
+        tmp_path,
+        {
+            "app.py": "def run():\n    return 'FEATURE_LIMIT'\n",
+            "config.py": "FEATURE_LIMIT = 'SECOND_KEY'\n",
+            "other.py": "SECOND_KEY = 7\n",
+        },
+    )
+    client = ScriptedJevClient(default_noul=probability)
+    result = find_all(
+        index,
+        Judge(client),
+        {"p": "configuration"},
+        files=["app.py"],
+        delivered=[RangeAnchor("app.py", 1, 2)] if supplied else [],
+        sources=(FILES,),
+        hops=(LITERALS,),
+        policy=VALUE,
+    )
+    assert result.stopped_by == "scope_examined", result.failure
+    expanded = supplied or probability == 1.0
+    assert {unit.path for unit in result.units} == ({"app.py", "config.py"} if expanded else {"app.py"})
+    expected = {"config.py"} if supplied else ({"app.py", "config.py"} if expanded else {"app.py"})
+    assert {item["file"] for state, _ in client.requests for item in state["items"]} == expected
+    assert len(result.judged["p"]) == len(expected)

@@ -16,6 +16,7 @@ from jev_navigator.sources import (
     CALLERS,
     CLIENT_CALLS,
     DEFINITIONS,
+    FILE_WORDS,
     FILES,
     IMPORTERS,
     IMPORTS,
@@ -28,6 +29,7 @@ from jev_navigator.sources import (
     Reach,
     Seeds,
 )
+from jev_navigator.testing import ScriptedJevClient
 
 BOX = JEV_INPUT_LIMITS.box_chars
 SCHEMA = "prisma/schema.prisma"
@@ -258,3 +260,44 @@ def test_under_a_ranked_policy_a_unit_two_sources_reach_counts_at_the_nearer_sou
         NAMES.name,
         3,
     )
+
+
+def test_word_matched_files_keep_source_priority_under_a_request_cap(tmp_path: Path) -> None:
+    index = shop_index(
+        tmp_path,
+        {
+            "a/limit.py": "def alpha():\n    return 1\n",
+            "z/feature_limit.py": "def beta():\n    return 2\n",
+            "scope.py": "def scoped():\n    return 3\n",
+        },
+    )
+    client = ScriptedJevClient()
+    result = find_all(
+        index,
+        Judge(client, max_calls=1, items_per_request=1),
+        {"p": "feature limit"},
+        files=["scope.py"],
+        sources=(FILE_WORDS, FILES),
+    )
+    assert result.stopped_by == "budget"
+    assert [score.unit.path for score in result.scores("p")] == ["z/feature_limit.py"]
+    assert client.requests[0][0]["items"][0]["file"] == "z/feature_limit.py"
+
+
+def test_owner_qualified_callees_with_the_same_name_reach_both_bound_owners(tmp_path: Path) -> None:
+    index = shop_index(
+        tmp_path,
+        {
+            "app.py": (
+                "import worker\nimport guard\n\ndef run():\n    worker.decide()\n    return guard.decide()\n"
+            ),
+            "worker.py": "def decide():\n    return 1\n",
+            "guard.py": "def decide():\n    return 2\n",
+            "unrelated.py": "def decide():\n    return 3\n",
+        },
+    )
+    unit = units_by_symbol(index, "app.py")["run"]
+    assert {reach.at for reach in CALLEES.reach(index, Seeds(units=(unit,)))} == {
+        LineAnchor("worker.py", 1),
+        LineAnchor("guard.py", 1),
+    }
