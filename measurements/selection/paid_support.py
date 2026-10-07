@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -26,6 +27,14 @@ def load(path):
 def write(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+
+
+def frozen_prompt(folder):
+    wire = (folder / "llm-prompt.txt").read_bytes()
+    expected = load(folder / "llm-page.json")["prompt_sha256"]
+    if hashlib.sha256(wire).hexdigest() != expected:
+        raise ValueError("Frozen prompt bytes changed")
+    return wire.decode("utf-8")
 
 
 def resources():
