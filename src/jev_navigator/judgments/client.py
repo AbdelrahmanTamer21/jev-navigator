@@ -19,17 +19,9 @@ MAX_TOKENS_MARKER = "max_tokens_exceeded"
 """The provider's error_type when a request's input exceeds the model's input budget."""
 
 REQUEST_CHARS_PER_TOKEN = 2.4
-"""ASCII-escaped characters (``serialized_chars``) per input token, the same value and meaning as the
-Engine's ``REQUEST_CHARS_PER_TOKEN`` (analysis-engine ``enginepy/host/system_one.py``). A limit in
-tokens becomes a box in characters with ``chars_for_tokens``, never with a second ratio: route boxes
-(Drex's 8,192 tokens is 19,660 characters) use it too.
-
-The fit and its data are in ``jvn-eval-2026-10-03/census/request-size-fit`` (``fit-table-request-size.md``).
-On 3,096 real requests (03.10.2026) Jev's input is 263 tokens plus 0.22 per state character and 0.29
-per question character. The 264 requests of 2,000 tokens or more cost at most 0.38 tokens per
-character (2.63 characters per token), so 2.4 (0.417) keeps a 1.10 margin. The data reaches only 11,652
-tokens; the limit itself rests on the Engine's measurement of the edge (32,883 pass, about 33,200
-refused)."""
+"""ASCII-escaped characters (``serialized_chars``) per input token. Token limits become character
+boxes with ``chars_for_tokens``; route boxes use the same ratio. The conservative measured fit
+and its provenance are retained in ``measurements/runtime-limits/REPORT.md``."""
 
 
 def chars_for_tokens(tokens: int) -> int:
@@ -38,8 +30,8 @@ def chars_for_tokens(tokens: int) -> int:
 
 JEV_STATE_TOKEN_LIMIT = 32_000
 """The input Jev accepts for the state plus the longest single question (TypeSafe Models page,
-docs.typesafe.ai/models). The Engine measured it on 27.09.2026: 32,883 input tokens pass and about
-33,200 are refused with ``max_tokens_exceeded``."""
+docs.typesafe.ai/models). Historical boundary measurements and their provenance are retained in
+``measurements/runtime-limits/REPORT.md``."""
 
 JEV_REQUEST_TOKEN_LIMIT = 64_000
 """The input Jev accepts for a whole request; a request of 48,951 tokens was accepted."""

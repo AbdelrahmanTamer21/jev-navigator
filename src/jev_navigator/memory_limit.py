@@ -45,8 +45,8 @@ from .index.file_shape import MAX_PARSE_PEAK_MB
 ALLOWANCE_MB = 1024
 """What the child processes of one JVN host may hold together. Measured on 04.10.2026 with the streaming
 parser (#50) and the declaration-rule fix (#72), parsing every file of an app-sized scope: the largest
-measured, saleor/graphql with 15.6 MB of code, peaked at 333 MB, and the worst, Heedvane's
-packages/protocol with generated bundles parsed side by side, at 471 MB."""
+measured 15.6 MB scope peaked at 333 MB; generated bundles parsed side by side peaked at 471 MB.
+Sample provenance is retained in ``measurements/runtime-limits/REPORT.md``."""
 
 CEILING_MB = 8192
 """The shared ceiling of JVN child-process reservations: eight slots at the default allowance. All
@@ -64,7 +64,8 @@ SLOT_POLL_SECONDS = 0.2
 
 PARSE_HEADROOM_MB = 270
 """Conservative headroom when sizing ast-grep concurrency and individual files. Originally based on
-Python's 261 MB share for saleor/graphql, it remains parser sizing slack, not a host-heap charge."""
+a measured 261 MB Python parsing share, it remains parser sizing slack, not a host-heap charge.
+Sample provenance is retained in ``measurements/runtime-limits/REPORT.md``."""
 
 ENVIRONMENT_NAMES = {
     "allowance_mb": "JEV_NAVIGATOR_MEMORY_ALLOWANCE_MB",
