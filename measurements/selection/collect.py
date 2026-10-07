@@ -32,9 +32,6 @@ def deny_network(event, args):
         raise RuntimeError("The selection replay permits zero provider calls")
 
 
-sys.addaudithook(deny_network)
-
-
 def load(path):
     return json.loads(path.read_text())
 
@@ -340,6 +337,7 @@ def build_features(db, cases, inputs, out, *, limit=None):
 
 
 def main():
+    sys.addaudithook(deny_network)
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--proof", type=Path, default=Path.home() / ".local/share/system-one-proof/jvn-eval-2026-10-03"

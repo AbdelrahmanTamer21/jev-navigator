@@ -28,8 +28,6 @@ def deny_network(event, args):
         raise RuntimeError("The selection replay permits zero provider calls")
 
 
-sys.addaudithook(deny_network)
-
 FIXED = {
     "scent": (1, 0, 0, 0, 0, 0),
     "filename": (0, 0, 1, 0, 0, 0),
@@ -345,6 +343,7 @@ def active_arms(dev, hard, proof, out):
 
 
 def main():
+    sys.addaudithook(deny_network)
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)

@@ -24,9 +24,6 @@ def deny_network(event, args):
         raise RuntimeError("The frozen allocation replay permits zero provider calls")
 
 
-sys.addaudithook(deny_network)
-
-
 def load(path):
     return json.loads(path.read_text())
 
@@ -40,6 +37,7 @@ def location(unit):
 
 
 def main():
+    sys.addaudithook(deny_network)
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)

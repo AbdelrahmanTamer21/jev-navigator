@@ -26,9 +26,6 @@ def deny_network(event, args):
         raise RuntimeError("Trial preparation permits zero provider calls")
 
 
-sys.addaudithook(deny_network)
-
-
 def load(path):
     return json.loads(path.read_text())
 
@@ -48,6 +45,7 @@ def priced(request):
 
 
 def main():
+    sys.addaudithook(deny_network)
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
