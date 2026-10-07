@@ -5,7 +5,7 @@ hid: token and hash shapes, credentials in URLs, and values under secret-named k
 env-file words, quoted, plain, bare and fallback values, structured values in
 ``secret_structures``), plus literal arguments to secret-named calls and high-entropy quoted
 values. Which keys are secret and which values are code is ``secret_values``. The structural
-rules follow the analysis engine's audit masker, whose corpus both sides test.
+rules recognize secret literals across code and configuration; the shared corpus tests their behavior.
 """
 
 from __future__ import annotations

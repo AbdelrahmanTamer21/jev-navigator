@@ -1073,7 +1073,7 @@ def test_provider_max_tokens_error_splits_the_batch_and_keeps_every_question_ide
     assert keys == ["part0.py", "part1.py", "part2.py", "part3.py"]
 
 
-def test_unsplittable_single_question_is_reported_honestly_after_a_real_attempt(tmp_path: Path) -> None:
+def test_unsplittable_single_question_is_rejected_before_sending(tmp_path: Path) -> None:
     client = BudgetedClient(34_000)
     journal = JsonlJournal(tmp_path / "journal.jsonl")
     judge = Judge(client, journal=journal)
@@ -1082,7 +1082,7 @@ def test_unsplittable_single_question_is_reported_honestly_after_a_real_attempt(
     with pytest.raises(InputBudgetExceededError):
         judge.check_every([DESCRIBES], [item], {"doc": {"sentence": "s"}}, list_name="parts")
 
-    assert client.refusals == 1, "the provider, not the estimate, reports the unsplittable request"
+    assert client.refusals == 0 and client.requests == []
     failures = [
         json.loads(line)
         for line in journal.path.read_text().splitlines()

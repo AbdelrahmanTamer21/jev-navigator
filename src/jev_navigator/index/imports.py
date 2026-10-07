@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+from . import languages, tools
 from .packages import Packages, package_name
 from .tsconfig import ScriptPaths, normalised
 
@@ -25,9 +26,6 @@ _SCRIPT_FROM = re.compile(
     r"""^[ \t]*(import|export)\s+(?:type\s+)?"""
     r"""((?:(?!\n[ \t]*(?:import|export)\b)[\w$*\s{},])*?)\s*from\s*['"]([^'"]+)['"]""",
     re.M,
-)
-_SCRIPT_COMMENT_OR_STRING = re.compile(
-    r""""(?:[^"\\\n]++|\\.)*+"|'(?:[^'\\\n]++|\\.)*+'|`(?:[^`\\]++|\\.)*+`|//[^\n]*|/\*.*?\*/""", re.S
 )
 _SCRIPT_SIDE_EFFECT_IMPORT = re.compile(r"""^[ \t]*import\s*['"][^'"]+['"][ \t]*;?[ \t]*$""", re.M)
 _SCRIPT_REQUIRE_STATEMENT = re.compile(
@@ -67,13 +65,13 @@ class ImportFact:
 
 def imported_modules(source: str, path: str) -> list[str]:
     """The module specifiers a file imports, in source order, each once."""
+    source = _import_source(source, path)
     if path.endswith(".py"):
         found = [(match.start(), match.group(1)) for match in _PYTHON_FROM.finditer(source)]
         found += [(position, module) for position, module, _ in _python_imports(source)]
     else:
-        code = _without_script_comments(source)
-        found = [(match.start(), match.group(3)) for match in _SCRIPT_FROM.finditer(code)]
-        found += [(match.start(), match.group(1)) for match in _SCRIPT_BARE.finditer(code)]
+        found = [(match.start(), match.group(3)) for match in _SCRIPT_FROM.finditer(source)]
+        found += [(match.start(), match.group(1)) for match in _SCRIPT_BARE.finditer(source)]
     return list(dict.fromkeys(specifier for _, specifier in sorted(found)))
 
 
@@ -81,6 +79,7 @@ def module_imports(source: str, path: str) -> tuple[tuple[str, frozenset[str] | 
     """Each module specifier the source imports, re-exports or requires, in source order, with the
     names it takes by name as that module exports them; ``None`` when it takes the whole module (a
     namespace or default import, ``export *``, ``require``, a dynamic or bare import, ``import m``)."""
+    source = _import_source(source, path)
     if path.endswith(".py"):
         found = [
             (match.start(), match.group(1), _python_names(match.group(2)))
@@ -88,12 +87,11 @@ def module_imports(source: str, path: str) -> tuple[tuple[str, frozenset[str] | 
         ]
         found += [(position, module, None) for position, module, _ in _python_imports(source)]
     else:
-        code = _without_script_comments(source)
         found = [
             (match.start(), match.group(3), _script_names(match.group(1), match.group(2)))
-            for match in _SCRIPT_FROM.finditer(code)
+            for match in _SCRIPT_FROM.finditer(source)
         ]
-        found += [(match.start(), match.group(1), None) for match in _SCRIPT_BARE.finditer(code)]
+        found += [(match.start(), match.group(1), None) for match in _SCRIPT_BARE.finditer(source)]
     taken: dict[str, frozenset[str] | None] = {}
     for _, specifier, names in sorted(found, key=lambda entry: entry[0]):
         if names == frozenset():
@@ -114,9 +112,7 @@ def _python_imports(source: str) -> list[tuple[int, str, str | None]]:
 
 
 def _python_names(clause: str) -> frozenset[str] | None:
-    parts = [
-        part.strip() for part in _PYTHON_COMMENT.sub("", clause).strip("()\n ").split(",") if part.strip()
-    ]
+    parts = [part.strip() for part in clause.strip("()\n ").split(",") if part.strip()]
     if "*" in parts:
         return None
     return frozenset(_exported(part) for part in parts)
@@ -269,7 +265,6 @@ def _script_files(base: str) -> list[str]:
     ]
 
 
-_PYTHON_COMMENT = re.compile(r"#[^\n]*")
 _SCRIPT_DEFAULT_NAME = re.compile(r"^\s*([\w$]+)\s*(?:,|$)")
 # `const { verify, sign: signToken } = require('./jwt')`, which imports `verify` and `signToken`, but
 # not `require('./jwt').verify` or `require('./jwt')(options)`.
@@ -284,20 +279,20 @@ def imported_names(source: str, path: str) -> dict[str, ImportedName]:
     parenthesised over several lines; ``import { a as b } from "m"`` and ``import a from "m"``, also
     over several lines; ``const { a, b: c } = require("m")``). Type-only names are included;
     namespace imports are not."""
+    source = _import_source(source, path)
     if path.endswith(".py"):
         return {
             _local(part): ImportedName(match.group(1), _exported(part))
             for match in _PYTHON_FROM.finditer(source)
-            for part in _PYTHON_COMMENT.sub("", match.group(2)).strip("()\n ").split(",")
+            for part in match.group(2).strip("()\n ").split(",")
             if part.strip() and part.strip() != "*"
         }
-    code = _without_script_comments(source)
     names = {
         local: ImportedName(match.group(2), exported)
-        for match in _SCRIPT_REQUIRED_NAMES.finditer(code)
+        for match in _SCRIPT_REQUIRED_NAMES.finditer(source)
         for exported, local in _destructured_pairs(match.group(1))
     }
-    for match in _SCRIPT_FROM.finditer(code):
+    for match in _SCRIPT_FROM.finditer(source):
         keyword, clause, specifier = match.groups()
         if keyword != "import":
             continue
@@ -325,10 +320,11 @@ def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | Non
     ``from m import *``). A Python module passes on what it imports by name, as a package's
     ``__init__.py`` does; a name it imports under another name is left out, since its module exports
     it under the first."""
+    source = _import_source(source, path)
     if path.endswith(".py"):
         return _python_reexports(source)
     exports = []
-    for match in _SCRIPT_FROM.finditer(_without_script_comments(source)):
+    for match in _SCRIPT_FROM.finditer(source):
         keyword, clause, specifier = match.groups()
         if keyword != "export":
             continue
@@ -350,7 +346,7 @@ def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | Non
 def _python_reexports(source: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
     exports = []
     for match in _PYTHON_FROM.finditer(source):
-        parts = [part.strip() for part in _PYTHON_COMMENT.sub("", match.group(2)).strip("()\n ").split(",")]
+        parts = [part.strip() for part in match.group(2).strip("()\n ").split(",")]
         if "*" in parts:
             exports.append((None, match.group(1)))
             continue
@@ -360,21 +356,42 @@ def _python_reexports(source: str) -> tuple[tuple[frozenset[str] | None, str], .
     return tuple(exports)
 
 
-def _without_script_comments(source: str) -> str:
-    """The source with ``//`` and ``/* */`` comments removed and their line breaks kept, so every line
-    keeps its number; string literals are kept whole, so a ``//`` inside a string is not taken for a
-    comment."""
-    return _SCRIPT_COMMENT_OR_STRING.sub(_keep_literal, source)
+def _import_source(source: str, path: str) -> str:
+    """Parse comments only when the text can contain an import or re-export.
 
-
-def _keep_literal(match: re.Match) -> str:
-    text = match.group(0)
-    return "\n" * text.count("\n") if text.startswith("/") else text
+    These keywords also cover clauses split by comments. Exported functions without a module
+    specifier do not need a comment parse, even when their bodies contain URL literals.
+    """
+    if not any(word in source for word in ("import", "require", "from")):
+        return source
+    return without_comments(source, path)
 
 
 def without_comments(source: str, path: str) -> str:
-    """``source`` with its comments removed and every line break kept, so lines keep their numbers."""
-    return _PYTHON_COMMENT.sub("", source) if path.endswith(".py") else _without_script_comments(source)
+    """Remove parser-recognized comments, retaining every CR/LF byte and all literal text.
+
+    The same ast-grep grammars as the index own comment boundaries, including f-string and
+    template expressions. With syntax errors, remove only comment nodes recovered by the parser;
+    unrecognized text remains. Unsupported file languages remain unchanged. An unavailable or
+    failed parser raises its process error when comments may exist; Python text without a hash
+    cannot contain a comment and needs no parse.
+    """
+    content = source.encode()
+    language = languages.parse_language(path, content)
+    if language is None or not source or (language == "python" and "#" not in source):
+        return source
+    rule = f"id: comments\nlanguage: {languages.grammar_of(language)}\nrule:\n  kind: comment\n"
+    matches = tools.ast_grep_source(rule, source)
+    chunks = []
+    position = 0
+    for match in sorted(matches, key=lambda match: match["range"]["byteOffset"]["start"]):
+        offsets = match["range"]["byteOffset"]
+        start, end = offsets["start"], offsets["end"]
+        chunks.append(content[position:start])
+        chunks.append(bytes(byte for byte in content[start:end] if byte in (10, 13)))
+        position = end
+    chunks.append(content[position:])
+    return b"".join(chunks).decode()
 
 
 def import_lines(source: str, path: str) -> frozenset[int]:
@@ -382,7 +399,7 @@ def import_lines(source: str, path: str) -> frozenset[int]:
     spans. A script's ``require`` counts only as a whole statement (``const x = require("x")``),
     never inside other code."""
     statements = _PYTHON_IMPORT_STATEMENTS if path.endswith(".py") else _SCRIPT_IMPORT_STATEMENTS
-    return frozenset(_lines_matched(without_comments(source, path), statements))
+    return frozenset(_lines_matched(_import_source(source, path), statements))
 
 
 def _lines_matched(code: str, patterns: tuple[re.Pattern[str], ...]) -> set[int]:

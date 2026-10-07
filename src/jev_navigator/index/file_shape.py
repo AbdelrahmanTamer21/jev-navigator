@@ -1,19 +1,10 @@
-"""What a file's bytes say about the cost of parsing it, measured without parsing it.
+"""Estimate parsing cost from file bytes without parsing them.
 
-ast-grep's memory follows the number of syntax nodes on a line, and a node is roughly one punctuation
-character (``{ } ( ) ; , [ ]``): a 120 KB bundle on one line peaked at 681 MB, the same bundle cut into
-lines of about 1,000 characters at 35 MB, and one 2.5 MB image string, which is a single node, at 58 MB.
-So the estimate sums, over lines, the square of each line's punctuation count. It fits every real file
-measured on 03.10.2026 and 04.10.2026 (the table is in the ``census/parse-peak`` folder of the
-evaluation, ``fit-table-punctuation-5.5.md``): the 13 files that really peak above 250 MB stay refused,
-and a long string of data is parsed. Code also costs by how much of it there is: on 04.10.2026,
-1.2 to 15 MB files of Heedvane TypeScript, saleor Python and dense generated lines peaked at 53 to 75
-MB per MB of code over the base, whatever the length of their lines. So the estimate adds a term per
-byte, every byte counted as code. A long string literal is one node and costs less, but no reading of
-quotes short of the language's own grammar can tell a string from code that sits between two quotes
-the language does not pair (an apostrophe in a template literal, JSX text or a comment), and counting
-such code as data let 4 MB files peaking at 254 MB be estimated at 26. Counting every byte costs no
-real file its place: documenso's 2.5 MB SVG path estimates 226 MB and is still parsed side by side.
+Syntax-node density drives parser memory: punctuation per line contributes a squared term, and
+source size contributes a term per byte. Every byte is counted as code. A long string literal
+may cost less, but only the language's grammar can distinguish it reliably from executable code.
+The conservative estimate admits ordinary files while refusing dense files above the parse ceiling.
+Historical fits and caller-specific samples live in ``measurements/runtime-limits/REPORT.md``.
 """
 
 from __future__ import annotations

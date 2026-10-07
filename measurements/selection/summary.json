@@ -1,0 +1,58 @@
+{
+  "status": "frozen historical evidence",
+  "scope": {
+    "dev_findings": 110,
+    "dev_registered_lines": 201,
+    "permitted_hard_findings": 13,
+    "hard_registered_lines": 28
+  },
+  "library_revisions": {
+    "zero_cost_citation_rebuild": "1c13a7ba6bf0eca53ebcc73b2d41531c0aa97e0c",
+    "paid_trial_source": "a7bb65f44374bec240093aa2a961f754218854c4",
+    "paid_role_runtime": "e7fbd398",
+    "strict_native_replay": "677ef3e13fc1992982ef00b83505fc76d27454aa",
+    "harness_moved_from": "1940b5351f538ca187714f2517b2b808bc9a14e6"
+  },
+  "engine_revision": "91f57ab4668d1f5f74ee4c9e31def8f8e0564c47",
+  "ranking": {
+    "weights": {
+      "scent": 0.5,
+      "walk": 1.0,
+      "path": 0.0,
+      "prior": 0.0,
+      "hub": 0.0,
+      "test": 0.1
+    },
+    "top128_source_exposure": {
+      "dev": 116,
+      "hard": 12
+    },
+    "provider_calls": 0,
+    "usd": 0
+  },
+  "historical_paid_trial": {
+    "physical_attempts": 2542,
+    "settled_usd": "2.338094374",
+    "cap_usd": "2.50",
+    "pending_reservations": 0
+  },
+  "limits": [
+    "Historical census recordings include the rejected #149 whole-frontier configuration, now removed. They do not measure retained-workflow reach.",
+    "Source exposure, changed-group replay and native delivery are distinct boundaries. Old probabilities do not establish new-group accuracy.",
+    "The October 7 review fixes have not rerun or refitted these measurements. No new labels, thresholds or paid calls."
+  ],
+  "external_harness": "~/.local/share/jvn-takeover/2026-10-03/search-design/case1/selection-harness/",
+  "external_evidence_root": "~/.local/share/jvn-takeover/2026-10-03/search-design/case1/",
+  "artifact_sha256": {
+    "REPORT.md": "e6ccd3689e365ec6319aad074e04e7d00fa4f49ebafa8a403be6128b1b032c9c",
+    "TRIAL.md": "deb99de595d07d2cb1a3554035b787b22adff1cc7253716f71113f3a9872cd53",
+    "provenance.json": "972620f9c302987f04ae18554da6a920eb6f125cd2c72d2f57558c1101ecea04",
+    "citation-rebuild-20261007/provenance.json": "72c283242f8e6dcbbb76ae4dc8dcb180018a03ef99cceb7da316f122f8a51225",
+    "citation-rebuild-20261007/ranking.json": "e50669b17f57ca67e54cad3c01cc4de711017f9185efb1f962cd8463090205ef",
+    "citation-rebuild-20261007/recipe-top128-lines.json": "6185e575627375799ed04dc687d8bafcb6d78b057cdd9fddd5c3657eaca67263",
+    "paid-trial-20261007/provenance.json": "3e0bb544d4b41391c9a025a5db8727d240bf6ddc18b0ea8148473b8c5c4e90c6",
+    "paid-trial-20261007/summary.json": "e5274ad58bf91882510c3b3ff2734c3815b92f017a5f14deead88666612f24ab",
+    "paid-trial-20261007/raw-artifact-manifest.jsonl": "01d841e246d8c5c040b32df7a795438300f23fbd1619fd5d586ad18e92b89476"
+  },
+  "external_harness_commit": "4b1e16fed1c7f6d7947dea4b324b6abf820ebe4d"
+}

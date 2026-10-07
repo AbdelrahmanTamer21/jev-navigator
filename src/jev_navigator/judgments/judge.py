@@ -98,7 +98,7 @@ class Refusal:
 
 @dataclass(frozen=True)
 class CheckResult:
-    """``probability`` is Jev's raw P(yes); ``verdict`` applies the current yes/no band. Callers may
+    """``probability`` is raw P(yes). ``verdict`` applies the current yes/no band. Callers may
     apply any band of their own to ``probability``. ``request_sha256`` identifies the masked request
     that answered it, also when the answer came from the store, and ``question_id`` the question it
     was asked under there (None in a result saved before it was recorded). ``place`` is the unit or
@@ -691,10 +691,20 @@ class Judge:
         return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton, batch)
 
     def _sendable(self, state: Mapping, questions: Mapping, masked: frozenset[str] | None) -> _Prepared:
-        """The prepared request, refused without a call when this route, under the same input box,
-        already refused these exact bytes for their input size, so a replay splits it again for free.
-        A changed box tries the request again."""
+        """Admit the masked request within the route's declared input limits before dispatch.
+
+        Stored answers need no send. A prior provider refusal under this same box also splits
+        again for free; a changed box can retry when the request fits its new limits.
+        """
         prepared = self._prepare(state, questions, masked)
+        if prepared.stored is None and self.input_limits.exceeded_by(prepared.state, prepared.questions):
+            error = InputBudgetExceededError(
+                "request exceeds this route's declared input limits",
+                model=self.client.model,
+                box_chars=self.input_limits.box_chars,
+            )
+            self._journal_failure(self._journal_request(prepared), error, None)
+            raise error
         if self._known_refusal(prepared):
             raise InputBudgetExceededError("this route refused this exact request for its input size before")
         return prepared
@@ -862,7 +872,7 @@ class Judge:
                 wave = queue.next_wave(self._next_wave_size)
                 with defer_keyboard_interrupts():
                     futures = [pool.submit(self._send_batch, plan, batch, stop) for batch in wave]
-                queue.put_halves((yield from _completed_wave(futures)))
+                queue.put_halves((yield from _completed_wave(futures, keep_order=plan.keep_order)))
         except KeyboardInterrupt:
             stop.halted.set()
             self.abort_sends(futures)
@@ -1449,11 +1459,14 @@ def _at_least_one(setting: str, value: int) -> int:
     return value
 
 
-def _completed_wave(futures: list[Future]) -> Generator[tuple[_Batch, JevResponse], None, list[_Batch]]:
-    """Yield a wave's answers as its batches complete, then return the halves its refused batches
+def _completed_wave(
+    futures: list[Future], *, keep_order: bool = False
+) -> Generator[tuple[_Batch, JevResponse], None, list[_Batch]]:
+    """Yield a wave's answers in input order when requested, otherwise as batches complete. Return
+    the halves its refused batches
     split into, in the wave's batch order; after every batch settled, ``_wave_failure`` decides
     what is raised."""
-    for future in as_completed(futures):
+    for future in futures if keep_order else as_completed(futures):
         yield from future.result().answered
     sent = [future.result() for future in futures]
     failure = _wave_failure([batch.error for batch in sent if batch.error is not None])

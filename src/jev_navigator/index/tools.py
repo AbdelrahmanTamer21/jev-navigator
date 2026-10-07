@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -108,6 +109,35 @@ def _tool_failure(tool: str, returncode: int, stderr: str) -> ToolFailedError:
 @cache
 def ast_grep_version() -> str:
     return run_command([AST_GREP, "--version"], Path.cwd()).strip()
+
+
+def ast_grep_source(rules_yaml: str, source: str) -> list[dict]:
+    """Parse in-memory source with JVN-owned rules and neutral config; tool failures propagate.
+
+    Stdin avoids file discovery and file-skipping limits. Tree-sitter recovers nodes from incomplete
+    syntax, so returned matches describe only what its grammar recognized, not a syntax validation.
+    """
+    with tempfile.TemporaryDirectory(prefix="jev-navigator-sgconfig-") as directory:
+        config = Path(directory) / "sgconfig.yml"
+        config.write_text(NEUTRAL_AST_GREP_CONFIG)
+        with memory_limit.parsing():
+            output = run_command(
+                [
+                    AST_GREP,
+                    "scan",
+                    "--inline-rules",
+                    rules_yaml,
+                    "--config",
+                    str(config),
+                    "--stdin",
+                    "--json=compact",
+                ],
+                Path.cwd(),
+                stdin=source,
+                no_match_exit=_NO_MATCHES_EXIT,
+                timeout=PARSE_GUARD_SECONDS,
+            )
+    return json.loads(output)
 
 
 def ast_grep_rules(
@@ -367,11 +397,46 @@ def ripgrep_fixed(
     ripgrep's JSON would carry the whole line."""
     pattern = _hit_window(text, context_bytes, whole_word)
     per_file = [] if max_hits is None else ["--max-count", str(max_hits)]
-    command = [*RIPGREP_SAFE, "--only-matching", "--line-number", "--with-filename", "--null", *per_file]
+    command = [
+        *RIPGREP_SAFE,
+        "--text",
+        "--only-matching",
+        "--line-number",
+        "--with-filename",
+        "--null",
+        *per_file,
+    ]
     command += ["--replace", "$window", "--regexp", pattern, "--"]
     hits: dict[tuple[str, int], TextHit] = {}
     for chunk in file_chunks(files, bytes_only=True):
         for hit in _windows(command_output([*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT)):
+            hits.setdefault((hit.file, hit.line), hit)
+    return list(hits.values())
+
+
+def ripgrep_term_lines(texts: Sequence[str], files: Sequence[str], cwd: Path) -> list[TextHit]:
+    """Line identities matching any literal, without printing potentially huge source lines."""
+    pattern = "(?:" + "|".join(re.escape(text) for text in texts) + ")"
+    command = [
+        *RIPGREP_SAFE,
+        "--text",
+        "--only-matching",
+        "--line-number",
+        "--with-filename",
+        "--null",
+        "--replace",
+        "$term",
+        "--file",
+        "-",
+        "--",
+    ]
+    hits = {}
+    for chunk in file_chunks(files, bytes_only=True):
+        for hit in _windows(
+            command_output(
+                [*command, *chunk], cwd, no_match_exit=_NO_MATCHES_EXIT, stdin=f"(?P<term>{pattern})(?-u:.)*"
+            )
+        ):
             hits.setdefault((hit.file, hit.line), hit)
     return list(hits.values())
 

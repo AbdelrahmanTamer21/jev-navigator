@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from conftest import WEBSITE_QUERIES, AsyncBudgetedClient, BudgetedClient, labelled
+from shop_search import shop_index
 from short_secrets import ShortSecretMasker, numbered_secret
 
 from jev_navigator.directives.find_all import (
@@ -37,12 +38,13 @@ from jev_navigator.index.units import (
     UNSUPPORTED_LANGUAGE,
     LineAnchor,
     RangeAnchor,
+    Reading,
     UnitKind,
 )
 from jev_navigator.judgments.client import JEV_INPUT_LIMITS, InputBudgetExceededError, InputLimits
 from jev_navigator.judgments.judge import Judge
 from jev_navigator.judgments.questions import serialized_chars
-from jev_navigator.judgments.secrets import MASK
+from jev_navigator.judgments.secrets import MASK, SecretMasker
 from jev_navigator.judgments.thresholds import NoulVerdict
 from jev_navigator.sources import DEFINITIONS, NAMES
 from jev_navigator.testing import AsyncScriptedJevClient, ScriptedJevClient
@@ -1007,3 +1009,24 @@ def test_find_text_ends_as_its_wave_failed_even_when_that_wave_held_a_yes(tmp_pa
     assert [
         score.unit.path for score in result.scores("target") if score.answer.verdict is NoulVerdict.YES
     ] == ["b.md"]
+
+
+def test_cached_builtin_masking_keeps_path_rules_and_cross_item_secret_copies(tmp_path: Path) -> None:
+    secret = "abc123TOKEN987secretVALUE456"
+    index = shop_index(
+        tmp_path,
+        {
+            "app.py": f"def run():\n    api_key = '{secret}'\n    return api_key\n",
+            "config.yaml": f"message: {secret}\ntoken: config-only-value\n",
+        },
+    )
+    cached, uncached = ScriptedJevClient(), ScriptedJevClient()
+    for judge in (Judge(cached), Judge(uncached, masker=SecretMasker())):
+        result = find_all(index, judge, {"p": "configuration"}, files=index.files, reading=Reading.MIXED)
+        assert result.stopped_by == "scope_examined", result.failure
+        assert {score.unit.path for score in result.scores("p")} == {"app.py", "config.yaml"}
+    assert cached.requests == uncached.requests
+    code = str(cached.requests)
+    assert secret not in code
+    assert "config-only-value" not in code
+    assert "[MASKED]" in code

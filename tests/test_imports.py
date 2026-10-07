@@ -921,3 +921,27 @@ def test_a_declared_package_mapping_proves_a_call_only_when_the_package_and_file
     # Assert
     assert edge.binding.status == status
     assert (edge.binding.target is not None) == (status == "resolved")
+
+
+@pytest.mark.parametrize("path", ["src/p.ts", "src/p.tsx", "src/p.js", "src/p.mts", "src/p.cts"])
+def test_parser_comments_preserve_unicode_and_all_line_breaks_in_template_expressions(path):
+    source = "const café = `text ${1 /* hidden\r\ncomment */} billing_policy`; // removed\r\n"
+    assert without_comments(source, path) == "const café = `text ${1 \r\n} billing_policy`; \r\n"
+
+
+def test_comment_parser_recovers_comments_from_incomplete_python():
+    source = 'def broken(:\r\n    café = "#kept" # hidden\r\n'
+    assert without_comments(source, "broken.py") == 'def broken(:\r\n    café = "#kept" \r\n'
+
+
+def test_comment_parser_leaves_unsupported_languages_unchanged():
+    source = "text # retained\r\n/* retained */\r\n"
+    assert without_comments(source, "notes.txt") == source
+
+
+def test_comment_parser_failure_is_visible_to_the_caller(tmp_path, monkeypatch):
+    from jev_navigator.index import tools
+
+    monkeypatch.setattr(tools, "AST_GREP", str(tmp_path / "missing-parser"))
+    with pytest.raises(FileNotFoundError):
+        without_comments('value = "#kept" # removed\n', "a.py")
