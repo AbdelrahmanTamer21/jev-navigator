@@ -37,7 +37,7 @@ from functools import cached_property
 
 from ..judgments.questions import serialized_chars
 from .code_index import CodeIndex
-from .imports import import_lines, without_comments
+from .imports import import_lines
 from .languages import TEXT_LANGUAGE, is_schema_file, language_of, language_read
 from .scope import is_test_file
 from .spans import Span, holder_of
@@ -330,7 +330,7 @@ class _FileUnits:
         return self._unit(f"{self._file}:top", ranges, UnitKind.TOP_LEVEL, TOP_LEVEL_SYMBOL)
 
     def _holds_no_code(self) -> bool:
-        non_code = _non_code_lines("\n".join(self._lines), self._file)
+        non_code = _non_code_lines(self._index.source_without_comments(self._file), self._file)
         return all(line in non_code for start, end in self.top_level.ranges for line in range(start, end + 1))
 
     def _without_blank_edges(self, run: LineRange) -> LineRange | None:
@@ -554,14 +554,14 @@ class UnitReader:
 
 
 def _non_code_lines(source: str, file: str) -> frozenset[int]:
-    """Lines holding nothing but imports, comments, a directive, closing brackets or whitespace."""
-    code = without_comments(source, file).split("\n")
+    """Non-code line numbers in source whose parser comments were already removed."""
+    code = source.split("\n")
     trivial = {
         number
         for number, line in enumerate(code, 1)
         if _CLOSING_BRACKETS.match(line) or _DIRECTIVE.match(line)
     }
-    return frozenset(trivial) | import_lines(source, file)
+    return frozenset(trivial) | import_lines(source, file, comment_ranges=())
 
 
 def _one_per_range(spans: Iterable[Span]) -> tuple[Span, ...]:

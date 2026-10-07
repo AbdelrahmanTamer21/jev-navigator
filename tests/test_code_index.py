@@ -147,9 +147,9 @@ def test_each_files_imports_are_read_once_for_every_dependents_lookup(
     read: list[str] = []
     real = code_index_module.imported_modules
 
-    def counted(source: str, file: str):
+    def counted(source: str, file: str, **options):
         read.append(file)
-        return real(source, file)
+        return real(source, file, **options)
 
     monkeypatch.setattr(code_index_module, "imported_modules", counted)
 

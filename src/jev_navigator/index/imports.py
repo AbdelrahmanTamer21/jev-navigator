@@ -9,6 +9,8 @@ is build output and resolves to the source it is built from."""
 from __future__ import annotations
 
 import re
+import struct
+import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -16,6 +18,9 @@ from pathlib import PurePosixPath
 from . import languages, tools
 from .packages import Packages, package_name
 from .tsconfig import ScriptPaths, normalised
+
+COMMENT_RANGE_RECORD = struct.Struct("<qI")
+"""A signed byte-start delta and unsigned byte length, compressed in cached file facts."""
 
 _PYTHON_FROM = re.compile(r"^[ \t]*from\s+(\.*[\w.]*)\s+import\s+(\([^)]*\)|[^\n]*)", re.M)
 _PYTHON_IMPORT = re.compile(
@@ -63,9 +68,11 @@ class ImportFact:
     reason: str
 
 
-def imported_modules(source: str, path: str) -> list[str]:
+def imported_modules(
+    source: str, path: str, *, comment_ranges: Sequence[tuple[int, int]] | bytes | None = None
+) -> list[str]:
     """The module specifiers a file imports, in source order, each once."""
-    source = _import_source(source, path)
+    source = without_comments(source, path, comment_ranges=comment_ranges)
     if path.endswith(".py"):
         found = [(match.start(), match.group(1)) for match in _PYTHON_FROM.finditer(source)]
         found += [(position, module) for position, module, _ in _python_imports(source)]
@@ -75,11 +82,13 @@ def imported_modules(source: str, path: str) -> list[str]:
     return list(dict.fromkeys(specifier for _, specifier in sorted(found)))
 
 
-def module_imports(source: str, path: str) -> tuple[tuple[str, frozenset[str] | None], ...]:
+def module_imports(
+    source: str, path: str, *, comment_ranges: Sequence[tuple[int, int]] | bytes | None = None
+) -> tuple[tuple[str, frozenset[str] | None], ...]:
     """Each module specifier the source imports, re-exports or requires, in source order, with the
     names it takes by name as that module exports them; ``None`` when it takes the whole module (a
     namespace or default import, ``export *``, ``require``, a dynamic or bare import, ``import m``)."""
-    source = _import_source(source, path)
+    source = without_comments(source, path, comment_ranges=comment_ranges)
     if path.endswith(".py"):
         found = [
             (match.start(), match.group(1), _python_names(match.group(2)))
@@ -274,12 +283,14 @@ _SCRIPT_REQUIRED_NAMES = re.compile(
 _SCRIPT_BRACES = re.compile(r"\{([^}]*)\}")
 
 
-def imported_names(source: str, path: str) -> dict[str, ImportedName]:
+def imported_names(
+    source: str, path: str, *, comment_ranges: Sequence[tuple[int, int]] | bytes | None = None
+) -> dict[str, ImportedName]:
     """Local name to what it imports, for names imported by name (``from m import a as b``, also
     parenthesised over several lines; ``import { a as b } from "m"`` and ``import a from "m"``, also
     over several lines; ``const { a, b: c } = require("m")``). Type-only names are included;
     namespace imports are not."""
-    source = _import_source(source, path)
+    source = without_comments(source, path, comment_ranges=comment_ranges)
     if path.endswith(".py"):
         return {
             _local(part): ImportedName(match.group(1), _exported(part))
@@ -315,12 +326,14 @@ def _script_imported(specifier: str, exported: str) -> ImportedName:
     return ImportedName(specifier, None if exported == "default" else exported)
 
 
-def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
+def reexported_names(
+    source: str, path: str, *, comment_ranges: Sequence[tuple[int, int]] | bytes | None = None
+) -> tuple[tuple[frozenset[str] | None, str], ...]:
     """Names a module passes on from each module it names; ``None`` means every name (``export *``,
     ``from m import *``). A Python module passes on what it imports by name, as a package's
     ``__init__.py`` does; a name it imports under another name is left out, since its module exports
     it under the first."""
-    source = _import_source(source, path)
+    source = without_comments(source, path, comment_ranges=comment_ranges)
     if path.endswith(".py"):
         return _python_reexports(source)
     exports = []
@@ -356,37 +369,31 @@ def _python_reexports(source: str) -> tuple[tuple[frozenset[str] | None, str], .
     return tuple(exports)
 
 
-def _import_source(source: str, path: str) -> str:
-    """Parse comments only when the text can contain an import or re-export.
-
-    These keywords also cover clauses split by comments. Exported functions without a module
-    specifier do not need a comment parse, even when their bodies contain URL literals.
-    """
-    if not any(word in source for word in ("import", "require", "from")):
-        return source
-    return without_comments(source, path)
-
-
-def without_comments(source: str, path: str) -> str:
+def without_comments(
+    source: str, path: str, *, comment_ranges: Sequence[tuple[int, int]] | bytes | None = None
+) -> str:
     """Remove parser-recognized comments, retaining every CR/LF byte and all literal text.
 
     The same ast-grep grammars as the index own comment boundaries, including f-string and
     template expressions. With syntax errors, remove only comment nodes recovered by the parser;
     unrecognized text remains. Unsupported file languages remain unchanged. An unavailable or
-    failed parser raises its process error when comments may exist; Python text without a hash
-    cannot contain a comment and needs no parse.
+    failed parser raises its process error, rather than guessing comment boundaries.
+    ``comment_ranges`` reuses comment nodes from a fact scan of these exact source bytes,
+    as pairs or compressed start-delta/length records.
     """
     content = source.encode()
     language = languages.parse_language(path, content)
-    if language is None or not source or (language == "python" and "#" not in source):
+    if language is None or not source:
         return source
-    rule = f"id: comments\nlanguage: {languages.grammar_of(language)}\nrule:\n  kind: comment\n"
-    matches = tools.ast_grep_source(rule, source)
+    if comment_ranges is None:
+        matches = tools.ast_grep_source(languages.comment_rule(language), source)
+        comment_ranges = tuple(
+            (match["range"]["byteOffset"]["start"], match["range"]["byteOffset"]["end"]) for match in matches
+        )
     chunks = []
     position = 0
-    for match in sorted(matches, key=lambda match: match["range"]["byteOffset"]["start"]):
-        offsets = match["range"]["byteOffset"]
-        start, end = offsets["start"], offsets["end"]
+    ranges = _cached_comment_ranges(comment_ranges) if isinstance(comment_ranges, bytes) else comment_ranges
+    for start, end in sorted(ranges):
         chunks.append(content[position:start])
         chunks.append(bytes(byte for byte in content[start:end] if byte in (10, 13)))
         position = end
@@ -394,12 +401,25 @@ def without_comments(source: str, path: str) -> str:
     return b"".join(chunks).decode()
 
 
-def import_lines(source: str, path: str) -> frozenset[int]:
+def _cached_comment_ranges(packed: bytes):
+    """Restore exact byte ranges from the cache's lossless delta representation."""
+    position = 0
+    content = zlib.decompress(packed) if packed else b""
+    for delta, length in COMMENT_RANGE_RECORD.iter_unpack(content):
+        position += delta
+        yield position, position + length
+
+
+def import_lines(
+    source: str, path: str, *, comment_ranges: Sequence[tuple[int, int]] | bytes | None = None
+) -> frozenset[int]:
     """The 1-based lines import statements cover; an import over several lines covers every line it
     spans. A script's ``require`` counts only as a whole statement (``const x = require("x")``),
     never inside other code."""
     statements = _PYTHON_IMPORT_STATEMENTS if path.endswith(".py") else _SCRIPT_IMPORT_STATEMENTS
-    return frozenset(_lines_matched(_import_source(source, path), statements))
+    return frozenset(
+        _lines_matched(without_comments(source, path, comment_ranges=comment_ranges), statements)
+    )
 
 
 def _lines_matched(code: str, patterns: tuple[re.Pattern[str], ...]) -> set[int]:

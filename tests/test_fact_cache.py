@@ -443,3 +443,14 @@ def test_a_cache_that_refuses_stamps_still_serves_its_facts(tmp_path, example, r
     # Assert
     assert loaded == facts
     assert day_of(entry.stat().st_mtime) == today() - 40
+
+
+def test_truncated_comment_ranges_are_a_cache_miss(tmp_path, example):
+    content, facts = example
+    cache = FactCache(tmp_path / "cache")
+    cache.save("module.py", content, facts)
+    [entry] = cache.root.rglob("*.json")
+    raw = json.loads(entry.read_text())
+    raw["comment_ranges"] = "00"
+    entry.write_text(json.dumps(raw))
+    assert cache.load("module.py", content) is None

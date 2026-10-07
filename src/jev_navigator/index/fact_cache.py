@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import tempfile
+import zlib
 from contextlib import suppress
 from dataclasses import asdict
 from functools import cache
@@ -59,7 +60,7 @@ class FactCache:
                 raw = json.loads(entry.read())
                 modified = os.fstat(entry.fileno()).st_mtime
             facts = _decode(file, raw)
-        except (OSError, KeyError, TypeError, ValueError):
+        except (OSError, KeyError, TypeError, ValueError, zlib.error):
             return None
         _confirm(path, modified)
         return facts
@@ -203,11 +204,15 @@ def _encode(facts: FileFacts) -> dict:
         "module_bindings": list(facts.module_bindings),
         "language": facts.language,
         "default_members": [list(pair) for pair in facts.default_members],
+        "comment_ranges": facts.comment_ranges.hex(),
     }
 
 
 def _decode(file: str, raw: dict) -> FileFacts:
     structure = raw["structure"]
+    comments = bytes.fromhex(raw["comment_ranges"])
+    if comments and len(zlib.decompress(comments)) % imports.COMMENT_RANGE_RECORD.size:
+        raise ValueError("incomplete comment byte range")
     return FileFacts(
         FileStructure(
             tuple(_span(file, span) for span in structure["functions"]),
@@ -253,4 +258,5 @@ def _decode(file: str, raw: dict) -> FileFacts:
         tuple(raw["module_bindings"]),
         language=raw["language"],
         default_members=tuple((member, own) for member, own in raw["default_members"]),
+        comment_ranges=comments,
     )

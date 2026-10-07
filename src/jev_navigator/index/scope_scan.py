@@ -13,6 +13,7 @@ may hide.
 
 from __future__ import annotations
 
+import zlib
 from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -22,7 +23,7 @@ from typing import NamedTuple, NotRequired, Protocol, TypedDict, TypeVar
 import msgspec
 
 from . import tools
-from .imports import _exported, _local, python_submodule
+from .imports import COMMENT_RANGE_RECORD, _exported, _local, python_submodule
 from .languages import (
     CLASS_KINDS,
     COMMONJS_EXPORT_PAIR,
@@ -51,6 +52,7 @@ from .languages import (
     TYPE_DECLARATIONS,
     VALUE_DECLARATIONS,
     VALUE_KINDS,
+    comment_rule,
     export_rules,
     grammar_of,
     language_of,
@@ -226,6 +228,8 @@ class FileFacts:
     # ("insert", "insert") and ("utc", "toUtc") for `export default { insert, utc: toUtc }` (see
     # ``DEFAULT_MEMBERS``). A default import reaches them as members.
     default_members: tuple[tuple[str, str], ...] = ()
+    # Parser comment-node byte ranges in exact cached bytes, compressed start-delta/length records.
+    comment_ranges: bytes = b""
 
 
 class _Text(TypedDict):
@@ -321,8 +325,15 @@ def _scanned(
     matches = tools.ast_grep_rules(
         fact_rules(languages), files, root, config=config, refused=refused, decode=decode_match
     )
+    previous = None
     for match in matches:
-        found[match["file"]].add(match)
+        current = found[match["file"]]
+        if previous is not None and current is not previous:
+            previous.compact_comments()
+        current.add(match)
+        previous = current
+    if previous is not None:
+        previous.compact_comments()
     return found
 
 
@@ -353,6 +364,7 @@ def fact_rules(languages: Sequence[str]) -> str:
         part
         for part in (
             _structure_rules(languages),
+            "\n---\n".join(comment_rule(language) for language in languages),
             _call_rules(languages),
             reference_rules(languages),
             export_rules(languages),
@@ -405,10 +417,24 @@ class _FileFound:
     from_names: list[tuple[int, str, str]] = field(default_factory=list)
     module_bindings: set[str] = field(default_factory=set)
     error_lines: list[tuple[int, int]] = field(default_factory=list)
+    comment_ranges: bytearray | bytes = field(default_factory=bytearray)
+    comment_start: int = 0
 
     def add(self, match: dict) -> None:
         rule = match["ruleId"]
-        if rule == _ERROR_RULE:
+        if rule == "comments":
+            if isinstance(self.comment_ranges, bytes):
+                self.comment_ranges = (
+                    bytearray(zlib.decompress(self.comment_ranges)) if self.comment_ranges else bytearray()
+                )
+            offsets = match["range"]["byteOffset"]
+            self.comment_ranges.extend(
+                COMMENT_RANGE_RECORD.pack(
+                    offsets["start"] - self.comment_start, offsets["end"] - offsets["start"]
+                )
+            )
+            self.comment_start = offsets["start"]
+        elif rule == _ERROR_RULE:
             # The grammar reports ERROR nodes here: whatever recovery swallowed is unknown, while the
             # symbols it did keep are still matched.
             self.error_lines.append(_lines_of(match))
@@ -443,10 +469,21 @@ class _FileFound:
         else:
             self._add_reference(match)
 
+    def compact_comments(self) -> None:
+        """Keep only the current parser file's ranges unpacked; ast-grep groups matches by file."""
+        if isinstance(self.comment_ranges, bytearray):
+            if self.comment_ranges:
+                # Small compression workspace keeps compaction below the fact-scan memory bound.
+                compressor = zlib.compressobj(level=1, wbits=9, memLevel=1)
+                self.comment_ranges = compressor.compress(self.comment_ranges) + compressor.flush()
+            else:
+                self.comment_ranges = b""
+
     def unread_line_count(self) -> int:
         return sum(end - start + 1 for start, end in _merged_stretches(self.error_lines))
 
     def finished(self, incomplete: bool) -> FileFacts:
+        self.compact_comments()
         return FileFacts(
             self._structure(),
             tuple(call for _, call in sorted(self.calls, key=lambda entry: entry[0])),
@@ -460,6 +497,7 @@ class _FileFound:
             tuple(sorted(self.module_bindings)),
             language=self.language,
             default_members=tuple(sorted(self.default_members)),
+            comment_ranges=self.comment_ranges,
         )
 
     def _structure(self) -> FileStructure:
