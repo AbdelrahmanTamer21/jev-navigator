@@ -119,19 +119,25 @@ def _words(text: str) -> frozenset[str]:
     )
 
 
-def batch_query(index: CodeIndex, files: list[str], concerns: list[str]) -> str:
-    """Actual concerns in order, followed by sorted identifiers from the batch's source."""
+def batch_query(index: CodeIndex, files: list[str], concerns: list[str], *, refused: dict[str, str]) -> str:
+    """Concerns followed by source identifiers; incomplete Python keeps available names.
+
+    Lexical failures are named in ``refused`` so a caller can report the partial query.
+    """
     names: set[str] = set()
     for path in files:
         if path not in index.files:
             continue
         text = "\n".join(index.lines(path))
         if path.endswith(".py"):
-            names.update(
-                token.string
-                for token in tokenize.generate_tokens(io.StringIO(text).readline)
-                if token.type == tokenize.NAME and not keyword.iskeyword(token.string)
-            )
+            try:
+                names.update(
+                    token.string
+                    for token in tokenize.generate_tokens(io.StringIO(text).readline)
+                    if token.type == tokenize.NAME and not keyword.iskeyword(token.string)
+                )
+            except (tokenize.TokenError, IndentationError) as exc:
+                refused[path] = f"{type(exc).__name__}: {exc}"
         else:
             names.update(code_names_in(without_comments(text, path)))
         facts = index.facts_in_files([path]).get(path)

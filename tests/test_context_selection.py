@@ -1,5 +1,6 @@
 """Static context delivery from real bindings, paths and structural excerpts."""
 
+import pytest
 from git_repos import commit_files
 
 from jev_navigator.index.code_index import CodeIndex
@@ -50,3 +51,19 @@ def test_structural_excerpt_keeps_branch_exits_and_physical_gaps(tmp_path):
     assert "34:     return value" in rendered
     assert "... ELIDED lines 4-29 (26 lines) ..." in rendered
     assert "padding_10" not in rendered
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from helper import value\nrecovered = (\n",
+        "from helper import value\ndef broken():\n    recovered = value\n  return recovered\n",
+    ],
+)
+def test_query_retains_available_names_and_reports_incomplete_python(tmp_path, source):
+    commit_files(tmp_path, {"main.py": source, "helper.py": "value = 1\n"})
+    selection = ONE_HOP_NAMED_CONTEXT.build(CodeIndex.from_git(tmp_path))
+    query = selection.query(["main.py"], ["invalid input"])
+    assert "recovered" in query.split()
+    assert "main.py" in selection.query_refused
+    assert selection.query_refused["main.py"]

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import zip_longest
 from typing import TypeVar
 
@@ -66,6 +66,7 @@ class ContextSelection:
     calls: _CallsOnly
     unlisted: dict[str, str]
     excerpts: StructuralExcerpts
+    query_refused: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def build(cls, index: CodeIndex, configuration: ContextConfiguration) -> ContextSelection:
@@ -118,4 +119,4 @@ class ContextSelection:
 
     def query(self, files: list[str], concerns: list[str]) -> str:
         """Concern text followed by the sorted names in the supplied source files."""
-        return batch_query(self.index, files, concerns)
+        return batch_query(self.index, files, concerns, refused=self.query_refused)
