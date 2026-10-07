@@ -82,7 +82,8 @@ def measurement(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("resume_boundary", ["complete_root", "individual_case"])
-def test_changed_citation_rebuilds_features_and_current_receipts_resume(measurement, resume_boundary):
+@pytest.mark.parametrize("change", ["citation", "query", "legacy_query"])
+def test_changed_inputs_rebuild_features_and_current_receipts_resume(measurement, resume_boundary, change):
     db, cases, inputs, out, ids = measurement
     initial = collect.build_features(db, cases, inputs, out)
     assert len(initial) == 2
@@ -93,7 +94,13 @@ def test_changed_citation_rebuilds_features_and_current_receipts_resume(measurem
         first_walk = features["features"][:, 1].copy()
     assert first_walk[0] > first_walk[1]
 
-    inputs["trial:one"]["claim"]["evidence"][0]["line"] = 5
+    if change == "citation":
+        inputs["trial:one"]["claim"]["evidence"][0]["line"] = 5
+    elif change == "query":
+        inputs["trial:one"]["claim"]["statement"] = "second"
+    else:
+        receipt.pop("query", None)
+        (out / "trial_one.json").write_text(json.dumps(receipt))
     if resume_boundary == "individual_case":
         # An incomplete sibling forces the root build to reach individual cache checks.
         (out / "trial_two.npz").unlink()
@@ -104,11 +111,15 @@ def test_changed_citation_rebuilds_features_and_current_receipts_resume(measurem
     rebuilt = collect.build_features(db, cases, inputs, out)
     assert {item["case"] for item in rebuilt} == expected
     receipt = json.loads((out / "trial_one.json").read_text())
-    assert receipt["anchors"] == [["source.py", 5]]
-    assert set(receipt["seeds"]) == {receipt["identities"][ids[1]]}
+    cited_unit = 1 if change == "citation" else 0
+    assert receipt["anchors"] == [["source.py", 5 if change == "citation" else 2]]
+    assert receipt["query"] == inputs["trial:one"]["claim"]["statement"]
+    assert set(receipt["seeds"]) == {receipt["identities"][ids[cited_unit]]}
     with np.load(out / "trial_one.npz") as features:
         second_walk = features["features"][:, 1]
-        assert second_walk[1] > second_walk[0]
+        assert second_walk[cited_unit] > second_walk[1 - cited_unit]
+        if change == "query":
+            assert features["features"][1, 0] > features["features"][0, 0]
     if resume_boundary == "complete_root":
         assert (out / "trial_two.json").read_bytes() == sibling_receipt
 

@@ -194,13 +194,18 @@ def canonical_source_units(units):
 
 
 def cached_features_current(path, row):
-    """Reuse features only when their receipt records the current citation seeds."""
+    """Reuse features only when their receipt records the current query and citation seeds."""
     receipt_path = path.with_suffix(".json")
     if not path.exists() or not receipt_path.exists():
         return False
-    recorded = load(receipt_path).get("anchors")
+    receipt = load(receipt_path)
+    recorded = receipt.get("anchors")
     # Receipts use JSON lists; order and repeated citations do not change seeds.
-    return recorded is not None and {tuple(anchor) for anchor in recorded} == set(input_anchors(row))
+    return (
+        receipt.get("query") == row["claim"]["statement"]
+        and recorded is not None
+        and {tuple(anchor) for anchor in recorded} == set(input_anchors(row))
+    )
 
 
 def build_features(db, cases, inputs, out, *, limit=None):
@@ -359,6 +364,7 @@ def build_features(db, cases, inputs, out, *, limit=None):
                 "graph": str(graph_path),
                 "identities": {key: identities[key] for key in ids if key in identities},
                 "labels": labels,
+                "query": row["claim"]["statement"],
                 "anchors": anchors,
                 "seeds": seeds,
                 "unbound_candidates": sum(key not in units for key in ids),
