@@ -194,3 +194,28 @@ def test_python_scent_keeps_hashes_in_strings_beside_real_comments(literal):
     index = ScentIndex([document])
     assert index.scores("billing policy")["unit"] > 0
     assert index.scores("hidden comment")["unit"] == 0
+
+
+@pytest.mark.parametrize(
+    "scores",
+    [
+        {"worst": -0.1, "preferred": -0.01},
+        {"worst": -0.1, "preferred": -0.01, "positive": 0.2},
+        {"worst": -0.1, "preferred": 0},
+        {"worst": 0.01, "preferred": 0.1},
+        {"worst": -0.1, "preferred": -0.1},
+        {"worst": 0, "preferred": 0},
+    ],
+)
+def test_active_search_preserves_signed_score_order_at_the_oracle(scores):
+    candidates = list(scores)
+    received = []
+
+    class Oracle:
+        def judge(self, batch):
+            received.append(batch)
+            return dict.fromkeys(batch, Observation(0, False))
+
+    result = active_search(candidates, scores, CodeGraph(candidates), Oracle())
+    assert received == [tuple(sorted(candidates, key=lambda id: -scores[id]))]
+    assert 0 <= result.expected_gain <= len(candidates)

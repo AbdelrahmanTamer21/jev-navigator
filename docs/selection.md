@@ -47,7 +47,10 @@ result = active_search(ordered, scores, graph, oracle, policy=ActivePolicy())
 
 An oracle implements `judge(tuple_of_ids)` and returns a mapping from offered identities to
 `Observation(probability, confirmed)`. The active loop judges groups of up to 16, propagates
-confirmed observations, reranks and estimates the marginal value of its next group. Missing
+confirmed observations, reranks and estimates the marginal value of its next group. Ranking scores
+are shifted up when their minimum is negative and scaled by the shifted maximum, preserving order
+in [0, 1]. Equal nonpositive scores normalize to zero. These values feed the observed-yield gain
+heuristic alongside propagated relevance. Missing
 observations remain unknown and end that run without counting as negatives. The default
 marginal rule is a declared heuristic, not calibrated Jev confidence. A caller can compare it
 with `min_expected_gain=0` under the same request guard. Results retain offered groups, actual

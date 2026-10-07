@@ -68,8 +68,10 @@ def active_search(
 ) -> ActiveResult:
     """Judge 16, propagate confirmed relevance, re-rank, then estimate the next batch's gain.
 
-    The marginal rule uses posterior observed yield times the next batch's mean normalized scent,
-    plus its propagated relevance, bounded by one per candidate. It is a declared heuristic, not
+    Ranking scores are shifted up only when their minimum is negative, then divided by the
+    shifted maximum. This preserves their order in [0, 1]; equal nonpositive scores become zero.
+    The marginal rule uses posterior observed yield times these normalized scores, plus propagated
+    relevance, bounded by one per candidate. It is a declared heuristic, not
     calibrated Jev confidence. Missing answers stay unjudged and never count as negatives. A caller
     can disable marginal stopping with min_expected_gain=0 and fit the rule on independent cases.
     """
@@ -79,8 +81,9 @@ def active_search(
     observations: dict[str, Observation] = {}
     batches = []
     unjudged = []
-    maximum = max((scores[id] for id in candidates), default=0) or 1
-    normalized = {id: max(0.0, scores[id] / maximum) for id in candidates}
+    floor = min(0.0, min((scores[id] for id in candidates), default=0.0))
+    maximum = max((scores[id] - floor for id in candidates), default=0.0) or 1.0
+    normalized = {id: (scores[id] - floor) / maximum for id in candidates}
     expected = 0.0
     stopped = "exhausted"
     while pending:
