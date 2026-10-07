@@ -7,11 +7,12 @@ import sqlite3
 
 from jev_navigator.judgments.answers import JevResponse, response_from_raw
 from jev_navigator.judgments.questions import content_hash
-from jev_navigator.selection import CodeGraph
 
 
 def request_graph(graph, identities):
     """Project one canonical source graph onto this request's actual candidate identities."""
+    from jev_navigator.selection import CodeGraph
+
     names = {canonical: shown for shown, canonical in identities.items()}
     if len(names) != len(identities):
         raise ValueError("A finding must admit each physical source range only once")
