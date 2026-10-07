@@ -234,19 +234,22 @@ def find_all(
 
     ``targets`` maps a name (an identifier) to a description; each unit is asked one question per
     target, all in the same request. ``delivered`` names the lines the caller already shows: a unit
-    or piece whose every line lies in them is not judged, one with a line outside them is. ``completed``
-    holds each target's answers from an earlier run over the same code; a place answered for every
-    target is not asked again. A failed request ends the search ``failed`` with ``failure`` holding
+    or piece whose every line lies in them is not judged, one with a line outside them is. Under
+    ``VALUE`` fully supplied units seed one-step discovery hops without providing a relevance answer
+    for any target. ``completed`` holds each target's answers from an earlier run over the same code;
+    a place answered for every target is not asked again. A failed request ends the search ``failed``
+    with ``failure`` holding
     the error (see ``search_failure``), Ctrl-C ends it ``cancelled``, and either way ``judged`` keeps
     every answer that arrived.
 
     Under a ranked policy ``shares`` sets each target's share of the item slots in every batch (a
     target it does not name has 1). Under a settling policy (``VALUE``) a unit clears a target's bar
     when its answer is yes by the Judge's thresholds; that target then draws only the units ``hops``
-    reach from it (by default its callers and callees), and settles once none of them is left to
-    judge. Every unit drawn is still asked every target's question, so a settled target spends no call
-    of its own. Once every target has settled the search ends ``settled``, with the units it never
-    reached ``not_judged``.
+    reach from it (by default its callers and callees), and settles once none of its pending hops is
+    left to judge and any required ``role_coverage`` is complete. Without a yes answer or complete
+    required roles it keeps drawing its ordinary queue until the call cap or exhaustion. Every unit
+    drawn is still asked every target's question, so a settled target spends no call of its own. Once
+    every target has settled the search ends ``settled``, with the units it never reached ``not_judged``.
     """
     composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
     search = _begin(
@@ -641,9 +644,9 @@ class _Search:
 
     def _drawing(self, frontier: Frontier) -> dict[str, bool]:
         """Each target still drawing, mapped to whether it draws only its hops. Under a settling policy
-        a target with a relevant or fully supplied unit first gets that unit's hops, and settles once none of
-        its hops is left to judge and its required roles are covered. Without role observations it
-        keeps drawing the ordinary queue as well as hops."""
+        a target settles only after a unit clears its yes bar, its one-step hops are spent and its
+        required roles are covered. Supplied units seed discovery hops separately; without a positive
+        relevance answer or complete roles the ordinary queue stays open."""
         if not self.policy.settles:
             return dict.fromkeys(self.targets, False)
         drawing = {}
@@ -651,7 +654,8 @@ class _Search:
             if target in self.settled:
                 continue
             clearing = self._clearing(target)
-            self._push_hops(frontier, target, sorted(clearing - self.expanded[target]))
+            hop_seeds = clearing | self.delivered_units
+            self._push_hops(frontier, target, sorted(hop_seeds - self.expanded[target]))
             coverage = self.policy.role_coverage
             judged_units = {
                 self.unit_of_place[answer.place.id]
@@ -666,16 +670,16 @@ class _Search:
         return drawing
 
     def _clearing(self, target: str) -> set[str]:
-        """Relevant units and fully supplied units, whose one-step hops need no repeat judgment."""
-        return self.delivered_units | {
+        """Units with a positive relevance answer for this target."""
+        return {
             self.unit_of_place[answer.place.id]
             for answer in self.judged[target]
             if answer.verdict is NoulVerdict.YES and answer.place.id in self.unit_of_place
         }
 
     def _push_hops(self, frontier: Frontier, target: str, unit_ids: Sequence[str]) -> None:
-        """Gives ``target`` the units the hop sources reach from each clearing unit, worth most to it
-        first; a unit a push brought in pushes nothing, so hops go one step deep."""
+        """Gives ``target`` the units the hop sources reach from each relevant or supplied unit, worth
+        most to it first; a unit a push brought in pushes nothing, so hops go one step deep."""
         for unit_id in unit_ids:
             self.expanded[target].add(unit_id)
             if unit_id in self.hopped:

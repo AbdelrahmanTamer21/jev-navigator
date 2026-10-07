@@ -538,3 +538,39 @@ def test_relevant_or_supplied_code_seeds_only_one_hop_without_rejudging_supplied
     expected = {"config.py"} if supplied else ({"app.py", "config.py"} if expanded else {"app.py"})
     assert {item["file"] for state, _ in client.requests for item in state["items"]} == expected
     assert len(result.judged["p"]) == len(expected)
+
+
+@pytest.mark.parametrize("hop_kind", ["none", "default", "literal"])
+def test_supplied_discovery_does_not_settle_unanswered_targets(tmp_path: Path, hop_kind: str) -> None:
+    index = shop_index(
+        tmp_path,
+        {
+            "visible.py": "from config import side\n\ndef unrelated():\n    return side('UNRELATED_FLAG')\n",
+            "config.py": "def side(flag='UNRELATED_FLAG'):\n    return 0\n",
+            "target.py": "def billing_policy():\n    return 2\n",
+            "spare.py": "def remaining_candidate():\n    return 3\n",
+        },
+    )
+
+    client = labelled({("billing", "def billing_policy"): 1.0}, default=0.0)
+    hop_options = {} if hop_kind == "default" else {"hops": (LITERALS,) if hop_kind == "literal" else ()}
+    result = find_all(
+        index,
+        Judge(client, items_per_request=1, max_concurrency=1),
+        {"billing": "billing_policy", "other": "other behavior"},
+        files=["visible.py", "target.py", "spare.py"],
+        delivered=[RangeAnchor("visible.py", 3, 4)],
+        sources=(FILES,),
+        policy=VALUE,
+        batches_per_wave=1,
+        **hop_options,
+    )
+    asked = {item["file"] for state, _ in client.requests for item in state["items"]}
+    assert asked == (
+        {"target.py", "spare.py"} if hop_kind == "none" else {"target.py", "spare.py", "config.py"}
+    )
+    assert result.failure is None
+    for target in ("billing", "other"):
+        assert {score.unit.path for score in result.scores(target)} == asked
+    assert result.settled == ("billing",)
+    assert result.stopped_by == "scope_examined"

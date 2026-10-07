@@ -1001,7 +1001,9 @@ like one, the distance and whether it is a test. Each target has its own queue, 
 description spells out, and a share of the item slots in every batch: equal by default, and a caller
 overrides it with `shares={"limit": 3}`. Under `VALUE` a target settles: once a unit clears its yes
 bar, the target draws only the units the hop sources reach from that unit, one step deep, and settles
-when none of them is left to judge. A settled target draws nothing more, its share flows to the targets
+when none of its pending hops is left to judge and any required role coverage is complete. Without
+a yes answer or complete required roles, it keeps drawing its ordinary queue until the call cap or
+exhaustion. A settled target draws nothing more, its share flows to the targets
 still open, and when every target has settled the search ends `settled`. Every unit drawn is still
 asked every target's question. `Policy("value_all", ranked=True)` keeps the queues and shares without
 settling.
@@ -1233,8 +1235,9 @@ retain overlapping matches. Callers compose these sources explicitly through `so
 The existing `VALUE` policy follows one step from units that clear the Judge's relevance bar or
 whose code the caller already supplies through `delivered`. Hop sources receive the seed unit's
 code, spelled identifiers and file, so named paths and exact literals can be followed without
-judging supplied code again. Hop results do not recursively expand. `STAGE_ORDER` keeps its
-existing source-by-source population without relevance hops. Neither policy adds a new request
+judging supplied code again. Supplied lines seed discovery only: they provide no target-specific
+relevance answer and cannot close a target's ordinary queue. Hop results do not recursively expand.
+`STAGE_ORDER` keeps its existing source-by-source population without relevance hops. Neither policy adds a new request
 allowance. The Judge's caller-selected cap still owns the judging budget.
 
 `mentions.names_from_text(text)` returns `TextNames(code=..., paths=...)`, using the existing
