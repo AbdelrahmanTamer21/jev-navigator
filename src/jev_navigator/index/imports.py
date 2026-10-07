@@ -65,7 +65,7 @@ class ImportFact:
 
 def imported_modules(source: str, path: str) -> list[str]:
     """The module specifiers a file imports, in source order, each once."""
-    source = without_comments(source, path)
+    source = _import_source(source, path)
     if path.endswith(".py"):
         found = [(match.start(), match.group(1)) for match in _PYTHON_FROM.finditer(source)]
         found += [(position, module) for position, module, _ in _python_imports(source)]
@@ -79,7 +79,7 @@ def module_imports(source: str, path: str) -> tuple[tuple[str, frozenset[str] | 
     """Each module specifier the source imports, re-exports or requires, in source order, with the
     names it takes by name as that module exports them; ``None`` when it takes the whole module (a
     namespace or default import, ``export *``, ``require``, a dynamic or bare import, ``import m``)."""
-    source = without_comments(source, path)
+    source = _import_source(source, path)
     if path.endswith(".py"):
         found = [
             (match.start(), match.group(1), _python_names(match.group(2)))
@@ -279,7 +279,7 @@ def imported_names(source: str, path: str) -> dict[str, ImportedName]:
     parenthesised over several lines; ``import { a as b } from "m"`` and ``import a from "m"``, also
     over several lines; ``const { a, b: c } = require("m")``). Type-only names are included;
     namespace imports are not."""
-    source = without_comments(source, path)
+    source = _import_source(source, path)
     if path.endswith(".py"):
         return {
             _local(part): ImportedName(match.group(1), _exported(part))
@@ -320,7 +320,7 @@ def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | Non
     ``from m import *``). A Python module passes on what it imports by name, as a package's
     ``__init__.py`` does; a name it imports under another name is left out, since its module exports
     it under the first."""
-    source = without_comments(source, path)
+    source = _import_source(source, path)
     if path.endswith(".py"):
         return _python_reexports(source)
     exports = []
@@ -356,17 +356,29 @@ def _python_reexports(source: str) -> tuple[tuple[frozenset[str] | None, str], .
     return tuple(exports)
 
 
+def _import_source(source: str, path: str) -> str:
+    """Parse comments only when the text can contain an import or re-export.
+
+    These keywords also cover clauses split by comments. Exported functions without a module
+    specifier do not need a comment parse, even when their bodies contain URL literals.
+    """
+    if not any(word in source for word in ("import", "require", "from")):
+        return source
+    return without_comments(source, path)
+
+
 def without_comments(source: str, path: str) -> str:
     """Remove parser-recognized comments, retaining every CR/LF byte and all literal text.
 
     The same ast-grep grammars as the index own comment boundaries, including f-string and
     template expressions. With syntax errors, remove only comment nodes recovered by the parser;
     unrecognized text remains. Unsupported file languages remain unchanged. An unavailable or
-    failed parser raises its process error, rather than guessing comment boundaries.
+    failed parser raises its process error when comments may exist; Python text without a hash
+    cannot contain a comment and needs no parse.
     """
     content = source.encode()
     language = languages.parse_language(path, content)
-    if language is None or not source:
+    if language is None or not source or (language == "python" and "#" not in source):
         return source
     rule = f"id: comments\nlanguage: {languages.grammar_of(language)}\nrule:\n  kind: comment\n"
     matches = tools.ast_grep_source(rule, source)
@@ -387,7 +399,7 @@ def import_lines(source: str, path: str) -> frozenset[int]:
     spans. A script's ``require`` counts only as a whole statement (``const x = require("x")``),
     never inside other code."""
     statements = _PYTHON_IMPORT_STATEMENTS if path.endswith(".py") else _SCRIPT_IMPORT_STATEMENTS
-    return frozenset(_lines_matched(without_comments(source, path), statements))
+    return frozenset(_lines_matched(_import_source(source, path), statements))
 
 
 def _lines_matched(code: str, patterns: tuple[re.Pattern[str], ...]) -> set[int]:
