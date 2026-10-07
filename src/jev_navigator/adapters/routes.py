@@ -1,5 +1,4 @@
-"""The route table: named decision-model routes with automatic fallback, the pattern
-analysis-engine proven on its System One seats.
+"""The route table: named decision-model routes with automatic fallback.
 
 `SYSTEM_ONE_ROUTES` orders named routes (``drex,jev`` makes Drex primary and Jev its
 fallback); each route reads `SYSTEM_ONE_<NAME>_ENDPOINT`, `SYSTEM_ONE_<NAME>_API_KEY` and
@@ -47,17 +46,18 @@ JEV_ROUTE = "jev"
 TYPESAFE_KEY_SETTING = "TYPESAFE_API_KEY"
 
 DREX_INPUT_LIMITS = InputLimits.from_tokens(8_192)
-"""Drex's limit: 8,192 tokens for the state plus the longest question, which Analysis Engine measured
-on 26.09.2026 (``ROUTE_LIMITS`` in ``enginepy/host/system_one.py``: HTTP 422 above it). No bound on
-the whole body is measured, so Drex's own refusal stays the only one."""
+"""Drex's measured limit: 8,192 tokens for the state plus the longest question. No whole-body bound
+is measured, so its own refusal stays authoritative. Historical measurement provenance is retained
+in ``measurements/runtime-limits/REPORT.md``."""
 
 DREX_CONCURRENCY = 2
-"""Requests Drex admits in flight at once: the Engine measured HTTP 429 on the third (26.09.2026,
-``ROUTE_LIMITS``)."""
+"""Requests Drex admits in flight at once; measurements observed HTTP 429 on the third. Historical
+measurement provenance is retained in ``measurements/runtime-limits/REPORT.md``."""
 
 JEV_CONCURRENCY = 32
-"""Requests sent to Jev at once: the Engine saw no 429 up to 128 and flat latency to 32 (27.09.2026,
-``ROUTE_LIMITS``), so 32 is a latency choice, not a refusal bound."""
+"""Requests sent to Jev at once; measurements found no 429 up to 128 and flat latency to 32, so 32
+is a latency choice, not a refusal bound. Historical measurement provenance is retained in
+``measurements/runtime-limits/REPORT.md``."""
 
 
 @dataclass(frozen=True)

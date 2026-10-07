@@ -999,9 +999,10 @@ composition lists them. `VALUE` scores every unit by code before the first call:
 its code holds as whole words, each weighted by how rare it is, whether the unit or its file is named
 like one, the distance and whether it is a test. Each target has its own queue, ranked by the names its
 description spells out, and a share of the item slots in every batch: equal by default, and a caller
-overrides it with `shares={"limit": 3}`. Under `VALUE` a target settles: once a unit clears its yes
-bar, the target draws only the units the hop sources reach from that unit, one step deep, and settles
-when none of them is left to judge. A settled target draws nothing more, its share flows to the targets
+overrides it with `shares={"limit": 3}`. Under `VALUE`, a target with a unit clearing the Judge's
+yes bar draws only its pending one-step hops. It settles when none is left to judge. Without a yes
+answer, it keeps drawing its ordinary queue until the call cap or exhaustion. Supplied lines seed
+discovery hops separately and provide no relevance answer for a target. A settled target draws nothing more, its share flows to the targets
 still open, and when every target has settled the search ends `settled`. Every unit drawn is still
 asked every target's question. `Policy("value_all", ranked=True)` keeps the queues and shares without
 settling.
@@ -1233,9 +1234,10 @@ retain overlapping matches. Callers compose these sources explicitly through `so
 The existing `VALUE` policy follows one step from units that clear the Judge's relevance bar or
 whose code the caller already supplies through `delivered`. Hop sources receive the seed unit's
 code, spelled identifiers and file, so named paths and exact literals can be followed without
-judging supplied code again. Hop results do not recursively expand. `STAGE_ORDER` keeps its
-existing source-by-source population without relevance hops. Neither policy adds a new request
-allowance. The Judge's caller-selected cap still owns the judging budget.
+judging supplied code again. Supplied lines seed discovery only: they provide no target-specific
+relevance answer and cannot close a target's ordinary queue. Hop results do not recursively expand.
+`STAGE_ORDER` keeps its existing source-by-source population without relevance hops. Neither policy
+adds a new request allowance. The Judge's caller-selected cap still owns the judging budget.
 
 `mentions.names_from_text(text)` returns `TextNames(code=..., paths=...)`, using the existing
 mention rules. Bare `copy_sandbox_tree` and `copySandbox` are code names, while `pyproject.toml`
@@ -1302,6 +1304,8 @@ an uncapped parent. Its requests still count against that parent. A ranking allo
 up cannot fund the labelling step. The twelve-group ranking default is an **Engine setting**, not a
 JVN default or an environment flag. No provider calls are made by preparing pieces or questions.
 
-The retained selection measurement recipes describe their original pinned library and Engine
-versions. Their archived six-role rankings are historical controls; run them at those recorded
-pins rather than interpreting them as the current ranking or labelling API.
+The [frozen selection report](measurements/selection/REPORT.md) and its summary record the
+historical comparison and pinned revisions. The caller-specific reproduction harness and its tests
+live outside JVN at `~/.local/share/jvn-takeover/2026-10-03/search-design/case1/selection-harness/`.
+That harness reproduces historical controls at their recorded pins; JVN retains only the report and
+summary, with no six-role ranking code or recipes.

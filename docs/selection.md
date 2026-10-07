@@ -47,7 +47,10 @@ result = active_search(ordered, scores, graph, oracle, policy=ActivePolicy())
 
 An oracle implements `judge(tuple_of_ids)` and returns a mapping from offered identities to
 `Observation(probability, confirmed)`. The active loop judges groups of up to 16, propagates
-confirmed observations, reranks and estimates the marginal value of its next group. Missing
+confirmed observations, reranks and estimates the marginal value of its next group. Ranking scores
+are shifted up when their minimum is negative and scaled by the shifted maximum, preserving order
+in [0, 1]. Equal nonpositive scores normalize to zero. These values feed the observed-yield gain
+heuristic alongside propagated relevance. Missing
 observations remain unknown and end that run without counting as negatives. The default
 marginal rule is a declared heuristic, not calibrated Jev confidence. A caller can compare it
 with `min_expected_gain=0` under the same request guard. Results retain offered groups, actual
@@ -61,6 +64,8 @@ requires its own measurement; it does not inherit a Noul threshold. Preparation 
 a provider. The existing request owner still masks, checks request size, judges and stores
 exact context before a live call.
 
-The separate `measurements/selection` recipes compare these blocks on retained development
-data. They preserve exact groups for strict replay and label changed-group probability reuse
-as a development diagnostic. They do not install a new default search configuration.
+The frozen [selection report](../measurements/selection/REPORT.md) and summary retain historical
+results, revisions and limits. Caller-specific recipes and their tests live in the external harness
+linked there. Historical census data does not establish the reach of retained workflows. Strict
+replay preserves exact groups; changed-group probability reuse is a development diagnostic. The
+measurements do not install a new default search configuration.

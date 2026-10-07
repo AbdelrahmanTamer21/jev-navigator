@@ -12,11 +12,13 @@ test is ranked by the same score, never dropped. Ties go to the unit's content h
 path, and code that repeats a unit already in the queue is judged once.
 
 Under ``VALUE`` each target has its own queue (B3), ranked by the names its description spells out,
-and a share of the item slots in every batch: equal by default, set by the caller. A target settles
-once a unit clears the Judge's yes bar for it or is fully supplied by the caller, and the units the
-search's hop sources reach from that unit (by default its callers and callees), one step deep, have
-been judged. A settled target draws no more slots, so its share flows to the targets still open, and
-the search stops when every target has settled.
+and a share of the item slots in every batch: equal by default, set by the caller. A target with a
+unit clearing the Judge's yes bar draws only its pending one-step hops (by default callers and
+callees). It settles when none is left to judge. Without a yes answer it keeps drawing its ordinary
+queue until the call cap or exhaustion. Fully supplied units separately seed one-step discovery hops
+without being judged again; supplied lines provide no relevance answer for a target. A settled target
+draws no more slots, so its share flows to the targets still open, and the search stops when every
+target has settled.
 """
 
 from __future__ import annotations
@@ -48,9 +50,9 @@ class Policy:
     """``ranked`` False keeps the stage order. True gives each target a queue ordered by value under
     ``weights``, keeps that order in the batches, splits each batch's slots by the targets' shares, and
     judges repeated code once. ``settles`` (ranked only) lets a target settle and its units push the
-    places a search's hop sources reach from relevant or fully supplied units (see the module docstring);
-    without it every unit is
-    judged until the call cap."""
+    places a search's hop sources reach from relevant or fully supplied units (see the module docstring).
+    Only a target-specific yes answer clears the relevance bar; supplied units seed discovery alone.
+    Without settling every unit is judged until the call cap."""
 
     name: str
     ranked: bool

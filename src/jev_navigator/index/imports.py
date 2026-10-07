@@ -115,7 +115,7 @@ def _python_imports(source: str) -> list[tuple[int, str, str | None]]:
 
 def _python_names(clause: str) -> frozenset[str] | None:
     parts = [
-        part.strip() for part in _PYTHON_COMMENT.sub("", clause).strip("()\n ").split(",") if part.strip()
+        part.strip() for part in _without_python_comments(clause).strip("()\n ").split(",") if part.strip()
     ]
     if "*" in parts:
         return None
@@ -269,7 +269,12 @@ def _script_files(base: str) -> list[str]:
     ]
 
 
-_PYTHON_COMMENT = re.compile(r"#[^\n]*")
+_PYTHON_COMMENT_OR_STRING = re.compile(
+    r'''"""(?:[^"\\]++|\\.|"(?!""))*+"""|'''
+    r"'''(?:[^'\\]++|\\.|'(?!''))*+'''|"
+    r""""(?:[^"\\\n]++|\\.)*+"|'(?:[^'\\\n]++|\\.)*+'|#[^\n]*""",
+    re.S,
+)
 _SCRIPT_DEFAULT_NAME = re.compile(r"^\s*([\w$]+)\s*(?:,|$)")
 # `const { verify, sign: signToken } = require('./jwt')`, which imports `verify` and `signToken`, but
 # not `require('./jwt').verify` or `require('./jwt')(options)`.
@@ -288,7 +293,7 @@ def imported_names(source: str, path: str) -> dict[str, ImportedName]:
         return {
             _local(part): ImportedName(match.group(1), _exported(part))
             for match in _PYTHON_FROM.finditer(source)
-            for part in _PYTHON_COMMENT.sub("", match.group(2)).strip("()\n ").split(",")
+            for part in _without_python_comments(match.group(2)).strip("()\n ").split(",")
             if part.strip() and part.strip() != "*"
         }
     code = _without_script_comments(source)
@@ -350,7 +355,7 @@ def reexported_names(source: str, path: str) -> tuple[tuple[frozenset[str] | Non
 def _python_reexports(source: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
     exports = []
     for match in _PYTHON_FROM.finditer(source):
-        parts = [part.strip() for part in _PYTHON_COMMENT.sub("", match.group(2)).strip("()\n ").split(",")]
+        parts = [part.strip() for part in _without_python_comments(match.group(2)).strip("()\n ").split(",")]
         if "*" in parts:
             exports.append((None, match.group(1)))
             continue
@@ -369,12 +374,17 @@ def _without_script_comments(source: str) -> str:
 
 def _keep_literal(match: re.Match) -> str:
     text = match.group(0)
-    return "\n" * text.count("\n") if text.startswith("/") else text
+    return "\n" * text.count("\n") if text.startswith(("/", "#")) else text
+
+
+def _without_python_comments(source: str) -> str:
+    """Keep quoted strings, including multiline and escaped quotes, while removing real comments."""
+    return _PYTHON_COMMENT_OR_STRING.sub(_keep_literal, source)
 
 
 def without_comments(source: str, path: str) -> str:
     """``source`` with its comments removed and every line break kept, so lines keep their numbers."""
-    return _PYTHON_COMMENT.sub("", source) if path.endswith(".py") else _without_script_comments(source)
+    return _without_python_comments(source) if path.endswith(".py") else _without_script_comments(source)
 
 
 def import_lines(source: str, path: str) -> frozenset[int]:
