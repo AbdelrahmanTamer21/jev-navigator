@@ -183,6 +183,16 @@ def input_anchors(row):
     return anchors
 
 
+def canonical_source_units(units):
+    """Request mask spellings are aliases, never additional physical graph nodes."""
+    canonical, identities = {}, {}
+    for key, unit in units.items():
+        identity = content_hash({"file": unit.path, "ranges": unit.ranges})
+        identities[key] = identity
+        canonical.setdefault(identity, replace(unit, id=identity))
+    return canonical, identities
+
+
 def build_features(db, cases, inputs, out, *, limit=None):
     import numpy as np
 
@@ -231,9 +241,8 @@ def build_features(db, cases, inputs, out, *, limit=None):
                 db.execute(
                     "update documents set binding=? where root=? and id=?", (json.dumps(record), root, key)
                 )
-                documents.append(
-                    scent_document(key, path, unit.symbol if unit else "", code, test=is_test_file(path))
-                )
+                if unit is None:
+                    documents.append(scent_document(key, path, "", code, test=is_test_file(path)))
             if number % 100 == 0:
                 db.commit()
                 print(
@@ -241,8 +250,19 @@ def build_features(db, cases, inputs, out, *, limit=None):
                     flush=True,
                 )
         db.commit()
+        canonical, identities = canonical_source_units(units)
+        documents.extend(
+            scent_document(
+                key,
+                unit.path,
+                unit.symbol,
+                read_ranges(index, unit.path, unit.ranges),
+                test=is_test_file(unit.path),
+            )
+            for key, unit in canonical.items()
+        )
         scent = ScentIndex(documents)
-        graph = graph_from_index(index, list(units.values()))
+        graph = graph_from_index(index, list(canonical.values()))
         graph_path = out / ("graph-" + hashlib.sha256(root.encode()).hexdigest()[:12] + ".json")
         write(
             graph_path,
@@ -258,7 +278,8 @@ def build_features(db, cases, inputs, out, *, limit=None):
             json.dumps(
                 {
                     "graph": Path(root).name,
-                    "units": len(units),
+                    "units": len(canonical),
+                    "request_aliases": len(units),
                     "edges": graph.edge_counts,
                     "unresolved": graph.unresolved,
                     "seconds": corpus_seconds,
@@ -280,7 +301,7 @@ def build_features(db, cases, inputs, out, *, limit=None):
             candidate_ids = set(ids)
             anchors = input_anchors(row)
             seeds = {
-                key: 1.0
+                identities[key]: 1.0
                 for key, unit in units.items()
                 if key in candidate_ids
                 and any(
@@ -290,13 +311,18 @@ def build_features(db, cases, inputs, out, *, limit=None):
             }
             # File-name scent seeds are query facts, independent of reference truth.
             _, filename = scent.signals(row["claim"]["statement"])
-            seed_names = sorted((key for key in ids if filename.get(key, 0)), key=lambda key: -filename[key])[
-                :16
-            ]
+            candidates = list(dict.fromkeys(identities.get(key, key) for key in ids))
+            seed_names = sorted(
+                (key for key in candidates if filename.get(key, 0)), key=lambda key: -filename[key]
+            )[:16]
             seeds.update({key: 0.25 for key in seed_names if key not in seeds})
             features = rank_features(scent, row["claim"]["statement"], graph, seeds)
             vectors = np.asarray(
-                [[f.scent, f.walk, f.path, f.prior, f.hub, f.test] for key in ids for f in [features[key]]],
+                [
+                    [f.scent, f.walk, f.path, f.prior, f.hub, f.test]
+                    for key in ids
+                    for f in [features[identities.get(key, key)]]
+                ],
                 dtype=np.float32,
             )
             np.savez_compressed(path, ids=np.asarray(ids), features=vectors)
@@ -316,6 +342,7 @@ def build_features(db, cases, inputs, out, *, limit=None):
                 "root": root,
                 "features": str(path),
                 "graph": str(graph_path),
+                "identities": {key: identities[key] for key in ids if key in identities},
                 "labels": labels,
                 "anchors": anchors,
                 "seeds": seeds,

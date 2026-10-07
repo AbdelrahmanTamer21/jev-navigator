@@ -4,12 +4,15 @@ import importlib.util
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from jev_navigator.index.code_index import CodeIndex
+from jev_navigator.index.units import Reading, UnitReader
 from jev_navigator.judgments.questions import content_hash
+from jev_navigator.selection import graph_from_index, random_walk
 
 spec = importlib.util.spec_from_file_location(
     "selection_collect", Path(__file__).parents[1] / "measurements/selection/collect.py"
@@ -36,6 +39,25 @@ def test_structured_piece_binds_literal_source_and_keeps_duplicates_unknown(tmp_
     index = CodeIndex(tmp_path, [path])
     code = '  {"value": 2}'
     assert collector.bind_shown(index, path, "another-id", code, collector.bind_file(index, path)) is None
+
+
+def test_mask_spelling_aliases_do_not_change_physical_graph_or_walk(tmp_path):
+    (tmp_path / "code.py").write_text("def helper():\n    return 1\n\ndef caller():\n    return helper()\n")
+    index = CodeIndex(tmp_path, ["code.py"])
+    units = UnitReader(index, 76800, listed_only=True, reading=Reading.CODE).list_files(["code.py"]).units
+    one = {f"first-{unit.symbol}": replace(unit, id=f"first-{unit.symbol}") for unit in units}
+    additional = {f"other-{unit.symbol}": replace(unit, id=f"other-{unit.symbol}") for unit in units}
+    baseline, first_names = collector.canonical_source_units(one)
+    repeated, all_names = collector.canonical_source_units({**one, **additional})
+    first_graph = graph_from_index(index, list(baseline.values()))
+    repeated_graph = graph_from_index(index, list(repeated.values()))
+    assert len(repeated) == len(units)
+    assert repeated_graph.edge_counts == first_graph.edge_counts
+    assert repeated_graph.adjacency == first_graph.adjacency
+    assert all_names["first-caller"] == all_names["other-caller"]
+    assert random_walk(repeated_graph, {all_names["other-caller"]: 1}) == random_walk(
+        first_graph, {first_names["first-caller"]: 1}
+    )
 
 
 def test_exact_replay_runs_on_judge_thread_and_rejects_changed_context(tmp_path):

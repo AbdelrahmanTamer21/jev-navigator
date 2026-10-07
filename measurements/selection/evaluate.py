@@ -19,6 +19,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
+from replay_store import request_graph
 
 from jev_navigator.selection import ActivePolicy, CodeGraph, Observation, active_search
 
@@ -267,6 +268,7 @@ def active_arms(dev, hard, proof, out):
         scores = dict(
             zip(case["ids"], (case["features"] @ np.asarray(case["weights"])).tolist(), strict=True)
         )
+        projected_graph = request_graph(graph, case["identities"])
         arms = {
             "perfect_oracle": (PerfectOracle(case["labels"]), ActivePolicy()),
             "perfect_no_marginal": (PerfectOracle(case["labels"]), ActivePolicy(min_expected_gain=0)),
@@ -276,7 +278,7 @@ def active_arms(dev, hard, proof, out):
             arms.pop("stored_single_development")
         for name, (oracle, policy) in arms.items():
             started = time.monotonic()
-            result = active_search(ids, scores, graph, oracle, policy=policy)
+            result = active_search(ids, scores, projected_graph, oracle, policy=policy)
             scheduled = [key for batch in result.batches for key in batch]
             positions = {key: rank for rank, key in enumerate(scheduled, 1) if key in result.observations}
             ranks = [
