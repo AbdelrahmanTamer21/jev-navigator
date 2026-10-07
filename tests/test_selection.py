@@ -219,3 +219,26 @@ def test_active_search_preserves_signed_score_order_at_the_oracle(scores):
     result = active_search(candidates, scores, CodeGraph(candidates), Oracle())
     assert received == [tuple(sorted(candidates, key=lambda id: -scores[id]))]
     assert 0 <= result.expected_gain <= len(candidates)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'def describe():\n    return f"{"#billing_policy"}" # hidden_comment\n',
+        "def describe():\n    return f'''{\n        1 # hidden_comment\n    } billing_policy'''\n",
+    ],
+    ids=["nested-same-quote-string", "multiline-expression-comment"],
+)
+def test_python_fstring_scent_distinguishes_expression_comments_from_strings(source):
+    document = scent_document("unit", "other.py", "describe", source)
+    index = ScentIndex([document])
+    assert index.scores("billing policy")["unit"] > 0
+    assert index.scores("hidden comment")["unit"] == 0
+
+
+@pytest.mark.parametrize("path", ["other.js", "other.ts", "other.tsx"])
+def test_template_scent_distinguishes_nested_strings_and_expression_comments(path):
+    source = "const describe = () => `nested ${`#billing_policy`} ${1 /* hidden_comment */}`;"
+    index = ScentIndex([scent_document("unit", path, "describe", source)])
+    assert index.scores("billing policy")["unit"] > 0
+    assert index.scores("hidden comment")["unit"] == 0

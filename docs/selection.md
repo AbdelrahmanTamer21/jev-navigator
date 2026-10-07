@@ -12,8 +12,11 @@ requests one file at a time.
 `scent_document(id, path, symbol, source)` reduces one source unit to word counts. The spelling
 map expands case, separators and identifier parts; retrieval also folds regular plurals and
 acronym parts. `ScentIndex` applies BM25 to identifiers, strings and paths and supplies a separate
-file-name signal. Source comments supply no scent. The index stores counts rather than parser
-output or source bodies.
+file-name signal. For supported Python and script files, ast-grep comment nodes supply no scent,
+including comments in f-string and template expressions. Parser recovery removes only recognized comments
+from incomplete syntax. Unsupported file languages retain their text; an unavailable or failed
+parser raises its process error. The host Python version does not parse source strings. The index
+stores counts rather than parser output or source bodies.
 
 `graph_from_index(index, units)` joins admitted units through proven calls and references,
 imports, literal named files, same-file membership and git co-change. Sparse virtual file nodes

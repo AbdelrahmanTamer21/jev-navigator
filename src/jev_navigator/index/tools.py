@@ -111,6 +111,35 @@ def ast_grep_version() -> str:
     return run_command([AST_GREP, "--version"], Path.cwd()).strip()
 
 
+def ast_grep_source(rules_yaml: str, source: str) -> list[dict]:
+    """Parse in-memory source with JVN-owned rules and neutral config; tool failures propagate.
+
+    Stdin avoids file discovery and file-skipping limits. Tree-sitter recovers nodes from incomplete
+    syntax, so returned matches describe only what its grammar recognized, not a syntax validation.
+    """
+    with tempfile.TemporaryDirectory(prefix="jev-navigator-sgconfig-") as directory:
+        config = Path(directory) / "sgconfig.yml"
+        config.write_text(NEUTRAL_AST_GREP_CONFIG)
+        with memory_limit.parsing():
+            output = run_command(
+                [
+                    AST_GREP,
+                    "scan",
+                    "--inline-rules",
+                    rules_yaml,
+                    "--config",
+                    str(config),
+                    "--stdin",
+                    "--json=compact",
+                ],
+                Path.cwd(),
+                stdin=source,
+                no_match_exit=_NO_MATCHES_EXIT,
+                timeout=PARSE_GUARD_SECONDS,
+            )
+    return json.loads(output)
+
+
 def ast_grep_rules(
     rules_yaml: str,
     files: Sequence[str],
