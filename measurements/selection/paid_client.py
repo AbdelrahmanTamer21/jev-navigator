@@ -107,7 +107,6 @@ def pick_llm(ledger, folder, model):
     reserve = Decimal(len(prompt.encode()) + 1024) * Decimal(str(model["input_price"]))
     reserve += Decimal(1024) * Decimal(str(model["output_price"]))
     resources()
-    ledger.reserve(identity, "planner", reserve)
     body = {
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
@@ -118,6 +117,8 @@ def pick_llm(ledger, folder, model):
             "json_schema": {"name": "ranked_source_pick", "strict": True, "schema": PICK_SCHEMA},
         },
     }
+    refuse_if_secret(body, {}, SecretScanner())
+    ledger.reserve(identity, "planner", reserve)
     wire = json.dumps(body, ensure_ascii=False).encode()
     (folder / "llm-request.json").write_bytes(wire)
     started = time.perf_counter()

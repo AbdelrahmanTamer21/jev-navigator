@@ -122,3 +122,30 @@ def test_physical_http_requests_are_reserved_before_send_and_settle_their_own_us
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_llm_final_scan_rejects_a_frozen_secret_before_reserving_money(tmp_path, monkeypatch):
+    pytest.importorskip("typesafe_sdk")
+    import hashlib
+    import json
+
+    import paid_client
+
+    from jev_navigator.judgments.secrets import SecretInRequestError
+
+    wire = b"Read source: api_key = 'fixture-secret-value'\n"
+    (tmp_path / "llm-prompt.txt").write_bytes(wire)
+    (tmp_path / "llm-page.json").write_text(
+        json.dumps({"prompt_sha256": hashlib.sha256(wire).hexdigest(), "offered": []})
+    )
+    ledger = Ledger(tmp_path / "spend.jsonl")
+    monkeypatch.setattr(paid_client, "resources", lambda: {})
+
+    def forbidden_send(*args, **kwargs):
+        raise AssertionError("A request with a secret reached the HTTP boundary")
+
+    monkeypatch.setattr(paid_client.urllib.request, "urlopen", forbidden_send)
+    with pytest.raises(SecretInRequestError, match="final scan"):
+        paid_client.pick_llm(ledger, tmp_path, {"input_price": 0.00000028, "output_price": 0.00000042})
+    assert ledger.latest() == {}
+    assert not (tmp_path / "llm-request.json").exists()
