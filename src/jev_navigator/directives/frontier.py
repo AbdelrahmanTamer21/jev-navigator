@@ -13,8 +13,8 @@ path, and code that repeats a unit already in the queue is judged once.
 
 Under ``VALUE`` each target has its own queue (B3), ranked by the names its description spells out,
 and a share of the item slots in every batch: equal by default, set by the caller. A target settles
-once a unit clears the Judge's yes bar for it and the units the search's hop sources reach from that
-unit (by default its callers and callees), one step deep, have been judged; a settled target draws no
+once a unit clears the Judge's yes bar for it or is fully supplied by the caller, and the units the
+search's hop sources reach from that unit (by default its callers and callees), one step deep, have been judged; a settled target draws no
 more slots, so its share flows to the targets still open, and the search stops when every target has
 settled.
 """
@@ -48,7 +48,8 @@ class Policy:
     """``ranked`` False keeps the stage order. True gives each target a queue ordered by value under
     ``weights``, keeps that order in the batches, splits each batch's slots by the targets' shares, and
     judges repeated code once. ``settles`` (ranked only) lets a target settle and its units push the
-    places a search's hop sources reach from them (see the module docstring); without it every unit is
+    places a search's hop sources reach from relevant or fully supplied units (see the module docstring);
+    without it every unit is
     judged until the call cap. ``role_coverage`` adds a caller-owned prerequisite: every required
     role must be observed among the target's judged units before it can settle."""
 
@@ -57,8 +58,6 @@ class Policy:
     settles: bool = False
     weights: Weights = field(default_factory=Weights)
     role_coverage: RoleCoverage | None = None
-    expands: bool = False
-    search_order: bool = False
 
     def __post_init__(self) -> None:
         if self.settles and not self.ranked:
@@ -83,7 +82,6 @@ class RoleCoverage:
 
 STAGE_ORDER = Policy("stage_order", ranked=False)
 VALUE = Policy("value", ranked=True, settles=True)
-WHOLE_FRONTIER = Policy("whole_frontier", ranked=False, expands=True, search_order=True)
 
 
 @dataclass(frozen=True)

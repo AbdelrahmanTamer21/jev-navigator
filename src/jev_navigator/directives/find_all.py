@@ -44,8 +44,8 @@ from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
 from ..judgments.questions import Check, item_path, serialized_chars
 from ..judgments.secrets import DEFAULT_MASKER
 from ..judgments.thresholds import NoulVerdict
-from ..mentions import code_names_in, literal_names_in
-from ..sources import ANCHORS, CALLEES, CALLERS, FILES, NAMES, TEXT_NAMES, Reach, Seeds, Source
+from ..mentions import code_names_in
+from ..sources import ANCHORS, CALLEES, CALLERS, FILE_WORDS, FILES, NAMES, TEXT_NAMES, Reach, Seeds, Source
 from .find_code import search_failure
 from .frontier import (
     STAGE_ORDER,
@@ -81,8 +81,7 @@ TEXT_SOURCES: tuple[Source, ...] = (ANCHORS, FILES, TEXT_NAMES)
 """find_all_text's and find_text's sources by default: as ``CODE_SOURCES``, with a name's hits only in
 text files and never in a lockfile."""
 HOP_SOURCES: tuple[Source, ...] = (CALLERS, CALLEES)
-"""What a unit that clears a target's bar pushes under a settling policy, by default: its callers and
-callees."""
+"""One-step hops of a relevant or fully supplied unit under a settling policy: callers and callees."""
 
 T = TypeVar("T")
 
@@ -485,7 +484,6 @@ class _Search:
         self.answered: set[tuple[str, str]] = set()
         self.judged: dict[str, list[CheckResult]] = {target: [] for target in targets}
         self.units: dict[str, Unit] = {}
-        self.resolved_units: dict[str | Anchor, tuple[Unit, ...]] = {}
         self.entered_by: dict[str, str] = {}
         self.features: dict[str, dict[str, Features]] = {target: {} for target in targets}
         self.repeat_of: dict[str, str] = {}
@@ -533,7 +531,7 @@ class _Search:
                 list_name=ITEMS,
                 places=places,
                 refusals=self.refusals,
-                keep_order=self.policy.ranked or self.policy.search_order,
+                keep_order=self.policy.ranked or FILE_WORDS in self.sources,
             ):
                 self._record(self.target_of[name], answer)
 
@@ -556,58 +554,7 @@ class _Search:
         size = self.judge.items_per_request * self.batches_per_wave
         if self.policy.ranked:
             return self._ranked_waves(size)
-        if self.policy.expands:
-            return self._expanding_waves(size)
         return _chunks(self._staged_population(), size)
-
-    def _expanding_waves(self, size: int) -> Iterator[list[Item]]:
-        """Register the entire reached frontier before judging, then expand newly judged units.
-
-        Answers control neither admission nor expansion. Every unit is expanded once, and fresh
-        terms are searched once. A spent call budget leaves the full pending population visible.
-        """
-        pending = list(self._staged_population())
-        expanded: set[str] = set()
-        terms = set(self.seeds.names)
-        searched_literals: set[str] = set()
-        while not self.stopped():
-            yield from _chunks(pending, size)
-            judged = self.delivered_units | {
-                self.unit_of_place[answer.place.id]
-                for answers in self.judged.values()
-                for answer in answers
-                if answer.place is not None and answer.place.id in self.unit_of_place
-            }
-            fresh_ids = judged - expanded
-            fresh = [unit for unit in self.units.values() if unit.id in fresh_ids]
-            if not fresh:
-                return
-            expanded.update(unit.id for unit in fresh)
-            codes = tuple(read_ranges(self.index, unit.path, unit.ranges) for unit in fresh)
-            names = tuple(
-                dict.fromkeys(name for code in codes for name in code_names_in(code) if name not in terms)
-            )
-            terms.update(names)
-            literals = tuple(
-                dict.fromkeys(
-                    literal
-                    for code in codes
-                    for literal in literal_names_in(code)
-                    if literal not in searched_literals
-                )
-            )
-            searched_literals.update(literals)
-            seeds = Seeds(
-                names=names,
-                texts=codes,
-                files=tuple(dict.fromkeys(unit.path for unit in fresh)),
-                units=tuple(fresh),
-                literals=literals,
-            )
-            pending = []
-            for source in self.hops:
-                reaches = list(source.reach(self.index, seeds))
-                pending.extend(self._admitted(self._units_reached(reaches)))
 
     def _next_wave(self, waves: Iterator[list[Item]]) -> tuple[list[Item], list[dict]] | None:
         """The next wave's places and the entries Jev reads for them; None when the population is spent."""
@@ -694,7 +641,7 @@ class _Search:
 
     def _drawing(self, frontier: Frontier) -> dict[str, bool]:
         """Each target still drawing, mapped to whether it draws only its hops. Under a settling policy
-        a target with a unit that cleared its bar first gets that unit's hops, and settles once none of
+        a target with a relevant or fully supplied unit first gets that unit's hops, and settles once none of
         its hops is left to judge and its required roles are covered. Without role observations it
         keeps drawing the ordinary queue as well as hops."""
         if not self.policy.settles:
@@ -719,8 +666,8 @@ class _Search:
         return drawing
 
     def _clearing(self, target: str) -> set[str]:
-        """The units whose answer for ``target`` is yes by the Judge's thresholds."""
-        return {
+        """Relevant units and fully supplied units, whose one-step hops need no repeat judgment."""
+        return self.delivered_units | {
             self.unit_of_place[answer.place.id]
             for answer in self.judged[target]
             if answer.verdict is NoulVerdict.YES and answer.place.id in self.unit_of_place
@@ -742,7 +689,9 @@ class _Search:
         """The units the hop sources reach from ``unit_id``, seeded with that unit alone, each admitted on
         first sight; the unit itself is never its own hop."""
         if unit_id not in self.pushed:
-            seeds = Seeds(units=(self.units[unit_id],))
+            unit = self.units[unit_id]
+            code = read_ranges(self.index, unit.path, unit.ranges)
+            seeds = Seeds(names=tuple(code_names_in(code)), texts=(code,), files=(unit.path,), units=(unit,))
             reached = (
                 pair
                 for source in self.hops
@@ -796,31 +745,9 @@ class _Search:
     def _units_reached(self, reaches: Sequence[Reach]) -> list[tuple[Unit, Reach]]:
         """The units ``reaches`` name, each with the reach that named it: every listed unit of a file,
         the units an anchor names."""
-        if not self.policy.expands:
-            files = [reach for reach in reaches if _is_file_reach(reach)]
-            anchors = [reach for reach in reaches if not _is_file_reach(reach)]
-            return self._units_of_files(files) + self._units_at_anchors(anchors)
-        unseen = list(
-            {reach.at: reach for reach in reversed(reaches) if reach.at not in self.resolved_units}.values()
-        )
-        unseen.reverse()
-        files = [reach for reach in unseen if _is_file_reach(reach)]
-        anchors = [reach for reach in unseen if not _is_file_reach(reach)]
-        resolved = self._units_of_files(files) + self._units_at_anchors(anchors)
-        by_place: dict[str | Anchor, list[Unit]] = {reach.at: [] for reach in unseen}
-        for unit, reach in resolved:
-            by_place[reach.at].append(unit)
-        self.resolved_units.update((at, tuple(units)) for at, units in by_place.items())
-        result = []
-        admitted = set(self.units)
-        for reach in reaches:
-            units = self.resolved_units[reach.at]
-            self._record_name_resolution(reach, not units)
-            for unit in units:
-                if unit.id not in admitted:
-                    admitted.add(unit.id)
-                    result.append((unit, reach))
-        return result
+        files = [reach for reach in reaches if _is_file_reach(reach)]
+        anchors = [reach for reach in reaches if not _is_file_reach(reach)]
+        return self._units_of_files(files) + self._units_at_anchors(anchors)
 
     def _units_of_files(self, reaches: Sequence[Reach]) -> list[tuple[Unit, Reach]]:
         if not reaches:
@@ -834,7 +761,7 @@ class _Search:
         for reach in reaches:
             self._record_name_resolution(reach, reach.at not in listed)
         units = listing.units
-        if self.policy.search_order:
+        if all(reach.source == FILE_WORDS.name for reach in reaches):
             order = {file: position for position, file in enumerate(reach_of)}
             units = sorted(units, key=lambda unit: order[unit.path])
         return [(unit, reach_of[unit.path]) for unit in units]
@@ -871,7 +798,7 @@ class _Search:
         return places
 
     def _pending_places(self, unit: Unit) -> list[Item]:
-        if self.policy.expands and unit.ranges:
+        if unit.ranges:
             delivered = self.delivered.get(unit.path, frozenset())
             if all(line in delivered for first, last in unit.ranges for line in range(first, last + 1)):
                 self.delivered_units.add(unit.id)
@@ -911,7 +838,7 @@ class _Search:
             cancelled=self.cancelled,
             places=places,
             refusals=self.refusals,
-            keep_order=self.policy.ranked or self.policy.search_order,
+            keep_order=self.policy.ranked or FILE_WORDS in self.sources,
         ):
             self._record(self.target_of[name], answer)
 
