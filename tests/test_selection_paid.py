@@ -140,6 +140,7 @@ def test_llm_final_scan_rejects_a_frozen_secret_before_reserving_money(tmp_path,
     )
     ledger = Ledger(tmp_path / "spend.jsonl")
     monkeypatch.setattr(paid_client, "resources", lambda: {})
+    monkeypatch.setenv("REQUESTY_API_KEY", "fixture-provider-key")
 
     def forbidden_send(*args, **kwargs):
         raise AssertionError("A request with a secret reached the HTTP boundary")
