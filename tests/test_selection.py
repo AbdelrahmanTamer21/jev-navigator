@@ -174,3 +174,23 @@ def test_active_marginal_rule_stops_after_observed_low_yield():
     assert len(result.batches) == 1
     assert result.stopped_by == "marginal value"
     assert result.expected_gain == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [
+        '"https://example.test/#billing_policy"',
+        "'https://example.test/#billing_policy'",
+        '"""first line\n#billing_policy\nlast line"""',
+        'r"https://example.test/#billing_policy"',
+        'f"https://example.test/#{billing_policy}"',
+        '"escaped \\" #billing_policy"',
+    ],
+)
+def test_python_scent_keeps_hashes_in_strings_beside_real_comments(literal):
+    document = scent_document(
+        "unit", "other.py", "describe", f"def describe():\n    return {literal} # hidden_comment\n"
+    )
+    index = ScentIndex([document])
+    assert index.scores("billing policy")["unit"] > 0
+    assert index.scores("hidden comment")["unit"] == 0
