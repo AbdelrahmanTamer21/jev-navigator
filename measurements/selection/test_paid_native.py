@@ -7,6 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+
 def test_real_engine_accepts_ranked_code_and_text_and_reports_pending_units(tmp_path):
     """Runs in the pinned Engine environment; CI without that host records an explicit skip."""
     pytest.importorskip("enginepy.workflows.document_analysis.evidence_pack")

@@ -122,4 +122,3 @@ def test_physical_http_requests_are_reserved_before_send_and_settle_their_own_us
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
-
