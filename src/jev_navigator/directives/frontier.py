@@ -24,7 +24,7 @@ from __future__ import annotations
 import math
 import re
 from collections import deque
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
@@ -50,34 +50,16 @@ class Policy:
     judges repeated code once. ``settles`` (ranked only) lets a target settle and its units push the
     places a search's hop sources reach from relevant or fully supplied units (see the module docstring);
     without it every unit is
-    judged until the call cap. ``role_coverage`` adds a caller-owned prerequisite: every required
-    role must be observed among the target's judged units before it can settle."""
+    judged until the call cap."""
 
     name: str
     ranked: bool
     settles: bool = False
     weights: Weights = field(default_factory=Weights)
-    role_coverage: RoleCoverage | None = None
 
     def __post_init__(self) -> None:
         if self.settles and not self.ranked:
             raise ValueError("only a ranked policy settles: the stage order judges every unit")
-
-
-@dataclass(frozen=True)
-class RoleCoverage:
-    """Caller-required roles and observed roles of judged units. Missing observations never cover a role.
-
-    The reader receives the target and judged unit ids, not predictions about unread units.
-    The caller supplies role observations, including any semantic judgments, outside this policy.
-    """
-
-    required: Mapping[str, Collection[str]]
-    observed: Callable[[str, Collection[str]], Collection[str]]
-
-    def complete(self, target: str, unit_ids: Collection[str]) -> bool:
-        roles = self.required.get(target)
-        return roles is not None and set(roles) <= set(self.observed(target, unit_ids))
 
 
 STAGE_ORDER = Policy("stage_order", ranked=False)

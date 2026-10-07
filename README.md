@@ -1244,14 +1244,9 @@ when its body never repeats that name; ambiguous basenames retain all matches.
 
 ```python
 from jev_navigator.composition import SearchConfiguration, reserve_calls
-from jev_navigator.directives.frontier import Policy, RoleCoverage
+from jev_navigator.directives.frontier import VALUE
 
-coverage = RoleCoverage(
-    required={"p": ("guard", "value")},
-    observed=lambda point, judged_ids: roles_observed_for(point, judged_ids),
-)
-policy = Policy("required-evidence", ranked=True, settles=True, role_coverage=coverage)
-configuration = SearchConfiguration("code-and-named-text", code_calls=36, text_calls=12, policy=policy)
+configuration = SearchConfiguration("code-and-named-text", code_calls=36, text_calls=12, policy=VALUE)
 code, text = await configuration.search(index, judge, {"p": description}, files=scope, anchors=anchors)
 ```
 
@@ -1263,27 +1258,50 @@ caller that wants to stop at its first matching text unit.
 `reserve_calls(judge, {"discovery": 36, "continuation": 12})` returns scoped judges whose caps are
 reserved before either stage starts. Every call still counts against the parent. Unused calls remain
 reserved; a host can deliberately assign unused calls in a later composition. These are explicit
-allowances, not claims that one split is optimal. The role policy also works with an ordinary
-`find_all` composition. A target cannot settle until every role the caller requires has observations
-among its judged units and its clearing units' pending hops have been judged. Missing role answers
-keep the target open. A match probability does not establish an evidence role. The existing `VALUE`
-policy remains available for comparison.
+allowances, not claims that one split is optimal. `VALUE` settles after a relevant unit and its
+pending one-step hops have been judged; `STAGE_ORDER` examines its population up to the call cap.
 
-The [role question proposal](question-templates/evidence_roles/PROPOSAL.md) is not wired into searches.
+### J1 ranks, roles label selected pieces
 
-### Search question profiles
+Code and text population searches use the admitted **J1-3** local-match question as their one ranking
+profile. Its unchanged wording, yes/no criteria and contrasting examples live in
+`judgments/local_match_question.json`; `J1` in `judgments/profiles.py` binds only the item and target
+state paths. `match_check(target)` returns that Check. Each request carries `targets` and `items`,
+each item containing `file` and `code`. Ranking consumes that Check's raw P(yes). Cut units retain
+their best matching piece. Search has no role maxima, required-role retention or role prerequisites.
+The bare match profile and six-role ranking profile are removed.
 
-Code and text population searches accept `question_profile`, defaulting to `MATCH` from
-`jev_navigator.judgments.profiles`. `ROLES_V2` selects the measured proposal-v2 questions:
-`decide`, `guard`, `value`, `effect`, `delegates` and `satisfied`. All six run together for each
-unit and target, using the existing 16-unit batching, size limits, store and call cap.
-The wording lives in `judgments/role_questions.json`; composition lives in `judgments/profiles.py`.
+After the caller fits its packet, it passes **only the selected pieces and their exact visible text**
+to `label_roles` or `label_roles_async`. Neither operation reads surrounding source or changes the
+selection. The six unchanged questions remain owned by `judgments/role_questions.json`: `decide`,
+`guard`, `value`, `effect`, `delegates` and `satisfied`. All six run together for each supplied piece
+and point, in supplied order, at most sixteen pieces per request. The existing Judge handles size
+splitting by item, masking, final scanning, call accounting and the configured answer store.
+A single piece over the declared box remains explicitly unlabelled in `refusals` and is not sent.
 
-Relevance is the maximum of the four local roles and `satisfied`. Every composed answer retains
-its raw answers in `components`. `forwarding_only(components)` requires delegation at least 0.80
-and all four local roles at most 0.20. Delegation alone never demotes local evidence.
-`result.ranked(target)` keeps the best unit for each explicitly supplied `required_roles` ahead
-of the relevance ranking, including uncertain winners. Ties keep first-seen order. Required roles
-change retention only. They do not alter today's stopping policy, and the library does not infer
-which roles a search needs. `ProfileJudge` supplies the same questions and composition to collectors
-that need per-answer receipts; collectors keep no copy of this profile.
+```python
+from jev_navigator.judgments.role_labels import LabelPiece, label_roles_async
+
+# selected contains the final packet pieces, with their source Item and displayed text.
+pieces = [LabelPiece(piece.place, piece.code) for piece in selected]
+labels = await label_roles_async(label_judge, pieces, targets)
+for labelled in labels.pieces:
+    print(labelled.piece.place.id, labelled.probabilities)
+```
+
+`RoleLabellingResult.pieces` preserves supplied order. Each `PieceRoles.answers[point][role]` is
+its original `CheckResult`, retaining probability, request hash, question hash, source place and
+whether the answer came from the store. `probabilities` exposes the raw numeric dictionary without
+combining roles. Refused pieces have empty answers and are unknown. The caller displays these
+labels alongside each ranked region and chooses its display policy; labels never alter J1 ranks.
+Identical complete labelling batches can replay from the store. Changing batch companions changes
+the judgment context and requires new answers.
+
+Pass labelling a Judge with its own caller-owned allowance, or reserve a separate stage share from
+an uncapped parent. Its requests still count against that parent. A ranking allowance already used
+up cannot fund the labelling step. The twelve-group ranking default is an **Engine setting**, not a
+JVN default or an environment flag. No provider calls are made by preparing pieces or questions.
+
+The retained selection measurement recipes describe their original pinned library and Engine
+versions. Their archived six-role rankings are historical controls; run them at those recorded
+pins rather than interpreting them as the current ranking or labelling API.

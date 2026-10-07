@@ -1,0 +1,20 @@
+{
+  "match": {
+    "type": "noul",
+    "instructions": "Does `unit.code` contain the code that settles a part of `point`?",
+    "criteria": {
+      "true": {
+        "what": "Locally implements a condition, value or action described by the point.",
+        "examples": [
+          "if q < 0: raise ValueError()"
+        ]
+      },
+      "false": {
+        "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+        "examples": [
+          "return validate(q)"
+        ]
+      }
+    }
+  }
+}

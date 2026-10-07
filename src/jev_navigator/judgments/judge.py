@@ -98,9 +98,7 @@ class Refusal:
 
 @dataclass(frozen=True)
 class CheckResult:
-    """``probability`` is raw P(yes), or a profile's derived relevance when ``components`` holds
-    its raw answers. A composed result has no provider question id. ``verdict`` applies the
-    current yes/no band. Callers may
+    """``probability`` is raw P(yes). ``verdict`` applies the current yes/no band. Callers may
     apply any band of their own to ``probability``. ``request_sha256`` identifies the masked request
     that answered it, also when the answer came from the store, and ``question_id`` the question it
     was asked under there (None in a result saved before it was recorded). ``place`` is the unit or
@@ -113,8 +111,6 @@ class CheckResult:
     request_sha256: str
     question_id: str | None = None
     place: Item | None = None
-
-    components: Mapping[str, CheckResult] = field(default_factory=dict)
 
     def source(self) -> AnswerSource | None:
         if self.question_id is None:
@@ -695,10 +691,20 @@ class Judge:
         return self._finish(prepared, dispatched, thresholds, item_keys, sources, skeleton, batch)
 
     def _sendable(self, state: Mapping, questions: Mapping, masked: frozenset[str] | None) -> _Prepared:
-        """The prepared request, refused without a call when this route, under the same input box,
-        already refused these exact bytes for their input size, so a replay splits it again for free.
-        A changed box tries the request again."""
+        """Admit the masked request within the route's declared input limits before dispatch.
+
+        Stored answers need no send. A prior provider refusal under this same box also splits
+        again for free; a changed box can retry when the request fits its new limits.
+        """
         prepared = self._prepare(state, questions, masked)
+        if prepared.stored is None and self.input_limits.exceeded_by(prepared.state, prepared.questions):
+            error = InputBudgetExceededError(
+                "request exceeds this route's declared input limits",
+                model=self.client.model,
+                box_chars=self.input_limits.box_chars,
+            )
+            self._journal_failure(self._journal_request(prepared), error, None)
+            raise error
         if self._known_refusal(prepared):
             raise InputBudgetExceededError("this route refused this exact request for its input size before")
         return prepared

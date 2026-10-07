@@ -1,0 +1,298 @@
+{
+  "admitted_arm": "J1-3",
+  "admitted_case": "P1",
+  "admitted_request_sha256": "a69a504f4b711636be3fd98838bfcd813f9e7f210249138b1144f68bfa365c40",
+  "state_targets": {
+    "p0": "The code that sends the INSERT for POST /classes/:className."
+  },
+  "questions": {
+    "match_p0@ae35dc28#0": {
+      "type": "noul",
+      "instructions": "Does `items[0].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#1": {
+      "type": "noul",
+      "instructions": "Does `items[1].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#2": {
+      "type": "noul",
+      "instructions": "Does `items[2].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#3": {
+      "type": "noul",
+      "instructions": "Does `items[3].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#4": {
+      "type": "noul",
+      "instructions": "Does `items[4].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#5": {
+      "type": "noul",
+      "instructions": "Does `items[5].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#6": {
+      "type": "noul",
+      "instructions": "Does `items[6].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#7": {
+      "type": "noul",
+      "instructions": "Does `items[7].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#8": {
+      "type": "noul",
+      "instructions": "Does `items[8].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#9": {
+      "type": "noul",
+      "instructions": "Does `items[9].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#10": {
+      "type": "noul",
+      "instructions": "Does `items[10].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#11": {
+      "type": "noul",
+      "instructions": "Does `items[11].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#12": {
+      "type": "noul",
+      "instructions": "Does `items[12].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#13": {
+      "type": "noul",
+      "instructions": "Does `items[13].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#14": {
+      "type": "noul",
+      "instructions": "Does `items[14].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    },
+    "match_p0@ae35dc28#15": {
+      "type": "noul",
+      "instructions": "Does `items[15].code` contain the code that settles a part of `targets.p0`?",
+      "criteria": {
+        "true": {
+          "what": "Locally implements a condition, value or action described by the point.",
+          "examples": [
+            "if q < 0: raise ValueError()"
+          ]
+        },
+        "false": {
+          "what": "Only calls, forwards, mentions or sits near that code, or implements something else.",
+          "examples": [
+            "return validate(q)"
+          ]
+        }
+      }
+    }
+  }
+}
