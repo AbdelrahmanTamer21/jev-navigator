@@ -52,6 +52,7 @@ configuration: a recipe the caller passes as data names them, never an environme
 | Sources: one contract (`sources.Source`) for every primitive that reaches candidates; `find_all`, `find_all_text` and `find_text` are compositions of them | built |
 | `find` and `trace` as compositions of sources | not yet: they keep their own moves and call graph |
 | The spelling map | being built |
+| Static context configuration: one-hop proven calls, directly named files and structural excerpts (`selection.context`) | built |
 | Typed configurations | being built |
 | `jvn search` | being built |
 
