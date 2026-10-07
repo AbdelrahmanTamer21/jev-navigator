@@ -13,6 +13,7 @@ may hide.
 
 from __future__ import annotations
 
+import struct
 from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -51,6 +52,7 @@ from .languages import (
     TYPE_DECLARATIONS,
     VALUE_DECLARATIONS,
     VALUE_KINDS,
+    comment_rule,
     export_rules,
     grammar_of,
     language_of,
@@ -226,6 +228,8 @@ class FileFacts:
     # ("insert", "insert") and ("utc", "toUtc") for `export default { insert, utc: toUtc }` (see
     # ``DEFAULT_MEMBERS``). A default import reaches them as members.
     default_members: tuple[tuple[str, str], ...] = ()
+    # Parser comment-node byte ranges in exact cached bytes, packed as little-endian uint32 pairs.
+    comment_ranges: bytes = b""
 
 
 class _Text(TypedDict):
@@ -353,6 +357,7 @@ def fact_rules(languages: Sequence[str]) -> str:
         part
         for part in (
             _structure_rules(languages),
+            "\n---\n".join(comment_rule(language) for language in languages),
             _call_rules(languages),
             reference_rules(languages),
             export_rules(languages),
@@ -405,10 +410,14 @@ class _FileFound:
     from_names: list[tuple[int, str, str]] = field(default_factory=list)
     module_bindings: set[str] = field(default_factory=set)
     error_lines: list[tuple[int, int]] = field(default_factory=list)
+    comment_ranges: bytearray = field(default_factory=bytearray)
 
     def add(self, match: dict) -> None:
         rule = match["ruleId"]
-        if rule == _ERROR_RULE:
+        if rule == "comments":
+            offsets = match["range"]["byteOffset"]
+            self.comment_ranges.extend(struct.pack("<II", offsets["start"], offsets["end"]))
+        elif rule == _ERROR_RULE:
             # The grammar reports ERROR nodes here: whatever recovery swallowed is unknown, while the
             # symbols it did keep are still matched.
             self.error_lines.append(_lines_of(match))
@@ -460,6 +469,7 @@ class _FileFound:
             tuple(sorted(self.module_bindings)),
             language=self.language,
             default_members=tuple(sorted(self.default_members)),
+            comment_ranges=bytes(self.comment_ranges),
         )
 
     def _structure(self) -> FileStructure:

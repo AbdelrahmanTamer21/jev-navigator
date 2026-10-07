@@ -16,7 +16,8 @@ file-name signal. For supported Python and script files, ast-grep comment nodes 
 including comments in f-string and template expressions. Parser recovery removes only recognized comments
 from incomplete syntax. Unsupported file languages retain their text; an unavailable or failed
 parser raises its process error. The host Python version does not parse source strings. The index
-stores counts rather than parser output or source bodies.
+stores counts rather than parser output or source bodies. Index import and unit readers reuse
+comment ranges persisted by the normal fact scan, so warm lookups do not start another parser.
 
 `graph_from_index(index, units)` joins admitted units through proven calls and references,
 imports, literal named files, same-file membership and git co-change. Sparse virtual file nodes

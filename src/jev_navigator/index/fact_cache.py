@@ -203,11 +203,15 @@ def _encode(facts: FileFacts) -> dict:
         "module_bindings": list(facts.module_bindings),
         "language": facts.language,
         "default_members": [list(pair) for pair in facts.default_members],
+        "comment_ranges": facts.comment_ranges.hex(),
     }
 
 
 def _decode(file: str, raw: dict) -> FileFacts:
     structure = raw["structure"]
+    comments = bytes.fromhex(raw["comment_ranges"])
+    if len(comments) % 8:
+        raise ValueError("incomplete comment byte range")
     return FileFacts(
         FileStructure(
             tuple(_span(file, span) for span in structure["functions"]),
@@ -253,4 +257,5 @@ def _decode(file: str, raw: dict) -> FileFacts:
         tuple(raw["module_bindings"]),
         language=raw["language"],
         default_members=tuple((member, own) for member, own in raw["default_members"]),
+        comment_ranges=comments,
     )

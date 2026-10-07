@@ -592,6 +592,11 @@ def grammar_of(language: str) -> str:
     return "tsx" if language == FLOW_LANGUAGE else language
 
 
+def comment_rule(language: str) -> str:
+    """The shared rule recognizing comment byte ranges, in standalone and cached fact scans."""
+    return f"id: comments\nlanguage: {grammar_of(language)}\nrule:\n  kind: comment\n"
+
+
 def sgconfig_of(language: str) -> str | None:
     """The sgconfig a scan reading ``language`` passes, or None for the neutral one."""
     return FLOW_SGCONFIG if language == FLOW_LANGUAGE else None

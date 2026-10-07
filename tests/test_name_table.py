@@ -667,3 +667,33 @@ def test_a_lookup_whose_stamp_cannot_be_written_keeps_its_entries_and_says_so(
     assert set(entries) == set(blobs)
     assert "not stamped" in caplog.text
     assert confirmed_days(private_cache_root) == [today() - 40] * len(blobs)
+
+
+def test_warm_lookups_reuse_fstring_and_template_comment_nodes(tmp_path, spawned):
+    python_source = 'def describe():\r\n    return f"{"#billing_policy"}" # café_hidden\r\n'
+    script_source = "const describe = () => `nested ${`#billing_policy`} ${1 /* café_hidden */}`;\r\n"
+    commit_files(
+        tmp_path, {**REPOSITORY, "app/description.py": python_source, "web/description.ts": script_source}
+    )
+    index = CodeIndex.from_git(tmp_path)
+    cold = every_lookup(index)
+    expected_python = 'def describe():\r\n    return f"{"#billing_policy"}" \r\n'
+    expected_script = "const describe = () => `nested ${`#billing_policy`} ${1 }`;\r\n"
+    assert index.source_without_comments("app/description.py") == expected_python
+    assert index.source_without_comments("web/description.ts") == expected_script
+
+    warm = CodeIndex.from_git(tmp_path)
+    spawned.clear()
+    assert every_lookup(warm) == cold
+    assert warm.source_without_comments("app/description.py") == expected_python
+    assert warm.source_without_comments("web/description.ts") == expected_script
+    assert spawned[tools.AST_GREP] == 0
+
+    (tmp_path / "app/description.py").write_text(
+        'def describe():\n    return f"{"#changed_policy"}" # another_comment\n'
+    )
+    changed = CodeIndex.from_git(tmp_path)
+    assert (
+        changed.source_without_comments("app/description.py")
+        == 'def describe():\n    return f"{"#changed_policy"}" \n'
+    )

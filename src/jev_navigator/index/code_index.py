@@ -35,6 +35,7 @@ from .imports import (
     module_imports,
     reexported_names,
     resolve_import,
+    without_comments,
 )
 from .languages import export_words, is_schema_file, language_of
 from .memo import memoized
@@ -1169,13 +1170,26 @@ class CodeIndex:
                 pending.append(inherited)
         return tuple(found.values())
 
+    def _source_and_comments(self, file: str) -> tuple[str, bytes]:
+        """Exact first-read bytes and their cached parser comment ranges."""
+        comments = self._facts_in(file).comment_ranges
+        content = self._sources.first_read(file) or b""
+        return content.decode(errors="replace"), comments
+
+    def source_without_comments(self, file: str) -> str:
+        """First-read source with cached parser comments removed, keeping every line break."""
+        source, comments = self._source_and_comments(file)
+        return without_comments(source, file, comment_ranges=comments)
+
     @memoized
     def _read_reexports(self, file: str) -> tuple[tuple[frozenset[str] | None, str], ...]:
-        return reexported_names("\n".join(self._lines_of(file)), file)
+        source, comments = self._source_and_comments(file)
+        return reexported_names(source, file, comment_ranges=comments)
 
     @memoized
     def _read_imported_names(self, file: str) -> dict[str, ImportedName]:
-        return imported_names("\n".join(self._lines_of(file)), file)
+        source, comments = self._source_and_comments(file)
+        return imported_names(source, file, comment_ranges=comments)
 
     def _module_alias(self, file: str, name: str) -> ModuleAlias | None:
         """The alias that binds ``name`` when module-level code binds it to one whole module and in
@@ -1267,12 +1281,12 @@ class CodeIndex:
     @memoized
     def imports(self, file: str) -> tuple[str, ...]:
         """The scope files ``file`` imports, read once per index from the file as the index first read it."""
-        source = "\n".join(self._lines_of(file))
+        source, comments = self._source_and_comments(file)
         script_paths = self._script_paths(file)
         packages = self._read_packages()
         resolved = (
             resolve_import(specifier, file, self._scope, script_paths, packages)
-            for specifier in imported_modules(source, file)
+            for specifier in imported_modules(source, file, comment_ranges=comments)
         )
         return tuple(dict.fromkeys(fact.path for fact in resolved if fact))
 
