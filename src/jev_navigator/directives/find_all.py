@@ -41,6 +41,7 @@ from ..index.units import (
     read_ranges,
 )
 from ..judgments.judge import CallCapReachedError, CheckResult, Judge, Refusal
+from ..judgments.profiles import J1
 from ..judgments.questions import Check, item_path, serialized_chars
 from ..judgments.secrets import DEFAULT_MASKER
 from ..judgments.thresholds import NoulVerdict
@@ -87,12 +88,8 @@ T = TypeVar("T")
 
 
 def match_check(target: str) -> Check:
-    """The one question asked of every unit for ``target``: no criteria, the description in the
-    shared state, as jgrep asks it."""
-    return Check(
-        f"match_{target}",
-        f"Look only at `{{item}}`. Does that code match the description in `{TARGETS}.{target}`?",
-    )
+    """The admitted J1-3 local-match question, bound to one target in shared state."""
+    return J1.questions(target)[0]
 
 
 @dataclass(frozen=True)
@@ -193,6 +190,16 @@ class FindAllResult:
         features = self.features.get(target, {})
         return tuple(sorted(self.scores(target), key=lambda score: self._rank(score, features)))
 
+    def ranked_with(self, target: str, previous: FindAllResult) -> tuple[UnitScore, ...]:
+        """Rank both searches' units, keeping each unit's best local-match observation."""
+        scores: dict[str, UnitScore] = {}
+        for score in (*previous.scores(target), *self.scores(target)):
+            earlier = scores.get(score.unit.id)
+            if earlier is None or score.probability >= earlier.probability:
+                scores[score.unit.id] = score
+        features = {**previous.features.get(target, {}), **self.features.get(target, {})}
+        return tuple(sorted(scores.values(), key=lambda score: self._rank(score, features)))
+
     def _rank(self, score: UnitScore, features: Mapping[str, Features]) -> tuple[float, float, str, str]:
         unit_features = features.get(score.unit.id)
         value = 0.0 if unit_features is None else unit_features.value(self.policy.weights)
@@ -243,13 +250,12 @@ def find_all(
 
     Under a ranked policy ``shares`` sets each target's share of the item slots in every batch (a
     target it does not name has 1). Under a settling policy (``VALUE``), a target with a unit clearing
-    the Judge's yes bar and complete required ``role_coverage`` draws only its pending one-step hops
-    (``hops``, by default callers and callees). It settles when none is left to judge. Without a yes
-    answer or complete required roles it keeps drawing its ordinary queue until the call cap or
-    exhaustion. Supplied lines seed discovery hops separately and provide no relevance answer for
-    a target. Every unit drawn is still asked every target's question, so a settled target spends no
-    call of its own. Once every target has settled the search ends ``settled``, with the units it
-    never reached ``not_judged``.
+    the Judge's yes bar draws only its pending one-step hops (``hops``, by default callers and callees).
+    It settles when none is left to judge. Without a yes answer it keeps drawing its ordinary queue
+    until the call cap or exhaustion. Supplied lines seed discovery hops separately and provide no
+    relevance answer for a target. Every unit drawn is still asked every target's question, so a
+    settled target spends no call of its own. Once every target has settled the search ends
+    ``settled``, with the units it never reached ``not_judged``.
     """
     composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
     search = _begin(
@@ -644,9 +650,9 @@ class _Search:
 
     def _drawing(self, frontier: Frontier) -> dict[str, bool]:
         """Each target still drawing, mapped to whether it draws only its hops. Under a settling policy
-        a target settles only after a unit clears its yes bar, its one-step hops are spent and its
-        required roles are covered. Supplied units seed discovery hops separately; without a positive
-        relevance answer or complete roles the ordinary queue stays open."""
+        a target settles only after a unit clears its yes bar and its one-step hops are spent.
+        Supplied units seed discovery hops separately; without a positive relevance answer the
+        ordinary queue stays open."""
         if not self.policy.settles:
             return dict.fromkeys(self.targets, False)
         drawing = {}
@@ -656,15 +662,8 @@ class _Search:
             clearing = self._clearing(target)
             hop_seeds = clearing | self.delivered_units
             self._push_hops(frontier, target, sorted(hop_seeds - self.expanded[target]))
-            coverage = self.policy.role_coverage
-            judged_units = {
-                self.unit_of_place[answer.place.id]
-                for answer in self.judged[target]
-                if answer.place is not None and answer.place.id in self.unit_of_place
-            }
-            roles_complete = coverage is None or coverage.complete(target, judged_units)
-            if not clearing or self._awaiting(target) or not roles_complete:
-                drawing[target] = bool(clearing) and roles_complete
+            if not clearing or self._awaiting(target):
+                drawing[target] = bool(clearing)
             else:
                 self.settled.append(target)
         return drawing

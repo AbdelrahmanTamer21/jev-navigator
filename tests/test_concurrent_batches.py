@@ -591,3 +591,25 @@ def test_an_async_batch_failure_stops_the_batches_still_waiting_for_a_slot() -> 
 
     # Assert
     assert client.started == ["f0.py"]
+
+
+def test_keep_order_yields_input_batches_even_when_second_response_arrives_first():
+    from time import sleep
+
+    second_finished = threading.Event()
+
+    class DelayedFirst(ScriptedJevClient):
+        def send(self, state, questions):
+            if state["items"][0]["file"] == "f0.py":
+                assert second_finished.wait(5)
+                sleep(0.05)
+            raw = super().send(state, questions)
+            if state["items"][0]["file"] == "f1.py":
+                second_finished.set()
+            return raw
+
+    client = DelayedFirst()
+    judge = Judge(client, items_per_request=1, max_concurrency=2)
+    answers = list(judge.iter_check_every([DESCRIBES], SMALL_ITEMS[:2], SHARED, keep_order=True))
+    assert client.requests[0][0]["items"][0]["file"] == "f1.py"
+    assert [answer.item["file"] for _, answer in answers] == ["f0.py", "f1.py"]

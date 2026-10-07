@@ -1,0 +1,74 @@
+{
+  "decide": {
+    "type": "noul",
+    "instructions": "Does `unit.code` make the behavioral decision described by `point`?",
+    "criteria": {
+      "true": {
+        "what": "The shown branch, comparison, dispatch or selection determines which described behavior occurs."
+      },
+      "false": {
+        "what": "The unit merely invokes the decision elsewhere or supplies data to it."
+      }
+    }
+  },
+  "guard": {
+    "type": "noul",
+    "instructions": "Does `unit.code` restrict the behavior described by `point`?",
+    "criteria": {
+      "true": {
+        "what": "A shown validation, permission, containment or admission condition prevents or permits that behavior. A guard counts even when it prevents the alleged behavior."
+      },
+      "false": {
+        "what": "No such restriction is visible in this unit. A called validator whose body is absent is not a shown guard."
+      }
+    }
+  },
+  "value": {
+    "type": "noul",
+    "instructions": "Does `unit.code` establish a value that the behavior described by `point` depends on?",
+    "criteria": {
+      "true": {
+        "what": "The unit assigns, defaults, configures or computes that dependent value. A documented setting or configuration entry counts."
+      },
+      "false": {
+        "what": "The unit only reads or transports an already established value, or establishes an unrelated value."
+      }
+    }
+  },
+  "effect": {
+    "type": "noul",
+    "instructions": "Does `unit.code` perform the effect described by `point`?",
+    "criteria": {
+      "true": {
+        "what": "The shown unit performs the described write, mutation, command, response or other externally observable action."
+      },
+      "false": {
+        "what": "It only delegates the action to another unit, mentions it, or performs an unrelated action."
+      }
+    }
+  },
+  "delegates": {
+    "type": "noul",
+    "instructions": "Does `unit.code` delegate the call or transport the value relevant to `point`?",
+    "criteria": {
+      "true": {
+        "what": "The unit passes the relevant call to another unit or carries the relevant value onward. It may also decide, guard, establish a value or perform an effect locally."
+      },
+      "false": {
+        "what": "The unit does not pass the relevant call or value onward. Mentioning a call or value without transporting it does not count."
+      }
+    }
+  },
+  "satisfied": {
+    "type": "noul",
+    "instructions": "Does the supplied `unit.code` answer the search expressed by `point`?",
+    "criteria": {
+      "true": {
+        "what": "The visible implementation or text supplies the specific evidence the caller requests. Evidence that prevents the described behavior can answer a search for its controls."
+      },
+      "false": {
+        "what": "The requested answer requires another implementation or fact not shown here, or this unit is unrelated."
+      }
+    }
+  }
+}

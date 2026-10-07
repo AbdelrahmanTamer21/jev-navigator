@@ -1000,10 +1000,9 @@ its code holds as whole words, each weighted by how rare it is, whether the unit
 like one, the distance and whether it is a test. Each target has its own queue, ranked by the names its
 description spells out, and a share of the item slots in every batch: equal by default, and a caller
 overrides it with `shares={"limit": 3}`. Under `VALUE`, a target with a unit clearing the Judge's
-yes bar and complete required role coverage draws only its pending one-step hops. It settles when
-none is left to judge. Without a yes answer or complete required roles, it keeps drawing its ordinary
-queue until the call cap or exhaustion. Supplied lines seed discovery hops separately and provide no
-relevance answer for a target. A settled target draws nothing more, its share flows to the targets
+yes bar draws only its pending one-step hops. It settles when none is left to judge. Without a yes
+answer, it keeps drawing its ordinary queue until the call cap or exhaustion. Supplied lines seed
+discovery hops separately and provide no relevance answer for a target. A settled target draws nothing more, its share flows to the targets
 still open, and when every target has settled the search ends `settled`. Every unit drawn is still
 asked every target's question. `Policy("value_all", ranked=True)` keeps the queues and shares without
 settling.
@@ -1237,8 +1236,8 @@ whose code the caller already supplies through `delivered`. Hop sources receive 
 code, spelled identifiers and file, so named paths and exact literals can be followed without
 judging supplied code again. Supplied lines seed discovery only: they provide no target-specific
 relevance answer and cannot close a target's ordinary queue. Hop results do not recursively expand.
-`STAGE_ORDER` keeps its existing source-by-source population without relevance hops. Neither policy adds a new request
-allowance. The Judge's caller-selected cap still owns the judging budget.
+`STAGE_ORDER` keeps its existing source-by-source population without relevance hops. Neither policy
+adds a new request allowance. The Judge's caller-selected cap still owns the judging budget.
 
 `mentions.names_from_text(text)` returns `TextNames(code=..., paths=...)`, using the existing
 mention rules. Bare `copy_sandbox_tree` and `copySandbox` are code names, while `pyproject.toml`
@@ -1247,14 +1246,9 @@ when its body never repeats that name; ambiguous basenames retain all matches.
 
 ```python
 from jev_navigator.composition import SearchConfiguration, reserve_calls
-from jev_navigator.directives.frontier import Policy, RoleCoverage
+from jev_navigator.directives.frontier import VALUE
 
-coverage = RoleCoverage(
-    required={"p": ("guard", "value")},
-    observed=lambda point, judged_ids: roles_observed_for(point, judged_ids),
-)
-policy = Policy("required-evidence", ranked=True, settles=True, role_coverage=coverage)
-configuration = SearchConfiguration("code-and-named-text", code_calls=36, text_calls=12, policy=policy)
+configuration = SearchConfiguration("code-and-named-text", code_calls=36, text_calls=12, policy=VALUE)
 code, text = await configuration.search(index, judge, {"p": description}, files=scope, anchors=anchors)
 ```
 
@@ -1266,10 +1260,52 @@ caller that wants to stop at its first matching text unit.
 `reserve_calls(judge, {"discovery": 36, "continuation": 12})` returns scoped judges whose caps are
 reserved before either stage starts. Every call still counts against the parent. Unused calls remain
 reserved; a host can deliberately assign unused calls in a later composition. These are explicit
-allowances, not claims that one split is optimal. The role policy also works with an ordinary
-`find_all` composition. A target cannot settle until every role the caller requires has observations
-among its judged units and its clearing units' pending hops have been judged. Missing role answers
-keep the target open. A match probability does not establish an evidence role. The existing `VALUE`
-policy remains available for comparison.
+allowances, not claims that one split is optimal. `VALUE` settles after a relevant unit and its
+pending one-step hops have been judged; `STAGE_ORDER` examines its population up to the call cap.
 
-The [role question proposal](question-templates/evidence_roles/PROPOSAL.md) is not wired into searches.
+### J1 ranks, roles label selected pieces
+
+Code and text population searches use the admitted **J1-3** local-match question as their one ranking
+profile. Its unchanged wording, yes/no criteria and contrasting examples live in
+`judgments/local_match_question.json`; `J1` in `judgments/profiles.py` binds only the item and target
+state paths. `match_check(target)` returns that Check. Each request carries `targets` and `items`,
+each item containing `file` and `code`. Ranking consumes that Check's raw P(yes). Cut units retain
+their best matching piece. Search has no role maxima, required-role retention or role prerequisites.
+The bare match profile and six-role ranking profile are removed.
+
+After the caller fits its packet, it passes **only the selected pieces and their exact visible text**
+to `label_roles` or `label_roles_async`. Neither operation reads surrounding source or changes the
+selection. The six unchanged questions remain owned by `judgments/role_questions.json`: `decide`,
+`guard`, `value`, `effect`, `delegates` and `satisfied`. All six run together for each supplied piece
+and point, in supplied order, at most sixteen pieces per request. The existing Judge handles size
+splitting by item, masking, final scanning, call accounting and the configured answer store.
+A single piece over the declared box remains explicitly unlabelled in `refusals` and is not sent.
+
+```python
+from jev_navigator.judgments.role_labels import LabelPiece, label_roles_async
+
+# selected contains the final packet pieces, with their source Item and displayed text.
+pieces = [LabelPiece(piece.place, piece.code) for piece in selected]
+labels = await label_roles_async(label_judge, pieces, targets)
+for labelled in labels.pieces:
+    print(labelled.piece.place.id, labelled.probabilities)
+```
+
+`RoleLabellingResult.pieces` preserves supplied order. Each `PieceRoles.answers[point][role]` is
+its original `CheckResult`, retaining probability, request hash, question hash, source place and
+whether the answer came from the store. `probabilities` exposes the raw numeric dictionary without
+combining roles. Refused pieces have empty answers and are unknown. The caller displays these
+labels alongside each ranked region and chooses its display policy; labels never alter J1 ranks.
+Identical complete labelling batches can replay from the store. Changing batch companions changes
+the judgment context and requires new answers.
+
+Pass labelling a Judge with its own caller-owned allowance, or reserve a separate stage share from
+an uncapped parent. Its requests still count against that parent. A ranking allowance already used
+up cannot fund the labelling step. The twelve-group ranking default is an **Engine setting**, not a
+JVN default or an environment flag. No provider calls are made by preparing pieces or questions.
+
+The [frozen selection report](measurements/selection/REPORT.md) and its summary record the
+historical comparison and pinned revisions. The caller-specific reproduction harness and its tests
+live outside JVN at `~/.local/share/jvn-takeover/2026-10-03/search-design/case1/selection-harness/`.
+That harness reproduces historical controls at their recorded pins; JVN retains only the report and
+summary, with no six-role ranking code or recipes.

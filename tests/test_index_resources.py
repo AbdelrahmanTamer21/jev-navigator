@@ -48,14 +48,35 @@ def callback_tree(root: Path, file_count: int) -> tuple[list[str], int]:
     return files, file_count * len(text.encode())
 
 
+_FACT_SCAN_MEMORY_PROBE = """import sys
+import tracemalloc
+from pathlib import Path
+from jev_navigator.index.scope_scan import Unparsed, scan_facts
+
+root = Path(sys.argv[1])
+contents = {file: (root / file).read_bytes() for file in sys.argv[2:]}
+tracemalloc.start()
+scan_facts(contents, root, Unparsed())
+print(tracemalloc.get_traced_memory()[1])
+"""
+
+
 def peak_bytes_while_scanning(root: Path, files: list[str]) -> int:
-    contents = read_files(root, files)
+    """Measure the real scan in a fresh host, outside pytest's heap and tracing lifecycle."""
+    output = subprocess.check_output([sys.executable, "-c", _FACT_SCAN_MEMORY_PROBE, str(root), *files])
+    return int(output)
+
+
+def test_scan_memory_measurement_excludes_host_allocations_and_preserves_host_tracing(tmp_path: Path) -> None:
+    files, _ = callback_tree(tmp_path / "scope", file_count=4)
     tracemalloc.start()
-    tracemalloc.reset_peak()
-    scan_facts(contents, root, Unparsed())
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    return peak
+    try:
+        host_buffer = bytearray(3 * 2**20)
+        peak = peak_bytes_while_scanning(tmp_path / "scope", files)
+        assert peak < len(host_buffer)
+        assert tracemalloc.is_tracing()
+    finally:
+        tracemalloc.stop()
 
 
 def scanned(root: Path) -> tuple[dict, frozenset[str]]:
