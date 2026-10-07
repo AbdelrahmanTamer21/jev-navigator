@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import struct
+import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -17,6 +18,9 @@ from pathlib import PurePosixPath
 from . import languages, tools
 from .packages import Packages, package_name
 from .tsconfig import ScriptPaths, normalised
+
+COMMENT_RANGE_RECORD = struct.Struct("<qI")
+"""A signed byte-start delta and unsigned byte length, compressed in cached file facts."""
 
 _PYTHON_FROM = re.compile(r"^[ \t]*from\s+(\.*[\w.]*)\s+import\s+(\([^)]*\)|[^\n]*)", re.M)
 _PYTHON_IMPORT = re.compile(
@@ -375,7 +379,7 @@ def without_comments(
     unrecognized text remains. Unsupported file languages remain unchanged. An unavailable or
     failed parser raises its process error, rather than guessing comment boundaries.
     ``comment_ranges`` reuses comment nodes from a fact scan of these exact source bytes,
-    as pairs or packed little-endian uint32 pairs.
+    as pairs or compressed start-delta/length records.
     """
     content = source.encode()
     language = languages.parse_language(path, content)
@@ -388,15 +392,22 @@ def without_comments(
         )
     chunks = []
     position = 0
-    ranges = (
-        struct.iter_unpack("<II", comment_ranges) if isinstance(comment_ranges, bytes) else comment_ranges
-    )
+    ranges = _cached_comment_ranges(comment_ranges) if isinstance(comment_ranges, bytes) else comment_ranges
     for start, end in sorted(ranges):
         chunks.append(content[position:start])
         chunks.append(bytes(byte for byte in content[start:end] if byte in (10, 13)))
         position = end
     chunks.append(content[position:])
     return b"".join(chunks).decode()
+
+
+def _cached_comment_ranges(packed: bytes):
+    """Restore exact byte ranges from the cache's lossless delta representation."""
+    position = 0
+    content = zlib.decompress(packed) if packed else b""
+    for delta, length in COMMENT_RANGE_RECORD.iter_unpack(content):
+        position += delta
+        yield position, position + length
 
 
 def import_lines(

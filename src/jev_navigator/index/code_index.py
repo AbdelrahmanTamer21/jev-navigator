@@ -1170,14 +1170,17 @@ class CodeIndex:
                 pending.append(inherited)
         return tuple(found.values())
 
-    def _source_and_comments(self, file: str) -> tuple[str, bytes]:
-        """Exact first-read bytes and their cached parser comment ranges."""
-        comments = self._facts_in(file).comment_ranges
+    def _source_and_comments(self, file: str) -> tuple[str, bytes | None]:
+        """Exact first-read bytes and available cached comments; import-only reads need no fact scan."""
+        self._require_in_scope(file)
         content = self._sources.first_read(file) or b""
+        facts = self._facts.get(file) or self._fact_cache.load(file, content)
+        comments = None if facts is None else facts.comment_ranges
         return content.decode(errors="replace"), comments
 
     def source_without_comments(self, file: str) -> str:
         """First-read source with cached parser comments removed, keeping every line break."""
+        self._facts_in(file)
         source, comments = self._source_and_comments(file)
         return without_comments(source, file, comment_ranges=comments)
 

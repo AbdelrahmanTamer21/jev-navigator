@@ -17,7 +17,9 @@ including comments in f-string and template expressions. Parser recovery removes
 from incomplete syntax. Unsupported file languages retain their text; an unavailable or failed
 parser raises its process error. The host Python version does not parse source strings. The index
 stores counts rather than parser output or source bodies. Index import and unit readers reuse
-comment ranges persisted by the normal fact scan, so warm lookups do not start another parser.
+comment ranges persisted by the normal fact scan, so warm name lookups do not start another parser.
+An import-only read without cached file facts runs only the comment query and does not populate
+the syntax-fact cache.
 
 `graph_from_index(index, units)` joins admitted units through proven calls and references,
 imports, literal named files, same-file membership and git co-change. Sparse virtual file nodes
@@ -33,14 +35,18 @@ learned or configured through an environment flag.
 
 ```python
 from jev_navigator.selection import (
-    ActivePolicy, ScentIndex, active_search, graph_from_index,
-    rank, rank_features, scent_document,
+    ActivePolicy,
+    ScentIndex,
+    active_search,
+    graph_from_index,
+    rank,
+    rank_features,
+    scent_document,
 )
 
 # Discovery and source reading remain with the existing index and reader owners.
 documents = ScentIndex(
-    scent_document(unit.id, unit.path, unit.symbol, source_for(unit))
-    for unit in admitted_units
+    scent_document(unit.id, unit.path, unit.symbol, source_for(unit)) for unit in admitted_units
 )
 graph = graph_from_index(index, admitted_units)
 features = rank_features(documents, query, graph, seed_weights)
