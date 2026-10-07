@@ -14,9 +14,9 @@ path, and code that repeats a unit already in the queue is judged once.
 Under ``VALUE`` each target has its own queue (B3), ranked by the names its description spells out,
 and a share of the item slots in every batch: equal by default, set by the caller. A target settles
 once a unit clears the Judge's yes bar for it or is fully supplied by the caller, and the units the
-search's hop sources reach from that unit (by default its callers and callees), one step deep, have been judged; a settled target draws no
-more slots, so its share flows to the targets still open, and the search stops when every target has
-settled.
+search's hop sources reach from that unit (by default its callers and callees), one step deep, have
+been judged. A settled target draws no more slots, so its share flows to the targets still open, and
+the search stops when every target has settled.
 """
 
 from __future__ import annotations
