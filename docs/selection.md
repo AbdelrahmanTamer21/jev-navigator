@@ -64,6 +64,8 @@ requires its own measurement; it does not inherit a Noul threshold. Preparation 
 a provider. The existing request owner still masks, checks request size, judges and stores
 exact context before a live call.
 
-The separate `measurements/selection` recipes compare these blocks on retained development
-data. They preserve exact groups for strict replay and label changed-group probability reuse
-as a development diagnostic. They do not install a new default search configuration.
+The frozen [selection report](../measurements/selection/REPORT.md) and summary retain historical
+results, revisions and limits. Caller-specific recipes and their tests live in the external harness
+linked there. Historical census data does not establish the reach of retained workflows. Strict
+replay preserves exact groups; changed-group probability reuse is a development diagnostic. The
+measurements do not install a new default search configuration.
