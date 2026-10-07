@@ -999,11 +999,11 @@ composition lists them. `VALUE` scores every unit by code before the first call:
 its code holds as whole words, each weighted by how rare it is, whether the unit or its file is named
 like one, the distance and whether it is a test. Each target has its own queue, ranked by the names its
 description spells out, and a share of the item slots in every batch: equal by default, and a caller
-overrides it with `shares={"limit": 3}`. Under `VALUE` a target settles: once a unit clears its yes
-bar, the target draws only the units the hop sources reach from that unit, one step deep, and settles
-when none of its pending hops is left to judge and any required role coverage is complete. Without
-a yes answer or complete required roles, it keeps drawing its ordinary queue until the call cap or
-exhaustion. A settled target draws nothing more, its share flows to the targets
+overrides it with `shares={"limit": 3}`. Under `VALUE`, a target with a unit clearing the Judge's
+yes bar and complete required role coverage draws only its pending one-step hops. It settles when
+none is left to judge. Without a yes answer or complete required roles, it keeps drawing its ordinary
+queue until the call cap or exhaustion. Supplied lines seed discovery hops separately and provide no
+relevance answer for a target. A settled target draws nothing more, its share flows to the targets
 still open, and when every target has settled the search ends `settled`. Every unit drawn is still
 asked every target's question. `Policy("value_all", ranked=True)` keeps the queues and shares without
 settling.

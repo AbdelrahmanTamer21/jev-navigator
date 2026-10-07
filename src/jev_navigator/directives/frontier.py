@@ -12,14 +12,13 @@ test is ranked by the same score, never dropped. Ties go to the unit's content h
 path, and code that repeats a unit already in the queue is judged once.
 
 Under ``VALUE`` each target has its own queue (B3), ranked by the names its description spells out,
-and a share of the item slots in every batch: equal by default, set by the caller. A target settles
-once a unit clears the Judge's yes bar for it, its pending one-step hops (by default callers and
-callees) have been judged, and any required role coverage is complete. Without a yes answer or
-complete required roles it keeps drawing its ordinary queue until the call cap or exhaustion. Fully
-supplied units separately seed one-step discovery hops without being judged again; supplied lines provide
-no relevance answer for any target. A settled
-target draws no more slots, so its share flows to the targets still open, and the search stops when
-every target has settled.
+and a share of the item slots in every batch: equal by default, set by the caller. A target with a
+unit clearing the Judge's yes bar and complete required role coverage draws only its pending
+one-step hops (by default callers and callees). It settles when none is left to judge. Without a
+yes answer or complete required roles it keeps drawing its ordinary queue until the call cap or
+exhaustion. Fully supplied units separately seed one-step discovery hops without being judged again;
+supplied lines provide no relevance answer for a target. A settled target draws no more slots, so
+its share flows to the targets still open, and the search stops when every target has settled.
 """
 
 from __future__ import annotations

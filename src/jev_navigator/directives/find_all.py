@@ -238,18 +238,18 @@ def find_all(
     ``VALUE`` fully supplied units seed one-step discovery hops without providing a relevance answer
     for any target. ``completed`` holds each target's answers from an earlier run over the same code;
     a place answered for every target is not asked again. A failed request ends the search ``failed``
-    with ``failure`` holding
-    the error (see ``search_failure``), Ctrl-C ends it ``cancelled``, and either way ``judged`` keeps
-    every answer that arrived.
+    with ``failure`` holding the error (see ``search_failure``), Ctrl-C ends it ``cancelled``, and
+    either way ``judged`` keeps every answer that arrived.
 
     Under a ranked policy ``shares`` sets each target's share of the item slots in every batch (a
-    target it does not name has 1). Under a settling policy (``VALUE``) a unit clears a target's bar
-    when its answer is yes by the Judge's thresholds; that target then draws only the units ``hops``
-    reach from it (by default its callers and callees), and settles once none of its pending hops is
-    left to judge and any required ``role_coverage`` is complete. Without a yes answer or complete
-    required roles it keeps drawing its ordinary queue until the call cap or exhaustion. Every unit
-    drawn is still asked every target's question, so a settled target spends no call of its own. Once
-    every target has settled the search ends ``settled``, with the units it never reached ``not_judged``.
+    target it does not name has 1). Under a settling policy (``VALUE``), a target with a unit clearing
+    the Judge's yes bar and complete required ``role_coverage`` draws only its pending one-step hops
+    (``hops``, by default callers and callees). It settles when none is left to judge. Without a yes
+    answer or complete required roles it keeps drawing its ordinary queue until the call cap or
+    exhaustion. Supplied lines seed discovery hops separately and provide no relevance answer for
+    a target. Every unit drawn is still asked every target's question, so a settled target spends no
+    call of its own. Once every target has settled the search ends ``settled``, with the units it
+    never reached ``not_judged``.
     """
     composition = _Composition(tuple(sources), tuple(hops), policy, shares or {})
     search = _begin(
