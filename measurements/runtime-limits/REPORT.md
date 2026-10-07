@@ -104,3 +104,13 @@ Requests Drex admits in flight at once: the Engine measured HTTP 429 on the thir
 
 Requests sent to Jev at once: the Engine saw no 429 up to 128 and flat latency to 32 (27.09.2026,
 ``ROUTE_LIMITS``), so 32 is a latency choice, not a refusal bound.
+
+## src/jev_navigator/judgments/secret_shapes.py: structural-rule provenance
+
+Archived from the module documentation at JVN
+`5fe03f5cacfdca31bf074bb6893dfdb3f9c37731` during the f-string re-review fixes:
+
+The structural rules follow the analysis engine's audit masker, whose corpus both sides test.
+
+This records the rules' historical origin. JVN owns its generic secret-literal recognition and
+corpus checks; the attribution does not introduce a runtime host dependency. No rules changed.
