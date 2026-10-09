@@ -26,7 +26,7 @@ configures routes exactly like the real environment does.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -37,6 +37,7 @@ from ..judgments.client import (
     LATEST_JEV,
     InputBudgetExceededError,
     InputLimits,
+    Wire,
     input_budget_error,
 )
 from ..judgments.journal import AttemptJournalCallbackError, RawResponse
@@ -61,10 +62,6 @@ JEV_CONCURRENCY = 32
 """Requests sent to Jev at once; measurements found no 429 up to 128 and flat latency to 32, so 32
 is a latency choice, not a refusal bound. Historical measurement provenance is retained in
 ``measurements/runtime-limits/REPORT.md``."""
-
-
-Wire = Callable[[Mapping, Mapping], tuple[Mapping, Mapping]]
-"""A server's wire dialect: the state and questions it accepts, built from the judge's request."""
 
 
 @dataclass(frozen=True)
@@ -202,9 +199,11 @@ class SystemOneClient:
     and its transport sends it with exact-byte capture. A ``wire`` dialect, when the route has
     one, rewrites the request just before it is sent (Drex's sends criteria as text), so the
     request the judge hashed and stored is unchanged and the captured sent body is what the
-    server got. The response is decoded by jev-navigator's parser from the exact bytes instead
-    of the SDK's strict response schemas (whose score `legend` model rejects Drex's echo shape).
-    Every SDK-internal access lives in `_send_raw`, so an SDK version bump is a one-function fix.
+    server got. The client's ``input_limits`` measure the request in that same form, so the
+    judge splits a request that would only overflow once rewritten. The response is decoded by
+    jev-navigator's parser from the exact bytes instead of the SDK's strict response schemas
+    (whose score `legend` model rejects Drex's echo shape). Every SDK-internal access lives in
+    `_send_raw`, so an SDK version bump is a one-function fix.
     """
 
     def __init__(
@@ -231,7 +230,7 @@ class SystemOneClient:
             transport=self._capture,
         )
         self.model = self._sdk._config.default_model  # noqa: SLF001 - the config is the env contract
-        self.input_limits = input_limits
+        self.input_limits = input_limits if wire is None else replace(input_limits, wire=wire)
         self._slots = threading.BoundedSemaphore(max_concurrency)
         self._wire = wire
 
